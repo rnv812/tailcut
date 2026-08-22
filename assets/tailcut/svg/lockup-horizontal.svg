@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="380" height="120" viewBox="0 0 380 120" fill="none">
+  <g transform="translate(0 6) scale(0.9)">
+  <polygon points="30,18 68,41 68,79 30,102" fill="#17181F"></polygon>
+  <polygon points="77,46 101,60 77,74" fill="#B7F03F"></polygon>
+  </g>
+  <text x="132" y="82" font-family="Space Grotesk, Helvetica Neue, Helvetica, Arial, sans-serif" font-size="62" font-weight="700" letter-spacing="-2.4" fill="#17181F">tailcut</text>
+</svg>
