@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest'
-import { triage, BALANCED, LOOSE, STRICT, type VideoSignals } from '../../src/core/triage'
+import {
+  triage,
+  BALANCED,
+  LOOSE,
+  STRICT,
+  type TriageConfig,
+  type TriageVerdict,
+  type VideoSignals,
+} from '../../src/core/triage'
 
 const base: VideoSignals = {
   widthPx: 640,
@@ -58,14 +66,51 @@ describe('triage — беззвучное', () => {
   })
 })
 
+// Пауза (§5.5 спеки) замораживает НАКОПЛЕНИЕ времени, а не вердикт: playedSeconds
+// перестаёт расти, потому что наблюдатель начисляет его только играющему видео.
+// Сам triage поле playing не читает — иначе пауза после порога отзывала бы уже
+// заработанное повышение, а пауза до порога отменяла бы мгновенный отказ.
+// Отсюда контракт, который проверяется ниже: при одних и тех же прочих сигналах
+// вердикт обязан совпадать на паузе и на воспроизведении.
 describe('triage — пауза', () => {
-  it('на паузе накопленное не выбрасывается, но и не повышается', () => {
+  it('на паузе вердикт определяется накопленным временем', () => {
     expect(triage({ ...base, playing: false, playedSeconds: 2 }, BALANCED)).toBe('hold')
   })
 
-  it('пауза после порога не отменяет уже заработанного повышения', () => {
+  it('пауза не отменяет уже заработанного повышения', () => {
     expect(triage({ ...base, playing: false, playedSeconds: 30 }, BALANCED)).toBe('promote')
   })
+
+  const recordMutedOff: TriageConfig = { ...BALANCED, recordMuted: false }
+
+  const invariant: Array<[string, Partial<VideoSignals>, TriageConfig, TriageVerdict]> = [
+    ['DRM отсекается', { hasDrm: true, playedSeconds: 60 }, BALANCED, 'reject'],
+    ['мелкий элемент отсекается', { widthPx: 180, playedSeconds: 60 }, BALANCED, 'reject'],
+    ['невидимое отсекается', { visible: false, playedSeconds: 60 }, BALANCED, 'reject'],
+    [
+      'беззвучный зациклённый баннер отсекается',
+      { muted: true, loop: true, controls: false, playedSeconds: 60 },
+      BALANCED,
+      'reject',
+    ],
+    [
+      'беззвучное при строгой настройке отсекается',
+      { muted: true, playedSeconds: 60 },
+      recordMutedOff,
+      'reject',
+    ],
+    ['ничего не накоплено — ждём', { playedSeconds: 0 }, BALANCED, 'hold'],
+    ['за миг до порога — ждём', { playedSeconds: 5.999 }, BALANCED, 'hold'],
+    ['ровно на пороге — повышаем', { playedSeconds: 6 }, BALANCED, 'promote'],
+    ['далеко за порогом — повышаем', { playedSeconds: 30 }, BALANCED, 'promote'],
+  ]
+
+  for (const [name, signals, config, expected] of invariant) {
+    it(`${name} одинаково на паузе и на воспроизведении`, () => {
+      expect(triage({ ...base, ...signals, playing: true }, config)).toBe(expected)
+      expect(triage({ ...base, ...signals, playing: false }, config)).toBe(expected)
+    })
+  }
 })
 
 describe('triage — что баннером не является', () => {

@@ -6,6 +6,20 @@ export interface VideoSignals {
   controls: boolean
   /** элемент в видимой области и вкладка не скрыта */
   visible: boolean
+  /**
+   * Видео воспроизводится прямо сейчас.
+   *
+   * `triage` это поле сознательно не читает, и это не упущение. По §5.5 спеки
+   * пауза замораживает накопление времени, а не вердикт: наблюдатель
+   * (`src/page/watcher.ts`) начисляет `playedSeconds` только пока видео играет
+   * и видно, поэтому на паузе счётчик просто перестаёт расти. Если бы вердикт
+   * зависел ещё и от `playing`, пауза после порога отзывала бы уже заработанное
+   * повышение и убивала живую сессию, а пауза до порога отменяла бы мгновенный
+   * отказ, который по §5.4 должен срабатывать всегда.
+   *
+   * Поле живёт в сигналах, потому что его читает наблюдатель: он собирает
+   * `VideoSignals` целиком и по этому же полю решает, начислять ли время.
+   */
   playing: boolean
   /** сколько секунд элемент реально воспроизводился */
   playedSeconds: number
@@ -47,6 +61,8 @@ export function triage(signals: VideoSignals, config: TriageConfig): TriageVerdi
   if (signals.muted && signals.loop && !signals.controls) return 'reject'
   if (signals.muted && !config.recordMuted) return 'reject'
 
+  // Только накопленное время. Пауза уже учтена тем, что на ней playedSeconds
+  // не растёт — см. комментарий к VideoSignals.playing.
   if (signals.playedSeconds >= config.gracePeriodSeconds) return 'promote'
 
   return 'hold'
