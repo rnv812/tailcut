@@ -152,3 +152,52 @@ describe('контейнер moof', () => {
     expect(findBox(seg, ['moof', 'traf', 'trun'])).not.toBeNull()
   })
 })
+
+describe('битые размеры', () => {
+  it('не отдаёт бокс, объявивший размер больше буфера', () => {
+    // объявлено 32 байта, доступно 16 — тело такого бокса ещё не дошло
+    const buf = concat(u32(32), ascii('mdat'), ascii('ABCDEFGH'))
+    expect(buf.byteLength).toBe(16)
+    expect(topLevelBoxes(buf)).toEqual([])
+  })
+
+  it('не отдаёт потомка, вылезающего за конец родителя', () => {
+    const traf = concat(u32(32), ascii('traf'), ascii('abcdefgh'))
+    const moof = concat(u32(8 + traf.byteLength), ascii('moof'), traf)
+    const buf = concat(moof, u32(8), ascii('free'))
+    const parent = topLevelBoxes(buf).find((b) => b.type === 'moof')!
+    expect(parent.size).toBe(24)
+    // traf объявляет 32 байта, но внутри родителя их всего 16
+    expect(childBoxes(buf, parent)).toEqual([])
+  })
+
+  it('не отдаёт бокс, размер которого меньше заголовка', () => {
+    const buf = concat(u32(4), ascii('mdat'), u32(8), ascii('free'))
+    expect(topLevelBoxes(buf)).toEqual([])
+  })
+
+  it('не отдаёт 64-битный бокс с largesize меньше заголовка', () => {
+    // largesize==8 при 16-байтном заголовке: тело отрицательной длины
+    const buf = concat(u32(1), ascii('mdat'), u64(8), ascii('PAYLOAD!'))
+    expect(topLevelBoxes(buf)).toEqual([])
+  })
+
+  it('завершает обход на 64-битном боксе с largesize 0', () => {
+    // size==1, largesize==0: размер меньше 16-байтного заголовка, сдвига нет.
+    // Без проверки size < headerSize offset не двигается и обход зацикливается.
+    const buf = concat(u32(1), ascii('mdat'), u64(0), ascii('PAYLOAD!'))
+    expect(topLevelBoxes(buf)).toEqual([])
+  })
+})
+
+describe('контейнер с 64-битным заголовком', () => {
+  it('перечисляет потомков, начиная с parent.start + 16', () => {
+    const traf = concat(u32(16), ascii('traf'), ascii('abcdefgh'))
+    const moof = concat(u32(1), ascii('moof'), u64(16 + traf.byteLength), traf)
+    const parent = topLevelBoxes(moof)[0]!
+    expect(parent).toEqual({ type: 'moof', start: 0, size: 32, headerSize: 16 })
+    expect(childBoxes(moof, parent)).toEqual([
+      { type: 'traf', start: 16, size: 16, headerSize: 8 },
+    ])
+  })
+})
