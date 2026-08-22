@@ -35,6 +35,24 @@ describe('findBox', () => {
   it('возвращает null для отсутствующего пути', () => {
     expect(findBox(init, ['moov', 'nope'])).toBeNull()
   })
+
+  it('возвращает лист пути, а не пройденный контейнер', () => {
+    const moov = topLevelBoxes(init).find((b) => b.type === 'moov')!
+    const mdhd = findBox(init, ['moov', 'trak', 'mdia', 'mdhd'])!
+    expect(mdhd.type).toBe('mdhd')
+    // лист лежит строго внутри контейнера, через который к нему спускались
+    expect(mdhd.start).toBeGreaterThan(moov.start)
+    expect(mdhd.start + mdhd.size).toBeLessThanOrEqual(moov.start + moov.size)
+    expect(mdhd.size).toBeLessThan(moov.size)
+
+    const tfhd = findBox(seg, ['moof', 'traf', 'tfhd'])!
+    expect(tfhd.type).toBe('tfhd')
+  })
+
+  it('для пути из одного шага отдаёт сам верхнеуровневый бокс', () => {
+    const moov = topLevelBoxes(init).find((b) => b.type === 'moov')!
+    expect(findBox(init, ['moov'])).toEqual(moov)
+  })
 })
 
 describe('childBoxes', () => {
@@ -42,6 +60,17 @@ describe('childBoxes', () => {
     const moov = topLevelBoxes(init).find((b) => b.type === 'moov')!
     const traks = childBoxes(init, moov).filter((b) => b.type === 'trak')
     expect(traks.length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('не разбирает содержимое листового бокса как боксы', () => {
+    // полезная нагрузка mdat случайно похожа на заголовки боксов — потомков там нет
+    const mdat = topLevelBoxes(seg).find((b) => b.type === 'mdat')!
+    expect(mdat.size).toBeGreaterThan(mdat.headerSize)
+    expect(childBoxes(seg, mdat)).toEqual([])
+
+    const mdhd = findBox(init, ['moov', 'trak', 'mdia', 'mdhd'])!
+    expect(mdhd.size).toBeGreaterThan(mdhd.headerSize)
+    expect(childBoxes(init, mdhd)).toEqual([])
   })
 })
 
@@ -171,6 +200,19 @@ describe('битые размеры', () => {
     expect(childBoxes(buf, parent)).toEqual([])
   })
 
+  it('обрезает потомка по концу родителя, даже когда тот влезает в буфер', () => {
+    // traf заявляет 24 байта: внутри moof для него есть только 16,
+    // но до конца буфера — 32, так что проверка по буферу его бы пропустила
+    const traf = concat(u32(24), ascii('traf'), ascii('abcdefgh'))
+    const moof = concat(u32(8 + traf.byteLength), ascii('moof'), traf)
+    const buf = concat(moof, u32(16), ascii('free'), ascii('SIBLING!'))
+    expect(topLevelBoxes(buf).map((b) => b.type)).toEqual(['moof', 'free'])
+    const parent = topLevelBoxes(buf)[0]!
+    expect(parent.size).toBe(24)
+    expect(parent.start + parent.headerSize + 24).toBeLessThanOrEqual(buf.byteLength)
+    expect(childBoxes(buf, parent)).toEqual([])
+  })
+
   it('не отдаёт бокс, размер которого меньше заголовка', () => {
     const buf = concat(u32(4), ascii('mdat'), u32(8), ascii('free'))
     expect(topLevelBoxes(buf)).toEqual([])
@@ -184,7 +226,8 @@ describe('битые размеры', () => {
 
   it('завершает обход на 64-битном боксе с largesize 0', () => {
     // size==1, largesize==0: размер меньше 16-байтного заголовка, сдвига нет.
-    // Без проверки size < headerSize offset не двигается и обход зацикливается.
+    // Такой бокс отсекают сразу две проверки — size < headerSize и требование,
+    // чтобы offset строго возрастал; вторая не даёт обходу зациклиться.
     const buf = concat(u32(1), ascii('mdat'), u64(0), ascii('PAYLOAD!'))
     expect(topLevelBoxes(buf)).toEqual([])
   })

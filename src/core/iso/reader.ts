@@ -34,10 +34,14 @@ function readBoxesIn(data: Uint8Array, from: number, to: number): Box[] {
       size = to - offset
     }
 
-    if (size < headerSize || offset + size > to) break
+    // size < headerSize — тело отрицательной длины; next > to — бокс не влезает
+    // в разбираемый диапазон (тело родителя, а не конец буфера).
+    // next <= offset — страховка: обход обязан двигаться вперёд, иначе цикл вечный.
+    const next = offset + size
+    if (size < headerSize || next > to || next <= offset) break
 
     boxes.push({ type, start: offset, size, headerSize })
-    offset += size
+    offset = next
   }
 
   return boxes
