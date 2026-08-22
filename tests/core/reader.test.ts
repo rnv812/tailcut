@@ -20,6 +20,18 @@ describe('topLevelBoxes', () => {
 
   it('размеры боксов покрывают файл без дыр', () => {
     const boxes = topLevelBoxes(init)
+    expect(boxes.length).toBeGreaterThan(1)
+
+    // непрерывность, а не только суммарный объём: дыра, скомпенсированная
+    // перекрытием, даёт ту же сумму, но разбор при этом уже врёт
+    expect(boxes[0]!.start).toBe(0)
+    for (let i = 1; i < boxes.length; i++) {
+      const prev = boxes[i - 1]!
+      expect(boxes[i]!.start).toBe(prev.start + prev.size)
+    }
+    const last = boxes[boxes.length - 1]!
+    expect(last.start + last.size).toBe(init.byteLength)
+
     const covered = boxes.reduce((sum, b) => sum + b.size, 0)
     expect(covered).toBe(init.byteLength)
   })
@@ -34,6 +46,21 @@ describe('findBox', () => {
 
   it('возвращает null для отсутствующего пути', () => {
     expect(findBox(init, ['moov', 'nope'])).toBeNull()
+  })
+
+  it('обрывается на отсутствующем непоследнем звене, не проваливаясь дальше', () => {
+    // trak существует внутри moov, но добраться до него можно только через
+    // moov: путь через несуществующий промежуточный контейнер обязан дать null
+    const moov = topLevelBoxes(init).find((b) => b.type === 'moov')!
+    expect(childBoxes(init, moov).map((b) => b.type)).toContain('trak')
+    expect(findBox(init, ['moov', 'nope', 'trak'])).toBeNull()
+  })
+
+  it('возвращает null, когда отсутствует первое звено пути', () => {
+    // moov лежит на верхнем уровне, но путь начинается не с него —
+    // пропускать несовпавшее звено и искать следующее на том же уровне нельзя
+    expect(topLevelBoxes(init).map((b) => b.type)).toContain('moov')
+    expect(findBox(init, ['nope', 'moov'])).toBeNull()
   })
 
   it('возвращает лист пути, а не пройденный контейнер', () => {
@@ -176,9 +203,25 @@ describe('контейнер moof', () => {
   })
 
   it('спускается в боксы фрагмента через traf', () => {
-    expect(findBox(seg, ['moof', 'traf', 'tfhd'])).not.toBeNull()
-    expect(findBox(seg, ['moof', 'traf', 'tfdt'])).not.toBeNull()
-    expect(findBox(seg, ['moof', 'traf', 'trun'])).not.toBeNull()
+    const traf = findBox(seg, ['moof', 'traf'])!
+    expect(traf.type).toBe('traf')
+
+    const leaves = ['tfhd', 'tfdt', 'trun']
+    const children = childBoxes(seg, traf)
+    expect(children.map((b) => b.type)).toEqual(leaves)
+
+    // каждый лист — ровно тот бокс, который лежит в traf под этим типом,
+    // а не просто «что-то ненулевое»
+    expect(leaves.map((type) => findBox(seg, ['moof', 'traf', type]))).toEqual(children)
+
+    // и все они плотно заполняют тело traf
+    let at = traf.start + traf.headerSize
+    for (const box of children) {
+      expect(box.start).toBe(at)
+      expect(box.size).toBeGreaterThan(box.headerSize)
+      at += box.size
+    }
+    expect(at).toBe(traf.start + traf.size)
   })
 })
 
@@ -226,8 +269,8 @@ describe('битые размеры', () => {
 
   it('завершает обход на 64-битном боксе с largesize 0', () => {
     // size==1, largesize==0: размер меньше 16-байтного заголовка, сдвига нет.
-    // Такой бокс отсекают сразу две проверки — size < headerSize и требование,
-    // чтобы offset строго возрастал; вторая не даёт обходу зациклиться.
+    // Обход обязан оборваться на проверке size < headerSize — иначе offset
+    // остался бы на месте и цикл стал бы вечным.
     const buf = concat(u32(1), ascii('mdat'), u64(0), ascii('PAYLOAD!'))
     expect(topLevelBoxes(buf)).toEqual([])
   })
@@ -242,5 +285,60 @@ describe('контейнер с 64-битным заголовком', () => {
     expect(childBoxes(moof, parent)).toEqual([
       { type: 'traf', start: 16, size: 16, headerSize: 8 },
     ])
+  })
+})
+
+describe('срез с ненулевым byteOffset', () => {
+  // moof лежит не в начале подлежащего ArrayBuffer: перед ним — правдоподобный
+  // мусор, который сам читается как пара боксов. Смещения обязаны отсчитываться
+  // от начала среза, иначе размеры берутся из чужого места и разбор тихо врёт.
+  const junk = concat(u32(8), ascii('free'), u32(8), ascii('skip'))
+  const traf = concat(u32(16), ascii('traf'), ascii('abcdefgh'))
+  const moof = concat(u32(8 + traf.byteLength), ascii('moof'), traf)
+  const standalone = concat(moof, u32(8), ascii('free'))
+  const padded = concat(junk, standalone)
+  const slice = padded.subarray(junk.byteLength)
+
+  it('топ-уровень среза совпадает с самостоятельным буфером', () => {
+    expect(slice.byteOffset).toBe(16)
+    expect(standalone.byteOffset).toBe(0)
+    expect([...slice]).toEqual([...standalone])
+
+    expect(topLevelBoxes(slice)).toEqual(topLevelBoxes(standalone))
+    expect(topLevelBoxes(slice)).toEqual([
+      { type: 'moof', start: 0, size: 24, headerSize: 8 },
+      { type: 'free', start: 24, size: 8, headerSize: 8 },
+    ])
+  })
+
+  it('потомки внутри среза совпадают с самостоятельным буфером', () => {
+    const parent = topLevelBoxes(standalone).find((b) => b.type === 'moof')!
+    expect(childBoxes(slice, parent)).toEqual(childBoxes(standalone, parent))
+    expect(childBoxes(slice, parent)).toEqual([
+      { type: 'traf', start: 8, size: 16, headerSize: 8 },
+    ])
+  })
+
+  it('тело контейнера из boxBody разбирается как самостоятельный буфер', () => {
+    const moovBox = topLevelBoxes(init).find((b) => b.type === 'moov')!
+    const body = boxBody(init, moovBox)
+    expect(body.byteOffset).toBe(moovBox.start + moovBox.headerSize)
+    expect(body.byteOffset).toBeGreaterThan(0)
+
+    // та же последовательность байт, но в начале собственного буфера
+    const detached = new Uint8Array(body)
+    expect(detached.byteOffset).toBe(0)
+
+    expect(topLevelBoxes(body)).toEqual(topLevelBoxes(detached))
+    // это ровно потомки moov, пересчитанные в координаты тела
+    expect(topLevelBoxes(body)).toEqual(
+      childBoxes(init, moovBox).map((b) => ({ ...b, start: b.start - body.byteOffset })),
+    )
+
+    const trakInBody = topLevelBoxes(body).find((b) => b.type === 'trak')!
+    expect(childBoxes(body, trakInBody)).toEqual(childBoxes(detached, trakInBody))
+    expect(childBoxes(body, trakInBody).map((b) => b.type)).toEqual(
+      childBoxes(init, findBox(init, ['moov', 'trak'])!).map((b) => b.type),
+    )
   })
 })

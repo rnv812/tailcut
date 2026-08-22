@@ -36,9 +36,10 @@ function readBoxesIn(data: Uint8Array, from: number, to: number): Box[] {
 
     // size < headerSize — тело отрицательной длины; next > to — бокс не влезает
     // в разбираемый диапазон (тело родителя, а не конец буфера).
-    // next <= offset — страховка: обход обязан двигаться вперёд, иначе цикл вечный.
+    // Первая проверка попутно гарантирует size >= headerSize >= 8, то есть
+    // offset на каждой итерации строго растёт и цикл не может зациклиться.
     const next = offset + size
-    if (size < headerSize || next > to || next <= offset) break
+    if (size < headerSize || next > to) break
 
     boxes.push({ type, start: offset, size, headerSize })
     offset = next
