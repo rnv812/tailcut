@@ -2,10 +2,6 @@
   "name": "tailcut",
   "version": "0.1.0",
   "description": "Clip already-buffered video from any site and save it as MP4",
-  "main": "index.js",
-  "directories": {
-    "doc": "docs"
-  },
   "scripts": {
     "test": "vitest run",
     "build": "node build.mjs",
@@ -18,8 +14,7 @@
     "url": "git+https://github.com/rnv812/tailcut.git"
   },
   "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "type": "module",
   "bugs": {
     "url": "https://github.com/rnv812/tailcut/issues"

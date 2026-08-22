@@ -1,24 +1,19 @@
-import { test, expect, chromium, type BrowserContext } from '@playwright/test'
-import path from 'node:path'
-import os from 'node:os'
-import fs from 'node:fs/promises'
-
-const EXT = path.resolve('dist')
-
-export async function launchWithExtension(): Promise<{ context: BrowserContext; extensionId: string }> {
-  const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tailcut-'))
-  const context = await chromium.launchPersistentContext(userDataDir, {
-    headless: false,
-    args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`],
-  })
-  let [sw] = context.serviceWorkers()
-  if (!sw) sw = await context.waitForEvent('serviceworker')
-  const extensionId = new URL(sw.url()).host
-  return { context, extensionId }
-}
+import { test, expect } from '@playwright/test'
+import { launchWithExtension } from './helpers'
 
 test('extension loads and exposes a service worker', async () => {
   const { context, extensionId } = await launchWithExtension()
   expect(extensionId).toMatch(/^[a-p]{32}$/)
+  await context.close()
+})
+
+test('service worker applies its install-time setup', async () => {
+  const { context } = await launchWithExtension()
+  // launchWithExtension уже дождался воркера, поэтому список непустой
+  const sw = context.serviceWorkers()[0]!
+
+  const color = await sw.evaluate(() => chrome.action.getBadgeBackgroundColor({}))
+  expect(color, 'onInstalled должен выставить цвет бейджа').toEqual([76, 141, 255, 255])
+
   await context.close()
 })
