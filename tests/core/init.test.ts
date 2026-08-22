@@ -8,15 +8,11 @@ const media = new Uint8Array(readFileSync('tests/fixtures/h264/chunk-stream0-000
 
 describe('parseInit', () => {
   it('читает видеодорожку H.264', () => {
-    const info = parseInit(h264)!
-    expect(info).not.toBeNull()
-    const video = info.tracks.find((t) => t.kind === 'video')!
-    expect(video.codec).toBe('avc1')
-    expect(video.width).toBe(320)
-    expect(video.height).toBe(240)
-    // точные значения, а не «больше нуля»: чужое поле tkhd/mdhd тоже положительно
-    expect(video.timescale).toBe(12288)
-    expect(video.trackId).toBe(1)
+    // весь разбор целиком: и состав дорожек, и каждое поле — точные значения,
+    // а не «больше нуля»: чужое поле tkhd/mdhd тоже положительно
+    expect(parseInit(h264)).toEqual({
+      tracks: [{ trackId: 1, kind: 'video', timescale: 12288, codec: 'avc1', width: 320, height: 240 }],
+    })
   })
 
   it('читает видеодорожку VP9 — разбор не заточен под один кодек', () => {
@@ -85,6 +81,8 @@ interface TrackSpec {
   codec?: string | null
   /** готовый stsd вместо собранного по codec — для битых и усечённых боксов */
   stsd?: Uint8Array
+  /** обязательный бокс, который не класть в дорожку: неполный moov с чужого сайта */
+  omit?: 'tkhd' | 'mdia' | 'mdhd' | 'hdlr'
 }
 
 function tkhd(spec: TrackSpec): Uint8Array {
@@ -122,15 +120,16 @@ function trak(spec: TrackSpec): Uint8Array {
   const codec = spec.codec === undefined ? 'avc1' : spec.codec
   const stsd = spec.stsd ?? (codec === null ? null : box('stsd', zeros(4), u32(1), box(codec, zeros(8))))
   const stbl = stsd === null ? box('stbl') : box('stbl', stsd)
+  const mdia = box(
+    'mdia',
+    ...(spec.omit === 'mdhd' ? [] : [mdhd(spec)]),
+    ...(spec.omit === 'hdlr' ? [] : [box('hdlr', zeros(4), zeros(4), ascii(spec.handler), zeros(4))]),
+    box('minf', stbl),
+  )
   return box(
     'trak',
-    tkhd(spec),
-    box(
-      'mdia',
-      mdhd(spec),
-      box('hdlr', zeros(4), zeros(4), ascii(spec.handler), zeros(4)),
-      box('minf', stbl),
-    ),
+    ...(spec.omit === 'tkhd' ? [] : [tkhd(spec)]),
+    ...(spec.omit === 'mdia' ? [] : [mdia]),
   )
 }
 
@@ -204,5 +203,23 @@ describe('parseInit на синтетических init-сегментах', ()
     // дорожка с чужим handler'ом: ни видео, ни звук — тоже не в счёт
     const noKind = trak({ trackId: 1, handler: 'text', timescale: 1000 })
     expect(parseInit(moov(noKind))).toBeNull()
+  })
+
+  // parseInit кормится произвольными байтами со стороннего сайта: обязательного
+  // бокса может не быть вовсе, и это должно кончаться отброшенной дорожкой,
+  // а не исключением на разборе undefined.
+  describe.each(['tkhd', 'mdia', 'mdhd', 'hdlr'] as const)('дорожка без %s', (omit) => {
+    const broken = trak({ trackId: 2, handler: 'vide', timescale: 90000, width: 640, height: 360, omit })
+
+    it('отбрасывается, не мешая разбору соседней целой дорожки', () => {
+      const whole = trak({ trackId: 1, handler: 'vide', timescale: 12288, width: 320, height: 240 })
+      expect(parseInit(moov(whole, broken))).toEqual({
+        tracks: [{ trackId: 1, kind: 'video', timescale: 12288, codec: 'avc1', width: 320, height: 240 }],
+      })
+    })
+
+    it('даёт null, когда других дорожек в moov нет', () => {
+      expect(parseInit(moov(broken))).toBeNull()
+    })
   })
 })
