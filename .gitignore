@@ -148,3 +148,8 @@ vite.config.ts.timestamp-*
 dist/
 node_modules/
 test-results/
+
+# Промежуточные артефакты ffmpeg: в фикстурах нужны только сегменты .m4s,
+# исходные mp4 и манифесты DASH тесты не читают (tools/make-fixtures.sh)
+tests/fixtures/**/*.mp4
+tests/fixtures/**/*.mpd
