@@ -1,7 +1,16 @@
 import type { Chunk, Run } from '../../shared/types'
 
 /** Зазор меньше этого считаем следствием округления, а не разрывом. */
-const GAP_TOLERANCE_SECONDS = 0.05
+export const GAP_TOLERANCE_SECONDS = 0.05
+
+/**
+ * Продолжает ли кусок начатый прогон: граница включена, зазор ровно в допуск —
+ * ещё округление. Вынесено из runs(), потому что через вычитание времён медиа
+ * попасть в точную границу почти невозможно, а проверять её надо.
+ */
+export function continuesRun(lastEnd: number, start: number): boolean {
+  return start - lastEnd <= GAP_TOLERANCE_SECONDS
+}
 
 /** Совпадение начал с такой точностью означает тот же самый кусок. */
 const SAME_CHUNK_TOLERANCE_SECONDS = 0.001
@@ -34,7 +43,7 @@ export class PtsMap {
 
     for (const chunk of this.chunks) {
       const last = runs[runs.length - 1]
-      if (last && chunk.start - last.end <= GAP_TOLERANCE_SECONDS) {
+      if (last && continuesRun(last.end, chunk.start)) {
         last.end = Math.max(last.end, chunk.end)
         last.chunks.push(chunk)
       } else {
