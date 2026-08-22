@@ -83,6 +83,8 @@ interface TrackSpec {
   height?: number
   /** null — stsd не класть вовсе: кодек такой дорожки неизвестен */
   codec?: string | null
+  /** готовый stsd вместо собранного по codec — для битых и усечённых боксов */
+  stsd?: Uint8Array
 }
 
 function tkhd(spec: TrackSpec): Uint8Array {
@@ -118,9 +120,8 @@ function mdhd(spec: TrackSpec): Uint8Array {
 
 function trak(spec: TrackSpec): Uint8Array {
   const codec = spec.codec === undefined ? 'avc1' : spec.codec
-  const stbl = codec === null
-    ? box('stbl')
-    : box('stbl', box('stsd', zeros(4), u32(1), box(codec, zeros(8))))
+  const stsd = spec.stsd ?? (codec === null ? null : box('stsd', zeros(4), u32(1), box(codec, zeros(8))))
+  const stbl = stsd === null ? box('stbl') : box('stbl', stsd)
   return box(
     'trak',
     tkhd(spec),
@@ -157,6 +158,37 @@ describe('parseInit на синтетических init-сегментах', ()
     expect(video.timescale).toBe(90000)
     expect(video.width).toBe(640)
     expect(video.height).toBe(360)
+  })
+
+  it('перечисляет все дорожки муксированного moov, а не только первую', () => {
+    // video и audio в одном moov — так выглядит не-DASH init-сегмент
+    const init = parseInit(moov(
+      trak({ trackId: 1, handler: 'vide', timescale: 12288, width: 320, height: 240 }),
+      trak({ trackId: 2, handler: 'soun', timescale: 44100, codec: 'mp4a' }),
+    ))!
+    expect(init.tracks).toHaveLength(2)
+
+    const video = init.tracks.find((t) => t.kind === 'video')!
+    const audio = init.tracks.find((t) => t.kind === 'audio')!
+    // у второй дорожки свои поля, а не скопированные с первой
+    expect(video.trackId).toBe(1)
+    expect(video.timescale).toBe(12288)
+    expect(video.codec).toBe('avc1')
+    expect(audio.trackId).toBe(2)
+    expect(audio.timescale).toBe(44100)
+    expect(audio.codec).toBe('mp4a')
+  })
+
+  it('отбрасывает дорожку с усечённым stsd, а не выдаёт кодек из нулевых байтов', () => {
+    // тело stsd ровно 8 байт: version+flags и entry_count, sample entry обрезан
+    const truncated = trak({
+      trackId: 1, handler: 'vide', timescale: 1000, stsd: box('stsd', zeros(4), u32(1)),
+    })
+    expect(parseInit(moov(truncated))).toBeNull()
+
+    // контроль: тот же конструктор с целым stsd читает настоящий кодек
+    const whole = trak({ trackId: 1, handler: 'vide', timescale: 1000, codec: 'avc1' })
+    expect(parseInit(moov(whole))!.tracks[0]!.codec).toBe('avc1')
   })
 
   it('возвращает null, когда moov есть, но пригодных дорожек в нём нет', () => {
