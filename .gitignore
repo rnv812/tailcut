@@ -144,3 +144,7 @@ vite.config.ts.timestamp-*
 
 # Brainstorming mockups
 .superpowers/
+
+dist/
+node_modules/
+test-results/
