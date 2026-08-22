@@ -1,16 +1,55 @@
 export interface KeyInput {
   url: string
   codecs: string[]
-  /** Infinity для прямого эфира */
+  /**
+   * Полная длительность ролика в секундах. `Infinity` — прямой эфир.
+   *
+   * NaN попадает в ту же корзину, что и эфир, и это осознанно: `HTMLMediaElement.duration`
+   * равен NaN до события `loadedmetadata`, и отличить «эфир» от «ещё не знаем» здесь нечем.
+   * Плата за это — ключ, посчитанный слишком рано, совпадёт с ключом настоящего эфира, а с
+   * приходом настоящей длительности сменится, и материал одного ролика разъедется по двум
+   * сессиям. Поэтому вызывающая сторона обязана считать ключ не раньше `loadedmetadata`
+   * (реестр сессий в мосте, Task 10).
+   */
   durationSeconds: number
 }
 
-/** Параметры, которые меняются от захода к заходу и на само видео не влияют. */
+/**
+ * Параметры, которые меняются от захода к заходу и на само видео не влияют.
+ *
+ * Сверка идёт по имени целиком: имя, лишь начинающееся со служебного, служебным не
+ * считается. `title`, `token` и `type` не имеют отношения к `t`, `sig` — к `si`,
+ * `source_id` — к `source`. Ошибиться здесь дорого: срезанный значимый параметр сливает
+ * разные ролики в одну сессию, тогда как лишний оставленный стоит всего одной лишней сессии.
+ *
+ * `lang` в списке сознательно отсутствует: на части сайтов он переключает не язык
+ * интерфейса, а звуковую дорожку. Дубляжи одного ролика совпадают и по длительности, и по
+ * кодекам, так что общий ключ свёл бы фрагменты двух языков в одну карту.
+ */
 const NOISE_PARAMS = [
   't', 'time_continue', 'start', 'index', 'list', 'si', 'feature', 'pp',
-  'ref', 'ref_src', 'referrer', 'source', 'share_id', 'lang',
+  'ref', 'ref_src', 'referrer', 'source', 'share_id',
 ]
 
+/**
+ * Регистр имени в сверке не участвует: `?T=42` и `?UTM_Source=x` — те же метки, что `?t=42`
+ * и `?utm_source=x`. Сам адрес при этом не переписывается, поэтому значимые `?V=abc` и
+ * `?v=abc` остаются разными параметрами — за сайт мы их не схлопываем.
+ */
+function isNoiseParam(name: string): boolean {
+  const key = name.toLowerCase()
+  return NOISE_PARAMS.includes(key) || key.startsWith('utm_')
+}
+
+/**
+ * Приводит адрес к виду, по которому два захода к одному видео узнаются как одно.
+ *
+ * Нормализуется то, как до видео дошли: якорь, порядок параметров запроса и служебные
+ * параметры. Не трогается то, куда дошли: схема, хост и путь остаются как есть, поэтому
+ * `http` и `https`, `/v/1` и `/v/1/` дают разные ключи. Схлопнуть их значило бы решить за
+ * сайт, что он отдаёт там то же самое. (Регистр хоста снимает сам разбор адреса, регистр
+ * пути — нет.)
+ */
 export function normalizeUrl(url: string): string {
   let parsed: URL
   try {
@@ -22,7 +61,7 @@ export function normalizeUrl(url: string): string {
   parsed.hash = ''
 
   for (const key of [...parsed.searchParams.keys()]) {
-    if (NOISE_PARAMS.includes(key) || key.startsWith('utm_')) {
+    if (isNoiseParam(key)) {
       parsed.searchParams.delete(key)
     }
   }
@@ -32,10 +71,14 @@ export function normalizeUrl(url: string): string {
 }
 
 export function sessionKey(input: KeyInput): string {
+  // Копия перед сортировкой: массив приходит от вызывающей стороны, порядок кодеков в нём
+  // может быть значим для неё самой.
   const codecs = [...input.codecs].sort().join(',')
   const duration = Number.isFinite(input.durationSeconds)
     ? Math.round(input.durationSeconds).toString()
     : 'live'
 
+  // Разделители обязательны: без них компоненты перетекают друг в друга и разные сессии
+  // получают один ключ («…/v/1» + «avc1» и «…/v/1a» + «vc1» дают одну строку).
   return `${normalizeUrl(input.url)}|${codecs}|${duration}`
 }
