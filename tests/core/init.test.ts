@@ -190,6 +190,31 @@ describe('parseInit на синтетических init-сегментах', ()
     expect(parseInit(moov(whole))!.tracks[0]!.codec).toBe('avc1')
   })
 
+  // Тип sample entry лежит в теле stsd на байтах 12..15. Если тело обрывается
+  // внутри них, недостающие байты читаются как undefined, а
+  // String.fromCharCode(undefined) возвращает '\0' — строку непустую, а значит
+  // истинную: дорожка прошла бы дальше с мусором вместо кодека.
+  it.each([12, 13, 14, 15])('отбрасывает дорожку: тело stsd в %i байт обрывает тип sample entry', (bodyBytes) => {
+    // заголовок sample entry урезан до bodyBytes - 8 байт: size целиком, тип частично
+    const stsd = box('stsd', zeros(4), u32(1), u32(8), ascii('avc1'.slice(0, bodyBytes - 12)))
+    expect(stsd.byteLength - 8).toBe(bodyBytes) // тело именно той длины, ради которой тест
+
+    const broken = trak({ trackId: 1, handler: 'vide', timescale: 1000, stsd })
+    expect(parseInit(moov(broken))).toBeNull()
+  })
+
+  it('принимает stsd с телом ровно в 16 байт: тип sample entry прочитан целиком', () => {
+    // законный минимум: version+flags(4) + entry_count(4) + sample entry из
+    // одного заголовка(8). Байты 12..15 — последние в теле, но они на месте.
+    const stsd = box('stsd', zeros(4), u32(1), box('avc1'))
+    expect(stsd.byteLength - 8).toBe(16)
+
+    const minimal = trak({ trackId: 3, handler: 'vide', timescale: 1000, width: 320, height: 240, stsd })
+    expect(parseInit(moov(minimal))).toEqual({
+      tracks: [{ trackId: 3, kind: 'video', timescale: 1000, codec: 'avc1', width: 320, height: 240 }],
+    })
+  })
+
   it('возвращает null, когда moov есть, но пригодных дорожек в нём нет', () => {
     // контроль: тот же конструктор с полноценной дорожкой даёт непустой разбор
     const good = trak({ trackId: 1, handler: 'vide', timescale: 1000, width: 320, height: 240 })
