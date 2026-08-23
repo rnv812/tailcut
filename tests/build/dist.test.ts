@@ -1,11 +1,40 @@
-import { describe, it, expect, beforeAll } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { Script } from 'node:vm'
 
+/**
+ * Сборка идёт под собственным таймаутом, заведомо меньшим хукового: тогда и зависшая сборка
+ * приходит ловимым исключением, а не срывом хука.
+ */
+const BUILD_TIMEOUT_MS = 120_000
+
+const buildFailureText = (cause: unknown): string => {
+  const stderr = (cause as { stderr?: { toString(): string } }).stderr?.toString().trim()
+  return [String(cause), stderr].filter(Boolean).join('\n')
+}
+
+let buildFailure: Error | undefined
+
 beforeAll(() => {
-  execFileSync('npm', ['run', 'build'], { stdio: 'pipe' })
-}, 120_000)
+  try {
+    // Сборка идёт с нуля: на прогретом dist набор проверял бы пересборку поверх готового
+    // дерева и не заметил бы, что на чистом клоне сборка вообще не запускается.
+    rmSync('dist', { recursive: true, force: true })
+    execFileSync('npm', ['run', 'build'], { stdio: 'pipe', timeout: BUILD_TIMEOUT_MS })
+  } catch (cause) {
+    buildFailure = new Error(`сборка не состоялась, проверять нечего:\n${buildFailureText(cause)}`)
+  }
+}, BUILD_TIMEOUT_MS + 30_000)
+
+/**
+ * Несостоявшаяся сборка обязана валить каждый тест. Брошенное прямо из beforeAll исключение
+ * увело бы весь набор в skipped: ни одной проверки не выполнено, но и ни одна не красная —
+ * покрытие молча вырождается в ноль.
+ */
+beforeEach(() => {
+  if (buildFailure) throw buildFailure
+})
 
 const manifest = () => JSON.parse(readFileSync('dist/manifest.json', 'utf8'))
 const packageJson = () => JSON.parse(readFileSync('package.json', 'utf8'))
@@ -103,6 +132,15 @@ const chromeApisUsedInSrc = (): string[] => {
   }
 
   return [...namespaces].sort()
+}
+
+/**
+ * Файл content-скрипта → мир, в котором он обязан исполняться. Мир задаёт роль: из MAIN виден
+ * и подменяем MSE самой страницы, из ISOLATED — только собственные объекты расширения.
+ */
+const CONTENT_SCRIPT_WORLDS: Record<string, string> = {
+  'page/main-hook.js': 'MAIN',
+  'page/content.js': 'ISOLATED',
 }
 
 /**
@@ -258,6 +296,23 @@ describe('манифест', () => {
     expect(content.all_frames).toBe(true)
   })
 
+  it('каждый content-скрипт объявлен ровно один раз и ровно в своём мире', () => {
+    const declared: ContentScript[] = manifest().content_scripts
+
+    // Пары «файл → мир» собираются из всех объявлений разом, а не поиском первого совпадения
+    // и не по индексу: второе объявление того же файла в чужом мире прячется за первым, а
+    // Chrome исполнит его дважды — второй раз не в той роли.
+    const injected = declared.flatMap((c) => c.js.map((js) => `${js} → ${c.world}`)).sort()
+    const expected = Object.entries(CONTENT_SCRIPT_WORLDS)
+      .map(([js, world]) => `${js} → ${world}`)
+      .sort()
+
+    expect(
+      injected,
+      'состав content-скриптов разошёлся с ролями: лишний, потерянный или не в своём мире',
+    ).toEqual(expected)
+  })
+
   it('оба content-скрипта объявлены для всех сайтов, без привязки к домену', () => {
     expect(contentScript('page/main-hook.js').matches).toEqual(['<all_urls>'])
     expect(contentScript('page/content.js').matches).toEqual(['<all_urls>'])
@@ -308,6 +363,23 @@ describe('манифест', () => {
     // matches у content-скрипта права на межсайтовый fetch не даёт — их даёт только
     // host_permissions, и без него дозапрос умирает в рантайме.
     expect(manifest().host_permissions).toEqual(['<all_urls>'])
+  })
+
+  it('у кнопки на панели есть подпись', () => {
+    // default_title — то, что Chrome показывает подсказкой над кнопкой расширения. Пустая
+    // строка оставляет кнопку без подписи: в ряду иконок расширение не опознать.
+    const title = manifest().action.default_title
+
+    expect(typeof title, 'default_title не объявлен строкой').toBe('string')
+    expect(title.trim(), 'подпись кнопки пуста').not.toBe('')
+  })
+
+  it('имя расширения совпадает с именем пакета', () => {
+    const name = packageJson().name
+
+    expect(typeof name, 'имя пакета не строка').toBe('string')
+    expect(name.trim(), 'имя пакета пусто').not.toBe('')
+    expect(manifest().name, 'манифест и пакет разъехались по имени').toBe(name)
   })
 
   it('версия расширения совпадает с версией пакета', () => {
