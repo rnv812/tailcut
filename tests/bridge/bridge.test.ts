@@ -7,53 +7,53 @@ import type { BridgeToPage, SessionSummary } from '../../src/shared/protocol'
 const initBytes = new Uint8Array(readFileSync('tests/fixtures/h264/init-stream0.m4s'))
 const seg1Bytes = new Uint8Array(readFileSync('tests/fixtures/h264/chunk-stream0-00001.m4s'))
 const seg2Bytes = new Uint8Array(readFileSync('tests/fixtures/h264/chunk-stream0-00002.m4s'))
-/** Фрагмент через один после первого: вместе они дают буфер с разрывом посередине. */
+/** The fragment after next: together with the first it makes a buffer with a gap between. */
 const seg3Bytes = new Uint8Array(readFileSync('tests/fixtures/h264/chunk-stream0-00003.m4s'))
 
 /**
- * Звуковая дорожка той же фикстуры. Она нужна там, где прогоны должны получиться разной
- * длины: у видеофрагментов длительность одинаковая, и прогон из одного такого фрагмента
- * от прогона из другого не отличить.
+ * The audio track of the same fixture. It is needed where the runs have to come out of
+ * different lengths: video fragments all last the same, and a run made of one of them is
+ * indistinguishable from a run made of another.
  */
 const audioInitBytes = new Uint8Array(readFileSync('tests/fixtures/h264/init-stream1.m4s'))
-/** Куски звука: 0…1.95, 1.95…3.95, 3.95…5.97, 5.97…6.02 секунды. */
+/** Pieces of sound: 0…1.95, 1.95…3.95, 3.95…5.97, 5.97…6.02 seconds. */
 const audioBytes = [1, 2, 3, 4].map(
   (n) => new Uint8Array(readFileSync(`tests/fixtures/h264/chunk-stream1-0000${n}.m4s`)),
 )
 
-/** Слепок байтов: сравнение целых буферов, не заваливающее вывод при расхождении. */
+/** A digest of bytes: comparing whole buffers without flooding the output on a mismatch. */
 function digest(...parts: Uint8Array[]): string {
   const hash = createHash('sha256')
   for (const part of parts) hash.update(part)
   return hash.digest('hex')
 }
 
-/** Байты уходят мосту передачей, то есть отдельным ArrayBuffer, а не видом на фикстуру. */
+/** Bytes reach the bridge by transfer: an ArrayBuffer of their own, not a view on the fixture. */
 const buffer = (bytes: Uint8Array): ArrayBuffer => bytes.slice().buffer
 
-/** Адрес и заголовок страницы, которая вставила мост. */
+/** The address and the title of the page that inserted the bridge. */
 const PAGE_URL = 'https://site.example/watch?v=abc'
 const PAGE_TITLE = 'Clip — site.example'
 const REFERRER = 'https://referrer.example/from'
 
 /**
- * Ключ, под которым реестр держит сессию этой страницы. Адресом он не является никогда:
- * normalizeUrl срезает метки перехода, а к остатку приписываются кодеки и длительность.
+ * The key the registry holds the session of this page under. It is never an address:
+ * normalizeUrl cuts the referral marks off, and the codecs and the duration are appended.
  */
 const keyFor = (url: string, codecs: string[] = ['avc1']): string =>
   sessionKey({ url, codecs, durationSeconds: Infinity })
 
 /**
- * Второй аргумент postMessage как есть: и строка targetOrigin, и объект опций — законные его
- * формы. Разбирает их targetOriginOf, а храним нетронутым, чтобы форма аргумента не диктовала
- * реализацию.
+ * The second argument of postMessage as it is: both a targetOrigin string and an options object
+ * are legal forms of it. targetOriginOf takes them apart; it is kept untouched here so that the
+ * form of the argument does not dictate the implementation.
  */
 type Post = { message: unknown; to: unknown }
 
-/** Заказ на скачивание в том виде, в каком мост передаёт его Chrome. */
+/** A download request in the shape the bridge hands it to Chrome. */
 type Download = { url: string; filename: string }
 
-/** Окно-получатель: мост шлёт ему сообщения, тест смотрит, что именно дошло. */
+/** A receiving window: the bridge sends messages to it, the test looks at what arrived. */
 function receiver() {
   const posts: Post[] = []
   return {
@@ -64,7 +64,7 @@ function receiver() {
   }
 }
 
-/** Порт из MessageChannel: этим каналом мост отвечает на запрос списка сессий. */
+/** A port of a MessageChannel: the bridge answers a session list request through it. */
 function port() {
   const received: unknown[] = []
   return {
@@ -79,13 +79,13 @@ type Receiver = ReturnType<typeof receiver>
 type MessageListener = (event: MessageEvent) => void
 
 /**
- * Что мост отдаёт в ответ на tc:list. Тип берётся из протокола, а не переписывается здесь:
- * иначе набор проверял бы мост против собственного представления о нём, а не против
- * объявленного протокола, и расхождение между ними осталось бы незамеченным.
+ * What the bridge returns for tc:list. The type comes from the protocol instead of being
+ * rewritten here: otherwise the set would check the bridge against its own idea of it rather
+ * than against the declared protocol, and a drift between the two would go unnoticed.
  */
 type Summary = SessionSummary
 
-/** Признак сводки сессии по факту: у postMessage типов нет, проверять приходится значение. */
+/** A session summary by the facts: postMessage has no types, so the value has to be checked. */
 function isSummary(value: unknown): value is SessionSummary {
   if (typeof value !== 'object' || value === null) return false
   const summary = value as Record<string, unknown>
@@ -100,9 +100,9 @@ function isSummary(value: unknown): value is SessionSummary {
   )
 }
 
-/** Вариант союза BridgeToPage, под который подходит значение; null — не подходит ни под один. */
-function variantOf(value: unknown): 'tc:ready' | 'сводки сессий' | null {
-  if (Array.isArray(value)) return value.every(isSummary) ? 'сводки сессий' : null
+/** The variant of the BridgeToPage union a value fits; null — it fits none of them. */
+function variantOf(value: unknown): 'tc:ready' | 'session summaries' | null {
+  if (Array.isArray(value)) return value.every(isSummary) ? 'session summaries' : null
   if (typeof value === 'object' && value !== null) {
     const fields = value as Record<string, unknown>
     if (fields.type === 'tc:ready' && Object.keys(fields).length === 1) return 'tc:ready'
@@ -111,9 +111,9 @@ function variantOf(value: unknown): 'tc:ready' | 'сводки сессий' | n
 }
 
 /**
- * Адрес получателя из второго аргумента postMessage: окно принимает и строку targetOrigin,
- * и объект опций с тем же полем. Формы равнозначны, поэтому сверяется извлечённый адрес,
- * а не то, какой из них воспользовался мост.
+ * The address of the receiver out of the second argument of postMessage: a window takes both a
+ * targetOrigin string and an options object with the same field. The forms are equal, so the
+ * extracted address is what gets checked and not which of them the bridge used.
  */
 function targetOriginOf(to: unknown): unknown {
   if (typeof to === 'object' && to !== null) return (to as { targetOrigin?: unknown }).targetOrigin
@@ -121,13 +121,13 @@ function targetOriginOf(to: unknown): unknown {
 }
 
 /**
- * Подменяет окно, в котором живёт мост: слушателя он вешает на window, рукопожатие шлёт
- * window.parent. Родитель, верхняя страница и отправитель здесь разные объекты: только так
- * видно, кому мост на самом деле ответил.
+ * Replaces the window the bridge lives in: it hangs its listener on window and sends the
+ * handshake to window.parent. The parent, the top page and the sender are different objects
+ * here: only that way is it visible who the bridge actually answered.
  *
- * Иерархия не выдумана: оба content-скрипта объявлены с all_frames, поэтому мост встаёт и во
- * вложенном фрейме, где window.parent (окно того самого фрейма) и window.top (верхняя
- * страница) — разные окна.
+ * The hierarchy is not invented: both content scripts are declared with all_frames, so the
+ * bridge stands up in a nested frame too, where window.parent (the window of that very frame)
+ * and window.top (the top page) are different windows.
  */
 function installWindow(referrer = REFERRER) {
   const listeners: MessageListener[] = []
@@ -141,20 +141,20 @@ function installWindow(referrer = REFERRER) {
     parent,
     top,
   })
-  // Документ моста живёт на origin расширения; referrer — единственное, что он знает
-  // о вставившей его странице до прихода tc:context.
+  // The document of the bridge lives on the extension origin; the referrer is the only thing it
+  // knows about the page that inserted it before tc:context arrives.
   vi.stubGlobal('document', { referrer })
 
-  /** Начатые скачивания в том виде, в каком мост их заказывает Chrome. */
+  /** Downloads that were started, in the shape the bridge orders them from Chrome. */
   const downloads: Download[] = []
-  /** Блобы, на которые мост выдал адреса, и снятые адреса — по одному на скачивание. */
+  /** Blobs the bridge handed out addresses for, and the revoked addresses — one per download. */
   const blobs = new Map<string, Blob>()
   const revoked: string[] = []
-  /** Идентификатор скачивания; undefined — Chrome отказал, как при запрете на запись. */
+  /** The download id; undefined — Chrome refused, as it does when writing is forbidden. */
   let downloadId: number | undefined = 1
 
-  // URL остаётся настоящим: его конструктор зовёт ключ сессии на каждом init-сегменте.
-  // Дописаны только статические методы блобов, которых в Node нет.
+  // URL stays the real one: its constructor is called by the session key on every init segment.
+  // Only the static blob methods, which Node does not have, are added.
   class TestURL extends URL {
     static createObjectURL(blob: Blob): string {
       const url = `blob:chrome-extension://tailcut/${blobs.size + 1}`
@@ -169,11 +169,11 @@ function installWindow(referrer = REFERRER) {
   vi.stubGlobal('URL', TestURL)
 
   /**
-   * Отказы, о которых Chrome написал бы в консоль «Unchecked runtime.lastError»: обработчик
-   * скачивания вернул управление, так и не прочитав chrome.runtime.lastError.
+   * Failures Chrome would write to the console as "Unchecked runtime.lastError": the download
+   * callback returned without ever reading chrome.runtime.lastError.
    */
   const uncheckedErrors: string[] = []
-  /** Отказ живёт ровно на время обработчика — так его отдаёт и Chrome. */
+  /** A failure lives exactly as long as the callback — that is how Chrome hands it over too. */
   let lastError: { message: string } | undefined
   let lastErrorRead = false
 
@@ -212,28 +212,28 @@ function installWindow(referrer = REFERRER) {
     parent,
     top,
     deliver,
-    /** Спрашивает у моста список сессий тем же способом, что попап: каналом сообщений. */
+    /** Asks the bridge for the session list the way the popup does: through a message channel. */
     list(): Summary[] {
       const reply = port()
       deliver({ type: 'tc:list' }, { ports: [reply] })
-      expect(reply.received, 'мост не ответил на запрос списка сессий').toHaveLength(1)
+      expect(reply.received, 'the bridge did not answer the session list request').toHaveLength(1)
       return reply.received[0] as Summary[]
     },
-    /** Отдаёт мосту сегмент так, как его присылает content script. */
-    append(bytes: Uint8Array, sourceId = 's1'): void {
+    /** Hands the bridge a segment the way the content script sends it. */
+    append(bytes: Uint8Array, sourceId = 's1', bufferId = 'b1'): void {
       deliver({
         type: 'tc:append',
         sourceId,
-        bufferId: 'b1',
+        bufferId,
         mime: 'video/mp4',
         bytes: buffer(bytes),
       })
     },
-    /** Сообщает мосту, на какой странице он стоит. */
+    /** Tells the bridge which page it stands on. */
     context(url = PAGE_URL, title = PAGE_TITLE): void {
       deliver({ type: 'tc:context', url, title })
     },
-    /** Просит мост собрать сессию в файл — так это делает попап через content script. */
+    /** Asks the bridge to build a file — the way the popup does through the content script. */
     save(key: string): ReturnType<typeof port> {
       const reply = port()
       deliver({ type: 'tc:save', key }, { ports: [reply] })
@@ -242,26 +242,26 @@ function installWindow(referrer = REFERRER) {
     downloads,
     revoked,
     uncheckedErrors,
-    /** Байты файла, которые мост отдал Chrome на скачивание. */
+    /** The bytes of the file the bridge handed Chrome to download. */
     async savedBytes(index = 0): Promise<Uint8Array> {
       const started = downloads[index]
-      expect(started, 'скачивание не начиналось').toBeDefined()
+      expect(started, 'no download was started').toBeDefined()
       const blob = blobs.get(started!.url)
-      expect(blob, 'мост отдал Chrome адрес, за которым нет блоба').toBeDefined()
+      expect(blob, 'the bridge gave Chrome an address with no blob behind it').toBeDefined()
       return new Uint8Array(await blob!.arrayBuffer())
     },
-    /** Тип блоба, который мост отдал Chrome. */
+    /** The type of the blob the bridge handed Chrome. */
     savedType(index = 0): string | undefined {
       return blobs.get(downloads[index]?.url ?? '')?.type
     },
-    /** Chrome отказывает в скачивании: запрет на запись, нет места, отмена пользователем. */
+    /** Chrome refuses the download: writing forbidden, no space, cancelled by the user. */
     failDownloads(): void {
       downloadId = undefined
     },
   }
 }
 
-/** Мост ставит слушателя и здоровается прямо при загрузке модуля. */
+/** The bridge sets its listener and says hello right when the module loads. */
 async function loadBridge(referrer?: string) {
   const win = installWindow(referrer)
   vi.resetModules()
@@ -274,43 +274,43 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-describe('рукопожатие моста', () => {
-  it('уходит родительскому окну сразу при загрузке', async () => {
+describe('the handshake of the bridge', () => {
+  it('goes to the parent window right at load', async () => {
     const win = await loadBridge()
 
     expect(win.parent.posts.map((p) => p.message)).toEqual([{ type: 'tc:ready' }])
   })
 
-  it('уходит окну своего фрейма, а не верхней странице', async () => {
+  it('goes to the window of its own frame, not to the top page', async () => {
     const win = await loadBridge()
 
-    // Мост живёт в каждом фрейме страницы, и для плеера, встроенного через iframe, окно
-    // фрейма и верхняя страница — разные окна. Рукопожатие, ушедшее наверх, не доходит до
-    // того, кто мост и вставил: этот фрейм о мосте так и не узнает.
-    expect(win.top.posts, 'рукопожатие ушло верхней странице вместо своего фрейма').toEqual([])
+    // The bridge lives in every frame of the page, and for a player embedded through an iframe
+    // the frame window and the top page are different windows. A handshake sent upwards never
+    // reaches the one that inserted the bridge: that frame never learns about it.
+    expect(win.top.posts, 'the handshake went to the top page instead of its frame').toEqual([])
     expect(win.parent.posts.map((p) => p.message)).toEqual([{ type: 'tc:ready' }])
   })
 
-  it('адресовано любому origin: расширение работает на всех сайтах', async () => {
+  it('is addressed to any origin: the extension works on every site', async () => {
     const win = await loadBridge()
 
-    // Прибитый адрес молча теряет рукопожатие на любой странице, кроме него самого,
-    // а страница узнаёт о мосте только из этого сообщения.
+    // A nailed-down address silently loses the handshake on every page but that one, and the
+    // page learns about the bridge from this message alone.
     expect(
       targetOriginOf(win.parent.posts[0]?.to),
-      'рукопожатие прибито к конкретному адресу',
+      'the handshake is nailed to a particular address',
     ).toBe('*')
   })
 })
 
-describe('мост складывает сегменты в реестр сессий', () => {
-  it('на пустом реестре отдаёт пустой список', async () => {
+describe('the bridge puts segments into the session registry', () => {
+  it('returns an empty list from an empty registry', async () => {
     const win = await loadBridge()
 
     expect(win.list()).toEqual([])
   })
 
-  it('init-сегмент заводит сессию под адресом и заголовком страницы', async () => {
+  it('opens a session under the address and title of the page on an init', async () => {
     const win = await loadBridge()
     win.context()
 
@@ -328,7 +328,7 @@ describe('мост складывает сегменты в реестр сес�
     ])
   })
 
-  it('медиафрагменты набирают длительность, объём и прогоны', async () => {
+  it('collects duration, volume and runs from media fragments', async () => {
     const win = await loadBridge()
     win.context()
 
@@ -336,25 +336,25 @@ describe('мост складывает сегменты в реестр сес�
     win.append(seg1Bytes)
     win.append(seg2Bytes)
 
-    // Фикстура: по две секунды на фрагмент, оба подряд — один прогон на четыре секунды.
+    // Fixture: two seconds per fragment, both in a row — one run of four seconds.
     expect(win.list()).toMatchObject([
       { duration: 4, bytes: seg1Bytes.byteLength + seg2Bytes.byteLength, runs: 1 },
     ])
   })
 
-  it('разрыв в буфере виден в сводке: два прогона и длительность без провала', async () => {
+  it('shows a gap in the buffer in the summary: two runs and a duration without it', async () => {
     const win = await loadBridge()
     win.context()
 
     win.append(initBytes)
     win.append(seg1Bytes)
-    // Второй фрагмент пропущен: пользователь перемотал вперёд, или вкладку придушили и плеер
-    // продолжил догружать уже с новой позиции. Зазор в две секунды — разрыв, а не округление.
+    // The second fragment is missing: the user skipped forward, or the tab was throttled and the
+    // player went on loading from a new position. A two-second gap is a gap, not rounding.
     win.append(seg3Bytes)
 
-    // Сводкой попап рисует, что вообще можно вырезать. Один прогон здесь обещал бы
-    // непрерывный кусок, которого нет; шесть секунд от начала до конца — материал,
-    // которого нет тоже: между 2-й и 4-й секундой в реестре пусто.
+    // The popup draws what can be cut out at all from this summary. One run here would promise a
+    // continuous piece that does not exist; six seconds from start to end would promise material
+    // that does not exist either: between the 2nd and the 4th second the registry is empty.
     expect(win.list()).toEqual([
       {
         key: keyFor(PAGE_URL),
@@ -367,9 +367,9 @@ describe('мост складывает сегменты в реестр сес�
     ])
   })
 
-  it('ключ сессии в сводке — ключ реестра, а не адрес страницы', async () => {
+  it('carries the registry key in the summary, not the page address', async () => {
     const win = await loadBridge()
-    // Живой адрес почти всегда несёт метки перехода: ?t= с перемотки, utm_ из рассылки.
+    // A live address almost always carries referral marks: ?t= from a rewind, utm_ from a mail.
     const url = `${PAGE_URL}&t=42&utm_source=tg`
     win.context(url, PAGE_TITLE)
 
@@ -377,44 +377,44 @@ describe('мост складывает сегменты в реестр сес�
 
     const summary = win.list()[0]!
 
-    // key — ручка, которой попап запросит эту сессию у реестра. Адрес страницы ею не
-    // является: метки перехода из ключа срезаны, а кодеки в него дописаны, так что
-    // запрос по адресу не найдёт ничего и выгружать клип будет нечего.
+    // key is the handle the popup asks the registry for this session with. The page address is
+    // not one: the referral marks are cut out of the key and the codecs are appended to it, so a
+    // request by address would find nothing and there would be no clip to save.
     expect(summary.key).toBe(keyFor(PAGE_URL))
     expect(summary.url).toBe(url)
   })
 
-  it('до прихода контекста сессия достаётся referrer’у, а не пустому адресу', async () => {
+  it('gives a session to the referrer before the context arrives', async () => {
     const win = await loadBridge()
 
-    // Content script присылает контекст сразу после загрузки моста, но сегменты хука идут тем
-    // же путём: если он когда-нибудь обгонит контекст, сессия должна остаться узнаваемой.
+    // The content script sends the context right after the bridge loads, but the hook segments
+    // travel the same road: should one outrun the context, the session must stay recognisable.
     win.append(initBytes)
 
     expect(win.list()).toMatchObject([{ url: REFERRER, title: '' }])
   })
 
-  it('нестроковый контекст приводится к строкам, а не уезжает в сводку как есть', async () => {
+  it('coerces a non-string context to strings instead of passing it on', async () => {
     const win = await loadBridge()
 
-    // tc:context мост принимает от кого угодно на странице: адресоваться ему может любой
-    // скрипт, а не только наш content script. Полей никто не проверял, поэтому в сводку
-    // сессии — то, чем попап её и подписывает — могло бы уехать что угодно вплоть до
-    // объекта, который отрисуется в списке как «[object Object]».
+    // The bridge takes tc:context from anyone on the page: any script can address it, not only
+    // our content script. Nobody checked the fields, so anything at all could travel into the
+    // summary of the session — the very thing the popup signs it with — right down to an object
+    // that would render in the list as "[object Object]".
     win.deliver({ type: 'tc:context', url: { href: PAGE_URL }, title: 42 })
     win.append(initBytes)
 
     expect(win.list()).toMatchObject([{ url: '[object Object]', title: '42' }])
   })
 
-  it('сегменты разных источников не сливаются в одну сессию', async () => {
+  it('does not merge segments of different sources into one session', async () => {
     const win = await loadBridge()
     win.context()
 
     win.append(initBytes, 's1')
     win.context('https://site.example/watch?v=second', 'Second')
     win.append(initBytes, 's2')
-    // Первый плеер продолжает играть: его фрагмент обязан лечь в свою сессию.
+    // The first player goes on playing: its fragment has to land in its own session.
     win.append(seg1Bytes, 's1')
 
     expect(win.list().map((s) => [s.url, s.runs])).toEqual(
@@ -425,70 +425,70 @@ describe('мост складывает сегменты в реестр сес�
     )
   })
 
-  it('свежая сессия идёт в списке первой', async () => {
+  it('lists a fresh session first', async () => {
     vi.useFakeTimers()
     const win = await loadBridge()
 
     vi.setSystemTime(new Date('2026-08-22T10:00:00Z'))
-    win.context(PAGE_URL, 'Первое')
+    win.context(PAGE_URL, 'First')
     win.append(initBytes, 's1')
 
     vi.setSystemTime(new Date('2026-08-22T10:05:00Z'))
-    win.context('https://site.example/watch?v=later', 'Второе')
+    win.context('https://site.example/watch?v=later', 'Second')
     win.append(initBytes, 's2')
 
-    // Время сессии — часы моста: без него порядок в попапе выродится в порядок вставки.
-    expect(win.list().map((s) => s.title)).toEqual(['Второе', 'Первое'])
+    // The session time is the bridge clock: without it the popup order is the insertion order.
+    expect(win.list().map((s) => s.title)).toEqual(['Second', 'First'])
   })
 })
 
-describe('мост и чужие сообщения', () => {
+describe('the bridge and foreign messages', () => {
   const foreign: [string, unknown][] = [
     ['tc:source', { type: 'tc:source', sourceId: 's', objectUrl: 'blob:x' }],
     ['tc:drm', { type: 'tc:drm', sourceId: 's' }],
-    ['чужой type', { type: 'webpackHotUpdate' }],
+    ['a foreign type', { type: 'webpackHotUpdate' }],
     ['null', null],
-    ['строку', 'tc:append'],
-    ['число', 42],
+    ['a string', 'tc:append'],
+    ['a number', 42],
   ]
 
-  it.each(foreign)('не отвечает на %s и не заводит сессию', async (_name, data) => {
+  it.each(foreign)('neither answers %s nor opens a session', async (_name, data) => {
     const win = await loadBridge()
     win.context()
 
     const sender = win.deliver(data)
 
-    expect(sender.posts, 'мост ответил на сообщение не своего типа').toEqual([])
+    expect(sender.posts, 'the bridge answered a message of a foreign type').toEqual([])
     expect(win.list()).toEqual([])
   })
 
   const junk: [string, Uint8Array][] = [
-    ['пустой буфер', new Uint8Array(0)],
-    ['страницу с ошибкой вместо сегмента', new Uint8Array([60, 33, 100, 111, 99])],
+    ['an empty buffer', new Uint8Array(0)],
+    ['an error page instead of a segment', new Uint8Array([60, 33, 100, 111, 99])],
   ]
 
-  it.each(junk)('%s в tc:append не роняет мост', async (_name, bytes) => {
+  it.each(junk)('%s in tc:append does not break the bridge', async (_name, bytes) => {
     const win = await loadBridge()
     win.context()
 
-    // Байты приходят с произвольного сайта, а исключение здесь остановило бы приём
-    // всего последующего: слушатель у моста один.
+    // The bytes come from an arbitrary site, and an exception here would stop everything that
+    // follows from being received: the bridge has a single listener.
     expect(() => win.append(bytes)).not.toThrow()
     win.append(initBytes)
 
-    expect(win.list(), 'мост перестал принимать сегменты после мусора').toHaveLength(1)
+    expect(win.list(), 'the bridge stopped taking segments after junk').toHaveLength(1)
   })
 
-  it('запрос списка без канала для ответа не роняет мост', async () => {
+  it('does not break on a list request without a channel to answer through', async () => {
     const win = await loadBridge()
     win.context()
     win.append(initBytes)
 
     expect(() => win.deliver({ type: 'tc:list' })).not.toThrow()
-    expect(win.list(), 'реестр пострадал от запроса без порта').toHaveLength(1)
+    expect(win.list(), 'the registry suffered from a request without a port').toHaveLength(1)
   })
 
-  it('ответ на tc:list уходит только в канал, а не в окно-отправитель', async () => {
+  it('answers tc:list into the channel alone, not into the sender window', async () => {
     const win = await loadBridge()
     win.context()
     win.append(initBytes)
@@ -496,19 +496,19 @@ describe('мост и чужие сообщения', () => {
     const reply = port()
     const sender = win.deliver({ type: 'tc:list' }, { ports: [reply] })
 
-    // Список сессий — это история просмотра. Ответ в окно раздал бы её любой странице,
-    // которая догадается прислать мосту tc:list.
-    expect(sender.posts, 'список сессий ушёл в окно страницы').toEqual([])
+    // The session list is a watch history. An answer into the window would hand it to any page
+    // that thinks of sending the bridge a tc:list.
+    expect(sender.posts, 'the session list went into the page window').toEqual([])
     expect(reply.received).toHaveLength(1)
   })
 })
 
-describe('мост принимает вердикты отсева', () => {
-  /** Вердикт в том виде, в каком его шлёт мосту content script. */
+describe('the bridge takes triage verdicts', () => {
+  /** A verdict in the shape the content script sends it to the bridge. */
   const verdict = (win: ReturnType<typeof installWindow>, sourceId: string, value: string) =>
     win.deliver({ type: 'tc:verdict', sourceId, verdict: value })
 
-  it('отказ стирает набранное отсеянным источником', async () => {
+  it('erases what a screened-out source collected on rejection', async () => {
     const win = await loadBridge()
     win.context()
     win.append(initBytes, 's1')
@@ -519,40 +519,40 @@ describe('мост принимает вердикты отсева', () => {
     expect(win.list()).toEqual([])
   })
 
-  it('отказ по одному источнику не трогает сессию соседнего', async () => {
+  it('does not touch the session of a neighbour on a rejection of one source', async () => {
     const win = await loadBridge()
     win.context()
     win.append(initBytes, 's1')
     win.context('https://site.example/watch?v=second', 'Second')
     win.append(initBytes, 's2')
 
-    // Баннер и настоящий плеер на одной странице: вердикт адресный, и отказ по первому
-    // обязан оставить второй в покое.
+    // A banner and the real player on one page: the verdict is addressed, and a rejection of the
+    // first has to leave the second alone.
     verdict(win, 's1', 'reject')
 
     expect(win.list().map((s) => s.title)).toEqual(['Second'])
   })
 
-  it('повышение защищает сессию от последующего отказа', async () => {
+  it('protects a session from a later rejection on promotion', async () => {
     const win = await loadBridge()
     win.context()
     win.append(initBytes, 's1')
     win.append(seg1Bytes, 's1')
 
     verdict(win, 's1', 'promote')
-    // Пауза или уход элемента с экрана: запись замирает, накопленное остаётся.
+    // A pause or the element leaving the screen: recording freezes, what was collected stays.
     verdict(win, 's1', 'reject')
 
     expect(win.list()).toMatchObject([{ runs: 1, duration: 2 }])
   })
 
-  it('ожидание возвращает запись отсеянному источнику', async () => {
+  it('returns recording to a screened-out source on a hold', async () => {
     const win = await loadBridge()
     win.context()
 
     verdict(win, 's1', 'reject')
     win.append(initBytes, 's1')
-    expect(win.list(), 'подготовка: после отказа сессии быть не должно').toEqual([])
+    expect(win.list(), 'setup: there must be no session after a rejection').toEqual([])
 
     verdict(win, 's1', 'hold')
     win.append(initBytes, 's1')
@@ -561,19 +561,19 @@ describe('мост принимает вердикты отсева', () => {
     expect(win.list()).toMatchObject([{ runs: 1 }])
   })
 
-  it('на вердикт мост не отвечает отправителю', async () => {
+  it('does not answer the sender of a verdict', async () => {
     const win = await loadBridge()
     win.context()
     win.append(initBytes, 's1')
 
     const sender = win.deliver({ type: 'tc:verdict', sourceId: 's1', verdict: 'promote' })
 
-    expect(sender.posts, 'мост ответил на вердикт').toEqual([])
+    expect(sender.posts, 'the bridge answered a verdict').toEqual([])
   })
 })
 
-describe('BridgeToPage описывает всё, что мост отправляет', () => {
-  it('и рукопожатие, и ответ на tc:list укладываются в объявленный союз', async () => {
+describe('BridgeToPage describes everything the bridge sends', () => {
+  it('fits both the handshake and the tc:list answer into the declared union', async () => {
     const win = await loadBridge()
     win.context()
     win.append(initBytes)
@@ -582,36 +582,36 @@ describe('BridgeToPage описывает всё, что мост отправл
     const reply = port()
     win.deliver({ type: 'tc:list' }, { ports: [reply] })
 
-    // Мост отправляет двумя каналами: окну-родителю и в порт запроса. Оба конца собираются
-    // вместе, потому что тип объявлен один на оба: вид сообщения, посланный мимо союза,
-    // получателю неизвестен, а следующий читатель протокола о нём попросту не узнает.
+    // The bridge sends through two channels: to the parent window and into the port of the
+    // request. Both ends are gathered here because one type is declared for both: a message sent
+    // past the union is unknown to the receiver and to the next reader of the protocol alike.
     const sent: unknown[] = [...win.parent.posts.map((post) => post.message), ...reply.received]
-    expect(sent.map(variantOf), 'мост отправил сообщение, не описанное в BridgeToPage').toEqual([
+    expect(sent.map(variantOf), 'the bridge sent a message not described in BridgeToPage').toEqual([
       'tc:ready',
-      'сводки сессий',
+      'session summaries',
     ])
   })
 
-  it('оба варианта берутся из союза, а не из представлений набора о нём', async () => {
+  it('takes both variants from the union, not from the ideas of the set about it', async () => {
     const win = await loadBridge()
     win.context()
     win.append(initBytes)
 
-    // Проверка компилятора: присваивание не пройдёт typecheck, если союз потеряет вариант
-    // (`BridgeToPage = { type: 'tc:ready' }` — как было до этой правки) или разойдётся со
-    // сводкой, которую мост отдаёт на самом деле.
+    // A check by the compiler: the assignment will not pass typecheck if the union loses a
+    // variant (`BridgeToPage = { type: 'tc:ready' }`, as it was before this change) or drifts
+    // away from the summary the bridge actually returns.
     const handshake: BridgeToPage = { type: 'tc:ready' }
     const list: BridgeToPage = win.list()
 
-    expect([variantOf(handshake), variantOf(list)]).toEqual(['tc:ready', 'сводки сессий'])
+    expect([variantOf(handshake), variantOf(list)]).toEqual(['tc:ready', 'session summaries'])
   })
 })
 
-describe('мост сохраняет накопленное файлом', () => {
-  /** Ключ звуковой сессии: у неё прогоны получаются разной длины. */
+describe('the bridge saves what it collected as a file', () => {
+  /** The key of the audio session: its runs come out of different lengths. */
   const audioKey = keyFor(PAGE_URL, ['mp4a'])
 
-  /** Набирает звуковую сессию из перечисленных кусков; пропущенный кусок даёт разрыв. */
+  /** Collects an audio session out of the listed pieces; a skipped piece makes a gap. */
   async function withAudio(...indexes: number[]) {
     const win = await loadBridge()
     win.context()
@@ -620,8 +620,8 @@ describe('мост сохраняет накопленное файлом', () =
     return win
   }
 
-  it('отдаёт Chrome init и самый длинный прогон, а не первый попавшийся', async () => {
-    // Прогоны 0…1.95 и 3.95…6.02: длиннее второй.
+  it('hands Chrome the init and the longest run, not the first one around', async () => {
+    // Runs 0…1.95 and 3.95…6.02: the second one is longer.
     const win = await withAudio(0, 2, 3)
 
     win.save(audioKey)
@@ -631,9 +631,9 @@ describe('мост сохраняет накопленное файлом', () =
     )
   })
 
-  it('длинный прогон берётся и когда он не последний', async () => {
-    // Прогоны 0…3.95 и 5.97…6.02: длиннее первый. Хвост в полсекунды — обычное дело:
-    // плеер догрузил кусочек после перемотки и остановился.
+  it('takes the long run when it is not the last one either', async () => {
+    // Runs 0…3.95 and 5.97…6.02: the first one is longer. A tail of half a second is ordinary:
+    // the player loaded a piece after a rewind and stopped.
     const win = await withAudio(0, 1, 3)
 
     win.save(audioKey)
@@ -643,7 +643,7 @@ describe('мост сохраняет накопленное файлом', () =
     )
   })
 
-  it('файл заявлен видео, а не потоком байтов', async () => {
+  it('declares the file a video, not a stream of bytes', async () => {
     const win = await loadBridge()
     win.context()
     win.append(initBytes)
@@ -651,12 +651,12 @@ describe('мост сохраняет накопленное файлом', () =
 
     win.save(keyFor(PAGE_URL))
 
-    // По типу блоба Chrome выбирает, чем открыть скачанное; application/octet-stream
-    // отправил бы клип в «неизвестный файл».
+    // Chrome picks what to open the download with by the type of the blob;
+    // application/octet-stream would send the clip into an "unknown file".
     expect(win.savedType()).toBe('video/mp4')
   })
 
-  it('имя файла — заголовок страницы с расширением mp4', async () => {
+  it('names the file after the page title with an mp4 extension', async () => {
     const win = await loadBridge()
     win.context(PAGE_URL, 'Ночной эфир')
     win.append(initBytes)
@@ -664,28 +664,28 @@ describe('мост сохраняет накопленное файлом', () =
 
     win.save(keyFor(PAGE_URL))
 
-    // Заголовок не латиницей — не повод отдать пользователю файл из подчёркиваний.
+    // A title not in Latin is no reason to hand the user a file made of underscores.
     expect(win.downloads.map((item) => item.filename)).toEqual(['Ночной эфир.mp4'])
   })
 
-  it('в имени файла не остаётся запрещённых знаков', async () => {
+  it('leaves no forbidden characters in the file name', async () => {
     const win = await loadBridge()
-    // Заголовок задаёт страница, и здесь он доходит до файловой системы: в проверке стоит
-    // весь запрещённый набор разом, потому что выпавший из него знак дошёл бы туда молча.
+    // The title is set by the page and reaches the file system here: the whole forbidden set is
+    // in the check at once, because a character dropped from it would get there silently.
     win.context(PAGE_URL, 'A/B: "C" <D> | E? AC\\DC * F\u0001G')
     win.append(initBytes)
     win.append(seg1Bytes)
 
     win.save(keyFor(PAGE_URL))
 
-    // Обе косые Chrome читает разделителем пути: «AC\DC.mp4» уходит не файлом, а каталогом
-    // AC с файлом DC.mp4 внутри — пользователь нажал «Save all» и клипа на месте не нашёл.
-    // Звёздочку и двоеточие Windows в именах не принимает вовсе: скачивание отклоняется,
-    // и попап об этом молчит. Управляющие знаки — оттуда же.
+    // Chrome reads both slashes as a path separator: "AC\DC.mp4" goes out not as a file but as
+    // a directory AC with a file DC.mp4 inside — the user pressed "Save all" and found no clip.
+    // Windows does not take a star or a colon in a name at all: the download is rejected and the
+    // popup says nothing about it. Control characters come from the same place.
     expect(win.downloads[0]!.filename).toBe('A B C D E AC DC F G.mp4')
   })
 
-  it('заголовок из одних точек не превращается в скрытый файл', async () => {
+  it('does not turn a title of nothing but dots into a hidden file', async () => {
     const win = await loadBridge()
     win.context(PAGE_URL, '../../.bashrc')
     win.append(initBytes)
@@ -693,14 +693,14 @@ describe('мост сохраняет накопленное файлом', () =
 
     win.save(keyFor(PAGE_URL))
 
-    // Заголовок задаёт страница, и через имя файла он ведёт прямо в файловую систему:
-    // точки с краёв Chrome читает как путь наверх и скачивание отклоняет целиком.
+    // The title is set by the page and through the file name it leads straight into the file
+    // system: Chrome reads dots at the edges as a path upwards and rejects the download whole.
     const filename = win.downloads[0]!.filename
-    expect(filename.startsWith('.'), `имя файла начинается с точки: ${filename}`).toBe(false)
+    expect(filename.startsWith('.'), `the file name starts with a dot: ${filename}`).toBe(false)
     expect(filename).not.toContain('..')
   })
 
-  it('точка и пробел с хвоста имени снимаются перед расширением', async () => {
+  it('strips a dot and a space off the tail of the name before the extension', async () => {
     const win = await loadBridge()
     win.context(PAGE_URL, 'Серия 1.')
     win.append(initBytes)
@@ -708,15 +708,15 @@ describe('мост сохраняет накопленное файлом', () =
 
     win.save(keyFor(PAGE_URL))
 
-    // Расширение приписывается следом, и хвостовая точка заголовка удваивает разделитель:
-    // «Серия 1..mp4». Windows к тому же сама срезает точки и пробелы с конца имени.
+    // The extension is appended right after, and a trailing dot in the title doubles the
+    // separator: «Серия 1..mp4». Windows also cuts dots and spaces off the end of a name itself.
     expect(win.downloads[0]!.filename).toBe('Серия 1.mp4')
   })
 
-  it('обрезанный по пробелу длинный заголовок не оставляет пробел перед расширением', async () => {
+  it('leaves no space before the extension when a long title is cut on one', async () => {
     const win = await loadBridge()
-    // Пробел стоит сотым знаком: срез по пределу длины приходится ровно на него.
-    win.context(PAGE_URL, `${'ц'.repeat(99)} и ещё сколько-то слов`)
+    // The space is the hundredth character: the cut by the length limit falls exactly on it.
+    win.context(PAGE_URL, `${'ц'.repeat(99)} and some more words`)
     win.append(initBytes)
     win.append(seg1Bytes)
 
@@ -725,7 +725,7 @@ describe('мост сохраняет накопленное файлом', () =
     expect(win.downloads[0]!.filename).toBe(`${'ц'.repeat(99)}.mp4`)
   })
 
-  it('страница без заголовка сохраняется под именем расширения', async () => {
+  it('saves a page without a title under the name of the extension', async () => {
     const win = await loadBridge()
     win.context(PAGE_URL, '   ')
     win.append(initBytes)
@@ -736,7 +736,7 @@ describe('мост сохраняет накопленное файлом', () =
     expect(win.downloads[0]!.filename).toBe('tailcut.mp4')
   })
 
-  it('длинный заголовок обрезается до имени, которое примет файловая система', async () => {
+  it('cuts a long title down to a name the file system will take', async () => {
     const win = await loadBridge()
     win.context(PAGE_URL, 'ц'.repeat(300))
     win.append(initBytes)
@@ -748,7 +748,7 @@ describe('мост сохраняет накопленное файлом', () =
     expect(win.downloads[0]!.filename.endsWith('.mp4')).toBe(true)
   })
 
-  it('о начатом скачивании мост отчитывается в порт запроса', async () => {
+  it('reports a started download into the port of the request', async () => {
     const win = await loadBridge()
     win.context()
     win.append(initBytes)
@@ -759,46 +759,46 @@ describe('мост сохраняет накопленное файлом', () =
     expect(reply.received).toEqual([{ ok: true }])
   })
 
-  it('незнакомый ключ — отказ, а не попытка скачать пустоту', async () => {
+  it('refuses an unknown key instead of trying to download nothing', async () => {
     const win = await loadBridge()
     win.context()
     win.append(initBytes)
     win.append(seg1Bytes)
 
-    // Страницу успели перезагрузить, пока попап был открыт: его ключ указывает в пустоту.
-    const reply = win.save('нет такой сессии')
+    // The page was reloaded while the popup was open: its key points at nothing.
+    const reply = win.save('no such session')
 
     expect(reply.received).toEqual([{ ok: false }])
-    expect(win.downloads, 'мост начал скачивание несуществующей сессии').toEqual([])
+    expect(win.downloads, 'the bridge downloaded a session that does not exist').toEqual([])
   })
 
-  it('сессия из одного init-сегмента — отказ, а не файл без единого кадра', async () => {
+  it('refuses a session of one init segment instead of a file without a frame', async () => {
     const win = await loadBridge()
     win.context()
     win.append(initBytes)
 
-    // Плеер открыл поток и ничего не догрузил: прогонов в карте нет. Самый длинный из них
-    // взять неоткуда, и файл вышел бы из одного заголовка.
+    // The player opened the stream and loaded nothing: there are no runs on the map. There is
+    // nowhere to take the longest one from, and the file would come out of a header alone.
     const reply = win.save(keyFor(PAGE_URL))
 
     expect(reply.received).toEqual([{ ok: false }])
     expect(win.downloads).toEqual([])
   })
 
-  it('отказ Chrome доезжает до попапа отказом', async () => {
+  it('carries a refusal by Chrome to the popup as a refusal', async () => {
     const win = await loadBridge()
     win.context()
     win.append(initBytes)
     win.append(seg1Bytes)
     win.failDownloads()
 
-    // Нет места на диске, запрет на запись в каталог загрузок, отмена пользователем.
+    // No space on the disk, no write permission for the downloads directory, a user cancel.
     const reply = win.save(keyFor(PAGE_URL))
 
     expect(reply.received).toEqual([{ ok: false }])
   })
 
-  it('отказ Chrome прочитан, а не оставлен консоли фрейма', async () => {
+  it('reads a refusal by Chrome instead of leaving it to the frame console', async () => {
     const win = await loadBridge()
     win.context()
     win.append(initBytes)
@@ -807,13 +807,13 @@ describe('мост сохраняет накопленное файлом', () =
 
     win.save(keyFor(PAGE_URL))
 
-    // Отказ Chrome отдаёт через chrome.runtime.lastError и, если обработчик его не прочитал,
-    // пишет о нём сам: консоль фрейма моста набирается «Unchecked runtime.lastError» — на вид
-    // необработанными ошибками расширения там, где отказ на самом деле разобран.
-    expect(win.uncheckedErrors, 'отказ скачивания остался непрочитанным').toEqual([])
+    // Chrome hands a refusal over through chrome.runtime.lastError and, if the callback did not
+    // read it, writes about it itself: the console of the bridge frame fills with "Unchecked
+    // runtime.lastError" — errors of the extension by the look of them, where all is handled.
+    expect(win.uncheckedErrors, 'the download refusal was left unread').toEqual([])
   })
 
-  it('адрес блоба живёт, пока Chrome читает файл, и снимается потом', async () => {
+  it('keeps the blob address alive while Chrome reads the file and revokes it after', async () => {
     vi.useFakeTimers()
     const win = await loadBridge()
     win.context()
@@ -822,18 +822,18 @@ describe('мост сохраняет накопленное файлом', () =
 
     win.save(keyFor(PAGE_URL))
 
-    // Снятый сразу адрес обрывает уже начатое скачивание: Chrome читает блоб не мгновенно.
+    // An address revoked at once cuts a started download off: Chrome reads a blob slowly.
     vi.advanceTimersByTime(59_000)
-    expect(win.revoked, 'адрес блоба снят, пока Chrome ещё читает файл').toEqual([])
+    expect(win.revoked, 'the blob address was revoked while Chrome was still reading').toEqual([])
 
     vi.advanceTimersByTime(1_000)
-    // А не снятый вовсе держит собранный файл в памяти фрейма до конца жизни страницы.
-    expect(win.revoked, 'адрес блоба не снят: файл остался висеть в памяти').toEqual([
+    // One never revoked at all keeps the built file in the frame memory for the page lifetime.
+    expect(win.revoked, 'the blob address was not revoked: the file stayed in memory').toEqual([
       win.downloads[0]!.url,
     ])
   })
 
-  it('после отказа адрес блоба снимается сразу', async () => {
+  it('revokes the blob address at once after a refusal', async () => {
     vi.useFakeTimers()
     const win = await loadBridge()
     win.context()
@@ -844,21 +844,21 @@ describe('мост сохраняет накопленное файлом', () =
     win.save(keyFor(PAGE_URL))
     vi.advanceTimersByTime(0)
 
-    // Скачивания не будет, читать блоб некому — держать его минуту незачем.
+    // There will be no download and nobody to read the blob — no reason to hold it a minute.
     expect(win.revoked).toEqual([win.downloads[0]!.url])
   })
 
-  it('запрос сохранения без канала для ответа не роняет мост', async () => {
+  it('does not break on a save request without a channel to answer through', async () => {
     const win = await loadBridge()
     win.context()
     win.append(initBytes)
     win.append(seg1Bytes)
 
     expect(() => win.deliver({ type: 'tc:save', key: keyFor(PAGE_URL) })).not.toThrow()
-    expect(win.downloads, 'скачивание не началось').toHaveLength(1)
+    expect(win.downloads, 'the download did not start').toHaveLength(1)
   })
 
-  it('ответ на tc:save уходит только в канал, а не в окно-отправитель', async () => {
+  it('answers tc:save into the channel alone, not into the sender window', async () => {
     const win = await loadBridge()
     win.context()
     win.append(initBytes)
@@ -867,8 +867,81 @@ describe('мост сохраняет накопленное файлом', () =
     const reply = port()
     const sender = win.deliver({ type: 'tc:save', key: keyFor(PAGE_URL) }, { ports: [reply] })
 
-    // Ответ в окно сказал бы любой странице, что у расширения на неё что-то записано.
-    expect(sender.posts, 'ответ на сохранение ушёл в окно страницы').toEqual([])
+    // An answer into the window would tell any page that the extension has something on it.
+    expect(sender.posts, 'the save answer went into the page window').toEqual([])
     expect(reply.received).toEqual([{ ok: true }])
+  })
+})
+
+describe('the bridge tells apart the buffers of one media source', () => {
+  /** Both tracks of one clip, appended the way a player does it. */
+  function feedBothTracks(win: ReturnType<typeof installWindow>): void {
+    // The order of real YouTube: the SourceBuffer for sound is created first, and the init of
+    // the picture arrives second.
+    win.append(audioInitBytes, 's1', 'b2')
+    win.append(initBytes, 's1', 'b1')
+    for (const [index, video] of [seg1Bytes, seg2Bytes, seg3Bytes].entries()) {
+      win.append(video, 's1', 'b1')
+      win.append(audioBytes[index]!, 's1', 'b2')
+    }
+    win.append(audioBytes[3]!, 's1', 'b2')
+  }
+
+  /** Everything the two tracks of the fixture add up to. */
+  const allBytes = [seg1Bytes, seg2Bytes, seg3Bytes, ...audioBytes].reduce(
+    (total, part) => total + part.byteLength,
+    0,
+  )
+
+  it('collects both tracks of one video into one session', async () => {
+    const win = await loadBridge()
+    win.context()
+
+    feedBothTracks(win)
+
+    // bufferId is in the protocol and the hook sets one per SourceBuffer; drop it on the way to
+    // the registry and the two tracks of one clip fall apart into two sessions, of which the
+    // popup shows one — and the fragments of both pile onto its single map.
+    //
+    // Six seconds is what can be cut out: the picture holds 0…6, the sound 0…6.0232. The
+    // fragments of the sound counted by the timescale of the picture would stretch the same six
+    // seconds into twenty-two.
+    expect(win.list()).toEqual([
+      {
+        key: keyFor(PAGE_URL, ['avc1', 'mp4a']),
+        url: PAGE_URL,
+        title: PAGE_TITLE,
+        duration: 6,
+        bytes: allBytes,
+        runs: 1,
+      },
+    ])
+  })
+
+  it('keeps every byte of both tracks', async () => {
+    const win = await loadBridge()
+    win.context()
+
+    feedBothTracks(win)
+
+    // On one shared map the first fragment of the picture and the first fragment of the sound
+    // both start at zero, and the deduplication rule of the map destroys one of them.
+    expect(win.list()[0]!.bytes).toBe(allBytes)
+  })
+
+  it('saves the picture of a two-track session, not a mix of both tracks', async () => {
+    const win = await loadBridge()
+    win.context()
+    feedBothTracks(win)
+
+    win.save(keyFor(PAGE_URL, ['avc1', 'mp4a']))
+
+    // Assembly can put one init together with the fragments of one track; the sound needs two
+    // moov boxes merged into one, and that is not written yet. Until then the file carries the
+    // picture whole rather than the moov of one track with the fragments of both — the mix is
+    // what made the decoder fall over on the first audio mdat.
+    expect(digest(await win.savedBytes())).toBe(
+      digest(initBytes, seg1Bytes, seg2Bytes, seg3Bytes),
+    )
   })
 })
