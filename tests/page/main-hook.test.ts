@@ -231,6 +231,53 @@ describe('копия сегмента', () => {
     expect(padded.byteLength, 'буфер под видом отсоединён отправкой мосту').toBe(75)
   })
 
+  it('снимается из DataView: appendBuffer принимает любой ArrayBufferView', async () => {
+    const page = installPage()
+    await importHook()
+    const { sourceBuffer } = openSource(page)
+
+    // appendBuffer по спецификации принимает BufferSource, то есть любой ArrayBufferView, а не
+    // только Uint8Array. DataView — самый опасный из них: свойства length у него нет вовсе,
+    // и копирование через `.set(data)` перенесло бы ноль байтов. Мост получил бы буфер нужной
+    // длины из одних нулей — молча, без единой ошибки, и разбор боксов увидел бы пустоту.
+    const padded = new Uint8Array(64 + 11)
+    padded.set(pattern(64), 7)
+    const view = new DataView(padded.buffer, 7, 64)
+    const expected = digest(pattern(64))
+
+    sourceBuffer.appendBuffer(view)
+    await flush()
+
+    expect(
+      page.of('tc:append').map((item) => digest(new Uint8Array(item.message.bytes as ArrayBuffer))),
+    ).toEqual([expected])
+  })
+
+  it('снимается из типизированного массива шире байта побайтово, а не поэлементно', async () => {
+    const page = installPage()
+    await importHook()
+    const { sourceBuffer } = openSource(page)
+
+    // Int16Array — тот же законный BufferSource. Здесь ошибочное `.set(data)` не промолчит,
+    // а исказит: Uint8Array.set копирует элементы источника, то есть 16-битные значения
+    // усечёт до байта и заполнит только половину копии. Сегмент нужен побайтово — как он
+    // лежит в памяти, а не как его разметил вызывающий.
+    const bytes = pattern(64)
+    const holder = new Uint8Array(8 + 64)
+    holder.set(bytes, 8)
+    // Смещение кратно размеру элемента: иначе конструктор Int16Array бросит RangeError.
+    const view = new Int16Array(holder.buffer, 8, 32)
+    const expected = digest(bytes)
+
+    sourceBuffer.appendBuffer(view)
+    await flush()
+
+    expect(view.byteLength, 'подготовка: вид должен покрывать все 64 байта').toBe(64)
+    expect(
+      page.of('tc:append').map((item) => digest(new Uint8Array(item.message.bytes as ArrayBuffer))),
+    ).toEqual([expected])
+  })
+
   it('уходит мосту списком передачи, а не копией', async () => {
     const page = installPage()
     await importHook()
