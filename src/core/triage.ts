@@ -54,7 +54,11 @@ export type TriageVerdict = 'reject' | 'hold' | 'promote'
 
 export function triage(signals: VideoSignals, config: TriageConfig): TriageVerdict {
   if (signals.hasDrm) return 'reject'
-  if (signals.widthPx < config.minWidthPx) return 'reject'
+  // NaN означает, что ширину ещё не измерили: элемент не попал в раскладку и
+  // getBoundingClientRect отдал не число. Неподтверждённый минимум — это отказ,
+  // иначе неизмеренный элемент проскочил бы фильтр ширины целиком. Сравнение
+  // идёт с дробным значением как есть: 319.6 пикселя ниже порога в 320.
+  if (Number.isNaN(signals.widthPx) || signals.widthPx < config.minWidthPx) return 'reject'
   if (!signals.visible) return 'reject'
 
   // Беззвучное, зациклённое и без панели управления — это баннер, а не видео.

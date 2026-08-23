@@ -188,3 +188,55 @@ describe('triage — пресеты', () => {
     expect(triage({ ...base, muted: true, widthPx: 210, playedSeconds: 60 }, LOOSE)).toBe('promote')
   })
 })
+
+// getBoundingClientRect почти никогда не возвращает целую ширину, поэтому порог
+// обязан сравниваться с реальным дробным значением, а не с округлённым: элемент
+// в 319.6 пикселя ниже минимума и должен отсеиваться, хотя округляется до 320.
+describe('triage — дробная ширина', () => {
+  it('дробная ширина чуть ниже порога отсекается, хотя округляется до порога', () => {
+    expect(triage({ ...base, widthPx: 319.6, playedSeconds: 60 }, BALANCED)).toBe('reject')
+    expect(triage({ ...base, widthPx: 319.5, playedSeconds: 60 }, BALANCED)).toBe('reject')
+  })
+
+  it('дробная ширина чуть выше порога проходит', () => {
+    expect(triage({ ...base, widthPx: 320.4, playedSeconds: 60 }, BALANCED)).toBe('promote')
+    expect(triage({ ...base, widthPx: 320.01, playedSeconds: 60 }, BALANCED)).toBe('promote')
+  })
+
+  it('дробная ширина сравнивается с порогом пресета, а не с округлением', () => {
+    expect(triage({ ...base, widthPx: 199.7, playedSeconds: 60 }, LOOSE)).toBe('reject')
+    expect(triage({ ...base, widthPx: 200.3, playedSeconds: 60 }, LOOSE)).toBe('promote')
+    expect(triage({ ...base, widthPx: 479.8, playedSeconds: 60 }, STRICT)).toBe('reject')
+    expect(triage({ ...base, widthPx: 480.2, playedSeconds: 60 }, STRICT)).toBe('promote')
+  })
+})
+
+// Числовые сигналы приходят из измерений живой страницы и могут оказаться NaN:
+// playedSeconds — это разность отметок времени, и первая же разность с ещё не
+// проставленной отметкой даёт NaN; widthPx берётся из getBoundingClientRect и
+// не определён, пока элемент не попал в раскладку. NaN означает «не измерено»,
+// а не «измерено и хорошо»: неизмеренное время не заслуживает повышения,
+// неизмеренная ширина не может подтвердить минимум и отсеивается.
+describe('triage — неизмеренные числовые сигналы (NaN)', () => {
+  it('NaN во времени воспроизведения не повышает — видео ждёт', () => {
+    expect(triage({ ...base, playedSeconds: NaN }, BALANCED)).toBe('hold')
+    expect(triage({ ...base, playedSeconds: NaN }, LOOSE)).toBe('hold')
+    expect(triage({ ...base, playedSeconds: NaN }, STRICT)).toBe('hold')
+  })
+
+  it('NaN во времени воспроизведения не отменяет мгновенного отказа', () => {
+    expect(triage({ ...base, hasDrm: true, playedSeconds: NaN }, BALANCED)).toBe('reject')
+    expect(triage({ ...base, visible: false, playedSeconds: NaN }, BALANCED)).toBe('reject')
+  })
+
+  it('NaN в ширине отсекается: минимум не подтверждён', () => {
+    expect(triage({ ...base, widthPx: NaN, playedSeconds: 60 }, BALANCED)).toBe('reject')
+    expect(triage({ ...base, widthPx: NaN, playedSeconds: 60 }, LOOSE)).toBe('reject')
+    expect(triage({ ...base, widthPx: NaN, playedSeconds: 60 }, STRICT)).toBe('reject')
+  })
+
+  it('NaN в ширине отсекается раньше испытательного срока', () => {
+    expect(triage({ ...base, widthPx: NaN, playedSeconds: 0 }, BALANCED)).toBe('reject')
+    expect(triage({ ...base, widthPx: NaN, playedSeconds: NaN }, BALANCED)).toBe('reject')
+  })
+})
