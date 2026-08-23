@@ -9,25 +9,28 @@ import type { SessionSummary } from '../../src/shared/protocol'
 const PLAYER_URL = 'https://tailcut.test/player'
 
 /**
- * Сколько плеер обязан отыграть, чтобы отбор пропустил его дальше испытательного срока
- * (BALANCED.gracePeriodSeconds = 6). Запас в секунду — на неточность опроса наблюдателя.
+ * How long the player has to run for triage to let it past its probation
+ * (BALANCED.gracePeriodSeconds = 6). The spare second is for the imprecision of the watcher poll.
  */
 const PLAY_MS = 7_000
 
 type PageState = { allAppended?: boolean }
 
-/** Открывает страницу с плеером и даёт ей набрать материал: три фрагмента по две секунды. */
-async function recorded(): Promise<{ context: BrowserContext; page: Page; extensionId: string }> {
+/** Opens a page with a player and lets it gather material: three fragments of two seconds. */
+async function recorded(
+  htmlFile = 'player.html',
+  url = PLAYER_URL,
+): Promise<{ context: BrowserContext; page: Page; extensionId: string }> {
   const { context, extensionId } = await launchWithExtension()
   const page = await context.newPage()
-  await serveLocal(page, 'player.html', PLAYER_URL)
+  await serveLocal(page, htmlFile, url)
 
   await page.waitForFunction(() => (window as unknown as PageState).allAppended === true, undefined, {
     timeout: 15_000,
   })
 
-  // Зацикливание — как в triage.spec.ts: материала у страницы ровно шесть секунд, впритык
-  // к порогу, и без повтора счётчик сыгранного до него не дотягивается.
+  // The looping is as in triage.spec.ts: the page holds exactly six seconds of material, right on
+  // the threshold, and without a repeat the played counter never reaches it.
   await page.evaluate(() => {
     const video = document.querySelector('video')!
     video.loop = true
@@ -39,9 +42,9 @@ async function recorded(): Promise<{ context: BrowserContext; page: Page; extens
 }
 
 /**
- * Открывает попап. Настоящий попап расширения вкладкой не является: активной остаётся
- * страница пользователя, у неё попап и спрашивает список. Playwright открывает его обычной
- * вкладкой, поэтому активную возвращаем плееру — иначе попап спросил бы список у самого себя.
+ * Opens the popup. A real extension popup is not a tab: the user's page stays the active one, and
+ * that is the tab the popup asks for its list. Playwright opens it as an ordinary tab, so the
+ * active one is given back to the player — otherwise the popup would be asking itself.
  */
 async function openPopup(context: BrowserContext, page: Page, extensionId: string): Promise<Page> {
   const popup = await context.newPage()
@@ -50,10 +53,10 @@ async function openPopup(context: BrowserContext, page: Page, extensionId: strin
   return popup
 }
 
-/** Адрес, по которому попапу отдаётся его же сборка из dist. Вымышленный, как и у плеера. */
+/** The address the popup is served its own dist build under. Invented, like the player's. */
 const POPUP_URL = 'https://tailcut.test/popup/popup.html'
 
-/** Сводка, которой «вкладка» отвечает попапу по команде теста. */
+/** The summary the "tab" answers the popup with on the test's command. */
 const SUMMARY: SessionSummary = {
   key: 'https://site.example/watch|avc1|inf',
   url: 'https://site.example/watch?v=abc',
@@ -63,15 +66,34 @@ const SUMMARY: SessionSummary = {
   runs: 1,
 }
 
+/** A second session of the same page: another video of a feed, left behind with its material. */
+const OLDER: SessionSummary = {
+  key: 'https://site.example/watch|vp09|inf',
+  url: 'https://site.example/watch?v=older',
+  title: 'The previous video',
+  duration: 300,
+  bytes: 90_000_000,
+  runs: 4,
+}
+
 type Answer = (sessions: SessionSummary[]) => Promise<void>
 
+/** Window fields the offline popup harness plants for the page to answer through. */
+type Harness = { __answer: (value: unknown) => void; __save: { ok: boolean } }
+
 /**
- * Открывает попап из dist без запуска расширения и оставляет ответ вкладки за тестом:
- * состояние ожидания здесь не мгновенное, как с живым content script, а держится ровно до
- * вызова answer. Меряется при этом настоящая вёрстка попапа настоящим движком — высоту,
- * которой Chrome открывает окно попапа, взять больше неоткуда.
+ * Opens the popup out of dist without running the extension, leaving the tab's answer to the
+ * test: the waiting state here is not instantaneous, as it is with a live content script, but
+ * lasts exactly until answer is called. What is measured meanwhile is the real markup of the
+ * popup by a real engine — there is nowhere else to take the height Chrome opens the popup window
+ * at from.
  */
-async function offlinePopup(): Promise<{ browser: Browser; popup: Page; answer: Answer }> {
+async function offlinePopup(): Promise<{
+  browser: Browser
+  popup: Page
+  answer: Answer
+  refuseSave: () => Promise<void>
+}> {
   const browser = await chromium.launch()
   const popup = await browser.newPage()
 
@@ -86,10 +108,19 @@ async function offlinePopup(): Promise<{ browser: Browser; popup: Page; answer: 
     const asked = new Promise((resolve) => {
       Object.assign(window, { __answer: resolve })
     })
-    // Из всего chrome.* попапу нужна одна вкладка и её ответ: остальное к вёрстке отношения
-    // не имеет, а живой вкладке нечем растянуть молчание на время замера.
+    // Of all of chrome.* the popup needs one tab and its answers: the rest has nothing to do with
+    // the markup, and a live tab has no way of stretching its silence out for the measurement.
     Object.assign(window, {
-      chrome: { tabs: { query: async () => [{ id: 1 }], sendMessage: () => asked } },
+      __save: { ok: true },
+      chrome: {
+        tabs: {
+          query: async () => [{ id: 1 }],
+          sendMessage: (_tabId: number, message: { type?: string } | null) =>
+            message?.type === 'tc:save'
+              ? Promise.resolve((window as unknown as Harness).__save)
+              : asked,
+        },
+      },
     })
   })
 
@@ -97,13 +128,19 @@ async function offlinePopup(): Promise<{ browser: Browser; popup: Page; answer: 
 
   const answer: Answer = (sessions) =>
     popup.evaluate((list) => {
-      ;(window as unknown as { __answer: (value: unknown) => void }).__answer(list)
+      ;(window as unknown as Harness).__answer(list)
     }, sessions)
 
-  return { browser, popup, answer }
+  /** The bridge refuses: the session is gone, or there is nothing in it to cut. */
+  const refuseSave = () =>
+    popup.evaluate(() => {
+      ;(window as unknown as Harness).__save = { ok: false }
+    })
+
+  return { browser, popup, answer, refuseSave }
 }
 
-test('попап показывает накопленное и сохраняет его файлом mp4', async () => {
+test('the popup shows what was gathered and saves it as an mp4 file', async () => {
   const { context, page, extensionId } = await recorded()
   const popup = await openPopup(context, page, extensionId)
 
@@ -114,15 +151,19 @@ test('попап показывает накопленное и сохраняе
   const button = popup.getByRole('button', { name: 'Save all' })
   await expect(button).toBeEnabled()
 
-  // Скачивание начинает мост — фрейм расширения внутри вкладки плеера, а не сам попап.
+  // The download is started by the bridge — the extension frame inside the player tab, not the
+  // popup itself.
   const started = page.waitForEvent('download')
   await button.click()
   const download = await started
 
-  // Расширение файла Chrome берёт из типа блоба, а имя под Playwright подменяется на GUID:
-  // проверяется здесь именно расширение — то, с чем файл ляжет пользователю на диск.
-  // Правила имени разобраны отдельно, в tests/bridge/bridge.test.ts.
-  expect(download.suggestedFilename(), 'файл сохранён не с расширением mp4').toMatch(/\.mp4$/)
+  // Chrome takes the file extension from the type of the blob, and the name under Playwright is
+  // replaced with a GUID: what is checked here is the extension — what the file lands on the
+  // user's disk with. The rules of the name are taken apart separately, in
+  // tests/bridge/bridge.test.ts.
+  expect(download.suggestedFilename(), 'the file was not saved with an mp4 extension').toMatch(
+    /\.mp4$/,
+  )
 
   const file = await download.path()
   const probe = spawnSync(
@@ -139,43 +180,59 @@ test('попап показывает накопленное и сохраняе
 
   expect(probe.error).toBeUndefined()
   expect(probe.status, probe.stderr).toBe(0)
-  expect(probe.stderr, 'ffprobe жалуется на разбор сохранённого файла').toBe('')
+  expect(probe.stderr, 'ffprobe complains about parsing the saved file').toBe('')
 
   const probed = JSON.parse(probe.stdout) as {
     format: { duration: string }
     streams: Array<{ nb_read_frames: string }>
   }
 
-  // Шесть секунд материала при 24 кадрах в секунду: сохранено всё накопленное, целиком.
+  // Six seconds of material at 24 frames a second: everything gathered was saved, whole.
   expect(Number(probed.format.duration)).toBeGreaterThan(5.5)
   expect(Number(probed.format.duration)).toBeLessThan(6.5)
   expect(probed.streams.map((stream) => Number(stream.nb_read_frames))).toEqual([144])
 
-  // То же скачивание глазами Chrome: начало его расширение, дошло оно до конца и записало
-  // ровно столько байтов, сколько собрал мост. Адрес блоба, снятый слишком рано, оставил бы
-  // здесь interrupted и файл в половину длины.
+  // The same download through the eyes of Chrome: the extension started it, it ran to the end and
+  // wrote exactly as many bytes as the bridge assembled. A blob address revoked too early would
+  // leave "interrupted" here and a file half the length.
   const [sw] = context.serviceWorkers()
   const item = await sw!.evaluate(
     async () => (await chrome.downloads.search({ limit: 1, orderBy: ['-startTime'] }))[0] ?? null,
   )
-  expect(item, 'Chrome не знает ни одного скачивания').not.toBeNull()
+  expect(item, 'Chrome knows of no download at all').not.toBeNull()
   expect(item).toMatchObject({ state: 'complete', mime: 'video/mp4', byExtensionName: 'tailcut' })
-  expect(item!.fileSize, 'на диск легло не всё').toBe(statSync(file).size)
+  expect(item!.fileSize, 'not all of it reached the disk').toBe(statSync(file).size)
 
   await context.close()
 })
 
-test('бейдж показывает накопленное на вкладке', async () => {
+test('the popup shows the title a page filled in after recording had started', async () => {
+  // At document_start there is no <title> yet, and this page — like every single-page application
+  // — sets one only once the video has loaded. Told the page context once, the extension would
+  // sign the session with nothing, and the popup would say "Untitled" for a video that has a
+  // perfectly good name.
+  const { context, page, extensionId } = await recorded(
+    'late-title.html',
+    'https://tailcut.test/late-title',
+  )
+  const popup = await openPopup(context, page, extensionId)
+
+  await expect(popup.getByTestId('title')).toHaveText('The video that named itself late')
+
+  await context.close()
+})
+
+test('the badge shows what was gathered on the tab', async () => {
   const { context, page } = await recorded()
   const [sw] = context.serviceWorkers()
 
-  // Пересчёт заведён будильником и переживает сон service worker: setInterval уснул бы
-  // вместе с ним, и бейдж замер бы на первом же значении.
+  // The recount is set on an alarm and outlives the sleep of the service worker: a setInterval
+  // would fall asleep with it, and the badge would freeze on its first value.
   const period = await sw!.evaluate(async () => (await chrome.alarms.get('tc:badge'))?.periodInMinutes ?? null)
-  expect(period, 'бейдж некому пересчитывать: будильник не заведён').toBeCloseTo(1 / 6, 5)
+  expect(period, 'there is nobody to recount the badge: no alarm is set').toBeCloseTo(1 / 6, 5)
 
   await page.bringToFront()
-  // Тот же обработчик, что и по расписанию, только без ожидания следующего срока.
+  // The same handler as the scheduled one, only without the wait for the next due time.
   await sw!.evaluate(() => chrome.alarms.create('tc:badge', { when: Date.now() }))
 
   const badgeText = async () =>
@@ -189,7 +246,7 @@ test('бейдж показывает накопленное на вкладке
   await context.close()
 })
 
-test('попап открывается в свой рост, а не полоской «Loading…»', async () => {
+test('the popup opens at its full height, not as a "Loading…" strip', async () => {
   const { browser, popup, answer } = await offlinePopup()
   const bodyHeight = () => popup.evaluate(() => document.body.getBoundingClientRect().height)
 
@@ -202,12 +259,50 @@ test('попап открывается в свой рост, а не полос
   await expect(popup.getByTestId('title')).toHaveText(SUMMARY.title)
   const ready = await bodyHeight()
 
-  // Без пола высоты тело попапа обжимает единственную строку «Loading…»: окно открывается
-  // в её рост и подпрыгивает, когда приходит ответ вкладки.
-  expect(waiting, 'попап открылся полоской в одну строку').toBeGreaterThan(strip)
-  // Точный рост готового попапа зависит от шрифта системы, поэтому сверяется не равенство,
-  // а порядок: открылся попап примерно в свой рост, а не вырос на ответе вдвое.
-  expect(ready, 'на ответе вкладки попап вырос вдвое').toBeLessThan(waiting * 2)
+  // Without a floor on the height the body of the popup hugs the single "Loading…" line: the
+  // window opens at its height and jumps when the tab's answer arrives.
+  expect(waiting, 'the popup opened as a strip one line high').toBeGreaterThan(strip)
+  // The exact height of the ready popup depends on the system font, so what is checked is not
+  // equality but the order of things: the popup opened at roughly its own height rather than
+  // doubling on the answer.
+  expect(ready, 'the popup doubled in height on the answer of the tab').toBeLessThan(waiting * 2)
+
+  await browser.close()
+})
+
+test('the popup reaches the other sessions of the page', async () => {
+  const { browser, popup, answer } = await offlinePopup()
+
+  await answer([SUMMARY, OLDER])
+  await expect(popup.getByTestId('title')).toHaveText(SUMMARY.title)
+
+  // Show the first session alone and every other one on the page is invisible and out of reach.
+  const rows = popup.getByTestId('session')
+  await expect(rows).toHaveCount(1)
+  await expect(rows.first()).toContainText(OLDER.title)
+
+  await rows.first().click()
+
+  // The picked one takes the top block, and the one that stood there moves down into the list.
+  await expect(popup.getByTestId('title')).toHaveText(OLDER.title)
+  await expect(popup.getByTestId('duration')).toHaveText('5:00')
+  await expect(popup.getByTestId('session')).toContainText(SUMMARY.title)
+
+  await browser.close()
+})
+
+test('the popup says a save that failed failed', async () => {
+  const { browser, popup, answer, refuseSave } = await offlinePopup()
+
+  await answer([SUMMARY])
+  await expect(popup.getByTestId('title')).toHaveText(SUMMARY.title)
+  await refuseSave()
+
+  await popup.getByRole('button', { name: 'Save all' }).click()
+
+  // Nothing downloads on a refusal. Without a word about it the user cannot tell the failure from
+  // a slow save, and waits for a file that will never appear.
+  await expect(popup.getByTestId('error')).toBeVisible()
 
   await browser.close()
 })

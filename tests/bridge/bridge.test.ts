@@ -406,6 +406,37 @@ describe('the bridge puts segments into the session registry', () => {
     expect(win.list()).toMatchObject([{ url: REFERRER, title: '' }])
   })
 
+  it('signs an already open session with the title that arrives later', async () => {
+    const win = await loadBridge()
+    // The page knows its address from the first moment and its title only later: at
+    // document_start <head> is not parsed yet, and on a single-page application the next video
+    // arrives without a navigation at all.
+    win.context(PAGE_URL, '')
+    win.append(initBytes)
+    expect(win.list()).toMatchObject([{ title: '' }])
+
+    win.context(PAGE_URL, PAGE_TITLE)
+
+    // The bridge is told the title, so the sessions of that page must carry it: otherwise the
+    // popup shows "Untitled" for a video that has a perfectly good name, and the saved file is
+    // named after nothing.
+    expect(win.list()).toMatchObject([{ title: PAGE_TITLE }])
+  })
+
+  it('names the file after the title that arrived after the session opened', async () => {
+    const win = await loadBridge()
+    win.context(PAGE_URL, '')
+    win.append(initBytes)
+    win.append(seg1Bytes)
+
+    win.context(PAGE_URL, 'Night broadcast')
+    win.save(keyFor(PAGE_URL))
+
+    // The name is read off the session at the moment of saving, and this is the whole point of
+    // the title reaching it at all.
+    expect(win.downloads[0]!.filename).toBe('Night broadcast.mp4')
+  })
+
   it('coerces a non-string context to strings instead of passing it on', async () => {
     const win = await loadBridge()
 

@@ -84,11 +84,18 @@ function box(type: string, ...parts: number[][]): number[] {
 }
 
 /** A trak with its fields at exactly the offsets parseInit reads them from. */
-function trak(trackId: number, timescale: number, handler: string, codec: string): number[] {
+function trak(
+  trackId: number,
+  timescale: number,
+  handler: string,
+  codec: string,
+  width = 320,
+  height = 240,
+): number[] {
   return box(
     'trak',
     // tkhd v0: version+flags, times, track_id, tail up to matrix, matrix, width, height
-    box('tkhd', zeros(12), u32(trackId), zeros(24), zeros(36), u32(320 * 65536), u32(240 * 65536)),
+    box('tkhd', zeros(12), u32(trackId), zeros(24), zeros(36), u32(width * 65536), u32(height * 65536)),
     box(
       'mdia',
       // mdhd v0: version+flags, times, timescale, duration+language+pre_defined
@@ -106,6 +113,15 @@ const muxedInit = new Uint8Array(
   box('moov', ...[trak(1, 1000, 'vide', 'avc1'), trak(2, 8000, 'soun', 'mp4a')]),
 )
 const muxedPage = { ...page, url: 'https://site.example/watch?v=muxed' }
+
+/**
+ * The same picture at two qualities: one codec, two frame sizes, two timescales. This is what an
+ * ABR switch delivers, and the timescales differ so that a fragment read against the wrong init
+ * gives itself away by its times rather than by its bytes.
+ */
+const sdInit = new Uint8Array(box('moov', trak(1, 1000, 'vide', 'avc1', 640, 360)))
+const hdInit = new Uint8Array(box('moov', trak(1, 90_000, 'vide', 'avc1', 1280, 720)))
+const abrPage = { ...page, url: 'https://site.example/watch?v=abr' }
 
 /** The same init with a harmless tail: same codecs, other bytes — a swap would show. */
 const initWithTail = new Uint8Array([...init, ...box('free', zeros(4))])
@@ -218,6 +234,54 @@ describe('SessionStore: what ends up in a session', () => {
     // The popup signs sessions with these two strings, and they are taken from the page that
     // sent the bytes.
     expect(store.list()[0]).toMatchObject({ url: page.url, title: 'Clip' })
+  })
+
+  it('takes on the page title that arrived after the session had opened', () => {
+    const store = new SessionStore()
+    // Recording starts at document_start, where <head> is not parsed yet, and a single-page
+    // application fills its <title> in later still. The session opens nameless, and on YouTube
+    // that is the ordinary case rather than the exception.
+    store.append({ ...page, title: '', bytes: init })
+    expect(store.list()[0]!.title).toBe('')
+
+    store.retitle(page.url, 'Real title')
+
+    // Without this the popup signs the session "Untitled" and the saved file is named after
+    // nothing, though the page has been telling its title all along.
+    expect(store.list()[0]!.title).toBe('Real title')
+  })
+
+  it('recognises the address of a retitled session through the referral marks', () => {
+    const store = new SessionStore()
+    store.append({ ...page, title: '', bytes: init })
+
+    // The address the title arrives with carries a rewind mark the address of the first segment
+    // did not. Compare the two literally and the session stays nameless on every rewind.
+    store.retitle(`${page.url}&t=42`, 'Real title')
+
+    expect(store.list()[0]!.title).toBe('Real title')
+  })
+
+  it('leaves the title of another video alone', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+
+    // A feed of short clips moves on without a navigation: the title that comes now belongs to
+    // the next video, while the material of this session belongs to the previous one.
+    store.retitle('https://site.example/watch?v=next', 'Next clip')
+
+    expect(store.list()[0]!.title).toBe('Clip')
+  })
+
+  it('does not erase a known title with an empty one', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+
+    // Between two videos a player blanks its <title> for a moment. Taking that at face value
+    // would cost the session the name it already had.
+    store.retitle(page.url, '')
+
+    expect(store.list()[0]!.title).toBe('Clip')
   })
 
   it('puts the bytes of a fragment and its times in seconds on the map', () => {
@@ -476,6 +540,38 @@ describe('SessionStore: session lifetime', () => {
         .tracks.map((t) => [t.info.tracks[0]!.codec, t.map.runs().flatMap((r) => r.chunks)]),
     )
     expect(chunksByCodec).toEqual({ avc1: [expect.anything()], vp09: [expect.anything()] })
+  })
+
+  it('keeps the previous rendition whole when quality switches at the same codec', () => {
+    const store = new SessionStore()
+    store.append({ ...abrPage, bytes: sdInit })
+    // Two seconds at the timescale of the first init.
+    store.append({ ...abrPage, bytes: moof(1, 0, 1, 2000) })
+
+    // ABR steps up: the codec stays what it was and only the frame size changes. Identify a
+    // rendition by the codec alone (§6.2) and this init lands on the previous track — its own
+    // init is dropped, the fragments that follow are read against the timescale of the old one,
+    // and a clip spanning the switch announces one resolution while carrying frames of another.
+    store.append({ ...abrPage, bytes: hdInit })
+    // The same two seconds of media time, counted at the timescale of the second init.
+    store.append({ ...abrPage, bytes: moof(1, 180_000, 1, 180_000) })
+
+    // One video, so one session — the switch adds a rendition to it, it does not split the clip.
+    expect(store.list()).toHaveLength(1)
+    const tracks = store.list()[0]!.tracks
+    expect(tracks.map((t) => [t.info.tracks[0]!.width, t.info.tracks[0]!.height])).toEqual([
+      [640, 360],
+      [1280, 720],
+    ])
+
+    // The first rendition keeps the init it was opened with and the material collected under it.
+    expect(tracks[0]!.initBytes).toEqual(sdInit)
+    expect(tracks[0]!.map.runs().flatMap((r) => r.chunks.map(shapeOf))).toEqual([[0, 2, 68]])
+
+    // The fragments after the switch are read against the new init: at the timescale of the old
+    // one the very same fragment would be laid down at 180…360 seconds.
+    expect(tracks[1]!.initBytes).toEqual(hdInit)
+    expect(tracks[1]!.map.runs().flatMap((r) => r.chunks.map(shapeOf))).toEqual([[2, 4, 68]])
   })
 
   it('starts a new session when the source moves on to another video', () => {

@@ -369,6 +369,29 @@ export class SessionStore {
     return [...this.sessions.values()].sort((a, b) => b.lastSeenAt - a.lastSeenAt)
   }
 
+  /**
+   * The page has learned its own title, and the sessions already opened on it take it on.
+   *
+   * A session is signed with the title of the moment its first init segment arrived, and on a
+   * single-page application that moment comes before the title does: recording starts at
+   * document_start, where <head> is not parsed yet, and the next video of the feed is loaded
+   * without a navigation at all. Without this the file would be saved under the name of nothing.
+   *
+   * Only the sessions of that very address are touched, and the address is compared the way the
+   * merge key compares it — through the referral marks. A page that has moved on to another video
+   * keeps the previous one titled as it was: the material is that video's, and so is its name.
+   */
+  retitle(url: string, title: string): void {
+    // An empty title is not news but the absence of it: a page that has not filled in its <title>
+    // yet, or a frame that never will. Erasing a name we already have for it would be a loss.
+    if (!title) return
+
+    const normalized = normalizeUrl(url)
+    for (const session of this.sessions.values()) {
+      if (normalizeUrl(session.url) === normalized) session.title = title
+    }
+  }
+
   evictAll(windowSeconds: number, currentTime: number): void {
     for (const session of this.sessions.values()) {
       for (const track of session.tracks) track.map.evict(windowSeconds, currentTime)

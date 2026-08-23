@@ -4,26 +4,27 @@ import { BRIDGE_PATH } from '../../src/shared/protocol'
 const EXTENSION_ORIGIN = 'chrome-extension://abcdefghijklmnopabcdefghijklmnop'
 const BRIDGE_URL = `${EXTENSION_ORIGIN}/${BRIDGE_PATH}`
 
-/** Куда браузер ведёт вставленный фрейм, у которого адрес ещё не задан. */
+/** Where the browser takes an inserted frame whose address is not set yet. */
 const BLANK = 'about:blank'
 
-/** Страница, на которой стоит content script: её адрес и заголовок уходят мосту. */
+/** The page the content script stands on: its address and title go to the bridge. */
 const PAGE_URL = 'https://site.example/watch?v=abc'
 const PAGE_TITLE = 'Clip — site.example'
 const CONTEXT = { type: 'tc:context', url: PAGE_URL, title: PAGE_TITLE }
 
 /**
- * Минимальный элемент: content script трогает только эти свойства. Фрейм при этом ходит по
- * адресам как в браузере: пока он вне документа, присвоение src ничего не грузит; вставка
- * начинает загрузку текущего адреса — а у фрейма без адреса это about:blank; присвоение src
- * уже вставленному фрейму начинает ещё одну загрузку. Каждая заканчивается своим load.
+ * A minimal element: the content script touches only these properties. The frame meanwhile moves
+ * between addresses the way a browser does — while it is out of the document, assigning src loads
+ * nothing; the insertion starts loading the current address, and for a frame without one that is
+ * about:blank; assigning src to a frame already inserted starts one more load. Each ends with a
+ * load event of its own.
  */
 function fakeElement(tagName: string) {
   const listeners: Record<string, Array<() => void>> = {}
   const attributes: Record<string, string> = {}
-  /** Начатые и ещё не отработавшие load навигации, в порядке начала. */
+  /** Navigations started and not yet answered with a load, in the order they began. */
   const pending: string[] = []
-  /** Что content script отправил в документ фрейма. */
+  /** What the content script has sent into the document of the frame. */
   const posted: Array<{ message: unknown; transfer: unknown }> = []
   let attached = false
   let src = ''
@@ -40,7 +41,7 @@ function fakeElement(tagName: string) {
     style: { cssText: '' },
     attributes,
     pending,
-    /** Адрес, чью загрузку фрейм уже отработал; до первого load — пусто. */
+    /** The address whose load the frame has already answered; empty until the first load. */
     loaded: '',
     get src(): string {
       return src
@@ -49,7 +50,7 @@ function fakeElement(tagName: string) {
       src = value
       if (attached) pending.push(value)
     },
-    /** Вставка в документ: с этого момента фрейм грузит то, что стоит в его src. */
+    /** Insertion into the document: from now on the frame loads whatever stands in its src. */
     attach: () => {
       attached = true
       pending.push(src || BLANK)
@@ -69,8 +70,8 @@ function fakeElement(tagName: string) {
 type FakeElement = ReturnType<typeof fakeElement>
 
 /**
- * Минимальный <video>: наблюдатель читает только перечисленное здесь. По умолчанию — баннер
- * (беззвучное зациклённое превью без панели управления), которому положен отказ.
+ * A minimal <video>: the watcher reads only what is listed here. The default is a banner — a
+ * muted looping preview with no controls, the kind that is due a rejection.
  */
 function fakeVideo(overrides: Record<string, unknown> = {}) {
   const rect = { width: 160, height: 90, top: 0, left: 0, bottom: 90, right: 160 }
@@ -91,17 +92,17 @@ function fakeVideo(overrides: Record<string, unknown> = {}) {
   }
 }
 
-function installDom() {
+function installDom(options: { title?: string } = {}) {
   const created: FakeElement[] = []
   const appended: FakeElement[] = []
   const messageListeners: Array<(event: MessageEvent) => void> = []
-  /** Элементы <video> страницы: наблюдатель находит их через document.querySelectorAll. */
+  /** The <video> elements of the page: the watcher finds them via document.querySelectorAll. */
   const videos: ReturnType<typeof fakeVideo>[] = []
-  /** Часы наблюдателя: время двигает tick(), а не очередь таймеров. */
+  /** The clock of the watcher: time is moved by tick(), not by the timer queue. */
   let now = 0
 
-  // Настоящим остаётся только setTimeout: на нём держатся ожидания микрозадач ниже.
-  // Опрос наблюдателя идёт по setInterval, и тесту нужно решать самому, когда он сработает.
+  // Only setTimeout stays real: the waits for microtasks below rest on it. The watcher polls on
+  // setInterval, and the test has to decide for itself when that fires.
   vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
   vi.stubGlobal('performance', { now: () => now })
   vi.stubGlobal('innerWidth', 1280)
@@ -113,18 +114,22 @@ function installDom() {
     },
   )
 
-  // Окно страницы: content script слушает на нём сообщения хука и по нему же отличает
-  // своё окно от чужого.
+  // The window of the page: the content script listens for the hook's messages on it, and by it
+  // it tells its own window from a stranger's.
   const pageWindow = {
     addEventListener: (type: string, listener: (event: MessageEvent) => void) => {
       if (type === 'message') messageListeners.push(listener)
     },
   }
   vi.stubGlobal('window', pageWindow)
-  vi.stubGlobal('location', { href: PAGE_URL })
 
-  vi.stubGlobal('document', {
-    title: PAGE_TITLE,
+  // The address and the title are mutable: a single-page application changes both without a
+  // navigation, and that is what the page context has to survive.
+  const location = { href: PAGE_URL }
+  vi.stubGlobal('location', location)
+
+  const document = {
+    title: options.title ?? PAGE_TITLE,
     visibilityState: 'visible',
     querySelectorAll: () => videos,
     createElement: (tagName: string) => {
@@ -139,8 +144,9 @@ function installDom() {
         return element
       },
     },
-  })
-  /** Слушатели chrome.runtime.onMessage: их зовёт попап и service worker, а не страница. */
+  }
+  vi.stubGlobal('document', document)
+  /** Listeners of chrome.runtime.onMessage: the popup and the service worker call them. */
   const tabRequestListeners: Array<
     (message: unknown, sender: unknown, sendResponse: (reply: unknown) => void) => boolean
   > = []
@@ -160,24 +166,33 @@ function installDom() {
     appended,
     pageWindow,
     videos,
-    /** Прогоняет один опрос наблюдателя и даёт разобрать очередь микрозадач. */
+    /** The page fills its <title> in — at document_start there was none. */
+    setTitle: (title: string): void => {
+      document.title = title
+    },
+    /** The page moves on to another video without a navigation, the way an SPA does. */
+    goTo: (href: string, title: string): void => {
+      location.href = href
+      document.title = title
+    },
+    /** Runs one poll of the watcher and lets the microtask queue drain. */
     tick: async (): Promise<void> => {
       now += 500
       vi.advanceTimersByTime(500)
       await new Promise((resolve) => setTimeout(resolve, 0))
     },
     /**
-     * Доставляет сообщение слушателю content script'а. Обработчик асинхронный — ждёт мост,
-     * поэтому после доставки очередь микрозадач надо дать разобрать.
+     * Delivers a message to the listener of the content script. The handler is asynchronous — it
+     * waits for the bridge — so the microtask queue has to be drained after the delivery.
      */
     deliverMessage: async (data: unknown, source: unknown = pageWindow): Promise<void> => {
       for (const listener of messageListeners) listener({ data, source } as MessageEvent)
       await new Promise((resolve) => setTimeout(resolve, 0))
     },
     /**
-     * Что ушло в документ моста помимо контекста страницы: его мост получает при загрузке,
-     * отдельно от пересылки, и в проверках пересылки только мешает. Что он вообще уходит,
-     * проверяет describe «контекст страницы».
+     * What went into the document of the bridge apart from the page context: the bridge gets that
+     * on load, separately from the forwarding, and in the forwarding checks it is only in the
+     * way. That it goes out at all is checked by the "page context" describe.
      */
     forwarded: (): Array<{ message: unknown; transfer: unknown }> =>
       created.flatMap((element) =>
@@ -185,10 +200,17 @@ function installDom() {
           (post) => (post.message as { type?: unknown } | null)?.type !== 'tc:context',
         ),
       ),
+    /** Every page context the content script has sent to the bridge, in order. */
+    contexts: (): unknown[] =>
+      created.flatMap((element) =>
+        element.posted
+          .map((post) => post.message)
+          .filter((message) => (message as { type?: unknown } | null)?.type === 'tc:context'),
+      ),
     /**
-     * Доставляет запрос расширения — так его присылает попап и service worker. Отдаёт то,
-     * что слушатель ответил синхронно (true держит канал ответа открытым), и накопленные
-     * ответы, ушедшие в sendResponse.
+     * Delivers an extension request — the way the popup and the service worker send it. Gives
+     * back what the listener answered synchronously (true holds the reply channel open) and the
+     * replies that went into sendResponse.
      */
     askTab: (message: unknown) => {
       const answers: unknown[] = []
@@ -197,18 +219,18 @@ function installDom() {
       )
       return { answers, kept }
     },
-    /** Порты, которые content script передал мосту вместе с запросами расширения. */
+    /** The ports the content script handed the bridge along with the extension requests. */
     portsToBridge: (): MessagePort[] =>
       created
         .flatMap((element) => element.posted)
         .flatMap((post) => (Array.isArray(post.transfer) ? post.transfer : []))
         .filter((item): item is MessagePort => item instanceof MessagePort),
-    /** Адреса, которые фреймы уже начали грузить и ещё не отработали. */
+    /** Addresses the frames have started loading and not yet answered. */
     pendingLoads: (): string[] => created.flatMap((element) => element.pending),
-    /** Отрабатывает ближайшую навигацию: браузер шлёт load по каждой, about:blank включая. */
+    /** Answers the nearest navigation: the browser sends a load for each, about:blank included. */
     deliverLoad: (): string => {
       const element = created.find((candidate) => candidate.pending.length > 0)
-      if (!element) throw new Error('ни один фрейм не начинал загрузку')
+      if (!element) throw new Error('no frame has started loading')
       element.loaded = element.pending.shift()!
       element.fire('load')
       return element.loaded
@@ -216,13 +238,13 @@ function installDom() {
   }
 }
 
-/** Импорт сам вставляет мост: в модуле есть вызов ensureBridge() на верхнем уровне. */
+/** The import inserts the bridge itself: the module calls ensureBridge() at the top level. */
 async function importContent() {
   vi.resetModules()
   return import('../../src/page/content')
 }
 
-/** Разбирает cssText в набор объявлений, чтобы не привязываться к порядку свойств. */
+/** Takes cssText apart into declarations, so as not to depend on the order of the properties. */
 function declarations(cssText: string): Record<string, string> {
   const out: Record<string, string> = {}
   for (const part of cssText.split(';')) {
@@ -239,23 +261,23 @@ afterEach(() => {
 })
 
 describe('ensureBridge', () => {
-  it('вставляет фрейм со страницей моста при загрузке модуля', async () => {
+  it('inserts a frame with the bridge page when the module loads', async () => {
     const dom = installDom()
     await importContent()
 
     expect(dom.created).toHaveLength(1)
     const iframe = dom.created[0]!
     expect(iframe.tagName).toBe('iframe')
-    // Адрес строится из той же константы, что и в коде: здесь проверяется путь до неё —
-    // chrome.runtime.getURL от BRIDGE_PATH. Что сама константа указывает на существующий
-    // и объявленный в манифесте файл, проверяет tests/build/dist.test.ts.
+    // The address is built from the same constant as in the code: what is checked here is the
+    // path to it — chrome.runtime.getURL of BRIDGE_PATH. That the constant itself points at a
+    // file that exists and is declared in the manifest is checked by tests/build/dist.test.ts.
     expect(iframe.src).toBe(BRIDGE_URL)
     expect(iframe.dataset.tailcut).toBe('bridge')
     expect(iframe.attributes['aria-hidden']).toBe('true')
     expect(dom.appended).toEqual([iframe])
   })
 
-  it('на повторные вызовы отдаёт тот же промис и не плодит фреймы', async () => {
+  it('gives back the same promise on repeated calls and breeds no frames', async () => {
     const dom = installDom()
     const { ensureBridge } = await importContent()
 
@@ -267,7 +289,7 @@ describe('ensureBridge', () => {
     expect(dom.appended).toHaveLength(1)
   })
 
-  it('объявляет фрейм невидимым и без размера', async () => {
+  it('declares the frame invisible and of no size', async () => {
     const dom = installDom()
     await importContent()
 
@@ -281,7 +303,7 @@ describe('ensureBridge', () => {
     })
   })
 
-  it('резолвится фреймом только после его загрузки', async () => {
+  it('resolves with the frame only once it has loaded', async () => {
     const dom = installDom()
     const { ensureBridge } = await importContent()
 
@@ -298,7 +320,7 @@ describe('ensureBridge', () => {
     expect(settled).toBe(dom.created[0])
   })
 
-  it('отдаёт фрейм, загрузивший страницу моста, а не пустую страницу перед ней', async () => {
+  it('gives back the frame that loaded the bridge page, not the blank page before it', async () => {
     const dom = installDom()
     const { ensureBridge } = await importContent()
 
@@ -307,18 +329,21 @@ describe('ensureBridge', () => {
       loadedAtResolve = (iframe as unknown as FakeElement).loaded
     })
 
-    // Фрейм, вставленный раньше присвоения src, успевает сходить на about:blank, и слушатель
-    // с { once: true } срабатывает на ней. Потребитель промиса получил бы фрейм без моста:
-    // postMessage в такой contentWindow пропадает молча, без ошибки и без адресата.
+    // A frame inserted before its src is assigned gets as far as about:blank, and a listener with
+    // { once: true } fires on that. The consumer of the promise would get a frame with no bridge
+    // in it: a postMessage into such a contentWindow vanishes silently, with no error and no
+    // receiver.
     dom.deliverLoad()
     await pending
 
-    expect(loadedAtResolve, 'промис отдал фрейм до загрузки моста').toBe(BRIDGE_URL)
-    expect(dom.pendingLoads(), 'фрейм ходил куда-то помимо страницы моста').toEqual([])
+    expect(loadedAtResolve, 'the promise gave back the frame before the bridge had loaded').toBe(
+      BRIDGE_URL,
+    )
+    expect(dom.pendingLoads(), 'the frame went somewhere other than the bridge page').toEqual([])
   })
 })
 
-describe('пересылка сообщений хука в мост', () => {
+describe('forwarding the hook messages into the bridge', () => {
   const bytes = () => new ArrayBuffer(8)
   const append = (buffer: ArrayBuffer) => ({
     type: 'tc:append',
@@ -328,7 +353,7 @@ describe('пересылка сообщений хука в мост', () => {
     bytes: buffer,
   })
 
-  /** Поднимает content script с уже загруженным мостом и отдаёт его окружение. */
+  /** Stands the content script up with the bridge already loaded and gives back its world. */
   async function withBridge() {
     const dom = installDom()
     await importContent()
@@ -336,17 +361,17 @@ describe('пересылка сообщений хука в мост', () => {
     return dom
   }
 
-  it('отдаёт сегмент мосту передачей буфера, а не копией', async () => {
+  it('hands a segment to the bridge by transfer, not by copy', async () => {
     const dom = await withBridge()
     const buffer = bytes()
 
     await dom.deliverMessage(append(buffer))
 
-    // Копия на этом участке стоила бы лишнего прохода по каждому сегменту.
+    // A copy on this stretch would cost one more pass over every segment.
     expect(dom.forwarded()).toEqual([{ message: append(buffer), transfer: [buffer] }])
   })
 
-  it('служебные сообщения уходят без списка передачи', async () => {
+  it('sends the housekeeping messages with no transfer list', async () => {
     const dom = await withBridge()
     const message = { type: 'tc:source', sourceId: 's1', objectUrl: 'blob:https://site.example/x' }
 
@@ -355,10 +380,10 @@ describe('пересылка сообщений хука в мост', () => {
     expect(dom.forwarded()).toEqual([{ message, transfer: undefined }])
   })
 
-  it('чужие сообщения в мост не уходят', async () => {
+  it('does not let foreign messages into the bridge', async () => {
     const dom = await withBridge()
 
-    // На живых страницах в окно летят сообщения сборщиков, аналитики и рекламы.
+    // On live pages the window is showered with messages from bundlers, analytics and ads.
     await dom.deliverMessage({ type: 'webpackHotUpdate' })
     await dom.deliverMessage(null)
     await dom.deliverMessage('tc:append')
@@ -366,33 +391,33 @@ describe('пересылка сообщений хука в мост', () => {
     expect(dom.forwarded()).toEqual([])
   })
 
-  it('сообщение не из окна страницы игнорируется', async () => {
+  it('ignores a message that did not come from the window of the page', async () => {
     const dom = await withBridge()
 
-    // Источник — не наше окно: так выглядит сообщение из вложенного фрейма или от самого моста.
-    // Приняв его, content script гонял бы чужие байты по кругу.
-    await dom.deliverMessage(append(bytes()), { name: 'другое окно' })
+    // The source is not our window: that is what a message from a nested frame or from the bridge
+    // itself looks like. Taking it in, the content script would drive foreign bytes in circles.
+    await dom.deliverMessage(append(bytes()), { name: 'another window' })
 
     expect(dom.forwarded()).toEqual([])
   })
 })
 
-describe('контекст страницы для моста', () => {
-  it('уходит мосту сразу после его загрузки', async () => {
+describe('the page context for the bridge', () => {
+  it('goes to the bridge right after it has loaded', async () => {
     const dom = installDom()
     await importContent()
 
-    // До load мост ещё не выполнил свой скрипт: сообщение, отправленное раньше, пропало бы
-    // молча — без слушателя и без ошибки.
-    expect(dom.created[0]!.posted, 'контекст ушёл в мост до его загрузки').toEqual([])
+    // Before load the bridge has not run its script: a message sent earlier would vanish
+    // silently — no listener and no error.
+    expect(dom.created[0]!.posted, 'the context went into the bridge before it loaded').toEqual([])
 
     dom.deliverLoad()
 
-    // Заголовок и адрес страницы: на origin расширения мост ни того, ни другого не знает.
+    // The title and the address of the page: on the extension origin the bridge knows neither.
     expect(dom.created[0]!.posted).toEqual([{ message: CONTEXT, transfer: undefined }])
   })
 
-  it('уходит раньше первого пересланного сегмента', async () => {
+  it('goes out before the first forwarded segment', async () => {
     const dom = installDom()
     await importContent()
     dom.deliverLoad()
@@ -405,17 +430,65 @@ describe('контекст страницы для моста', () => {
       bytes: new ArrayBuffer(8),
     })
 
-    // Порядок здесь и есть суть: сессия заводится первым init-сегментом, и адрес с
-    // заголовком должны быть у моста к этому моменту, иначе сессия родится безымянной.
+    // The order is the whole point: a session is opened by the first init segment, and the
+    // address and the title have to be with the bridge by then, or the session is born nameless.
     expect(
       dom.created[0]!.posted.map((post) => (post.message as { type: string }).type),
-      'сегмент обогнал контекст страницы',
+      'the segment outran the page context',
     ).toEqual(['tc:context', 'tc:append'])
+  })
+
+  it('tells the bridge the title the page filled in later', async () => {
+    // The content script runs at document_start, where <head> is not parsed yet: at the moment
+    // the bridge loads there is often no <title> at all, and a single-page application sets it
+    // later still. Told once, the bridge signs every session of such a page with nothing.
+    const dom = installDom({ title: '' })
+    await importContent()
+    dom.deliverLoad()
+    expect(dom.contexts()).toEqual([{ type: 'tc:context', url: PAGE_URL, title: '' }])
+
+    dom.setTitle(PAGE_TITLE)
+    await dom.tick()
+
+    expect(dom.contexts()).toEqual([
+      { type: 'tc:context', url: PAGE_URL, title: '' },
+      CONTEXT,
+    ])
+  })
+
+  it('tells the bridge the next video of a page that navigates without a navigation', async () => {
+    const dom = installDom()
+    await importContent()
+    dom.deliverLoad()
+
+    // A feed of short clips and the "next video" of YouTube change the address through the
+    // history API: no load fires, and there is nothing to hang a fresh context on but a poll.
+    dom.goTo('https://site.example/watch?v=next', 'Next clip')
+    await dom.tick()
+
+    expect(dom.contexts().at(-1)).toEqual({
+      type: 'tc:context',
+      url: 'https://site.example/watch?v=next',
+      title: 'Next clip',
+    })
+  })
+
+  it('does not repeat a context that has not changed', async () => {
+    const dom = installDom()
+    await importContent()
+    dom.deliverLoad()
+
+    await dom.tick()
+    await dom.tick()
+
+    // The poll runs for as long as the page is open. Sending the same pair every half second
+    // would be work for nobody: the bridge would rewrite the same title over and over.
+    expect(dom.contexts()).toEqual([CONTEXT])
   })
 })
 
-describe('вердикт отбора', () => {
-  /** Поднимает content script с уже загруженным мостом и отдаёт его окружение. */
+describe('the triage verdict', () => {
+  /** Stands the content script up with the bridge already loaded and gives back its world. */
   async function withBridge() {
     const dom = installDom()
     await importContent()
@@ -423,12 +496,12 @@ describe('вердикт отбора', () => {
     return dom
   }
 
-  it('уходит мосту с идентификатором того потока, чей элемент его получил', async () => {
+  it('goes to the bridge with the identifier of the stream whose element got it', async () => {
     const dom = await withBridge()
     dom.videos.push(fakeVideo())
 
-    // Связку потока с адресом изолированный мир узнаёт из сообщения хука — того самого,
-    // которое он же пересылает мосту.
+    // The isolated world learns which stream an address belongs to from the hook's message — the
+    // very one it forwards to the bridge.
     await dom.deliverMessage({ type: 'tc:source', sourceId: 's1', objectUrl: 'blob:banner' })
     await dom.tick()
 
@@ -441,15 +514,15 @@ describe('вердикт отбора', () => {
     ])
   })
 
-  it('связка потока с адресом запоминается, не дожидаясь моста', async () => {
+  it('remembers the stream-to-address binding without waiting for the bridge', async () => {
     const dom = installDom()
     await importContent()
     dom.videos.push(fakeVideo())
 
-    // Хук отдаёт адрес из createObjectURL на document_start — мост в этот момент ещё грузится,
-    // и первый опрос наблюдателя вполне успевает пройти до его загрузки. Отложи изолированный
-    // мир запоминание адреса до готовности моста — вердикт этого опроса остался бы без
-    // адресата и пропал бы вовсе.
+    // The hook hands over the address from createObjectURL at document_start — the bridge is
+    // still loading then, and the first poll of the watcher may well pass before it is done.
+    // Should the isolated world put the binding off until the bridge is ready, the verdict of
+    // that poll would be left with no receiver and lost altogether.
     await dom.deliverMessage({ type: 'tc:source', sourceId: 's1', objectUrl: 'blob:banner' })
     await dom.tick()
 
@@ -463,20 +536,21 @@ describe('вердикт отбора', () => {
     })
   })
 
-  it('по элементу с незнакомым адресом мосту не уходит', async () => {
+  it('does not go to the bridge for an element with an unknown address', async () => {
     const dom = await withBridge()
     dom.videos.push(fakeVideo({ src: 'blob:someone-else', currentSrc: 'blob:someone-else' }))
 
     await dom.deliverMessage({ type: 'tc:source', sourceId: 's1', objectUrl: 'blob:banner' })
     await dom.tick()
 
-    // Вердикт без адресата стёр бы в реестре чужую сессию — первую попавшуюся.
+    // A verdict with no addressee would erase a foreign session in the registry — whichever
+    // came first.
     expect(dom.forwarded().map((post) => (post.message as { type: string }).type)).toEqual([
       'tc:source',
     ])
   })
 
-  it('по запросу ключей отменяет запись и настоящему плееру', async () => {
+  it('cancels the recording of a real player too when keys are requested', async () => {
     const dom = await withBridge()
     const player = fakeVideo({
       src: 'blob:player',
@@ -499,7 +573,7 @@ describe('вердикт отбора', () => {
     await dom.tick()
     expect(
       dom.forwarded().map((post) => (post.message as { type: string }).type),
-      'подготовка: до запроса ключей отказывать плееру не за что',
+      'setup: before the keys are requested there is nothing to refuse the player for',
     ).toEqual(['tc:source'])
 
     await dom.deliverMessage({ type: 'tc:drm', sourceId: 'page' })
@@ -512,8 +586,8 @@ describe('вердикт отбора', () => {
   })
 })
 
-describe('запросы попапа и service worker', () => {
-  /** Поднимает content script с уже загруженным мостом и отдаёт его окружение. */
+describe('requests from the popup and the service worker', () => {
+  /** Stands the content script up with the bridge already loaded and gives back its world. */
   async function withBridge() {
     const dom = installDom()
     await importContent()
@@ -521,10 +595,10 @@ describe('запросы попапа и service worker', () => {
     return dom
   }
 
-  /** Отвечает за мост в тот порт, который content script ему передал. */
+  /** Answers for the bridge into the port the content script handed it. */
   async function replyFromBridge(dom: ReturnType<typeof installDom>, reply: unknown) {
     const [port] = dom.portsToBridge()
-    expect(port, 'content script не передал мосту канал для ответа').toBeDefined()
+    expect(port, 'the content script handed the bridge no channel to answer on').toBeDefined()
     port!.postMessage(reply)
     await new Promise((resolve) => setTimeout(resolve, 0))
   }
@@ -538,20 +612,20 @@ describe('запросы попапа и service worker', () => {
     runs: 1,
   }
 
-  it('запрос списка уходит мосту вместе с каналом для ответа', async () => {
+  it('sends the list request to the bridge together with a channel to answer on', async () => {
     const dom = await withBridge()
 
     const { kept } = dom.askTab({ type: 'tc:list' })
     await new Promise((resolve) => setTimeout(resolve, 0))
 
     expect(dom.forwarded().map((post) => post.message)).toEqual([{ type: 'tc:list' }])
-    expect(dom.portsToBridge(), 'мосту не с чем ответить').toHaveLength(1)
-    // Канал ответа Chrome закрывает, как только слушатель вернул не true, — попап получил
-    // бы undefined ещё до того, как мост увидел запрос.
-    expect(kept, 'слушатель не удержал канал ответа').toEqual([true])
+    expect(dom.portsToBridge(), 'the bridge has nothing to answer with').toHaveLength(1)
+    // Chrome closes the reply channel as soon as the listener returns anything but true — the
+    // popup would get undefined before the bridge had even seen the request.
+    expect(kept, 'the listener did not hold the reply channel').toEqual([true])
   })
 
-  it('ответ моста доезжает до спросившего', async () => {
+  it('carries the answer of the bridge back to the asker', async () => {
     const dom = await withBridge()
 
     const { answers } = dom.askTab({ type: 'tc:list' })
@@ -561,7 +635,7 @@ describe('запросы попапа и service worker', () => {
     expect(answers).toEqual([[summary]])
   })
 
-  it('запрос сохранения уходит мосту тем же путём', async () => {
+  it('sends the save request to the bridge by the same road', async () => {
     const dom = await withBridge()
 
     const { answers, kept } = dom.askTab({ type: 'tc:save', key: summary.key })
@@ -575,14 +649,14 @@ describe('запросы попапа и service worker', () => {
     expect(answers).toEqual([{ ok: true }])
   })
 
-  it('запрос, пришедший до загрузки моста, доходит до него после', async () => {
+  it('delivers a request that arrived before the bridge had loaded once it has', async () => {
     const dom = installDom()
     await importContent()
 
-    // Попап открывают когда угодно, в том числе на странице, где мост ещё грузится.
+    // The popup is opened whenever, including on a page where the bridge is still loading.
     const { kept } = dom.askTab({ type: 'tc:list' })
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(dom.forwarded(), 'запрос ушёл в незагруженный фрейм').toEqual([])
+    expect(dom.forwarded(), 'the request went into a frame that had not loaded').toEqual([])
     expect(kept).toEqual([true])
 
     dom.deliverLoad()
@@ -591,11 +665,11 @@ describe('запросы попапа и service worker', () => {
     expect(dom.forwarded().map((post) => post.message)).toEqual([{ type: 'tc:list' }])
   })
 
-  it('чужое сообщение расширения мосту не уходит и канал не держит', async () => {
+  it('neither forwards a foreign extension message nor holds the channel for it', async () => {
     const dom = await withBridge()
 
-    // Слушателей у chrome.runtime.onMessage несколько на всё расширение: удержи этот
-    // канал чужого запроса — ответ настоящего адресата уже никуда не уйдёт.
+    // chrome.runtime.onMessage has several listeners across the extension: hold the channel of
+    // someone else's request here, and the answer of its real addressee goes nowhere.
     const { kept } = dom.askTab({ type: 'tc:ping' })
     await new Promise((resolve) => setTimeout(resolve, 0))
 

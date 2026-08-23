@@ -63,6 +63,12 @@ window.addEventListener('message', (event: MessageEvent) => {
 
   if (data?.type === 'tc:context') {
     pageContext = { url: String(data.url), title: String(data.title) }
+    // The sessions of this page take the title on as well. A session is signed at the moment its
+    // first init segment arrives, and the page learns its own title later than that: recording
+    // starts at document_start, and a single-page application loads the next video without a
+    // navigation. Left to the moment of opening alone, the popup would say "Untitled" for a
+    // video that has a name, and the saved file would be named after nothing.
+    store.retitle(pageContext.url, pageContext.title)
     return
   }
 

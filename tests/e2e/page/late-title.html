@@ -1,0 +1,49 @@
+<!doctype html>
+<meta charset="utf-8" />
+<!--
+  A page that has no <title> when recording starts and fills one in afterwards — the ordinary
+  shape of a single-page application, and of YouTube in particular. The content script runs at
+  document_start, where <head> is not parsed yet, so the bridge is told the title of nothing; the
+  player meanwhile has already opened its MediaSource and is gathering segments.
+-->
+<video id="v" controls width="640" style="background: #000"></video>
+<script>
+  const INIT = '/fixtures/h264/init-stream0.m4s'
+  const SEGMENTS = [
+    '/fixtures/h264/chunk-stream0-00001.m4s',
+    '/fixtures/h264/chunk-stream0-00002.m4s',
+    '/fixtures/h264/chunk-stream0-00003.m4s',
+  ]
+
+  const video = document.getElementById('v')
+  const mediaSource = new MediaSource()
+  video.src = URL.createObjectURL(mediaSource)
+
+  window.appended = 0
+
+  mediaSource.addEventListener('sourceopen', async () => {
+    const sb = mediaSource.addSourceBuffer('video/mp4; codecs="avc1.4d401e"')
+
+    const append = (buffer) =>
+      new Promise((resolve) => {
+        sb.addEventListener('updateend', resolve, { once: true })
+        sb.appendBuffer(buffer)
+      })
+
+    const fetchBytes = async (url) => (await fetch(url)).arrayBuffer()
+
+    await append(await fetchBytes(INIT))
+    window.appended++
+
+    for (const url of SEGMENTS) {
+      await append(await fetchBytes(url))
+      window.appended++
+    }
+
+    window.allAppended = true
+
+    // The application knows the name of the video only once its data has arrived, and sets the
+    // title then — long after the session has been opened.
+    document.title = 'The video that named itself late'
+  })
+</script>

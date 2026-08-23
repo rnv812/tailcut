@@ -12,35 +12,39 @@ const summary: SessionSummary = {
   runs: 1,
 }
 
-/** Что попап отправил вкладке: сообщение и адресат внутри неё. */
+/** What the popup sent the tab: the message and its addressee inside it. */
 type Sent = { tabId: number; message: unknown; options: unknown }
 
 /**
- * Активная вкладка соседнего окна. Окон у пользователя бывает несколько, а вкладки Chrome
- * перечисляет по окнам: в ответ на запрос без `currentWindow` соседнее окно попадает раньше
- * текущего, и первой в списке оказывается его вкладка.
+ * The active tab of a neighbouring window. A user has several windows open, and Chrome lists
+ * tabs by window: answering a query without `currentWindow`, the neighbouring window comes
+ * before the current one, and its tab ends up first in the list.
  */
 const OTHER_WINDOW_TAB = { id: 42 }
 
 /**
- * Вкладка текущего окна на заднем плане. В ответ на запрос без `active` она попадает
- * раньше активной: вкладки одного окна перечисляются слева направо.
+ * A background tab of the current window. Answering a query without `active` it comes before the
+ * active one: the tabs of one window are listed left to right.
  */
 const BACKGROUND_TAB = { id: 5 }
 
-/** Чем ограничен запрос вкладок: ровно те поля, которыми пользуется расширение. */
+/** What the tab query is narrowed by: exactly the fields the extension uses. */
 type QueryInfo = { active?: boolean; currentWindow?: boolean }
 
 /**
- * Подменяет chrome для попапа. Вкладки заданы списком: это активные вкладки текущего окна,
- * первую из них и отдаёт chrome.tabs.query. Рядом с ними живут соседнее окно и вкладка на
- * заднем плане — их запрос обязан отсеять сам. Ответ вкладки задаётся отдельно: вкладка
- * может и не ответить вовсе (нет content script), и тогда sendMessage отказывает промисом.
+ * Replaces chrome for the popup. The tabs are given as a list: these are the active tabs of the
+ * current window, and the first of them is what chrome.tabs.query gives back. Beside them live a
+ * neighbouring window and a background tab — the query has to sift those out itself. The answers
+ * of the tab are set separately, one per request type: a tab may not answer at all (no content
+ * script), and then sendMessage rejects.
  */
-function installChrome(options: { tabs?: Array<{ id?: number }>; reply?: unknown } = {}) {
+function installChrome(
+  options: { tabs?: Array<{ id?: number }>; listReply?: unknown; saveReply?: unknown } = {},
+) {
   const sent: Sent[] = []
   let tabs = options.tabs ?? [{ id: 7 }]
-  let reply: unknown = 'reply' in options ? options.reply : [summary]
+  let listReply: unknown = 'listReply' in options ? options.listReply : [summary]
+  let saveReply: unknown = 'saveReply' in options ? options.saveReply : { ok: true }
   let failure: Error | null = null
 
   vi.stubGlobal('chrome', {
@@ -53,28 +57,31 @@ function installChrome(options: { tabs?: Array<{ id?: number }>; reply?: unknown
       sendMessage: async (tabId: number, message: unknown, opts: unknown) => {
         sent.push({ tabId, message, options: opts })
         if (failure) throw failure
-        return reply
+        return (message as { type?: string }).type === 'tc:save' ? saveReply : listReply
       },
     },
   })
 
   return {
     sent,
-    /** Пользователь переключил вкладку, пока попап открыт. */
+    /** The user switched tabs while the popup was open. */
     switchTo: (id: number | undefined) => {
       tabs = [{ id }]
     },
-    /** Страница без content script: sendMessage отказывает «receiving end does not exist». */
+    /** A page with no content script: sendMessage rejects with "receiving end does not exist". */
     breakTab: () => {
       failure = new Error('Could not establish connection. Receiving end does not exist.')
     },
-    setReply: (value: unknown) => {
-      reply = value
+    setListReply: (value: unknown) => {
+      listReply = value
+    },
+    setSaveReply: (value: unknown) => {
+      saveReply = value
     },
   }
 }
 
-/** Модуль помнит вкладку между вызовами, поэтому каждому тесту нужен свежий импорт. */
+/** The module remembers the tab between calls, so every test needs a fresh import. */
 async function importApi() {
   vi.resetModules()
   return import('../../src/popup/api')
@@ -85,56 +92,56 @@ afterEach(() => {
 })
 
 describe('listSessions', () => {
-  it('отдаёт сводки, которые прислала вкладка', async () => {
+  it('gives back the summaries the tab sent', async () => {
     installChrome()
     const { listSessions } = await importApi()
 
     expect(await listSessions()).toEqual([summary])
   })
 
-  it('спрашивает активную вкладку и только её главный фрейм', async () => {
+  it('asks the active tab and only its top frame', async () => {
     const chrome = installChrome()
     const { listSessions } = await importApi()
 
     await listSessions()
 
-    // Без frameId Chrome разошлёт запрос по всем фреймам страницы, и ответит тот, кто успел
-    // первым: на странице с рекламными фреймами это чужой пустой список.
+    // Without frameId Chrome sends the request round every frame of the page, and whoever is
+    // first answers: on a page with advertising frames that is a stranger's empty list.
     expect(chrome.sent).toEqual([{ tabId: 7, message: { type: 'tc:list' }, options: { frameId: 0 } }])
   })
 
-  it('берёт активную вкладку текущего окна, а не соседнего', async () => {
+  it('takes the active tab of the current window, not of a neighbouring one', async () => {
     const chrome = installChrome()
     const { listSessions } = await importApi()
 
     await listSessions()
 
-    // Окон открыто два, и запрос без currentWindow вернёт активную вкладку каждого —
-    // первой чужую. Попап тогда покажет сводку вкладки из другого окна и по «Save all»
-    // сохранит её сессию, а не ту, на которую пользователь смотрит.
+    // Two windows are open, and a query without currentWindow returns the active tab of each —
+    // a foreign one first. The popup would then show the summary of a tab in another window and
+    // save its session on "Save all" instead of the one the user is looking at.
     expect(chrome.sent.map((item) => item.tabId)).toEqual([7])
   })
 
-  it('на вкладке без content script отдаёт пустой список', async () => {
+  it('gives back an empty list on a tab with no content script', async () => {
     const chrome = installChrome()
     chrome.breakTab()
     const { listSessions } = await importApi()
 
-    // chrome://, магазин расширений, вкладка старше установки. Непойманный отказ оставил бы
-    // попап в «Loading…» навсегда.
+    // chrome://, the extension store, a tab older than the installation. An uncaught rejection
+    // would leave the popup in "Loading…" for good.
     expect(await listSessions()).toEqual([])
   })
 
-  it('на пустой ответ вкладки отдаёт пустой список', async () => {
+  it('gives back an empty list when the tab answers nothing', async () => {
     const chrome = installChrome()
-    chrome.setReply(undefined)
+    chrome.setListReply(undefined)
     const { listSessions } = await importApi()
 
-    // Так отвечает Chrome, когда слушателя нет вовсе, а канал закрылся без ответа.
+    // That is how Chrome answers when there is no listener at all and the channel closed unanswered.
     expect(await listSessions()).toEqual([])
   })
 
-  it('без активной вкладки не тревожит никого', async () => {
+  it('troubles nobody when there is no active tab', async () => {
     const chrome = installChrome({ tabs: [] })
     const { listSessions } = await importApi()
 
@@ -142,8 +149,8 @@ describe('listSessions', () => {
     expect(chrome.sent).toEqual([])
   })
 
-  it('вкладку без идентификатора считает отсутствующей', async () => {
-    // У вкладки devtools и у предзагруженной страницы id может не быть вовсе.
+  it('counts a tab without an identifier as absent', async () => {
+    // A devtools tab and a prerendered page may have no id at all.
     const chrome = installChrome({ tabs: [{}] })
     const { listSessions } = await importApi()
 
@@ -153,7 +160,7 @@ describe('listSessions', () => {
 })
 
 describe('saveAll', () => {
-  it('просит вкладку сохранить сессию по её ключу', async () => {
+  it('asks the tab to save the session by its key', async () => {
     const chrome = installChrome()
     const { saveAll } = await importApi()
 
@@ -164,34 +171,62 @@ describe('saveAll', () => {
     ])
   })
 
-  it('уходит той вкладке, у которой попап взял список', async () => {
+  it('goes to the tab the popup took the list from', async () => {
     const chrome = installChrome()
     const { listSessions, saveAll } = await importApi()
 
     await listSessions()
-    // Активная вкладка успевает смениться под открытым попапом. Спроси попап её заново —
-    // и «Save all» сохранил бы чужую сессию или не сохранил ничего.
+    // The active tab does change under an open popup. Ask for it again and "Save all" would save
+    // a foreign session, or none at all.
     chrome.switchTo(9)
     await saveAll(summary.key)
 
     expect(chrome.sent.map((item) => item.tabId)).toEqual([7, 7])
   })
 
-  it('на вкладке без content script не бросает', async () => {
+  it('reports the success the bridge answered with', async () => {
+    installChrome()
+    const { saveAll } = await importApi()
+
+    expect(await saveAll(summary.key)).toEqual({ ok: true })
+  })
+
+  it('reports the refusal of the bridge instead of swallowing it', async () => {
+    const chrome = installChrome()
+    // The bridge answers so when the session is gone — triage evicted it, or the page reloaded
+    // under the open popup — and when there is nothing in it to cut yet.
+    chrome.setSaveReply({ ok: false })
+    const { saveAll } = await importApi()
+
+    // Read nothing of the answer and the popup cannot tell a refusal from a slow save: no file
+    // appears and not a word is said.
+    expect(await saveAll(summary.key)).toEqual({ ok: false })
+  })
+
+  it('counts an answer of nothing as a failure', async () => {
+    const chrome = installChrome()
+    // Chrome answers undefined when the channel closed with nobody answering.
+    chrome.setSaveReply(undefined)
+    const { saveAll } = await importApi()
+
+    expect(await saveAll(summary.key)).toEqual({ ok: false })
+  })
+
+  it('does not throw on a tab with no content script and calls it a failure', async () => {
     const chrome = installChrome()
     chrome.breakTab()
     const { saveAll } = await importApi()
 
-    // Вкладку закрыли или увели со страницы: непойманный отказ ушёл бы в консоль попапа.
-    await expect(saveAll(summary.key)).resolves.toBeUndefined()
+    // The tab was closed or taken off the page: an uncaught rejection would reach no further
+    // than the console of the popup, and the user would be left waiting for a file.
+    await expect(saveAll(summary.key)).resolves.toEqual({ ok: false })
   })
 
-  it('без активной вкладки не тревожит никого', async () => {
+  it('troubles nobody when there is no active tab, and says the save failed', async () => {
     const chrome = installChrome({ tabs: [] })
     const { saveAll } = await importApi()
 
-    await saveAll(summary.key)
-
+    expect(await saveAll(summary.key)).toEqual({ ok: false })
     expect(chrome.sent).toEqual([])
   })
 })
@@ -201,8 +236,8 @@ describe('formatDuration', () => {
     [0, '0:00'],
     [6, '0:06'],
     [6.4, '0:06'],
-    // Минуты — целая часть от деления, а не округление: 45 секунд это «0:45», и никак не
-    // «1:45». Остаток больше половины минуты встречается на первой же записи.
+    // Minutes are the whole part of the division and not a rounding: 45 seconds is "0:45" and
+    // never "1:45". A remainder over half a minute turns up on the very first recording.
     [45, '0:45'],
     [59.6, '1:00'],
     [65, '1:05'],
@@ -210,7 +245,7 @@ describe('formatDuration', () => {
     [150, '2:30'],
     [600, '10:00'],
     [3661, '61:01'],
-  ])('%s секунд → %s', async (seconds, expected) => {
+  ])('%s seconds → %s', async (seconds, expected) => {
     installChrome()
     const { formatDuration } = await importApi()
 
@@ -222,18 +257,17 @@ describe('formatBytes', () => {
   it.each([
     [0, '0 KB'],
     [1024, '1 KB'],
-    // Килобайт округляется, а не добирается вверх: лишний байт сверх килобайта — всё ещё
-    // «1 KB».
+    // A kilobyte is rounded, not rounded up: one byte over a kilobyte is still "1 KB".
     [1025, '1 KB'],
     [500, '0 KB'],
     [700_000, '684 KB'],
-    // Граница между килобайтами и мегабайтами — двоичная, как и сам счёт: до 1024 KB
-    // подпись остаётся килобайтной, хотя миллион байт уже позади.
+    // The border between kilobytes and megabytes is binary, like the count itself: up to 1024 KB
+    // the label stays kilobytes, though a million bytes is already behind.
     [1_020_000, '996 KB'],
     [1_048_576, '1.0 MB'],
     [1_543_210, '1.5 MB'],
     [1_073_741_824, '1024.0 MB'],
-  ])('%s байт → %s', async (bytes, expected) => {
+  ])('%s bytes → %s', async (bytes, expected) => {
     installChrome()
     const { formatBytes } = await importApi()
 
@@ -245,10 +279,10 @@ describe('hostOf', () => {
   it.each([
     ['https://site.example/watch?v=abc', 'site.example'],
     ['https://site.example:8443/watch', 'site.example:8443'],
-    // Мост живёт на origin расширения и до первого tc:context знает только referrer,
-    // а его может не быть вовсе: заголовок сессии тогда есть, адреса нет.
+    // The bridge lives on the extension origin and knows only the referrer until the first
+    // tc:context, and there may be none at all: the session then has a title but no address.
     ['', ''],
-    ['не адрес', ''],
+    ['not an address', ''],
   ])('%s → %s', async (url, expected) => {
     installChrome()
     const { hostOf } = await importApi()

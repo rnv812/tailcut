@@ -1,13 +1,18 @@
-import { TOP_FRAME, type ExtensionToTab, type SessionSummary } from '../shared/protocol'
+import {
+  TOP_FRAME,
+  type ExtensionToTab,
+  type SaveResult,
+  type SessionSummary,
+} from '../shared/protocol'
 
-// Сводку описывает протокол, а не попап: разойдись эти два описания, попап читал бы поля,
-// которых мост не присылает, и молча показывал бы undefined.
-export type { SessionSummary }
+// The summary is described by the protocol and not by the popup: let the two descriptions drift
+// apart and the popup would read fields the bridge does not send, showing undefined in silence.
+export type { SaveResult, SessionSummary }
 
 /**
- * Вкладка, у которой попап взял список. Запоминается, потому что сохранять надо ровно ту
- * сессию, которую попап показывает: активная вкладка успевает смениться прямо под открытым
- * попапом, и «Save all» ушёл бы не туда.
+ * The tab the popup took its list from. Remembered because the session to save has to be exactly
+ * the one the popup is showing: the active tab does change under an open popup, and "Save all"
+ * would go to the wrong place.
  */
 let boundTabId: number | undefined
 
@@ -20,8 +25,8 @@ async function targetTabId(): Promise<number | undefined> {
 }
 
 /**
- * Спрашивает вкладку о накопленном. Попап только показывает ответ: ни разбора, ни сборки
- * здесь нет — открыться он обязан мгновенно.
+ * Asks the tab what it has gathered. The popup only shows the answer: there is no parsing and no
+ * assembly here — it is obliged to open instantly.
  */
 export async function listSessions(): Promise<SessionSummary[]> {
   const tabId = await targetTabId()
@@ -31,23 +36,34 @@ export async function listSessions(): Promise<SessionSummary[]> {
   try {
     return (await chrome.tabs.sendMessage(tabId, request, TOP_FRAME)) ?? []
   } catch {
-    // Страница без content script: chrome://, магазин расширений, вкладка старше установки.
-    // Пустой список здесь честнее ошибки — записывать там нечего.
+    // A page with no content script: chrome://, the extension store, a tab older than the
+    // installation. An empty list is honester here than an error — there is nothing to record.
     return []
   }
 }
 
-/** Просит вкладку собрать накопленное в файл. Сборка и скачивание идут в мосте. */
-export async function saveAll(key: string): Promise<void> {
+/**
+ * Asks the tab to assemble what it has gathered into a file. The building and the download happen
+ * in the bridge, and its verdict comes back here.
+ *
+ * The answer is what the caller acts on: the bridge refuses when the session is gone — evicted by
+ * triage, or lost to a reload under the open popup — and when Chrome refuses the download. Left
+ * unread, a refusal is indistinguishable from a slow save: no file appears and nothing is said.
+ */
+export async function saveAll(key: string): Promise<SaveResult> {
   const tabId = await targetTabId()
-  if (tabId === undefined) return
+  if (tabId === undefined) return { ok: false }
 
   const request: ExtensionToTab = { type: 'tc:save', key }
   try {
-    await chrome.tabs.sendMessage(tabId, request, TOP_FRAME)
+    const result: SaveResult | undefined = await chrome.tabs.sendMessage(tabId, request, TOP_FRAME)
+    // Chrome answers undefined when the channel closed with nobody answering: the tab was closed
+    // or taken off the page while the file was being built. Nothing was saved.
+    return { ok: result?.ok === true }
   } catch {
-    // Вкладку закрыли или увели с той страницы, пока попап был открыт: сохранять нечего,
-    // а необработанный отказ промиса попадёт разве что в консоль попапа.
+    // A page with no content script, or a tab that is gone: an unhandled rejection would reach no
+    // further than the console of the popup.
+    return { ok: false }
   }
 }
 
@@ -63,7 +79,7 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
-/** Адрес страницы в виде, годном для строки под заголовком; непонятный адрес — пустая строка. */
+/** The page address in a form fit for the line under the title; an unreadable one — empty. */
 export function hostOf(url: string): string {
   try {
     return new URL(url).host
