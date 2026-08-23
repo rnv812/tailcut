@@ -80,6 +80,9 @@ describe('ensureBridge', () => {
     expect(dom.created).toHaveLength(1)
     const iframe = dom.created[0]!
     expect(iframe.tagName).toBe('iframe')
+    // Адрес строится из той же константы, что и в коде: здесь проверяется путь до неё —
+    // chrome.runtime.getURL от BRIDGE_PATH. Что сама константа указывает на существующий
+    // и объявленный в манифесте файл, проверяет tests/build/dist.test.ts.
     expect(iframe.src).toBe(`${EXTENSION_ORIGIN}/${BRIDGE_PATH}`)
     expect(iframe.dataset.tailcut).toBe('bridge')
     expect(iframe.attributes['aria-hidden']).toBe('true')

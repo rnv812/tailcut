@@ -51,37 +51,55 @@ async function bridgeFrame(page: Page, extensionId: string, log: () => string): 
   return frame!
 }
 
-/** Шлёт мосту transferable-буфер и ждёт подтверждения. -1 означает «ответа не было». */
-async function echoRoundTrip(page: Page, timeout = 3_000): Promise<number> {
-  return page.evaluate(async (limit) => {
-    const iframe = document.querySelector<HTMLIFrameElement>('iframe[data-tailcut]')!
-    const payload = new Uint8Array([1, 2, 3, 4]).buffer
-    return new Promise<number>((resolve) => {
-      const timer = setTimeout(() => resolve(-1), limit)
-      window.addEventListener('message', function onMsg(e) {
-        if (e.data?.type === 'tc:echo') {
-          clearTimeout(timer)
-          window.removeEventListener('message', onMsg)
-          resolve(e.data.length)
-        }
+/** Итог обмена: длина из эха (-1 — ответа не было) и судьба буфера у отправителя. */
+type Echo = { length: number; detachedAtSender: boolean }
+
+/**
+ * Шлёт мосту transferable-буфер заданного размера и ждёт подтверждения. Размер у каждого
+ * вызова свой: подтверждение обязано повторять длину пришедшего буфера, а не какое-то число,
+ * и только это доказывает, что байты доехали до моста, а не потерялись по дороге.
+ */
+async function echoRoundTrip(page: Page, size: number, timeout = 3_000): Promise<Echo> {
+  return page.evaluate(
+    async ({ size, limit }) => {
+      const iframe = document.querySelector<HTMLIFrameElement>('iframe[data-tailcut]')!
+      const payload = new ArrayBuffer(size)
+      new Uint8Array(payload).fill(0xa5)
+
+      const length = await new Promise<number>((resolve) => {
+        const timer = setTimeout(() => resolve(-1), limit)
+        window.addEventListener('message', function onMsg(e) {
+          if (e.data?.type === 'tc:echo') {
+            clearTimeout(timer)
+            window.removeEventListener('message', onMsg)
+            resolve(e.data.length)
+          }
+        })
+        iframe.contentWindow!.postMessage(
+          { type: 'tc:append', sourceId: 's', bufferId: 'b', mime: 'video/mp4', bytes: payload },
+          '*',
+          [payload],
+        )
       })
-      iframe.contentWindow!.postMessage(
-        { type: 'tc:append', sourceId: 's', bufferId: 'b', mime: 'video/mp4', bytes: payload },
-        '*',
-        [payload],
-      )
-    })
-  }, timeout)
+
+      // Отсоединённый буфер у отправителя — признак настоящей передачи, а не копии:
+      // на реальных сегментах копия стоила бы плееру лишней работы на каждом appendBuffer.
+      return { length, detachedAtSender: payload.byteLength === 0 }
+    },
+    { size, limit: timeout },
+  )
 }
 
 test('мост встаёт на странице со строгим CSP и принимает бинарные данные', async () => {
   const { context, page, extensionId, log } = await openPlayer(PAGE_URL)
   await bridgeFrame(page, extensionId, log)
 
+  // Размер порядка реального сегмента, а не четыре байта: подтверждение должно нести
+  // длину именно этого буфера.
   expect(
-    await echoRoundTrip(page),
-    `мост должен подтвердить приём байтов; консоль страницы: ${log()}`,
-  ).toBe(4)
+    await echoRoundTrip(page, 4096),
+    `мост должен подтвердить приём 4096 байт; консоль страницы: ${log()}`,
+  ).toEqual({ length: 4096, detachedAtSender: true })
 
   // Страница со строгим CSP должна продолжать играть: мост не мешает её собственному MSE.
   await page.waitForFunction(() => (window as unknown as PlayerState).allAppended === true)
@@ -96,10 +114,11 @@ test('мост отвечает отправителю, а не заранее �
   const { context, page, extensionId, log } = await openPlayer(OTHER_PAGE_URL)
   await bridgeFrame(page, extensionId, log)
 
+  // Размер отличается от первого теста: длина в эхе обязана следовать за буфером.
   expect(
-    await echoRoundTrip(page),
-    `мост должен подтвердить приём байтов на любом origin; консоль страницы: ${log()}`,
-  ).toBe(4)
+    await echoRoundTrip(page, 7),
+    `мост должен подтвердить приём 7 байт на любом origin; консоль страницы: ${log()}`,
+  ).toEqual({ length: 7, detachedAtSender: true })
 
   await context.close()
 })
@@ -153,28 +172,36 @@ test('мост встаёт раньше первого скрипта стра�
   await context.close()
 })
 
-test('мост здоровается со страницей после загрузки', async () => {
-  const { context, page, extensionId, log } = await openPlayer(PAGE_URL)
-  await bridgeFrame(page, extensionId, log)
+// Расширение объявлено на <all_urls>, поэтому рукопожатие проверяется на обоих адресах:
+// на одном тестовом адресе прибитый targetOrigin неотличим от «любого родителя», а страница
+// узнаёт о мосте только из этого сообщения — на всех прочих сайтах оно пропало бы молча.
+for (const url of [PAGE_URL, OTHER_PAGE_URL]) {
+  const host = new URL(url).host
 
-  const handshake = await page
-    .waitForFunction(
-      () => {
-        const ready = (window as unknown as Probe).bridgeReady
-        return ready && ready.length > 0 ? ready : null
-      },
-      undefined,
-      { timeout: 5_000 },
-    )
-    .then((value) => value.jsonValue())
-    .catch(() => null)
+  test(`мост здоровается со страницей после загрузки (${host})`, async () => {
+    const { context, page, extensionId, log } = await openPlayer(url)
+    await bridgeFrame(page, extensionId, log)
 
-  expect(handshake, `мост должен прислать tc:ready странице; консоль страницы: ${log()}`).toEqual([
-    `chrome-extension://${extensionId}`,
-  ])
+    const handshake = await page
+      .waitForFunction(
+        () => {
+          const ready = (window as unknown as Probe).bridgeReady
+          return ready && ready.length > 0 ? ready : null
+        },
+        undefined,
+        { timeout: 5_000 },
+      )
+      .then((value) => value.jsonValue())
+      .catch(() => null)
 
-  await context.close()
-})
+    expect(
+      handshake,
+      `мост должен прислать tc:ready странице на ${host}; консоль страницы: ${log()}`,
+    ).toEqual([`chrome-extension://${extensionId}`])
+
+    await context.close()
+  })
+}
 
 test('мост отвечает только на tc:append и не спотыкается о чужие сообщения', async () => {
   const { context, page, extensionId, consoleLog, log } = await openPlayer(PAGE_URL)
@@ -194,7 +221,8 @@ test('мост отвечает только на tc:append и не спотык
     target.postMessage({ type: 'tc:source', sourceId: 's', objectUrl: 'blob:x' }, '*')
     target.postMessage({ type: 'webpackHotUpdate' }, '*')
 
-    const payload = new Uint8Array([1, 2, 3, 4]).buffer
+    // Ещё один размер, ни с чем не совпадающий: единственное эхо обязано нести его длину.
+    const payload = new ArrayBuffer(1543)
     target.postMessage(
       { type: 'tc:append', sourceId: 's', bufferId: 'b', mime: 'video/mp4', bytes: payload },
       '*',
@@ -205,7 +233,9 @@ test('мост отвечает только на tc:append и не спотык
     return seen
   })
 
-  expect(echoes, `лишнее эхо; консоль страницы: ${log()}`).toEqual([{ type: 'tc:echo', length: 4 }])
+  expect(echoes, `лишнее эхо; консоль страницы: ${log()}`).toEqual([
+    { type: 'tc:echo', length: 1543 },
+  ])
   expect(
     consoleLog.filter((line) => line.startsWith('pageerror')),
     `мост не должен падать на чужих сообщениях; консоль страницы: ${log()}`,

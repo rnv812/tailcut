@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, beforeEach } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { Script } from 'node:vm'
+import { BRIDGE_PATH } from '../../src/shared/protocol'
 
 /**
  * Сборка идёт под собственным таймаутом, заведомо меньшим хукового: тогда и зависшая сборка
@@ -322,6 +323,17 @@ describe('манифест', () => {
     const war = manifest().web_accessible_resources[0]
     expect(war.resources).toContain('bridge/bridge.html')
     expect(war.matches).toContain('<all_urls>')
+  })
+
+  it('адрес моста из протокола объявлен в манифесте и лежит в поставке', () => {
+    // Content script вставляет фрейм по BRIDGE_PATH. Опечатка в самой константе не видна
+    // ни сборке, ни манифесту: фрейм просто не грузится, и захват молча выключается.
+    // Проверка сверяет константу с внешним миром, а не с собой же.
+    expect(
+      manifest().web_accessible_resources[0].resources,
+      `${BRIDGE_PATH} не объявлен доступным ресурсом — Chrome такой фрейм не отдаст странице`,
+    ).toContain(BRIDGE_PATH)
+    expect(existsSync(`dist/${BRIDGE_PATH}`), `dist/${BRIDGE_PATH} отсутствует`).toBe(true)
   })
 
   it('манифест объявлен третьей версией — Chrome другую не загрузит', () => {
