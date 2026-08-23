@@ -15,8 +15,27 @@ type BadgeText = { tabId?: number; text: string }
 type Sent = { tabId: number; message: unknown; options: unknown }
 
 /**
+ * Активная вкладка соседнего окна. Окон у пользователя бывает несколько, а вкладки Chrome
+ * перечисляет по окнам: в ответ на запрос без `currentWindow` соседнее окно попадает раньше
+ * текущего, и первой в списке оказывается его вкладка.
+ */
+const OTHER_WINDOW_TAB = { id: 42 }
+
+/**
+ * Вкладка текущего окна на заднем плане. В ответ на запрос без `active` она попадает
+ * раньше активной: вкладки одного окна перечисляются слева направо.
+ */
+const BACKGROUND_TAB = { id: 5 }
+
+/** Чем ограничен запрос вкладок: ровно те поля, которыми пользуется расширение. */
+type QueryInfo = { active?: boolean; currentWindow?: boolean }
+
+/**
  * Подменяет chrome для service worker: слушатели он вешает при загрузке модуля, а зовёт их
  * потом браузер. Тест их и зовёт — установку и срабатывание будильника.
+ *
+ * Вкладки заданы списком: это активные вкладки текущего окна. Рядом с ними живут соседнее
+ * окно и вкладка на заднем плане — их запрос обязан отсеять сам.
  */
 function installChrome(options: { tabs?: Array<{ id?: number }>; reply?: unknown } = {}) {
   const alarms: Alarm[] = []
@@ -47,7 +66,11 @@ function installChrome(options: { tabs?: Array<{ id?: number }>; reply?: unknown
       },
     },
     tabs: {
-      query: async () => tabs,
+      query: async (info: QueryInfo = {}) => [
+        ...(info.currentWindow ? [] : [OTHER_WINDOW_TAB]),
+        ...(info.active ? [] : [BACKGROUND_TAB]),
+        ...tabs,
+      ],
       sendMessage: async (tabId: number, message: unknown, opts: unknown) => {
         sent.push({ tabId, message, options: opts })
         if (failure) throw failure
@@ -127,6 +150,19 @@ describe('пересчёт бейджа', () => {
     ])
     // Бейдж без tabId — общий: запись одной вкладки светилась бы на всех остальных.
     expect(chrome.badgeText).toEqual([{ tabId: 7, text: '6s' }])
+  })
+
+  it('считает по активной вкладке текущего окна, а не соседнего', async () => {
+    const chrome = installChrome()
+    await importWorker()
+
+    await chrome.fire()
+
+    // Окон открыто два, и запрос без currentWindow вернёт активную вкладку каждого —
+    // первой чужую. Бейдж тогда посчитан по чужой записи и поставлен чужой вкладке,
+    // а на той, где сидит пользователь, замирает на прежнем значении.
+    expect(chrome.sent.map((item) => item.tabId)).toEqual([7])
+    expect(chrome.badgeText.map((item) => item.tabId)).toEqual([7])
   })
 
   it('чужой будильник не трогает', async () => {

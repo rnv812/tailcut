@@ -16,9 +16,26 @@ const summary: SessionSummary = {
 type Sent = { tabId: number; message: unknown; options: unknown }
 
 /**
- * Подменяет chrome для попапа. Вкладки заданы списком: активной считается первая, как их
- * и отдаёт chrome.tabs.query. Ответ вкладки задаётся отдельно — вкладка может и не ответить
- * вовсе (нет content script), и тогда sendMessage отказывает промисом.
+ * Активная вкладка соседнего окна. Окон у пользователя бывает несколько, а вкладки Chrome
+ * перечисляет по окнам: в ответ на запрос без `currentWindow` соседнее окно попадает раньше
+ * текущего, и первой в списке оказывается его вкладка.
+ */
+const OTHER_WINDOW_TAB = { id: 42 }
+
+/**
+ * Вкладка текущего окна на заднем плане. В ответ на запрос без `active` она попадает
+ * раньше активной: вкладки одного окна перечисляются слева направо.
+ */
+const BACKGROUND_TAB = { id: 5 }
+
+/** Чем ограничен запрос вкладок: ровно те поля, которыми пользуется расширение. */
+type QueryInfo = { active?: boolean; currentWindow?: boolean }
+
+/**
+ * Подменяет chrome для попапа. Вкладки заданы списком: это активные вкладки текущего окна,
+ * первую из них и отдаёт chrome.tabs.query. Рядом с ними живут соседнее окно и вкладка на
+ * заднем плане — их запрос обязан отсеять сам. Ответ вкладки задаётся отдельно: вкладка
+ * может и не ответить вовсе (нет content script), и тогда sendMessage отказывает промисом.
  */
 function installChrome(options: { tabs?: Array<{ id?: number }>; reply?: unknown } = {}) {
   const sent: Sent[] = []
@@ -28,7 +45,11 @@ function installChrome(options: { tabs?: Array<{ id?: number }>; reply?: unknown
 
   vi.stubGlobal('chrome', {
     tabs: {
-      query: async () => tabs,
+      query: async (info: QueryInfo = {}) => [
+        ...(info.currentWindow ? [] : [OTHER_WINDOW_TAB]),
+        ...(info.active ? [] : [BACKGROUND_TAB]),
+        ...tabs,
+      ],
       sendMessage: async (tabId: number, message: unknown, opts: unknown) => {
         sent.push({ tabId, message, options: opts })
         if (failure) throw failure
@@ -80,6 +101,18 @@ describe('listSessions', () => {
     // Без frameId Chrome разошлёт запрос по всем фреймам страницы, и ответит тот, кто успел
     // первым: на странице с рекламными фреймами это чужой пустой список.
     expect(chrome.sent).toEqual([{ tabId: 7, message: { type: 'tc:list' }, options: { frameId: 0 } }])
+  })
+
+  it('берёт активную вкладку текущего окна, а не соседнего', async () => {
+    const chrome = installChrome()
+    const { listSessions } = await importApi()
+
+    await listSessions()
+
+    // Окон открыто два, и запрос без currentWindow вернёт активную вкладку каждого —
+    // первой чужую. Попап тогда покажет сводку вкладки из другого окна и по «Save all»
+    // сохранит её сессию, а не ту, на которую пользователь смотрит.
+    expect(chrome.sent.map((item) => item.tabId)).toEqual([7])
   })
 
   it('на вкладке без content script отдаёт пустой список', async () => {

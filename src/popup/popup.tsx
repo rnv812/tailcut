@@ -40,8 +40,14 @@ function Popup() {
         </div>
         <div class="meta">
           <span data-testid="duration">{formatDuration(current.duration)}</span>
-          <span class="muted">{formatBytes(current.bytes)}</span>
-          {current.runs > 1 && <span class="muted">{current.runs} runs</span>}
+          <span class="muted" data-testid="bytes">
+            {formatBytes(current.bytes)}
+          </span>
+          {current.runs > 1 && (
+            <span class="muted" data-testid="runs">
+              {current.runs} runs
+            </span>
+          )}
         </div>
         <button class="primary" onClick={() => void saveAll(current.key)}>
           Save all
