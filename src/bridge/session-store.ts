@@ -57,6 +57,13 @@ export class SessionStore {
       session.info.tracks.find((t) => t.trackId === fragment.trackId) ?? session.info.tracks[0]
     if (!track) return
 
+    // Такты фрагмента переводятся в секунды делением на timescale, и у битого init'а он
+    // бывает нулевым. Подставить вместо нуля единицу значило бы выдумать времена (такты
+    // ушли бы в секунды один к одному), а посчитать как есть — положить в карту кусок
+    // с границами NaN: пустым он не считается, перекрытым тоже, и NaN разошёлся бы
+    // оттуда по всей сводке в попапе. Такой фрагмент времени не имеет вовсе.
+    if (!(track.timescale > 0)) return
+
     const start = fragment.baseMediaDecodeTime / track.timescale
     const chunk: Chunk = {
       start,

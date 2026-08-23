@@ -189,6 +189,39 @@ describe('SessionStore: что попадает в сессию', () => {
     ])
   })
 
+  it('нецелые времена не округляются до целых секунд', () => {
+    const store = new SessionStore()
+    store.append({ ...muxedPage, bytes: muxedInit })
+
+    // Видеодорожка муксованного init'а идёт с timescale 1000: такт 500 — это полсекунды,
+    // три сэмпла по 100 тактов — три десятых. Фикстуры ffmpeg делятся на timescale нацело,
+    // поэтому на них округление до целых секунд неотличимо от точного деления; на живом
+    // потоке нацело не делится почти ничего.
+    store.append({ ...muxedPage, bytes: moof(1, 500, 3, 100) })
+
+    expect(store.list()[0]!.map.runs()).toEqual([
+      { start: 0.5, end: 0.8, chunks: [{ start: 0.5, end: 0.8, bytes: expect.any(Uint8Array) }] },
+    ])
+  })
+
+  it('соседние сегменты с нецелой длительностью остаются одним прогоном', () => {
+    const store = new SessionStore()
+    const cmaf = { ...page, url: 'https://site.example/watch?v=cmaf' }
+    // Обычная раскладка CMAF: timescale 90000 и сегменты по 172683 такта, то есть по
+    // 1.9187 секунды — ни одна граница на целую секунду не попадает.
+    store.append({ ...cmaf, bytes: new Uint8Array(box('moov', trak(1, 90_000, 'vide', 'avc1'))) })
+    for (const at of [0, 172_683, 345_366]) {
+      store.append({ ...cmaf, bytes: moof(1, at, 1, 172_683) })
+    }
+
+    // Так ошибка в переводе тактов и видна на живом сайте: округли начало вниз — куски
+    // наедут друг на друга и непрерывный буфер покажется рваным; округли обе величины —
+    // границы реза уедут на доли секунды от того, что на самом деле лежит в карте.
+    expect(store.list()[0]!.map.runs()).toHaveLength(1)
+    expect(store.list()[0]!.map.span()).toEqual({ start: 0, end: 5.7561 })
+    expect(store.list()[0]!.map.duration()).toBe(5.7561)
+  })
+
   it('ключ сессии — тот же, что считает sessionKey', () => {
     const store = new SessionStore()
     store.append({ ...page, bytes: init })
@@ -285,6 +318,24 @@ describe('SessionStore: чужие и битые данные', () => {
 
     expect(store.list()[0]!.map.runs()).toEqual([])
     expect(store.list()[0]!.map.totalBytes()).toBe(0)
+  })
+
+  it('init с нулевым timescale не пускает фрагменты в карту', () => {
+    const store = new SessionStore()
+    const broken = { ...page, url: 'https://site.example/watch?v=broken' }
+    // Битый init: timescale дорожки нулевой. Приходит он с произвольного сайта, так что
+    // выдумывать за него единицу нельзя — на такте это дало бы времена в тысячи секунд.
+    store.append({ ...broken, bytes: new Uint8Array(box('moov', trak(1, 0, 'vide', 'avc1'))) })
+    store.append({ ...broken, bytes: moof(1, 0, 4, 1_000) })
+
+    // Перевести такты в секунды нечем, поэтому участка времени у фрагмента нет. Ляг он
+    // в карту, границы вышли бы NaN: пустым такой кусок не считается и перекрытым тоже,
+    // и NaN уехал бы в сводку попапа, а его байты — в объём материала.
+    const session = store.list()[0]!
+    expect(session.map.runs()).toEqual([])
+    expect(session.map.totalBytes()).toBe(0)
+    expect(session.map.duration()).toBe(0)
+    expect(session.map.span()).toBeNull()
   })
 
   it('мусор не портит уже открытую сессию', () => {

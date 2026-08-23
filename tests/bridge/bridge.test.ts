@@ -271,6 +271,19 @@ describe('мост складывает сегменты в реестр сес�
     expect(win.list()).toMatchObject([{ url: REFERRER, title: '' }])
   })
 
+  it('нестроковый контекст приводится к строкам, а не уезжает в сводку как есть', async () => {
+    const win = await loadBridge()
+
+    // tc:context мост принимает от кого угодно на странице: адресоваться ему может любой
+    // скрипт, а не только наш content script. Полей никто не проверял, поэтому в сводку
+    // сессии — то, чем попап её и подписывает — могло бы уехать что угодно вплоть до
+    // объекта, который отрисуется в списке как «[object Object]».
+    win.deliver({ type: 'tc:context', url: { href: PAGE_URL }, title: 42 })
+    win.append(initBytes)
+
+    expect(win.list()).toMatchObject([{ url: '[object Object]', title: '42' }])
+  })
+
   it('сегменты разных источников не сливаются в одну сессию', async () => {
     const win = await loadBridge()
     win.context()
