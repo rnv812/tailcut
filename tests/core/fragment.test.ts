@@ -33,6 +33,19 @@ function moof(traf: number[]): Uint8Array {
   return moofWith(box('traf', traf))
 }
 
+/**
+ * Потолок на синхронный разбор одного moof. На исправном коде разбор занимает
+ * единицы миллисекунд; запас в секунду не ловит медленную машину, но ловит уход
+ * в перебор обещанных sample_count записей (2^32 итераций — это ~19 секунд).
+ */
+const PARSE_BUDGET_MS = 1000
+
+function timed<T>(fn: () => T): { value: T; ms: number } {
+  const start = performance.now()
+  const value = fn()
+  return { value, ms: performance.now() - start }
+}
+
 describe('parseFragment', () => {
   it('читает начало и длительность первого фрагмента', () => {
     // Фикстура детерминирована: 48 сэмплов по 512 тактов из tfhd.
@@ -155,6 +168,57 @@ describe('parseFragment', () => {
     const f = parseFragment(moof([...tfhd, ...tfdt, ...trun]))!
     expect(f.baseMediaDecodeTime).toBe(200)
     expect(f.duration).toBe(30)
+  })
+
+  it('бросает trun, обещающий 2^32 сэмплов при пустом теле, не перебирая их', () => {
+    // Байты сегмента приходят со стороннего сайта: sample_count может быть
+    // любым. Тело кончается сразу за заголовком trun, читать нечего — обход
+    // обязан оборваться на первой же записи, а не крутить 4 294 967 295 витков.
+    const tfhd = box('tfhd', [...u32(0x00000020), ...u32(1), ...u32(0x01010000)])
+    const tfdt = box('tfdt', [...u32(0), ...u32(0)])
+    const trun = box('trun', [...u32(0x000100), ...u32(0xffffffff)])
+
+    const { value, ms } = timed(() => parseFragment(moof([...tfhd, ...tfdt, ...trun]))!)
+    expect(value.trackId).toBe(1)
+    expect(value.baseMediaDecodeTime).toBe(0)
+    expect(value.duration).toBe(0)
+    expect(ms).toBeLessThan(PARSE_BUDGET_MS)
+  })
+
+  it('обрывает враждебный trun сразу за последней читаемой записью', () => {
+    // Тот же обман в sample_count, но две записи в теле настоящие: разбор
+    // обязан взять их и остановиться на границе тела, а не досчитывать остаток.
+    const tfhd = box('tfhd', [...u32(0x00000020), ...u32(1), ...u32(0x01010000)])
+    const tfdt = box('tfdt', [...u32(0), ...u32(9000)])
+    const trun = box('trun', [
+      ...u32(0x000100), ...u32(0xffffffff), ...u32(120), ...u32(80),
+    ])
+
+    const { value, ms } = timed(() => parseFragment(moof([...tfhd, ...tfdt, ...trun]))!)
+    expect(value.baseMediaDecodeTime).toBe(9000)
+    expect(value.duration).toBe(200)
+    expect(ms).toBeLessThan(PARSE_BUDGET_MS)
+  })
+
+  it('отдаёт длительность усечённого trun как обычную, без признака усечения', () => {
+    // Зафиксировано намеренно: sample_count обещает десять записей, в теле их
+    // три. parseFragment возвращает сумму только прочитанных (заниженную) и
+    // ничем не помечает, что trun оборван, — FragmentInfo не несёт такого поля.
+    // Для карты PTS это молчаливый сдвиг следующего фрагмента; менять контракт
+    // здесь не место, но поведение должно быть решением, а не случайностью.
+    const tfhd = box('tfhd', [...u32(0x00000020), ...u32(5), ...u32(0x01010000)])
+    const tfdt = box('tfdt', [...u32(0), ...u32(4000)])
+    const trun = box('trun', [
+      ...u32(0x000100), ...u32(10), ...u32(100), ...u32(100), ...u32(100),
+    ])
+
+    const f = parseFragment(moof([...tfhd, ...tfdt, ...trun]))!
+    expect(f.duration).toBe(300)
+    // Ровно те три поля, что объявлены в FragmentInfo: сигнала об усечении нет.
+    expect(Object.keys(f).sort()).toEqual(['baseMediaDecodeTime', 'duration', 'trackId'])
+    // Следующий фрагмент, выложенный по этой длительности, встанет раньше
+    // настоящего конца: 4300 вместо 5000, которые обещал sample_count.
+    expect(f.baseMediaDecodeTime + f.duration).toBe(4300)
   })
 
   it('учитывает ширину sample_flags в записи trun', () => {

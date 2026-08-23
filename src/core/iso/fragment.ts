@@ -61,6 +61,13 @@ function parseTrunDuration(data: Uint8Array, trun: Box, defaultSampleDuration: n
     (flags & TRUN_SAMPLE_FLAGS ? 4 : 0) +
     (flags & TRUN_SAMPLE_CTS ? 4 : 0)
 
+  // sample_count приходит из чужих байтов и может обещать что угодно вплоть до
+  // 2^32-1 записей. Обход обрывается на границе тела бокса именно через break:
+  // continue дал бы тот же результат, но прокрутил бы миллиарды пустых витков и
+  // подвесил разбор. Усечённый trun при этом отдаётся как обычный — сумма
+  // прочитанных записей, без признака усечения в FragmentInfo. Это осознанный
+  // выбор: битый сегмент даёт заниженную длительность, а не отказ разбора;
+  // цена — молчаливый сдвиг следующего фрагмента на карте PTS.
   let total = 0
   for (let i = 0; i < sampleCount; i++) {
     const at = offset + i * entrySize
