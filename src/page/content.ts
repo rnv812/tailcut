@@ -14,15 +14,12 @@ export function ensureBridge(): Promise<HTMLIFrameElement> {
     iframe.style.cssText =
       'position:fixed;width:0;height:0;border:0;visibility:hidden;pointer-events:none;left:-9999px'
 
-    const attach = () => {
-      const root = document.documentElement
-      root.appendChild(iframe)
-    }
-
     iframe.addEventListener('load', () => resolve(iframe), { once: true })
 
-    if (document.documentElement) attach()
-    else document.addEventListener('DOMContentLoaded', attach, { once: true })
+    // Скрипт работает на document_start: <html> уже разобран, <head> и <body> ещё нет,
+    // поэтому мост встаёт прямым ребёнком documentElement сразу. Ждать DOMContentLoaded
+    // нельзя — плеер успевает открыть MediaSource и набрать сегментов раньше.
+    document.documentElement.appendChild(iframe)
   })
 
   return bridgePromise

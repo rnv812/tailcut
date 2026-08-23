@@ -13,6 +13,15 @@
 <title>test player</title>
 <video id="v" controls width="640" style="background:#000"></video>
 <script>
+  // Мост обязан встать на document_start — раньше первого скрипта страницы.
+  window.bridgeAtScriptStart = !!document.querySelector('iframe[data-tailcut]')
+
+  // Рукопожатие мост шлёт в родительское окно; запоминаем origin отправителей.
+  window.bridgeReady = []
+  window.addEventListener('message', (e) => {
+    if (e.data && e.data.type === 'tc:ready') window.bridgeReady.push(e.origin)
+  })
+
   const INIT = '/fixtures/h264/init-stream0.m4s'
   const SEGMENTS = [
     '/fixtures/h264/chunk-stream0-00001.m4s',
