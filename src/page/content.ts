@@ -1,4 +1,4 @@
-import { BRIDGE_PATH, isPageToBridge } from '../shared/protocol'
+import { BRIDGE_PATH, isExtensionToTab, isPageToBridge } from '../shared/protocol'
 import { markDrmSeen, registerSource, startWatching } from './watcher'
 
 let bridgePromise: Promise<HTMLIFrameElement> | null = null
@@ -61,6 +61,23 @@ window.addEventListener('message', async (event: MessageEvent) => {
   } else {
     iframe.contentWindow?.postMessage(message, '*')
   }
+})
+
+// Попап и service worker адресуются content script'у: до фрейма моста сообщение расширения
+// само не доходит, а реестр сессий живёт именно там. Ответ мост присылает в порт
+// MessageChannel — тем же каналом, каким на tc:list отвечает странице.
+chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+  if (!isExtensionToTab(message)) return false
+
+  ensureBridge().then((iframe) => {
+    const channel = new MessageChannel()
+    channel.port1.onmessage = (event: MessageEvent) => sendResponse(event.data)
+    iframe.contentWindow?.postMessage(message, '*', [channel.port2])
+  })
+
+  // true держит канал ответа открытым: мост отвечает не сразу, а закрывшийся канал отдал бы
+  // спросившему undefined ещё до того, как мост увидел запрос.
+  return true
 })
 
 // Хук в MAIN world копирует байты всегда: про DOM он не знает и знать не должен, а разбор

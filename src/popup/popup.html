@@ -1,5 +1,20 @@
 <!doctype html>
 <meta charset="utf-8" />
 <title>tailcut</title>
-<body style="margin:0;width:340px"></body>
+<style>
+  /* Высота задана снизу: без неё попап открывается полоской «Loading…» и подпрыгивает,
+     когда приходит ответ вкладки. */
+  body { margin: 0; width: 340px; min-height: 118px; background: #15171a; color: #e8eaed;
+         font: 13px/1.4 system-ui, sans-serif; }
+  .top { padding: 10px 12px; border-bottom: 1px solid #26292e; }
+  .pad { padding: 12px; }
+  .muted { color: #9aa0a6; font-size: 11px; }
+  .title { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .host { margin-top: 2px; }
+  .meta { display: flex; gap: 10px; align-items: baseline; margin: 8px 0 12px; }
+  .primary { width: 100%; padding: 8px 0; border: 0; border-radius: 7px;
+             background: #4c8dff; color: #0b0d10; font-weight: 600; font-size: 12px;
+             cursor: pointer; }
+</style>
+<body></body>
 <script type="module" src="popup.js"></script>

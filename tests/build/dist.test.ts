@@ -150,6 +150,7 @@ const CONTENT_SCRIPT_WORLDS: Record<string, string> = {
  */
 const REQUIRED_PERMISSIONS: Record<string, string> = {
   activeTab: 'попап дотягивается до вкладки, на которой стоит пользователь',
+  alarms: 'бейдж пересчитывается и после того, как service worker уснул',
   downloads: 'готовый клип сохраняется файлом — то, ради чего расширение и существует',
   scripting: 'обёртки MSE регистрируются в MAIN world до скриптов страницы',
   storage: 'реестр сессий и правила доменов переживают смерть service worker',

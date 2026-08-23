@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { sessionKey } from '../../src/core/session-key'
 import type { BridgeToPage, SessionSummary } from '../../src/shared/protocol'
 
@@ -8,6 +9,24 @@ const seg1Bytes = new Uint8Array(readFileSync('tests/fixtures/h264/chunk-stream0
 const seg2Bytes = new Uint8Array(readFileSync('tests/fixtures/h264/chunk-stream0-00002.m4s'))
 /** Фрагмент через один после первого: вместе они дают буфер с разрывом посередине. */
 const seg3Bytes = new Uint8Array(readFileSync('tests/fixtures/h264/chunk-stream0-00003.m4s'))
+
+/**
+ * Звуковая дорожка той же фикстуры. Она нужна там, где прогоны должны получиться разной
+ * длины: у видеофрагментов длительность одинаковая, и прогон из одного такого фрагмента
+ * от прогона из другого не отличить.
+ */
+const audioInitBytes = new Uint8Array(readFileSync('tests/fixtures/h264/init-stream1.m4s'))
+/** Куски звука: 0…1.95, 1.95…3.95, 3.95…5.97, 5.97…6.02 секунды. */
+const audioBytes = [1, 2, 3, 4].map(
+  (n) => new Uint8Array(readFileSync(`tests/fixtures/h264/chunk-stream1-0000${n}.m4s`)),
+)
+
+/** Слепок байтов: сравнение целых буферов, не заваливающее вывод при расхождении. */
+function digest(...parts: Uint8Array[]): string {
+  const hash = createHash('sha256')
+  for (const part of parts) hash.update(part)
+  return hash.digest('hex')
+}
 
 /** Байты уходят мосту передачей, то есть отдельным ArrayBuffer, а не видом на фикстуру. */
 const buffer = (bytes: Uint8Array): ArrayBuffer => bytes.slice().buffer
@@ -30,6 +49,9 @@ const keyFor = (url: string, codecs: string[] = ['avc1']): string =>
  * реализацию.
  */
 type Post = { message: unknown; to: unknown }
+
+/** Заказ на скачивание в том виде, в каком мост передаёт его Chrome. */
+type Download = { url: string; filename: string }
 
 /** Окно-получатель: мост шлёт ему сообщения, тест смотрит, что именно дошло. */
 function receiver() {
@@ -123,6 +145,41 @@ function installWindow(referrer = REFERRER) {
   // о вставившей его странице до прихода tc:context.
   vi.stubGlobal('document', { referrer })
 
+  /** Начатые скачивания в том виде, в каком мост их заказывает Chrome. */
+  const downloads: Download[] = []
+  /** Блобы, на которые мост выдал адреса, и снятые адреса — по одному на скачивание. */
+  const blobs = new Map<string, Blob>()
+  const revoked: string[] = []
+  /** Идентификатор скачивания; undefined — Chrome отказал, как при запрете на запись. */
+  let downloadId: number | undefined = 1
+
+  // URL остаётся настоящим: его конструктор зовёт ключ сессии на каждом init-сегменте.
+  // Дописаны только статические методы блобов, которых в Node нет.
+  class TestURL extends URL {
+    static createObjectURL(blob: Blob): string {
+      const url = `blob:chrome-extension://tailcut/${blobs.size + 1}`
+      blobs.set(url, blob)
+      return url
+    }
+
+    static revokeObjectURL(url: string): void {
+      revoked.push(url)
+    }
+  }
+  vi.stubGlobal('URL', TestURL)
+
+  const runtime: { lastError?: { message: string } } = {}
+  vi.stubGlobal('chrome', {
+    runtime,
+    downloads: {
+      download(options: Download, done: (id?: number) => void) {
+        downloads.push(options)
+        runtime.lastError = downloadId === undefined ? { message: 'Download failed' } : undefined
+        done(downloadId)
+      },
+    },
+  })
+
   const deliver = (
     data: unknown,
     options: { from?: Receiver; ports?: ReturnType<typeof port>[] } = {},
@@ -157,6 +214,30 @@ function installWindow(referrer = REFERRER) {
     /** Сообщает мосту, на какой странице он стоит. */
     context(url = PAGE_URL, title = PAGE_TITLE): void {
       deliver({ type: 'tc:context', url, title })
+    },
+    /** Просит мост собрать сессию в файл — так это делает попап через content script. */
+    save(key: string): ReturnType<typeof port> {
+      const reply = port()
+      deliver({ type: 'tc:save', key }, { ports: [reply] })
+      return reply
+    },
+    downloads,
+    revoked,
+    /** Байты файла, которые мост отдал Chrome на скачивание. */
+    async savedBytes(index = 0): Promise<Uint8Array> {
+      const started = downloads[index]
+      expect(started, 'скачивание не начиналось').toBeDefined()
+      const blob = blobs.get(started!.url)
+      expect(blob, 'мост отдал Chrome адрес, за которым нет блоба').toBeDefined()
+      return new Uint8Array(await blob!.arrayBuffer())
+    },
+    /** Тип блоба, который мост отдал Chrome. */
+    savedType(index = 0): string | undefined {
+      return blobs.get(downloads[index]?.url ?? '')?.type
+    },
+    /** Chrome отказывает в скачивании: запрет на запись, нет места, отмена пользователем. */
+    failDownloads(): void {
+      downloadId = undefined
     },
   }
 }
@@ -504,5 +585,226 @@ describe('BridgeToPage описывает всё, что мост отправл
     const list: BridgeToPage = win.list()
 
     expect([variantOf(handshake), variantOf(list)]).toEqual(['tc:ready', 'сводки сессий'])
+  })
+})
+
+describe('мост сохраняет накопленное файлом', () => {
+  /** Ключ звуковой сессии: у неё прогоны получаются разной длины. */
+  const audioKey = keyFor(PAGE_URL, ['mp4a'])
+
+  /** Набирает звуковую сессию из перечисленных кусков; пропущенный кусок даёт разрыв. */
+  async function withAudio(...indexes: number[]) {
+    const win = await loadBridge()
+    win.context()
+    win.append(audioInitBytes)
+    for (const index of indexes) win.append(audioBytes[index]!)
+    return win
+  }
+
+  it('отдаёт Chrome init и самый длинный прогон, а не первый попавшийся', async () => {
+    // Прогоны 0…1.95 и 3.95…6.02: длиннее второй.
+    const win = await withAudio(0, 2, 3)
+
+    win.save(audioKey)
+
+    expect(digest(await win.savedBytes())).toBe(
+      digest(audioInitBytes, audioBytes[2]!, audioBytes[3]!),
+    )
+  })
+
+  it('длинный прогон берётся и когда он не последний', async () => {
+    // Прогоны 0…3.95 и 5.97…6.02: длиннее первый. Хвост в полсекунды — обычное дело:
+    // плеер догрузил кусочек после перемотки и остановился.
+    const win = await withAudio(0, 1, 3)
+
+    win.save(audioKey)
+
+    expect(digest(await win.savedBytes())).toBe(
+      digest(audioInitBytes, audioBytes[0]!, audioBytes[1]!),
+    )
+  })
+
+  it('файл заявлен видео, а не потоком байтов', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+
+    win.save(keyFor(PAGE_URL))
+
+    // По типу блоба Chrome выбирает, чем открыть скачанное; application/octet-stream
+    // отправил бы клип в «неизвестный файл».
+    expect(win.savedType()).toBe('video/mp4')
+  })
+
+  it('имя файла — заголовок страницы с расширением mp4', async () => {
+    const win = await loadBridge()
+    win.context(PAGE_URL, 'Ночной эфир')
+    win.append(initBytes)
+    win.append(seg1Bytes)
+
+    win.save(keyFor(PAGE_URL))
+
+    // Заголовок не латиницей — не повод отдать пользователю файл из подчёркиваний.
+    expect(win.downloads.map((item) => item.filename)).toEqual(['Ночной эфир.mp4'])
+  })
+
+  it('в имени файла не остаётся запрещённых знаков', async () => {
+    const win = await loadBridge()
+    win.context(PAGE_URL, 'A/B: "C" <D> | E?')
+    win.append(initBytes)
+    win.append(seg1Bytes)
+
+    win.save(keyFor(PAGE_URL))
+
+    // Косая черта увела бы файл в подкаталог, двоеточие и звёздочка запрещены Windows.
+    expect(win.downloads[0]!.filename).toBe('A B C D E.mp4')
+  })
+
+  it('заголовок из одних точек не превращается в скрытый файл', async () => {
+    const win = await loadBridge()
+    win.context(PAGE_URL, '../../.bashrc')
+    win.append(initBytes)
+    win.append(seg1Bytes)
+
+    win.save(keyFor(PAGE_URL))
+
+    // Заголовок задаёт страница, и через имя файла он ведёт прямо в файловую систему:
+    // точки с краёв Chrome читает как путь наверх и скачивание отклоняет целиком.
+    const filename = win.downloads[0]!.filename
+    expect(filename.startsWith('.'), `имя файла начинается с точки: ${filename}`).toBe(false)
+    expect(filename).not.toContain('..')
+  })
+
+  it('страница без заголовка сохраняется под именем расширения', async () => {
+    const win = await loadBridge()
+    win.context(PAGE_URL, '   ')
+    win.append(initBytes)
+    win.append(seg1Bytes)
+
+    win.save(keyFor(PAGE_URL))
+
+    expect(win.downloads[0]!.filename).toBe('tailcut.mp4')
+  })
+
+  it('длинный заголовок обрезается до имени, которое примет файловая система', async () => {
+    const win = await loadBridge()
+    win.context(PAGE_URL, 'ц'.repeat(300))
+    win.append(initBytes)
+    win.append(seg1Bytes)
+
+    win.save(keyFor(PAGE_URL))
+
+    expect(win.downloads[0]!.filename.length).toBeLessThanOrEqual(104)
+    expect(win.downloads[0]!.filename.endsWith('.mp4')).toBe(true)
+  })
+
+  it('о начатом скачивании мост отчитывается в порт запроса', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+
+    const reply = win.save(keyFor(PAGE_URL))
+
+    expect(reply.received).toEqual([{ ok: true }])
+  })
+
+  it('незнакомый ключ — отказ, а не попытка скачать пустоту', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+
+    // Страницу успели перезагрузить, пока попап был открыт: его ключ указывает в пустоту.
+    const reply = win.save('нет такой сессии')
+
+    expect(reply.received).toEqual([{ ok: false }])
+    expect(win.downloads, 'мост начал скачивание несуществующей сессии').toEqual([])
+  })
+
+  it('сессия из одного init-сегмента — отказ, а не файл без единого кадра', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+
+    // Плеер открыл поток и ничего не догрузил: прогонов в карте нет. Самый длинный из них
+    // взять неоткуда, и файл вышел бы из одного заголовка.
+    const reply = win.save(keyFor(PAGE_URL))
+
+    expect(reply.received).toEqual([{ ok: false }])
+    expect(win.downloads).toEqual([])
+  })
+
+  it('отказ Chrome доезжает до попапа отказом', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+    win.failDownloads()
+
+    // Нет места на диске, запрет на запись в каталог загрузок, отмена пользователем.
+    const reply = win.save(keyFor(PAGE_URL))
+
+    expect(reply.received).toEqual([{ ok: false }])
+  })
+
+  it('адрес блоба живёт, пока Chrome читает файл, и снимается потом', async () => {
+    vi.useFakeTimers()
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+
+    win.save(keyFor(PAGE_URL))
+
+    // Снятый сразу адрес обрывает уже начатое скачивание: Chrome читает блоб не мгновенно.
+    vi.advanceTimersByTime(59_000)
+    expect(win.revoked, 'адрес блоба снят, пока Chrome ещё читает файл').toEqual([])
+
+    vi.advanceTimersByTime(1_000)
+    // А не снятый вовсе держит собранный файл в памяти фрейма до конца жизни страницы.
+    expect(win.revoked, 'адрес блоба не снят: файл остался висеть в памяти').toEqual([
+      win.downloads[0]!.url,
+    ])
+  })
+
+  it('после отказа адрес блоба снимается сразу', async () => {
+    vi.useFakeTimers()
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+    win.failDownloads()
+
+    win.save(keyFor(PAGE_URL))
+    vi.advanceTimersByTime(0)
+
+    // Скачивания не будет, читать блоб некому — держать его минуту незачем.
+    expect(win.revoked).toEqual([win.downloads[0]!.url])
+  })
+
+  it('запрос сохранения без канала для ответа не роняет мост', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+
+    expect(() => win.deliver({ type: 'tc:save', key: keyFor(PAGE_URL) })).not.toThrow()
+    expect(win.downloads, 'скачивание не началось').toHaveLength(1)
+  })
+
+  it('ответ на tc:save уходит только в канал, а не в окно-отправитель', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+
+    const reply = port()
+    const sender = win.deliver({ type: 'tc:save', key: keyFor(PAGE_URL) }, { ports: [reply] })
+
+    // Ответ в окно сказал бы любой странице, что у расширения на неё что-то записано.
+    expect(sender.posts, 'ответ на сохранение ушёл в окно страницы').toEqual([])
+    expect(reply.received).toEqual([{ ok: true }])
   })
 })

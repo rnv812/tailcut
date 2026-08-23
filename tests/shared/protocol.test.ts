@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { isPageToBridge, type BridgeToPage, type PageToBridge } from '../../src/shared/protocol'
+import {
+  isExtensionToTab,
+  isPageToBridge,
+  type BridgeToPage,
+  type ExtensionToTab,
+  type PageToBridge,
+} from '../../src/shared/protocol'
 
 const append: PageToBridge = {
   type: 'tc:append',
@@ -86,5 +92,45 @@ describe('isPageToBridge', () => {
     if (!isPageToBridge(value)) throw new Error('ожидался tc:append')
     if (value.type !== 'tc:append') throw new Error('ожидался tc:append')
     expect(value.bytes.byteLength).toBe(4)
+  })
+})
+
+/** Запросы попапа и service worker к content script вкладки. */
+const tabRequests: [string, ExtensionToTab][] = [
+  ['запрос списка', { type: 'tc:list' }],
+  ['запрос сохранения', { type: 'tc:save', key: 'https://site.example/watch|avc1|inf' }],
+]
+
+describe('isExtensionToTab', () => {
+  it.each(tabRequests)('пропускает %s', (_name, message) => {
+    expect(isExtensionToTab(message)).toBe(true)
+  })
+
+  // Content script слушает chrome.runtime.onMessage: туда приходит всё, что шлют попап и
+  // service worker, включая сообщения будущих этапов. Непонятное он обязан оставить другим
+  // слушателям, а не отвечать на него от имени моста.
+  it.each([
+    ['null', null],
+    ['undefined', undefined],
+    ['строку', 'tc:list'],
+    ['массив', [{ type: 'tc:list' }]],
+    ['объект без type', { key: 'k' }],
+    ['чужой type', { type: 'tc:ping' }],
+    ['сохранение без ключа', { type: 'tc:save' }],
+    ['сохранение с нестроковым ключом', { type: 'tc:save', key: 42 }],
+    // Сторона страницы: эти сообщения ходят через window.postMessage и до content script'а
+    // приезжают другим путём. Признай он их здесь — попап получил бы ответ на чужой запрос.
+    ['сообщение хука', { type: 'tc:append', sourceId: 's', bufferId: 'b', mime: 'video/mp4' }],
+    ['вердикт отбора', { type: 'tc:verdict', sourceId: 's', verdict: 'reject' }],
+    ['рукопожатие моста', { type: 'tc:ready' }],
+  ])('отбивает %s', (_name, value) => {
+    expect(isExtensionToTab(value)).toBe(false)
+  })
+
+  it('сужает тип до объединения ExtensionToTab', () => {
+    const value: unknown = { type: 'tc:save', key: 'k' }
+    if (!isExtensionToTab(value)) throw new Error('ожидался tc:save')
+    if (value.type !== 'tc:save') throw new Error('ожидался tc:save')
+    expect(value.key).toBe('k')
   })
 })

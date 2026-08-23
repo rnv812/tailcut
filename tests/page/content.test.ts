@@ -140,8 +140,19 @@ function installDom() {
       },
     },
   })
+  /** Слушатели chrome.runtime.onMessage: их зовёт попап и service worker, а не страница. */
+  const tabRequestListeners: Array<
+    (message: unknown, sender: unknown, sendResponse: (reply: unknown) => void) => boolean
+  > = []
+
   vi.stubGlobal('chrome', {
-    runtime: { getURL: (path: string) => `${EXTENSION_ORIGIN}/${path}` },
+    runtime: {
+      getURL: (path: string) => `${EXTENSION_ORIGIN}/${path}`,
+      onMessage: {
+        addListener: (listener: (typeof tabRequestListeners)[number]) =>
+          tabRequestListeners.push(listener),
+      },
+    },
   })
 
   return {
@@ -174,6 +185,24 @@ function installDom() {
           (post) => (post.message as { type?: unknown } | null)?.type !== 'tc:context',
         ),
       ),
+    /**
+     * Доставляет запрос расширения — так его присылает попап и service worker. Отдаёт то,
+     * что слушатель ответил синхронно (true держит канал ответа открытым), и накопленные
+     * ответы, ушедшие в sendResponse.
+     */
+    askTab: (message: unknown) => {
+      const answers: unknown[] = []
+      const kept = tabRequestListeners.map((listener) =>
+        listener(message, { id: EXTENSION_ORIGIN }, (reply) => answers.push(reply)),
+      )
+      return { answers, kept }
+    },
+    /** Порты, которые content script передал мосту вместе с запросами расширения. */
+    portsToBridge: (): MessagePort[] =>
+      created
+        .flatMap((element) => element.posted)
+        .flatMap((post) => (Array.isArray(post.transfer) ? post.transfer : []))
+        .filter((item): item is MessagePort => item instanceof MessagePort),
     /** Адреса, которые фреймы уже начали грузить и ещё не отработали. */
     pendingLoads: (): string[] => created.flatMap((element) => element.pending),
     /** Отрабатывает ближайшую навигацию: браузер шлёт load по каждой, about:blank включая. */
@@ -480,5 +509,97 @@ describe('вердикт отбора', () => {
       message: { type: 'tc:verdict', sourceId: 's1', verdict: 'reject' },
       transfer: undefined,
     })
+  })
+})
+
+describe('запросы попапа и service worker', () => {
+  /** Поднимает content script с уже загруженным мостом и отдаёт его окружение. */
+  async function withBridge() {
+    const dom = installDom()
+    await importContent()
+    dom.deliverLoad()
+    return dom
+  }
+
+  /** Отвечает за мост в тот порт, который content script ему передал. */
+  async function replyFromBridge(dom: ReturnType<typeof installDom>, reply: unknown) {
+    const [port] = dom.portsToBridge()
+    expect(port, 'content script не передал мосту канал для ответа').toBeDefined()
+    port!.postMessage(reply)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+
+  const summary = {
+    key: 'https://site.example/watch|avc1|inf',
+    url: PAGE_URL,
+    title: PAGE_TITLE,
+    duration: 6,
+    bytes: 1543,
+    runs: 1,
+  }
+
+  it('запрос списка уходит мосту вместе с каналом для ответа', async () => {
+    const dom = await withBridge()
+
+    const { kept } = dom.askTab({ type: 'tc:list' })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(dom.forwarded().map((post) => post.message)).toEqual([{ type: 'tc:list' }])
+    expect(dom.portsToBridge(), 'мосту не с чем ответить').toHaveLength(1)
+    // Канал ответа Chrome закрывает, как только слушатель вернул не true, — попап получил
+    // бы undefined ещё до того, как мост увидел запрос.
+    expect(kept, 'слушатель не удержал канал ответа').toEqual([true])
+  })
+
+  it('ответ моста доезжает до спросившего', async () => {
+    const dom = await withBridge()
+
+    const { answers } = dom.askTab({ type: 'tc:list' })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await replyFromBridge(dom, [summary])
+
+    expect(answers).toEqual([[summary]])
+  })
+
+  it('запрос сохранения уходит мосту тем же путём', async () => {
+    const dom = await withBridge()
+
+    const { answers, kept } = dom.askTab({ type: 'tc:save', key: summary.key })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await replyFromBridge(dom, { ok: true })
+
+    expect(dom.forwarded().map((post) => post.message)).toEqual([
+      { type: 'tc:save', key: summary.key },
+    ])
+    expect(kept).toEqual([true])
+    expect(answers).toEqual([{ ok: true }])
+  })
+
+  it('запрос, пришедший до загрузки моста, доходит до него после', async () => {
+    const dom = installDom()
+    await importContent()
+
+    // Попап открывают когда угодно, в том числе на странице, где мост ещё грузится.
+    const { kept } = dom.askTab({ type: 'tc:list' })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(dom.forwarded(), 'запрос ушёл в незагруженный фрейм').toEqual([])
+    expect(kept).toEqual([true])
+
+    dom.deliverLoad()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(dom.forwarded().map((post) => post.message)).toEqual([{ type: 'tc:list' }])
+  })
+
+  it('чужое сообщение расширения мосту не уходит и канал не держит', async () => {
+    const dom = await withBridge()
+
+    // Слушателей у chrome.runtime.onMessage несколько на всё расширение: удержи этот
+    // канал чужого запроса — ответ настоящего адресата уже никуда не уйдёт.
+    const { kept } = dom.askTab({ type: 'tc:ping' })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(kept).toEqual([false])
+    expect(dom.forwarded()).toEqual([])
   })
 })

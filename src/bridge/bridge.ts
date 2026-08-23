@@ -1,7 +1,23 @@
-import { isPageToBridge, type BridgeToPage, type SessionSummary } from '../shared/protocol'
+import {
+  isPageToBridge,
+  type BridgeToPage,
+  type SaveResult,
+  type SessionSummary,
+} from '../shared/protocol'
+import { assembleFragmentedMp4 } from '../core/assemble'
 import { SessionStore } from './session-store'
+import type { Run } from '../shared/types'
 
 const store = new SessionStore()
+
+/**
+ * Столько блоб живёт после начала скачивания. Chrome читает его не мгновенно, и адрес,
+ * снятый сразу после вызова, обрывает уже начатое скачивание на полпути.
+ */
+const REVOKE_DELAY_MS = 60_000
+
+/** Предел длины имени файла: у файловых систем он есть, и заголовок страницы бывает длиннее. */
+const MAX_NAME_LENGTH = 100
 
 interface PageContext {
   url: string
@@ -25,6 +41,34 @@ function summaries(): SessionSummary[] {
   }))
 }
 
+/** Самый длинный прогон: файлом уходит непрерывный кусок, а не склейка через разрывы. */
+function longestRun(runs: Run[]): Run | undefined {
+  let longest: Run | undefined
+  for (const run of runs) {
+    if (!longest || run.end - run.start > longest.end - longest.start) longest = run
+  }
+  return longest
+}
+
+/**
+ * Имя файла из заголовка страницы. Запрещённое в именах файлов вычищается, остальное остаётся
+ * как есть: заголовок на любом языке — не повод отдать пользователю файл из подчёркиваний.
+ */
+function fileNameFor(title: string): string {
+  const base = title
+    .replace(/[\\/:*?"<>|\u0000-\u001f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    // Имя, начатое точкой, Chrome считает скрытым файлом, а «..» — путём наверх. Точки
+    // с краёв снимаются после схлопывания пробелов: «../../.bashrc» иначе оставит их
+    // за первым же пробелом.
+    .replace(/^[.\s]+/, '')
+    .slice(0, MAX_NAME_LENGTH)
+    .replace(/[.\s]+$/, '')
+
+  return `${base || 'tailcut'}.mp4`
+}
+
 window.addEventListener('message', (event: MessageEvent) => {
   const data = event.data
 
@@ -40,6 +84,40 @@ window.addEventListener('message', (event: MessageEvent) => {
     // разошедшийся с BridgeToPage ответ обнаружился бы только у получателя.
     const reply: BridgeToPage = summaries()
     event.ports[0]?.postMessage(reply)
+    return
+  }
+
+  // Сборка идёт здесь, а не в попапе: байты лежат в этом фрейме, и гнать мегабайты
+  // сообщениями расширения значило бы копировать их дважды и через JSON.
+  if (data?.type === 'tc:save') {
+    const port = event.ports[0]
+    const session = store.get(String(data.key))
+    const run = session && longestRun(session.map.runs())
+
+    // Сессию мог вытеснить отбор, а страница — перезагрузиться, пока попап был открыт:
+    // ключ у попапа тогда указывает в пустоту. Сохранять нечего и у сессии из одного
+    // init-сегмента: прогонов в ней нет.
+    if (!session || !run) {
+      const empty: SaveResult = { ok: false }
+      port?.postMessage(empty)
+      return
+    }
+
+    // Blob принимает вид только над обычным ArrayBuffer, а Uint8Array по типу допускает и
+    // разделяемую память. Сборка выделяет буфер сама и разделяемым он не бывает.
+    const file = assembleFragmentedMp4(session.initBytes, run) as Uint8Array<ArrayBuffer>
+    const url = URL.createObjectURL(new Blob([file], { type: 'video/mp4' }))
+
+    chrome.downloads.download({ url, filename: fileNameFor(session.title) }, (downloadId) => {
+      const failed = downloadId === undefined
+      // Отказ надо прочитать, иначе Chrome пишет о нём в консоль сам.
+      if (failed) void chrome.runtime.lastError
+
+      setTimeout(() => URL.revokeObjectURL(url), failed ? 0 : REVOKE_DELAY_MS)
+
+      const result: SaveResult = { ok: !failed }
+      port?.postMessage(result)
+    })
     return
   }
 

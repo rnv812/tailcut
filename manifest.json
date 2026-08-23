@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "minimum_chrome_version": "120",
   "description": "Clip already-buffered video from any site and save it as MP4",
-  "permissions": ["storage", "downloads", "activeTab", "scripting"],
+  "permissions": ["storage", "downloads", "activeTab", "scripting", "alarms"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "sw/service-worker.js", "type": "module" },
   "action": { "default_popup": "popup/popup.html", "default_title": "tailcut" },
