@@ -317,6 +317,35 @@ describe('битые размеры', () => {
     expect(childBoxes(buf, parent)).toEqual([])
   })
 
+  it('не отдаёт бокс, которому не хватает ровно одного байта', () => {
+    // объявлено 16 байт, доступно 15 — тело неполно ровно на байт. Тело либо
+    // целиком в диапазоне, либо бокса нет: допуск «почти влезает» отдал бы
+    // бокс, чей последний байт лежит уже за границей разбираемых данных
+    const buf = concat(u32(16), ascii('mdat'), ascii('1234567'))
+    expect(buf.byteLength).toBe(15)
+    expect(topLevelBoxes(buf)).toEqual([])
+
+    // стоит дописать недостающий байт — и тот же бокс разбирается целиком
+    const full = concat(buf, ascii('8'))
+    expect(full.byteLength).toBe(16)
+    expect(topLevelBoxes(full)).toEqual([
+      { type: 'mdat', start: 0, size: 16, headerSize: 8 },
+    ])
+    expect(text(boxBody(full, topLevelBoxes(full)[0]!))).toBe('12345678')
+  })
+
+  it('не отдаёт потомка, которому не хватает ровно одного байта до конца родителя', () => {
+    // traf объявляет 17 байт, внутри moof доступно 16. Недостающий байт в
+    // буфере есть — он лежит сразу за родителем, но принадлежит уже не ему
+    const traf = concat(u32(17), ascii('traf'), ascii('abcdefgh'))
+    const moof = concat(u32(8 + traf.byteLength), ascii('moof'), traf)
+    const buf = concat(moof, u32(8), ascii('free'))
+    const parent = topLevelBoxes(buf)[0]!
+    expect(parent).toEqual({ type: 'moof', start: 0, size: 24, headerSize: 8 })
+    expect(parent.start + parent.headerSize + 17).toBeLessThanOrEqual(buf.byteLength)
+    expect(childBoxes(buf, parent)).toEqual([])
+  })
+
   it('не отдаёт бокс, размер которого меньше заголовка', () => {
     const buf = concat(u32(4), ascii('mdat'), u32(8), ascii('free'))
     expect(topLevelBoxes(buf)).toEqual([])
@@ -349,6 +378,45 @@ describe('контейнер с 64-битным заголовком', () => {
   })
 })
 
+describe('одноимённые боксы на одном уровне', () => {
+  it('findBox отдаёт первый из одноимённых потомков', () => {
+    const first = concat(u32(16), ascii('trak'), ascii('FIRST!!!'))
+    const second = concat(u32(24), ascii('trak'), ascii('SECOND!!SECOND!!'))
+    const buf = concat(
+      u32(8 + first.byteLength + second.byteLength), ascii('moov'), first, second,
+    )
+
+    const children = childBoxes(buf, topLevelBoxes(buf)[0]!)
+    expect(children).toEqual([
+      { type: 'trak', start: 8, size: 16, headerSize: 8 },
+      { type: 'trak', start: 24, size: 24, headerSize: 8 },
+    ])
+
+    // спор одноимённых потомков разрешает порядок: берётся первый по буферу
+    const found = findBox(buf, ['moov', 'trak'])!
+    expect(found).toEqual(children[0])
+    expect(text(boxBody(buf, found))).toBe('FIRST!!!')
+  })
+
+  it('findBox спускается в первый из одноимённых верхнеуровневых боксов', () => {
+    const moofWith = (payload: string): Uint8Array =>
+      concat(u32(24), ascii('moof'), u32(16), ascii('traf'), ascii(payload))
+    const buf = concat(moofWith('FIRST!!!'), moofWith('SECOND!!'))
+
+    const top = topLevelBoxes(buf)
+    expect(top).toEqual([
+      { type: 'moof', start: 0, size: 24, headerSize: 8 },
+      { type: 'moof', start: 24, size: 24, headerSize: 8 },
+    ])
+
+    expect(findBox(buf, ['moof'])).toEqual(top[0])
+    // и путь дальше идёт внутрь первого, а не последнего
+    const traf = findBox(buf, ['moof', 'traf'])!
+    expect(traf).toEqual({ type: 'traf', start: 8, size: 16, headerSize: 8 })
+    expect(text(boxBody(buf, traf))).toBe('FIRST!!!')
+  })
+})
+
 describe('срез с ненулевым byteOffset', () => {
   // moof лежит не в начале подлежащего ArrayBuffer: перед ним — правдоподобный
   // мусор, который сам читается как пара боксов. Смещения обязаны отсчитываться
@@ -378,6 +446,28 @@ describe('срез с ненулевым byteOffset', () => {
     expect(childBoxes(slice, parent)).toEqual([
       { type: 'traf', start: 8, size: 16, headerSize: 8 },
     ])
+  })
+
+  it('не заглядывает за конец среза, за которым в буфере остался хвост', () => {
+    // вид, какой приходит из appendBuffer: окно посреди большого буфера,
+    // байты есть и до него, и после. Граница обхода — конец самого вида;
+    // взятая по остатку буфера, она увела бы разбор в чужие байты за срезом
+    const tail = concat(u32(16), ascii('mdat'), ascii('TAILTAIL'))
+    const whole = concat(junk, standalone, tail)
+    const middle = whole.subarray(junk.byteLength, junk.byteLength + standalone.byteLength)
+
+    expect(middle.byteOffset).toBe(junk.byteLength)
+    expect(middle.byteOffset).toBeGreaterThan(0)
+    expect(middle.byteOffset + middle.byteLength).toBeLessThan(middle.buffer.byteLength)
+    expect([...middle]).toEqual([...standalone])
+
+    expect(topLevelBoxes(middle)).toEqual(topLevelBoxes(standalone))
+    expect(topLevelBoxes(middle)).toEqual([
+      { type: 'moof', start: 0, size: 24, headerSize: 8 },
+      { type: 'free', start: 24, size: 8, headerSize: 8 },
+    ])
+    // хвостовой mdat лежит за окном и в разбор попасть не должен
+    expect(topLevelBoxes(middle).map((b) => b.type)).not.toContain('mdat')
   })
 
   it('тело контейнера из boxBody разбирается как самостоятельный буфер', () => {
