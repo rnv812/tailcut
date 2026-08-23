@@ -5,6 +5,8 @@
     "moduleResolution": "bundler",
     "strict": true,
     "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "jsx": "react-jsx",
     "jsxImportSource": "preact",
     "types": ["chrome", "node", "vitest/globals"],
