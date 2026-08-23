@@ -7,6 +7,8 @@ import {
   type Session,
 } from '../../src/bridge/session-store'
 import { sessionKey } from '../../src/core/session-key'
+import { parseInit } from '../../src/core/iso/init'
+import { parseFragment } from '../../src/core/iso/fragment'
 import type { Chunk } from '../../src/shared/types'
 
 const init = new Uint8Array(readFileSync('tests/fixtures/h264/init-stream0.m4s'))
@@ -19,6 +21,18 @@ const vp9Init = new Uint8Array(readFileSync('tests/fixtures/vp9/init-stream0.m4s
 const vp9Seg = new Uint8Array(readFileSync('tests/fixtures/vp9/chunk-stream0-00001.m4s'))
 /** Second segment of the vp9 fixture: 2…4 seconds, the same timescale of 12288. */
 const vp9Seg2 = new Uint8Array(readFileSync('tests/fixtures/vp9/chunk-stream0-00002.m4s'))
+
+/**
+ * The same clip delivered in the other container: an Opus track in WebM, which is what a real
+ * site serves its sound as. Four media segments running 0…6.001 seconds.
+ */
+const webmAudioInit = new Uint8Array(readFileSync('tests/fixtures/webm/init-stream1.webm'))
+const webmAudioSegs = [1, 2, 3, 4].map(
+  (n) => new Uint8Array(readFileSync(`tests/fixtures/webm/chunk-stream1-0000${n}.webm`)),
+)
+/** A WebM video track: the case the ingest boundary refuses rather than half-supports. */
+const webmVideoInit = new Uint8Array(readFileSync('tests/fixtures/webm/init-stream0.webm'))
+const webmVideoSeg = new Uint8Array(readFileSync('tests/fixtures/webm/chunk-stream0-00001.webm'))
 
 /** Video track of the h264 fixture: timescale 12288, three segments of two seconds each. */
 const videoSegs = [1, 2, 3].map(
@@ -1037,5 +1051,124 @@ describe('selectMaterial', () => {
     store.append({ ...videoBuffer, bytes: init })
 
     expect(chosen(store)).toEqual([])
+  })
+})
+
+describe('SessionStore: a track that did not arrive in mp4', () => {
+  const videoBuffer = { ...page, bufferId: 'b1' }
+  const audioBuffer = { ...page, bufferId: 'b2' }
+
+  /** The picture in mp4 and the sound in WebM, appended the way a player appends them. */
+  function feedMixedContainers(store: SessionStore): void {
+    store.append({ ...videoBuffer, bytes: init })
+    store.append({ ...audioBuffer, bytes: webmAudioInit })
+    for (let i = 0; i < 4; i++) {
+      const video = videoSegs[i]
+      const audio = webmAudioSegs[i]
+      if (video) store.append({ ...videoBuffer, bytes: video })
+      if (audio) store.append({ ...audioBuffer, bytes: audio })
+    }
+  }
+
+  it('lands both containers in one session and on one timeline', () => {
+    const store = new SessionStore()
+    feedMixedContainers(store)
+
+    expect(store.list()).toHaveLength(1)
+    expect(store.list()[0]!.tracks.map((t) => t.kinds)).toEqual([['video'], ['audio']])
+  })
+
+  it('lays the WebM segments out in seconds, as it lays out the mp4 ones', () => {
+    const store = new SessionStore()
+    feedMixedContainers(store)
+
+    const [video, audio] = store.list()[0]!.tracks
+    expect(video!.map.runs().map((r) => [r.start, r.end])).toEqual([[0, 6]])
+    // Matroska counts in milliseconds and the track is written at 48 kHz; either way the map
+    // holds seconds, and the four segments make one unbroken run.
+    expect(audio!.map.runs()).toHaveLength(1)
+    expect(audio!.map.runs()[0]!.start).toBe(0)
+    expect(audio!.map.runs()[0]!.end).toBeCloseTo(6.001, 6)
+  })
+
+  it('keeps the WebM track as ISO BMFF, not as the bytes the page appended', () => {
+    const store = new SessionStore()
+    feedMixedContainers(store)
+
+    const audio = store.list()[0]!.tracks[1]!
+    expect(audio.initBytes).not.toEqual(webmAudioInit)
+    // An mp4 init opens with an ftyp; the WebM one opens with the EBML magic.
+    expect([...audio.initBytes.subarray(4, 8)]).toEqual([...Uint8Array.from('ftyp', (c) => c.charCodeAt(0))])
+    expect(parseInit(audio.initBytes)!.tracks[0]!.codec).toBe('Opus')
+
+    for (const chunk of audio.map.runs()[0]!.chunks) {
+      expect(parseFragment(chunk.bytes)).not.toBeNull()
+      expect(webmAudioSegs).not.toContain(chunk.bytes)
+    }
+  })
+
+  it('identifies the track by the codec the page declared, not by the one it writes', () => {
+    const store = new SessionStore()
+    feedMixedContainers(store)
+
+    // The session key is built out of these names, and it is the page's stream being identified.
+    expect(codecsOf(store.list()[0]!)).toEqual(['A_OPUS', 'avc1'])
+  })
+
+  it('reports the stretch where both containers have material at once', () => {
+    const store = new SessionStore()
+    feedMixedContainers(store)
+
+    const { duration, runs } = summarize(store.list()[0]!)
+    // Picture 0…6, sound 0…6.001: six seconds is what a clip can be cut out of.
+    expect(duration).toBeCloseTo(6, 6)
+    expect(runs).toBe(1)
+  })
+
+  it('hands both tracks to the muxer with the init each of them is written under', () => {
+    const store = new SessionStore()
+    feedMixedContainers(store)
+
+    const material = selectMaterial(store.list()[0]!)
+    expect(material).toHaveLength(2)
+    expect(material[0]!.segments).toEqual(videoSegs)
+    expect(material[1]!.segments).toHaveLength(4)
+    // Everything handed over is ISO BMFF, whichever container it arrived in.
+    for (const track of material) {
+      expect(parseInit(track.initBytes)).not.toBeNull()
+      for (const segment of track.segments) expect(parseFragment(segment)).not.toBeNull()
+    }
+  })
+
+  it('opens no track for a WebM stream in a codec it cannot write', () => {
+    const store = new SessionStore()
+    store.append({ ...videoBuffer, bytes: webmVideoInit })
+    store.append({ ...videoBuffer, bytes: webmVideoSeg })
+
+    // Opening one would collect segments no file could hold and promise a picture in the popup
+    // that the saved clip would not have.
+    expect(store.list()).toEqual([])
+  })
+
+  it('keeps the sound when the picture arrives in a container it cannot write', () => {
+    const store = new SessionStore()
+    store.append({ ...videoBuffer, bytes: webmVideoInit })
+    store.append({ ...audioBuffer, bytes: webmAudioInit })
+    store.append({ ...videoBuffer, bytes: webmVideoSeg })
+    for (const bytes of webmAudioSegs) store.append({ ...audioBuffer, bytes })
+
+    const session = store.list()[0]!
+    expect(session.tracks.map((t) => t.kinds)).toEqual([['audio']])
+    expect(summarize(session).duration).toBeCloseTo(6.001, 6)
+  })
+
+  it('drops a WebM segment that reaches the wrong buffer instead of guessing at it', () => {
+    const store = new SessionStore()
+    store.append({ ...videoBuffer, bytes: init })
+    store.append({ ...audioBuffer, bytes: webmAudioInit })
+    // The sound of the page, appended to the buffer the picture goes to.
+    store.append({ ...videoBuffer, bytes: webmAudioSegs[0]! })
+
+    expect(store.list()[0]!.tracks[0]!.map.runs()).toEqual([])
   })
 })

@@ -30,3 +30,65 @@ export function boxOf(type: string, ...parts: Uint8Array[]): Uint8Array {
 
   return concatBytes([header, ...parts])
 }
+
+/**
+ * Big-endian integers of a fixed width — the only kind an ISO BMFF box is written out of.
+ *
+ * Several values at once because that is how the fields of a box come: an mvhd states four
+ * consecutive 32-bit numbers, and writing them one call each would bury the shape of the box
+ * under the calls.
+ */
+export function u8(...values: number[]): Uint8Array {
+  return Uint8Array.from(values, (value) => value & 0xff)
+}
+
+export function u16(...values: number[]): Uint8Array {
+  const out = new Uint8Array(values.length * 2)
+  const view = new DataView(out.buffer)
+  for (const [i, value] of values.entries()) view.setUint16(i * 2, value & 0xffff)
+  return out
+}
+
+export function i16(...values: number[]): Uint8Array {
+  const out = new Uint8Array(values.length * 2)
+  const view = new DataView(out.buffer)
+  for (const [i, value] of values.entries()) view.setInt16(i * 2, value)
+  return out
+}
+
+export function u32(...values: number[]): Uint8Array {
+  const out = new Uint8Array(values.length * 4)
+  const view = new DataView(out.buffer)
+  for (const [i, value] of values.entries()) view.setUint32(i * 4, value)
+  return out
+}
+
+/** A 64-bit field: the decode times of a long recording outgrow four bytes. */
+export function u64(value: number): Uint8Array {
+  const out = new Uint8Array(8)
+  new DataView(out.buffer).setBigUint64(0, BigInt(Math.max(0, Math.trunc(value))))
+  return out
+}
+
+/** A run of zero bytes: the reserved fields boxes are full of. */
+export function zeroes(count: number): Uint8Array {
+  return new Uint8Array(count)
+}
+
+/** Four-letter codes and box names — ASCII by specification, one byte a character. */
+export function ascii(text: string): Uint8Array {
+  return Uint8Array.from(text, (character) => character.charCodeAt(0) & 0xff)
+}
+
+/**
+ * A full box: an ordinary box whose body opens with one byte of version and three of flags.
+ * Written as one 32-bit field, which is how every reader of them takes it apart again.
+ */
+export function fullBoxOf(
+  type: string,
+  version: number,
+  flags: number,
+  ...parts: Uint8Array[]
+): Uint8Array {
+  return boxOf(type, u32(((version & 0xff) << 24) | (flags & 0x00ffffff)), ...parts)
+}

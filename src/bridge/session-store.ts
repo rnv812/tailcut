@@ -1,5 +1,5 @@
-import { parseInit } from '../core/iso/init'
 import { parseFragment } from '../core/iso/fragment'
+import { ingestInit, type IngestedInit, type SegmentConverter } from '../core/container'
 import { continuesRun, PtsMap } from '../core/timeline/map'
 import { normalizeUrl, sessionKey } from '../core/session-key'
 import type { MuxTrack } from '../core/mux'
@@ -22,9 +22,16 @@ export interface Track {
   representation: string
   /** Media kinds this buffer carries: one of them normally, both for a muxed init. */
   kinds: TrackKind[]
+  /** ftyp and moov of the track, in ISO BMFF whatever container the page delivered it in. */
   initBytes: Uint8Array
   info: InitInfo
   map: PtsMap
+  /**
+   * Set on a track that did not arrive in ISO BMFF: turns each of its media segments into one.
+   * Handed over by ingestInit, which is the one place a second container is spoken of. Absent on
+   * an mp4 track, whose segments are already what a file is built of.
+   */
+  convert?: SegmentConverter
 }
 
 /**
@@ -266,6 +273,46 @@ export function selectMaterial(session: Session): MuxTrack[] {
   }))
 }
 
+/**
+ * A chunk out of an ISO BMFF media segment. The bytes travel on as they arrived: a captured
+ * segment is already what a saved file is assembled from.
+ */
+function isoChunk(track: Track, bytes: Uint8Array): Chunk | null {
+  const fragment = parseFragment(bytes)
+  if (!fragment) return null
+
+  // Tracks inside a moof are marked with the trackId from the init; on a single-track stream
+  // players occasionally put something of their own there, hence the fallback to the first
+  // track of this very buffer. The choice is made among the tracks of the buffer the bytes came
+  // from, so the timescale is always the one these ticks were counted in.
+  const declared =
+    track.info.tracks.find((t) => t.trackId === fragment.trackId) ?? track.info.tracks[0]
+  if (!declared) return null
+
+  // Ticks are turned into seconds by dividing by the timescale, and a broken init sometimes has
+  // it at zero. Substituting one for the zero would invent times (ticks would go into seconds
+  // one to one), and counting as is would put a chunk with NaN boundaries on the map: it counts
+  // as neither empty nor overlapping, and the NaN would spread from there across the whole
+  // popup summary. Such a fragment has no time at all.
+  if (!(declared.timescale > 0)) return null
+
+  const start = fragment.baseMediaDecodeTime / declared.timescale
+  return { start, end: start + fragment.duration / declared.timescale, bytes }
+}
+
+/**
+ * A chunk out of a segment in another container: rewritten as ISO BMFF on the way in, and it is
+ * the rewriting that carries the times — the converter has already worked out, in seconds, where
+ * the fragment it wrote begins and ends. What lands on the map is the converted bytes; the ones
+ * the page appended are of no further use to anybody and are not kept.
+ */
+function convertedChunk(convert: SegmentConverter, bytes: Uint8Array): Chunk | null {
+  const converted = convert(bytes)
+  if (!converted) return null
+
+  return { start: converted.start, end: converted.end, bytes: converted.bytes }
+}
+
 export class SessionStore {
   private sessions = new Map<string, StoredSession>()
   /** What each MediaSource of the page feeds, and where. */
@@ -284,44 +331,27 @@ export class SessionStore {
     // its first segment would open a session right after it.
     if (this.rejected.has(input.sourceId)) return
 
-    const info = parseInit(input.bytes)
+    const opened = ingestInit(input.bytes)
 
-    if (info) {
-      this.openTrack(input, info)
+    if (opened) {
+      this.openTrack(input, opened)
       return
     }
 
-    const fragment = parseFragment(input.bytes)
-    if (!fragment) return
-
+    // Not an init, so a media segment — and which container it is written in was settled when the
+    // init of its buffer arrived. The track is found first and the bytes read second, through
+    // whichever reading its own buffer was opened with.
+    //
     // A fragment before its init is a normal thing: the page may have started playing before the
     // bridge stood up. There is nowhere to put it, and that is not an error.
     const found = this.locate(input)
     if (!found) return
 
     const { session, track } = found
-
-    // Tracks inside a moof are marked with the trackId from the init; on a single-track stream
-    // players occasionally put something of their own there, hence the fallback to the first
-    // track of this very buffer. The choice is made among the tracks of the buffer the bytes came
-    // from, so the timescale is always the one these ticks were counted in.
-    const declared =
-      track.info.tracks.find((t) => t.trackId === fragment.trackId) ?? track.info.tracks[0]
-    if (!declared) return
-
-    // Ticks are turned into seconds by dividing by the timescale, and a broken init sometimes has
-    // it at zero. Substituting one for the zero would invent times (ticks would go into seconds
-    // one to one), and counting as is would put a chunk with NaN boundaries on the map: it counts
-    // as neither empty nor overlapping, and the NaN would spread from there across the whole
-    // popup summary. Such a fragment has no time at all.
-    if (!(declared.timescale > 0)) return
-
-    const start = fragment.baseMediaDecodeTime / declared.timescale
-    const chunk: Chunk = {
-      start,
-      end: start + fragment.duration / declared.timescale,
-      bytes: input.bytes,
-    }
+    const chunk = track.convert
+      ? convertedChunk(track.convert, input.bytes)
+      : isoChunk(track, input.bytes)
+    if (!chunk) return
 
     // The map is per buffer, so the deduplication rule of PtsMap ("the same start means the same
     // piece") compares only segments of one stream, as it was meant to. Inside one buffer two
@@ -391,7 +421,8 @@ export class SessionStore {
    * source adds a track to its session instead of opening a session of its own — video and audio
    * of one video arrive in two SourceBuffers and are one session with two tracks.
    */
-  private openTrack(input: AppendInput, info: InitInfo): void {
+  private openTrack(input: AppendInput, opened: IngestedInit): void {
+    const { info } = opened
     const source = this.sourceState(input.sourceId)
     const url = normalizeUrl(input.url)
 
@@ -424,9 +455,10 @@ export class SessionStore {
       bufferId: input.bufferId,
       representation,
       kinds: kindsOf(info),
-      initBytes: input.bytes,
+      initBytes: opened.initBytes,
       info,
       map: new PtsMap(),
+      convert: opened.convert ?? undefined,
     })
   }
 

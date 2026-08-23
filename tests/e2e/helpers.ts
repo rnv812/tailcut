@@ -164,3 +164,85 @@ export function frameTimes(file: string, stream: 'v' | 'a'): number[] {
     .filter((time) => Number.isFinite(time))
     .sort((a, b) => a - b)
 }
+
+/**
+ * Decodes every frame of every stream of a file and throws the result away.
+ *
+ * ffprobe reads a file; this one plays it through. A track whose samples are described wrongly
+ * gets past the headers and past a frame count, and only a decoder run over the whole thing
+ * turns it into words on stderr — which is why the empty stderr is the assertion here.
+ */
+export function decodeFile(file: string): void {
+  const run = spawnSync('ffmpeg', ['-v', 'warning', '-i', file, '-f', 'null', '-'], {
+    encoding: 'utf8',
+  })
+
+  expect(run.error).toBeUndefined()
+  expect(run.status, run.stderr).toBe(0)
+  expect(run.stderr, 'decoding the saved file produces warnings').toBe('')
+}
+
+const PLAYBACK_ORIGIN = 'https://tailcut.test'
+const PLAYBACK_URL = `${PLAYBACK_ORIGIN}/playback`
+
+/** Long enough for a clip of a few seconds to run through in real time, and no longer. */
+const PLAYBACK_TIMEOUT_MS = 60_000
+
+/** What a browser made of a saved file: see tests/e2e/page/playback.html. */
+export interface Playback {
+  error: string | null
+  ended: boolean
+  reached: number
+  duration: number
+  audioBytes: number
+  videoBytes: number
+  audioTracks: number | null
+}
+
+/**
+ * Plays a saved file through to the end in a browser and reports what happened.
+ *
+ * A browser of its own, without the extension: what is under test is the file, and nothing the
+ * extension does while a finished clip is being played would belong in the answer. The flag turns
+ * on the track lists — `HTMLMediaElement.audioTracks` is behind it in Chromium, and without it a
+ * page has no way of saying how many audio tracks a file was found to have.
+ */
+export async function playInBrowser(file: string): Promise<Playback> {
+  const browser = await chromium.launch({
+    headless: false,
+    args: ['--enable-blink-features=AudioVideoTracks'],
+  })
+
+  try {
+    const page = await browser.newPage()
+    const bytes = await fs.readFile(file)
+
+    await page.route(`${PLAYBACK_ORIGIN}/saved.mp4`, async (route) => {
+      await route.fulfill({ body: bytes, contentType: 'video/mp4' })
+    })
+    await page.route(PLAYBACK_URL, async (route) => {
+      await route.fulfill({
+        body: await fs.readFile(path.resolve('tests/e2e/page/playback.html'), 'utf8'),
+        contentType: 'text/html',
+      })
+    })
+
+    await page.goto(PLAYBACK_URL)
+    // A click and not a call to play(): an unmuted element starts on a user gesture alone, and
+    // the sound has to be unmuted or the audio decoder may never be asked for a byte.
+    await page.getByRole('button', { name: 'play' }).click()
+
+    await page.waitForFunction(
+      () => {
+        const state = (window as unknown as { tc: Playback }).tc
+        return state.ended || state.error != null
+      },
+      undefined,
+      { timeout: PLAYBACK_TIMEOUT_MS },
+    )
+
+    return await page.evaluate(() => (window as unknown as { tc: Playback }).tc)
+  } finally {
+    await browser.close()
+  }
+}

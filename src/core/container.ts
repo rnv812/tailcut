@@ -2,6 +2,7 @@ import { parseInit as parseIsoInit } from './iso/init'
 import { parseFragment as parseIsoFragment } from './iso/fragment'
 import { parseInit as parseWebmInit } from './webm/init'
 import { parseFragment as parseWebmFragment } from './webm/fragment'
+import { webmToIso, type ConvertedSegment } from './webm/to-iso'
 import type { FragmentInfo, InitInfo } from '../shared/types'
 
 /**
@@ -67,4 +68,53 @@ export function detectInit(bytes: Uint8Array): DetectedInit | null {
   }
 
   return null
+}
+
+/**
+ * Turns one media segment into the ISO BMFF the rest of the program works in, and says where it
+ * lies on the timeline. Null when the bytes hold nothing for the track it belongs to.
+ */
+export type SegmentConverter = (bytes: Uint8Array) => ConvertedSegment | null
+
+/** An init segment taken in: whatever the page delivered, described as ISO BMFF from here on. */
+export interface IngestedInit {
+  container: Container
+  /**
+   * What the init declares — the kinds, the codecs and the frame sizes the track is identified
+   * by. Named in the idiom of the container it arrived in: A_OPUS stays A_OPUS, because it is the
+   * page's stream being identified and not the file being written out of it.
+   */
+  info: InitInfo
+  /** ftyp and moov. The bytes as they arrived for an mp4; written afresh for anything else. */
+  initBytes: Uint8Array
+  /** How this track's media segments come across, or null when they are ISO BMFF already. */
+  convert: SegmentConverter | null
+}
+
+/**
+ * The ingest boundary: the one place a container other than ISO BMFF is spoken of.
+ *
+ * Above this line a track is a track. Below it a page delivers mp4 or WebM, and a WebM one is
+ * converted here and now — while it is still a description of a few tracks rather than tens of
+ * megabytes of collected material, and while there is still somewhere to refuse it. An init in a
+ * codec the converter cannot write comes back null, exactly as bytes that are not an init at all
+ * do: better a buffer that never opens a track than a track that can never be saved.
+ */
+export function ingestInit(bytes: Uint8Array): IngestedInit | null {
+  const detected = detectInit(bytes)
+  if (!detected) return null
+
+  if (detected.container === 'iso') {
+    return { container: 'iso', info: detected.info, initBytes: bytes, convert: null }
+  }
+
+  const converted = webmToIso(detected.info)
+  if (!converted) return null
+
+  return {
+    container: detected.container,
+    info: converted.info,
+    initBytes: converted.initBytes,
+    convert: (segment) => converted.segment(segment),
+  }
 }

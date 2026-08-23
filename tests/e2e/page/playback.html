@@ -1,0 +1,59 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>playing a saved clip</title>
+<!--
+  Plays a file the extension saved and writes down what the browser made of it.
+
+  A file that merely opens proves very little: one whose sound track a browser cannot decode still
+  reports a duration, still runs to the end and still fires 'ended' — in silence. What tells the
+  two apart is the count of bytes each decoder actually consumed, and whether the browser lists an
+  audio track at all, so both are recorded here.
+-->
+<video id="clip" playsinline controls width="480" style="background:#000"></video>
+<!--
+  Started by a button and not by autoplay. The element is not muted — a browser is free to leave
+  the audio decoder alone for a muted one — and an unmuted element only plays on a real gesture,
+  which is what a click driven by the test is.
+-->
+<button id="play">play</button>
+<script>
+  const clip = document.getElementById('clip')
+
+  const state = {
+    error: null,
+    ended: false,
+    /** Furthest the play head reached. */
+    reached: 0,
+    duration: 0,
+    audioBytes: 0,
+    videoBytes: 0,
+    /** null when the browser does not offer the list at all, which is the usual case. */
+    audioTracks: null,
+  }
+  window.tc = state
+
+  function record() {
+    state.reached = Math.max(state.reached, clip.currentTime)
+    state.duration = clip.duration
+    state.audioBytes = clip.webkitAudioDecodedByteCount ?? 0
+    state.videoBytes = clip.webkitVideoDecodedByteCount ?? 0
+    state.audioTracks = clip.audioTracks ? clip.audioTracks.length : null
+  }
+
+  clip.addEventListener('timeupdate', record)
+  clip.addEventListener('ended', () => {
+    record()
+    state.ended = true
+  })
+  clip.addEventListener('error', () => {
+    state.error = clip.error ? `${clip.error.code}: ${clip.error.message}` : 'unknown'
+  })
+
+  document.getElementById('play').addEventListener('click', () => {
+    clip.play().catch((reason) => {
+      state.error = String(reason)
+    })
+  })
+
+  clip.src = '/saved.mp4'
+</script>

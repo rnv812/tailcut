@@ -1,0 +1,68 @@
+<!doctype html>
+<meta charset="utf-8" />
+<!--
+  The same strict policy as two-track.html: a site that forbids foreign frames outright is the
+  case the bridge is most at risk from, and a page whose two tracks come in two containers has to
+  stand up under it just as well.
+-->
+<meta
+  http-equiv="Content-Security-Policy"
+  content="default-src 'self'; frame-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; media-src blob:"
+/>
+<title>test player with webm sound</title>
+<!--
+  Picture in fragmented mp4 and sound in WebM — the layout a real site serves, and the one this
+  page exists for. Muted and looped with controls, exactly as two-track.html: six seconds of
+  material is the probation period, so the clip has to come round again for the watcher to count
+  it through, and muted playback is the one kind a browser starts without a click.
+-->
+<video id="v" controls muted loop width="640" style="background:#000"></video>
+<script>
+  const VIDEO_INIT = '/fixtures/h264/init-stream0.m4s'
+  const AUDIO_INIT = '/fixtures/webm/init-stream1.webm'
+  const VIDEO = [1, 2, 3].map((n) => `/fixtures/h264/chunk-stream0-0000${n}.m4s`)
+  const AUDIO = [1, 2, 3, 4].map((n) => `/fixtures/webm/chunk-stream1-0000${n}.webm`)
+
+  const video = document.getElementById('v')
+  const mediaSource = new MediaSource()
+  video.src = URL.createObjectURL(mediaSource)
+
+  window.allAppended = false
+  window.failure = null
+
+  mediaSource.addEventListener('sourceopen', async () => {
+    try {
+      // One MediaSource, two SourceBuffers, two containers. Nothing in MSE ties the container of
+      // one buffer to the container of another, and sites make full use of that.
+      const picture = mediaSource.addSourceBuffer('video/mp4; codecs="avc1.4d401e"')
+      const sound = mediaSource.addSourceBuffer('audio/webm; codecs="opus"')
+
+      const append = (buffer, into) =>
+        new Promise((resolve, reject) => {
+          into.addEventListener('updateend', resolve, { once: true })
+          into.addEventListener('error', () => reject(new Error('appendBuffer failed')), {
+            once: true,
+          })
+          into.appendBuffer(buffer)
+        })
+
+      const fetchBytes = async (url) => (await fetch(url)).arrayBuffer()
+
+      await append(await fetchBytes(VIDEO_INIT), picture)
+      await append(await fetchBytes(AUDIO_INIT), sound)
+
+      // Interleaved, the way a player loads them: the two buffers fill in step and not one
+      // after the other.
+      for (let i = 0; i < Math.max(VIDEO.length, AUDIO.length); i++) {
+        if (VIDEO[i]) await append(await fetchBytes(VIDEO[i]), picture)
+        if (AUDIO[i]) await append(await fetchBytes(AUDIO[i]), sound)
+      }
+
+      window.allAppended = true
+    } catch (error) {
+      // Otherwise a failure inside the handler sinks into a rejected promise and the test waits
+      // for allAppended until its timeout, reporting the timeout instead of the reason.
+      window.failure = String(error)
+    }
+  })
+</script>

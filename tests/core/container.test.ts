@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
   detectInit,
+  ingestInit,
   isoParser,
   parserFor,
   parsers,
@@ -9,6 +10,8 @@ import {
   type Container,
   type ContainerParser,
 } from '../../src/core/container'
+import { parseInit as parseIsoInit } from '../../src/core/iso/init'
+import { parseFragment as parseIsoFragment } from '../../src/core/iso/fragment'
 import type { InitInfo, TrackKind } from '../../src/shared/types'
 
 const load = (path: string): Uint8Array => new Uint8Array(readFileSync(`tests/fixtures/${path}`))
@@ -122,4 +125,46 @@ describe('the shape the two parsers share', () => {
       expect(fragment.duration / track.timescale).toBeCloseTo(2, 1)
     },
   )
+})
+
+describe('ingestInit', () => {
+  it('lets an mp4 init through as it came: it is already what a file is built of', () => {
+    const opened = ingestInit(isoInit)!
+    expect(opened.container).toBe('iso')
+    expect(opened.initBytes).toBe(isoInit)
+    expect(opened.convert).toBeNull()
+    expect(opened.info).toEqual(isoParser.parseInit(isoInit))
+  })
+
+  it('rewrites a WebM Opus init as ISO BMFF and keeps the name the page gave the codec', () => {
+    const opened = ingestInit(webmInit)!
+    expect(opened.container).toBe('webm')
+    expect(opened.info.tracks[0]!.codec).toBe('A_OPUS')
+
+    // The bytes handed on are a different container from the ones that arrived.
+    expect(opened.initBytes).not.toBe(webmInit)
+    expect(parseIsoInit(opened.initBytes)!.tracks[0]).toMatchObject({ kind: 'audio', codec: 'Opus' })
+  })
+
+  it('converts the media segments of a WebM track into ones an mp4 reader follows', () => {
+    const opened = ingestInit(webmInit)!
+    const converted = opened.convert!(webmSegment)!
+
+    expect(parseIsoFragment(converted.bytes)).not.toBeNull()
+    expect(converted.start).toBe(0)
+    expect(converted.end).toBeGreaterThan(1.9)
+  })
+
+  it('refuses a WebM stream in a codec it cannot write, exactly as it refuses junk', () => {
+    // detectInit still recognises the container: the refusal is about what can be done with it,
+    // and it has to be a refusal and not a track that would swallow every segment in silence.
+    expect(detectInit(webmVideoInit)).not.toBeNull()
+    expect(ingestInit(webmVideoInit)).toBeNull()
+  })
+
+  it('refuses anything that is not an init segment', () => {
+    expect(ingestInit(isoSegment)).toBeNull()
+    expect(ingestInit(webmSegment)).toBeNull()
+    expect(ingestInit(new Uint8Array(0))).toBeNull()
+  })
 })
