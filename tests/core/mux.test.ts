@@ -219,8 +219,151 @@ function withAbsoluteDataOffset(segment: Uint8Array): Uint8Array {
   ])
 }
 
+/**
+ * Where a box states how long it lasts. mvhd and mdhd carry the field after the timescale, tkhd
+ * after the reserved word behind its track number, and version 1 doubles every time before it as
+ * well as the field itself. Written out here rather than imported from the muxer on purpose: a
+ * test that reads the field back through the code that wrote it would agree with any offset.
+ */
+function durationField(bytes: Uint8Array, box: Box): { at: number; wide: boolean } {
+  const body = box.start + box.headerSize
+  const wide = bytes[body] === 1
+  return { at: body + (box.type === 'tkhd' ? (wide ? 28 : 20) : wide ? 24 : 16), wide }
+}
+
+function durationTicks(bytes: Uint8Array, box: Box): number {
+  const { at, wide } = durationField(bytes, box)
+  return wide ? Number(view(bytes).getBigUint64(at)) : view(bytes).getUint32(at)
+}
+
+function setDurationTicks(bytes: Uint8Array, box: Box, ticks: number): void {
+  const { at, wide } = durationField(bytes, box)
+  if (wide) view(bytes).setBigUint64(at, BigInt(ticks))
+  else view(bytes).setUint32(at, ticks)
+}
+
+/** Ticks per second of an mvhd or an mdhd: both state it in the same place. */
+function timescaleTicks(bytes: Uint8Array, box: Box): number {
+  const body = box.start + box.headerSize
+  return view(bytes).getUint32(bytes[body] === 1 ? body + 20 : body + 12)
+}
+
+/** mvhd of a file, and the tkhd and mdhd of each of its tracks. */
+function headers(file: Uint8Array): { mvhd: Box; tkhd: Box[]; mdhd: Box[] } {
+  const moov = typeIn(topLevelBoxes(file), 'moov')!
+  const inside = childBoxes(file, moov)
+  const traks = inside.filter((b) => b.type === 'trak')
+
+  return {
+    mvhd: typeIn(inside, 'mvhd')!,
+    tkhd: traks.map((trak) => typeIn(childBoxes(file, trak), 'tkhd')!),
+    mdhd: traks.map((trak) => {
+      const mdia = typeIn(childBoxes(file, trak), 'mdia')!
+      return typeIn(childBoxes(file, mdia), 'mdhd')!
+    }),
+  }
+}
+
+/** How long the file says it lasts: the movie header first, then a header of every track. */
+function declaredSeconds(file: Uint8Array): number[] {
+  const { mvhd, tkhd, mdhd } = headers(file)
+  const movie = timescaleTicks(file, mvhd)
+
+  return [
+    durationTicks(file, mvhd) / movie,
+    ...tkhd.map((box) => durationTicks(file, box) / movie),
+    ...mdhd.map((box) => durationTicks(file, box) / timescaleTicks(file, box)),
+  ]
+}
+
+/**
+ * The same init with the length of the whole video written into it.
+ *
+ * A packager that knows how long the film is says so: the init segments of YouTube state the full
+ * running time of the video in mvhd, tkhd and mdhd, and a clip cut out of it is a fraction of
+ * that. ffmpeg's DASH muxer leaves all three at zero, so the fixtures on their own never show
+ * what the muxer does with a duration it must not believe.
+ */
+function withDeclaredDuration(init: Uint8Array, seconds: number): Uint8Array {
+  const patched = init.slice()
+  const { mvhd, tkhd, mdhd } = headers(patched)
+  const movie = Math.round(seconds * timescaleTicks(patched, mvhd))
+
+  setDurationTicks(patched, mvhd, movie)
+  for (const box of tkhd) setDurationTicks(patched, box, movie)
+  for (const box of mdhd) {
+    setDurationTicks(patched, box, Math.round(seconds * timescaleTicks(patched, box)))
+  }
+
+  return patched
+}
+
+/** Rebuilds a tree of boxes, letting the caller replace the body of any box it recognises. */
+function rewrite(
+  data: Uint8Array,
+  boxes: Box[],
+  body: (type: string, body: Uint8Array) => Uint8Array | null,
+): Uint8Array[] {
+  return boxes.map((box) => {
+    const children = childBoxes(data, box)
+    if (children.length) return boxOf(box.type, ...rewrite(data, children, body))
+
+    const replaced = body(box.type, boxBody(data, box))
+    return replaced ? boxOf(box.type, replaced) : data.slice(box.start, box.start + box.size)
+  })
+}
+
+/**
+ * The same init with its headers stated in version 1 — the times widened from 32 bits to 64.
+ * Both versions are ordinary in the wild, and every one of the three durations sits at an offset
+ * of its own in each of them, so a muxer that writes the clip's length has two ways to write it
+ * into the wrong bytes.
+ */
+function asVersion1(init: Uint8Array): Uint8Array {
+  return concatBytes(
+    rewrite(init, topLevelBoxes(init), (type, body) => {
+      const flags = body.subarray(1, 4)
+      const at = (offset: number): Uint8Array => u64(view(body).getUint32(offset))
+
+      // creation and modification times, then the fields the box keeps as they were.
+      if (type === 'mvhd' || type === 'mdhd') {
+        return concatBytes([
+          Uint8Array.of(1),
+          flags,
+          at(4),
+          at(8),
+          body.subarray(12, 16),
+          at(16),
+          body.subarray(20),
+        ])
+      }
+      if (type === 'tkhd') {
+        return concatBytes([
+          Uint8Array.of(1),
+          flags,
+          at(4),
+          at(8),
+          body.subarray(12, 20),
+          at(20),
+          body.subarray(24),
+        ])
+      }
+      return null
+    }),
+  )
+}
+
 const video = { initBytes: videoInit, segments: videoSegments }
 const audio = { initBytes: audioInit, segments: audioSegments }
+
+/**
+ * Length of the fixture, from the first tick of either track to the last one of them.
+ *
+ * The picture runs to exactly six seconds. The sound runs 23 milliseconds past it: its last
+ * fragment starts at 263168 ticks and holds three samples that its trun measures out one by one,
+ * 2446 ticks in all — a tail shorter than the 1024 ticks a whole sample of it lasts.
+ */
+const CLIP_SECONDS = (263168 + 2446) / AUDIO_TIMESCALE
 
 describe('muxFragmentedMp4', () => {
   it('gathers both tracks under one ftyp and one moov', () => {
@@ -406,6 +549,64 @@ describe('muxFragmentedMp4', () => {
     // The init and the fragments belong to a live session and are saved again on the next click.
     // Renumbering them in place would leave the second file numbered after the first.
     expect(digest(videoInit, ...videoSegments, audioInit, ...audioSegments)).toBe(before)
+  })
+
+  it('states the length of the clip, not the length of the video it was cut from', () => {
+    // Ten minutes of film in the init, six seconds of it in the fragments. Left as it came, the
+    // file says ten minutes: a player then shows the material it has, walks the empty rest of the
+    // timeline and calls that the end of the clip.
+    const file = muxFragmentedMp4([
+      { initBytes: withDeclaredDuration(videoInit, 600), segments: videoSegments },
+      { initBytes: withDeclaredDuration(audioInit, 600), segments: audioSegments },
+    ])
+
+    // The movie header and both headers of both tracks — every place a file states how long it is.
+    for (const seconds of declaredSeconds(file)) expect(seconds).toBeCloseTo(CLIP_SECONDS, 2)
+  })
+
+  it('gives ffprobe the length of the clip when the init states the length of the film', () => {
+    const probed = probe(
+      'mux-declared-duration.mp4',
+      muxFragmentedMp4([
+        { initBytes: withDeclaredDuration(videoInit, 600), segments: videoSegments },
+        { initBytes: withDeclaredDuration(audioInit, 600), segments: audioSegments },
+      ]),
+    )
+
+    expect(Number(probed.format.duration)).toBeCloseTo(CLIP_SECONDS, 1)
+    expect(probed.streams.map((s) => Number(s.nb_read_frames))).toEqual([
+      VIDEO_FRAMES,
+      AUDIO_FRAMES,
+    ])
+  })
+
+  it('writes the length of the clip into the wide fields of a version 1 header', () => {
+    const file = muxFragmentedMp4([
+      { initBytes: asVersion1(withDeclaredDuration(videoInit, 600)), segments: videoSegments },
+      { initBytes: asVersion1(withDeclaredDuration(audioInit, 600)), segments: audioSegments },
+    ])
+
+    // The same three durations, each eight bytes wide now and each at an offset of its own.
+    for (const seconds of declaredSeconds(file)) expect(seconds).toBeCloseTo(CLIP_SECONDS, 2)
+
+    const probed = probe('mux-version-1.mp4', file)
+    expect(Number(probed.format.duration)).toBeCloseTo(CLIP_SECONDS, 1)
+    expect(probed.streams.map((s) => Number(s.nb_read_frames))).toEqual([
+      VIDEO_FRAMES,
+      AUDIO_FRAMES,
+    ])
+  })
+
+  it('states no length at all for a header the fragments give no length to', () => {
+    // A packager that states the sample durations in the trex alone and nowhere else leaves
+    // nothing here to measure the clip by. Zero is what a fragmented file says in that case, and
+    // a player works the length out of the fragments; the ten minutes of the source would be a
+    // number invented out of material that is not in the file.
+    const file = muxFragmentedMp4([
+      { initBytes: withDeclaredDuration(videoInit, 600), segments: [] },
+    ])
+
+    expect(declaredSeconds(file)).toEqual([0, 0, 0])
   })
 
   it('gives the header alone for a track that has collected nothing yet', () => {

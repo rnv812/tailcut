@@ -61,13 +61,13 @@ function parseTrunDuration(data: Uint8Array, trun: Box, defaultSampleDuration: n
     (flags & TRUN_SAMPLE_FLAGS ? 4 : 0) +
     (flags & TRUN_SAMPLE_CTS ? 4 : 0)
 
-  // sample_count приходит из чужих байтов и может обещать что угодно вплоть до
-  // 2^32-1 записей. Обход обрывается на границе тела бокса именно через break:
-  // continue дал бы тот же результат, но прокрутил бы миллиарды пустых витков и
-  // подвесил разбор. Усечённый trun при этом отдаётся как обычный — сумма
-  // прочитанных записей, без признака усечения в FragmentInfo. Это осознанный
-  // выбор: битый сегмент даёт заниженную длительность, а не отказ разбора;
-  // цена — молчаливый сдвиг следующего фрагмента на карте PTS.
+  // sample_count comes out of foreign bytes and may promise anything up to 2^32-1 entries. The
+  // walk stops at the end of the box body through break and not continue: continue would give
+  // the same answer but spin through billions of empty turns and hang the parse. A truncated
+  // trun is then handed back as an ordinary one — the sum of the entries that were readable,
+  // with no mark of the truncation in FragmentInfo. A deliberate choice: a broken segment gives
+  // an understated duration rather than a refusal to parse, and the price is a silent shift of
+  // the next fragment on the PTS map.
   let total = 0
   for (let i = 0; i < sampleCount; i++) {
     const at = offset + i * entrySize
@@ -76,6 +76,30 @@ function parseTrunDuration(data: Uint8Array, trun: Box, defaultSampleDuration: n
   }
 
   return total
+}
+
+/**
+ * How long one track fragment lasts, in ticks of its own track: the sample durations its trun
+ * boxes state, falling back to the default in the tfhd for a trun that states none of its own.
+ * Zero when neither of the two carries a duration — a packager that keeps its defaults in the
+ * trex alone says nothing here, and inventing a length for such a fragment would be worse.
+ *
+ * Shared with the muxer, which needs the same number to work out how long a clip is: two readings
+ * of one trun would be two chances to read it differently.
+ */
+export function trafDuration(data: Uint8Array, traf: Box): number {
+  const children = childBoxes(data, traf)
+  const tfhdBox = children.find((b) => b.type === 'tfhd')
+  if (!tfhdBox) return 0
+
+  const { defaultSampleDuration } = parseTfhd(data, tfhdBox)
+
+  let duration = 0
+  for (const trun of children.filter((b) => b.type === 'trun')) {
+    duration += parseTrunDuration(data, trun, defaultSampleDuration)
+  }
+
+  return duration
 }
 
 export function parseFragment(data: Uint8Array): FragmentInfo | null {
@@ -90,13 +114,9 @@ export function parseFragment(data: Uint8Array): FragmentInfo | null {
   const tfdtBox = children.find((b) => b.type === 'tfdt')
   if (!tfhdBox || !tfdtBox) return null
 
-  const tfhd = parseTfhd(data, tfhdBox)
-  const baseMediaDecodeTime = parseTfdt(data, tfdtBox)
-
-  let duration = 0
-  for (const trun of children.filter((b) => b.type === 'trun')) {
-    duration += parseTrunDuration(data, trun, tfhd.defaultSampleDuration)
+  return {
+    trackId: parseTfhd(data, tfhdBox).trackId,
+    baseMediaDecodeTime: parseTfdt(data, tfdtBox),
+    duration: trafDuration(data, traf),
   }
-
-  return { trackId: tfhd.trackId, baseMediaDecodeTime, duration }
 }

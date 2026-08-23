@@ -1,3 +1,4 @@
+import { trafDuration } from './iso/fragment'
 import { childBoxes, topLevelBoxes, type Box } from './iso/reader'
 import { boxOf } from './iso/writer'
 
@@ -36,8 +37,16 @@ interface Fragment {
   end: number
   /** Decode time in seconds — the one scale on which fragments of different tracks compare. */
   time: number
+  /** Where the fragment runs to, in the same seconds: its samples add up to that much. */
+  until: number
   /** track_id inside this stream → track_id in the file being built. */
   ids: Map<number, number>
+}
+
+/** A stretch of the timeline, in seconds. */
+interface Span {
+  start: number
+  end: number
 }
 
 const viewOf = (bytes: Uint8Array): DataView =>
@@ -54,14 +63,19 @@ const tkhdTrackIdAt = (data: Uint8Array, tkhd: Box): number =>
     ? tkhd.start + tkhd.headerSize + 20
     : tkhd.start + tkhd.headerSize + 12
 
+/** Ticks per second stated by an mvhd or an mdhd: the field sits in the same place in both. */
+function timescaleAt(data: Uint8Array, box: Box): number {
+  const body = box.start + box.headerSize
+  return viewOf(data).getUint32(data[body] === 1 ? body + 20 : body + 12)
+}
+
 /** Ticks per second of a track; null — the trak says nothing usable, and its times mean nothing. */
 function timescaleOf(data: Uint8Array, trak: Box): number | null {
   const mdia = typeIn(childBoxes(data, trak), 'mdia')
   const mdhd = mdia && typeIn(childBoxes(data, mdia), 'mdhd')
   if (!mdhd) return null
 
-  const body = mdhd.start + mdhd.headerSize
-  const timescale = viewOf(data).getUint32(data[body] === 1 ? body + 20 : body + 12)
+  const timescale = timescaleAt(data, mdhd)
   // Zero would turn every time of this track into a division by zero: better no track at all.
   return timescale > 0 ? timescale : null
 }
@@ -74,24 +88,26 @@ function decodeTicksOf(bytes: Uint8Array, tfdt: Box): number {
 }
 
 /**
- * When the fragment starts, in seconds. The ticks are counted in the timescale of the track and
- * the tracks do not share one, so seconds are the only scale on which fragments of two tracks can
- * be put in one order.
+ * When the fragment starts and when it runs out, in seconds. The ticks are counted in the
+ * timescale of the track and the tracks do not share one, so seconds are the only scale on which
+ * fragments of two tracks can be put in one order — or measured against each other for how long
+ * the clip they make up is.
  *
  * null: the fragment names a track this file does not carry, or it is missing the boxes that say
  * when it belongs. There is no honest place on the timeline for such a fragment, and guessing one
  * would drop it into the middle of a track it has nothing to do with.
  */
-function decodeTimeOf(
+function spanOf(
   bytes: Uint8Array,
   ids: Map<number, number>,
   timescales: Map<number, number>,
-): number | null {
+): Span | null {
   const moof = typeIn(topLevelBoxes(bytes), 'moof')
   if (!moof) return null
 
   const view = viewOf(bytes)
-  let earliest: number | null = null
+  let start: number | null = null
+  let end = 0
 
   for (const traf of childBoxes(bytes, moof).filter((b) => b.type === 'traf')) {
     const children = childBoxes(bytes, traf)
@@ -103,11 +119,15 @@ function decodeTimeOf(
     const timescale = id === undefined ? undefined : timescales.get(id)
     if (timescale === undefined) return null
 
-    const time = decodeTicksOf(bytes, tfdt) / timescale
-    if (earliest === null || time < earliest) earliest = time
+    const from = decodeTicksOf(bytes, tfdt) / timescale
+    // Zero for a packager that keeps its sample defaults in the trex: the fragment then measures
+    // out as an instant, and the clip is as long as the fragments that do state their samples.
+    const to = from + trafDuration(bytes, traf) / timescale
+    if (start === null || from < start) start = from
+    if (to > end) end = to
   }
 
-  return earliest
+  return start === null ? null : { start, end: Math.max(end, start) }
 }
 
 /** Fragments of one media segment, in the order they lie in it. */
@@ -133,10 +153,10 @@ function fragmentsOf(
     // the first moof — the styp and the sidx — describes the segment as a standalone delivery and
     // is left behind.
     const stop = starts[index + 1] ?? end
-    const time = decodeTimeOf(segment.subarray(start, stop), ids, timescales)
-    if (time === null) continue
+    const span = spanOf(segment.subarray(start, stop), ids, timescales)
+    if (!span) continue
 
-    fragments.push({ segment, start, end: stop, time, ids })
+    fragments.push({ segment, start, end: stop, time: span.start, until: span.end, ids })
   }
 
   return fragments
@@ -175,7 +195,7 @@ function place(
     const children = childBoxes(bytes, child)
     const tfhd = typeIn(children, 'tfhd')
     const tfdt = typeIn(children, 'tfdt')
-    // Both were found once already: decodeTimeOf drops a fragment that is missing either.
+    // Both were found once already: spanOf drops a fragment that is missing either.
     if (!tfhd || !tfdt) continue
 
     const body = tfhd.start + tfhd.headerSize
@@ -203,6 +223,59 @@ function shiftDecodeTime(bytes: Uint8Array, view: DataView, tfdt: Box, delta: nu
   const body = tfdt.start + tfdt.headerSize
   if (bytes[body] === 1) view.setBigUint64(body + 4, view.getBigUint64(body + 4) - BigInt(delta))
   else view.setUint32(body + 4, view.getUint32(body + 4) - delta)
+}
+
+/** Largest length a 32-bit field can hold; 0xffffffff is what a file writes for "unknown". */
+const MAX_NARROW_DURATION = 0xfffffffe
+
+/**
+ * Writes a length into the box that states one. mvhd and mdhd carry the field behind the
+ * timescale, tkhd behind the reserved word after its track number, and version 1 doubles every
+ * time before it as well as the field itself.
+ */
+function writeDuration(bytes: Uint8Array, box: Box, ticks: number): void {
+  const body = box.start + box.headerSize
+  const wide = bytes[body] === 1
+  const at = body + (box.type === 'tkhd' ? (wide ? 28 : 20) : wide ? 24 : 16)
+  const view = viewOf(bytes)
+
+  if (wide) view.setBigUint64(at, BigInt(Math.max(0, Math.round(ticks))))
+  // A narrow field cannot hold more than four bytes of ticks, and 0xffffffff is spoken for: a
+  // clip long enough to reach the cap is capped rather than wrapped round to a few seconds.
+  else view.setUint32(at, Math.min(MAX_NARROW_DURATION, Math.max(0, Math.round(ticks))))
+}
+
+/**
+ * States how long the clip is everywhere a file states it: once for the movie and twice for every
+ * track of it.
+ *
+ * An init segment describes the whole video the fragments were cut out of, and a packager that
+ * knows the length writes it there — YouTube's init says ten minutes for a clip of twenty
+ * seconds. Left as it came, the file says ten minutes and a player believes it: the material runs
+ * out, the timeline does not, and playback breaks off in the middle of what the file promised.
+ *
+ * Zero when the fragments give nothing to measure — that is what a fragmented file says for a
+ * length it does not know, and a player works it out of the fragments themselves.
+ */
+function stateDuration(mvhd: Uint8Array | undefined, traks: Uint8Array[], seconds: number): void {
+  const header = mvhd && topLevelBoxes(mvhd)[0]
+  const movieTimescale = mvhd && header ? timescaleAt(mvhd, header) : 0
+  if (mvhd && header) writeDuration(mvhd, header, seconds * movieTimescale)
+
+  for (const bytes of traks) {
+    const trak = topLevelBoxes(bytes)[0]
+    if (!trak) continue
+
+    const children = childBoxes(bytes, trak)
+    const tkhd = typeIn(children, 'tkhd')
+    // tkhd counts in the timescale of the movie. Without an mvhd the file states no such scale,
+    // and the only honest length for a track is then none at all.
+    if (tkhd) writeDuration(bytes, tkhd, seconds * movieTimescale)
+
+    const mdia = typeIn(children, 'mdia')
+    const mdhd = mdia && typeIn(childBoxes(bytes, mdia), 'mdhd')
+    if (mdhd) writeDuration(bytes, mdhd, seconds * timescaleAt(bytes, mdhd))
+  }
 }
 
 /**
@@ -289,8 +362,18 @@ export function muxFragmentedMp4(tracks: MuxTrack[]): Uint8Array {
   // sound are cut into segments of different length and hardly ever begin at the same instant.
   const origin = fragments[0]?.time ?? 0
 
+  // Where the last of the material runs out. Not the start of the last fragment: a fragment lasts
+  // for its samples, and a clip that ended at the start of its final one would cut them off.
+  let last = origin
+  for (const fragment of fragments) if (fragment.until > last) last = fragment.until
+
   // Track numbers ran out at nextTrackId, and next_track_ID is where a file states that.
   if (mvhd) viewOf(mvhd).setUint32(mvhd.byteLength - 4, nextTrackId)
+
+  // One length for the movie and for every track of it. The tracks of a clip cover one and the
+  // same stretch of time — that is what they were selected over — and the tenths of a second they
+  // differ by at the edges are not worth a length per track stated out of a different count.
+  stateDuration(mvhd, traks, last - origin)
 
   const head: Uint8Array[] = []
   if (ftyp) head.push(ftyp)
