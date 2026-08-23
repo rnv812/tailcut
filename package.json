@@ -7,7 +7,8 @@
     "build": "node build.mjs",
     "dev": "node build.mjs --watch",
     "e2e": "playwright test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "plan:check": "node tools/check-plan-blocks.mjs"
   },
   "repository": {
     "type": "git",
