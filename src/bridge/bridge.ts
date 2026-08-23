@@ -137,6 +137,9 @@ window.addEventListener('message', (event: MessageEvent) => {
       // Which SourceBuffer the bytes were appended to. Without it the registry cannot tell the
       // video stream from the audio one: both come from one MediaSource under one sourceId.
       bufferId: data.bufferId,
+      // The type that SourceBuffer was opened with. A WebM picture track is described by nothing
+      // else: Matroska carries no VP9 profile, and the codec string carries all of it.
+      mime: data.mime,
       url: pageContext.url,
       title: pageContext.title,
       bytes: new Uint8Array(data.bytes),

@@ -155,11 +155,42 @@ describe('ingestInit', () => {
     expect(converted.end).toBeGreaterThan(1.9)
   })
 
-  it('refuses a WebM stream in a codec it cannot write, exactly as it refuses junk', () => {
+  it('rewrites a WebM VP9 init out of the type the page opened its buffer with', () => {
+    const opened = ingestInit(webmVideoInit, 'video/webm; codecs="vp09.00.10.08"')!
+    expect(opened.container).toBe('webm')
+    expect(opened.info.tracks[0]!.codec).toBe('V_VP9')
+
+    expect(opened.initBytes).not.toBe(webmVideoInit)
+    expect(parseIsoInit(opened.initBytes)!.tracks[0]).toMatchObject({
+      kind: 'video',
+      codec: 'vp09',
+      width: 256,
+      height: 144,
+    })
+  })
+
+  it('converts the media segments of a WebM picture track just as it does the sound', () => {
+    const opened = ingestInit(webmVideoInit, 'video/webm; codecs="vp09.00.10.08"')!
+    const converted = opened.convert!(load('webm/chunk-stream0-00001.webm'))!
+
+    expect(parseIsoFragment(converted.bytes)).not.toBeNull()
+    expect(converted.start).toBe(0.014)
+    expect(converted.end).toBe(2.014)
+  })
+
+  it('refuses a WebM picture track the page described in no type it can read', () => {
     // detectInit still recognises the container: the refusal is about what can be done with it,
     // and it has to be a refusal and not a track that would swallow every segment in silence.
+    // What the codec string has to say and why it is the only source is in src/core/vp9/codec.ts.
     expect(detectInit(webmVideoInit)).not.toBeNull()
     expect(ingestInit(webmVideoInit)).toBeNull()
+    expect(ingestInit(webmVideoInit, 'video/webm')).toBeNull()
+    expect(ingestInit(webmVideoInit, 'video/webm; codecs="vp09.09.10.08"')).toBeNull()
+  })
+
+  it('passes the type nowhere it is not needed: an mp4 describes itself', () => {
+    const opened = ingestInit(isoInit, 'video/webm; codecs="vp09.00.10.08"')!
+    expect(opened.initBytes).toBe(isoInit)
   })
 
   it('refuses anything that is not an init segment', () => {

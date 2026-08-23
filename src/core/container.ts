@@ -116,8 +116,14 @@ export interface IngestedInit {
  * megabytes of collected material, and while there is still somewhere to refuse it. An init in a
  * codec the converter cannot write comes back null, exactly as bytes that are not an init at all
  * do: better a buffer that never opens a track than a track that can never be saved.
+ *
+ * `mime` is the type the page passed to addSourceBuffer, verbatim and untrusted. An mp4 needs
+ * none of it — its init segment describes itself — and a WebM picture track needs nothing else:
+ * Matroska does not carry what a vp09 sample entry has to state, and the codec string does. See
+ * src/core/vp9/codec.ts for why that source and not the bitstream, and for what an absent or
+ * unreadable string leads to.
  */
-export function ingestInit(bytes: Uint8Array): IngestedInit | null {
+export function ingestInit(bytes: Uint8Array, mime?: string): IngestedInit | null {
   const detected = detectInit(bytes)
   if (!detected) return null
 
@@ -125,7 +131,7 @@ export function ingestInit(bytes: Uint8Array): IngestedInit | null {
     return { container: 'iso', info: detected.info, initBytes: bytes, convert: null }
   }
 
-  const converted = webmToIso(detected.info)
+  const converted = webmToIso(detected.info, mime)
   if (!converted) return null
 
   return {

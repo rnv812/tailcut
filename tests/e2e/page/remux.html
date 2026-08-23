@@ -1,0 +1,81 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>feeding a saved clip back through MSE</title>
+<!--
+  Appends a file the extension saved to a MediaSource and writes down what came of it.
+
+  A browser opening a file through <video src> is forgiving: it hands the bytes to a full demuxer,
+  which reads what it needs out of the frames themselves and shrugs at a container that describes
+  them poorly. Media Source Extensions is the strict reader — it parses the boxes and nothing else,
+  and it refuses an init segment that does not describe its track properly. A vp09 sample entry
+  with no vpcC beside it, or one it cannot parse, fails here and nowhere else.
+
+  So this is the round trip: the clip was cut out of a byte stream MSE was fed, and it goes back in
+  the same way. If it comes out the other side, the file is one the web itself would accept.
+-->
+<video id="clip" muted playsinline controls width="480" style="background:#000"></video>
+<script>
+  const state = {
+    /** Whether the browser claims to support the type at all — a precondition, not a result. */
+    supported: false,
+    error: null,
+    /** The init segment and the fragments were taken without complaint. */
+    appended: false,
+    duration: 0,
+    reached: 0,
+    ended: false,
+    width: 0,
+    height: 0,
+  }
+  window.tc = state
+
+  // The type the clip is offered under. Given by the test through the fragment of the address so
+  // that one page serves every codec the suite saves a file in.
+  const TYPE = decodeURIComponent(location.hash.slice(1))
+
+  const clip = document.getElementById('clip')
+  const mediaSource = new MediaSource()
+  clip.src = URL.createObjectURL(mediaSource)
+
+  clip.addEventListener('error', () => {
+    state.error = clip.error ? `${clip.error.code}: ${clip.error.message}` : 'unknown'
+  })
+  clip.addEventListener('timeupdate', () => {
+    state.reached = Math.max(state.reached, clip.currentTime)
+    state.width = clip.videoWidth
+    state.height = clip.videoHeight
+  })
+  clip.addEventListener('ended', () => {
+    state.ended = true
+  })
+
+  mediaSource.addEventListener('sourceopen', async () => {
+    try {
+      state.supported = MediaSource.isTypeSupported(TYPE)
+      const buffer = mediaSource.addSourceBuffer(TYPE)
+      const bytes = await (await fetch('/saved.mp4')).arrayBuffer()
+
+      await new Promise((resolve, reject) => {
+        buffer.addEventListener('updateend', resolve, { once: true })
+        buffer.addEventListener('error', () => reject(new Error('appendBuffer failed')), {
+          once: true,
+        })
+        buffer.appendBuffer(bytes)
+      })
+
+      state.appended = true
+      mediaSource.endOfStream()
+      state.duration = clip.duration
+      state.width = clip.videoWidth
+      state.height = clip.videoHeight
+
+      // Muted, so it starts without a gesture. What the sound decodes to is the business of the
+      // other page; here the question is whether the file parses and runs.
+      await clip.play()
+    } catch (reason) {
+      // A rejected promise inside the handler would leave the test waiting for a state that never
+      // arrives, and reporting its own timeout instead of the reason.
+      state.error = String(reason)
+    }
+  })
+</script>

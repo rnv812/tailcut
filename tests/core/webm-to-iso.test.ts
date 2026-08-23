@@ -8,6 +8,9 @@ import { boxBody, findBox, topLevelBoxes } from '../../src/core/iso/reader'
 import { OPUS_SAMPLE_RATE } from '../../src/core/opus/packets'
 import type { InitInfo } from '../../src/shared/types'
 
+/** The type the fixture's picture would be served under: profile 0, level 1.0, eight bits. */
+const VP9_TYPE = 'video/webm; codecs="vp09.00.10.08"'
+
 const load = (path: string): Uint8Array => new Uint8Array(readFileSync(`tests/fixtures/${path}`))
 
 const opusInit = parseWebmInit(load('webm/init-stream1.webm'))!
@@ -16,18 +19,25 @@ const vp9Init = parseWebmInit(load('webm/init-stream0.webm'))!
 /** Four media segments of the Opus track: 0…1.961, 1.981…3.961, 3.981…5.961 and one last frame. */
 const audioSegments = [1, 2, 3, 4].map((n) => load(`webm/chunk-stream1-0000${n}.webm`))
 
+/** Three media segments of the VP9 track, two seconds each, a keyframe at the head of every one. */
+const videoSegments = [1, 2, 3].map((n) => load(`webm/chunk-stream0-0000${n}.webm`))
+
 const converter = webmToIso(opusInit)!
+const video = webmToIso(vp9Init, VP9_TYPE)!
 
 const view = (bytes: Uint8Array): DataView =>
   new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
 
-/** Sample durations a converted fragment states, in ticks of the track it was written for. */
-function durationsOf(fragment: Uint8Array): number[] {
+/**
+ * Sample durations a converted fragment states, in ticks of the track it was written for. The
+ * stride is the width of one trun entry, which is wider on a track that states a flag per sample.
+ */
+function durationsOf(fragment: Uint8Array, stride = 8): number[] {
   const trun = findBox(fragment, ['moof', 'traf', 'trun'])!
   const body = view(boxBody(fragment, trun))
   const count = body.getUint32(4)
 
-  return Array.from({ length: count }, (_unused, i) => body.getUint32(12 + i * 8))
+  return Array.from({ length: count }, (_unused, i) => body.getUint32(12 + i * stride))
 }
 
 describe('webmToIso: what it takes and what it refuses', () => {
@@ -35,11 +45,31 @@ describe('webmToIso: what it takes and what it refuses', () => {
     expect(webmToIso(opusInit)).not.toBeNull()
   })
 
-  it('refuses a WebM video track by codec name rather than guessing at it', () => {
-    // A vp09 sample entry needs facts about the bitstream Matroska does not carry. Refusing here
-    // leaves the buffer without a track; opening one would collect segments no file could hold.
+  it('takes a VP9 track when the page has said what it is', () => {
+    // A vp09 sample entry needs facts about the stream that Matroska does not carry — profile,
+    // level, bit depth, subsampling. They come from the type the page opened its SourceBuffer
+    // with, and with that in hand the track is written like any other.
     expect(vp9Init.tracks[0]!.codec).toBe('V_VP9')
+    expect(webmToIso(vp9Init, VP9_TYPE)).not.toBeNull()
+  })
+
+  it('refuses a VP9 track the page has said nothing about', () => {
+    // Refusing here leaves the buffer without a track; opening one would collect segments for the
+    // length of a recording and end as a picture stream no player could make sense of.
     expect(webmToIso(vp9Init)).toBeNull()
+    expect(webmToIso(vp9Init, 'video/webm')).toBeNull()
+    expect(webmToIso(vp9Init, 'video/webm; codecs="vp09.00.10.10"')).toBeNull()
+  })
+
+  it('refuses a VP9 track whose frame size the container never stated', () => {
+    // Both the sample entry and the track header have to state one, and zero is not a picture.
+    const track = { ...vp9Init.tracks[0]!, width: 0 }
+    expect(webmToIso({ tracks: [track] }, VP9_TYPE)).toBeNull()
+  })
+
+  it('refuses a WebM track in a codec written here for neither container', () => {
+    const vp8 = { ...vp9Init.tracks[0]!, codec: 'V_VP8' }
+    expect(webmToIso({ tracks: [vp8] }, 'video/webm; codecs="vp8"')).toBeNull()
   })
 
   it('refuses an init that declares more than one track', () => {
@@ -185,5 +215,119 @@ describe('webmToIso: segments across', () => {
     const source = Uint8Array.from(audioSegments[0]!)
     converter.segment(source)
     expect([...source]).toEqual([...audioSegments[0]!])
+  })
+})
+
+describe('webmToIso: the picture track it declares', () => {
+  it('writes an init segment the ISO BMFF reader makes sense of', () => {
+    expect(parseInit(video.initBytes)).toEqual({
+      tracks: [
+        { trackId: 1, kind: 'video', timescale: 1000, codec: 'vp09', width: 256, height: 144 },
+      ],
+    })
+  })
+
+  it('keeps the name the container gave the codec', () => {
+    expect(video.info.tracks[0]!.codec).toBe('V_VP9')
+    expect(video.info.tracks[0]!.kind).toBe('video')
+  })
+
+  it('counts in the ticks Matroska counted in: they cross over with nothing to round', () => {
+    expect(vp9Init.tracks[0]!.timescale).toBe(1000)
+    expect(video.info.tracks[0]!.timescale).toBe(1000)
+
+    const mdhd = findBox(video.initBytes, ['moov', 'trak', 'mdia', 'mdhd'])!
+    expect(view(boxBody(video.initBytes, mdhd)).getUint32(12)).toBe(1000)
+  })
+
+  it('describes the stream in a vpcC, out of the codec string and nowhere else', () => {
+    const stsd = findBox(video.initBytes, ['moov', 'trak', 'mdia', 'minf', 'stbl', 'stsd'])!
+    const body = boxBody(video.initBytes, stsd)
+    // Past version and flags, entry count, the box header of the sample entry, and the fixed part
+    // of a VisualSampleEntry.
+    const vpcC = body.subarray(4 + 4 + 8 + 78)
+
+    expect([...vpcC.subarray(0, 8)]).toEqual([0, 0, 0, 20, 0x76, 0x70, 0x63, 0x43])
+    // Version one, then profile 0, level 1.0, eight bits and 4:2:0, BT.709, no init data.
+    expect([...vpcC.subarray(8)]).toEqual([1, 0, 0, 0, 0, 10, 0x82, 1, 1, 1, 0, 0])
+  })
+})
+
+describe('webmToIso: picture segments across', () => {
+  const converted = videoSegments.map((bytes) => video.segment(bytes)!)
+
+  /** Sample flags a converted fragment states, one per sample. */
+  function flagsOf(fragment: Uint8Array): number[] {
+    const trun = findBox(fragment, ['moof', 'traf', 'trun'])!
+    const body = view(boxBody(fragment, trun))
+    const count = body.getUint32(4)
+
+    return Array.from({ length: count }, (_unused, i) => body.getUint32(12 + i * 12 + 8))
+  }
+
+  it('places each segment where the cluster timeline puts it', () => {
+    // The material starts fourteen milliseconds in and runs two seconds a segment.
+    expect(converted.map((segment) => segment.start)).toEqual([0.014, 2.014, 4.014])
+    expect(converted.map((segment) => segment.end)).toEqual([2.014, 4.014, 6.014])
+  })
+
+  it('states the decode time in the ticks the track counts in', () => {
+    expect(converted.map((s) => parseFragment(s.bytes)!.baseMediaDecodeTime)).toEqual([
+      14, 2014, 4014,
+    ])
+  })
+
+  it('leaves no seam between one segment and the next', () => {
+    for (const [index, segment] of converted.slice(1).entries()) {
+      expect(segment.start, `segment ${index + 2}`).toBe(converted[index]!.end)
+    }
+  })
+
+  it('measures every frame by the cluster timeline, as the sound is measured', () => {
+    const durations = durationsOf(converted[0]!.bytes, 12)
+    // Twenty frames of a hundred milliseconds: ten a second, which is what the fixture runs at.
+    expect(durations.length).toBe(20)
+    expect([...new Set(durations)]).toEqual([100])
+  })
+
+  it('measures the last frame of a fragment by the step the ones before it went at', () => {
+    // Nothing in a SimpleBlock states how long a frame lasts and nothing inside a coded frame
+    // does either, so the final one takes the step of its neighbours. Understating it would leave
+    // a gap at every segment boundary; overstating it would overlap the next segment.
+    const durations = durationsOf(converted[2]!.bytes, 12)
+    expect(durations[durations.length - 1]).toBe(100)
+  })
+
+  it('marks the keyframes and nothing else', () => {
+    // One at the head of each segment in this material, which is what a two-second key interval
+    // at ten frames a second comes to.
+    for (const [index, segment] of converted.entries()) {
+      const flags = flagsOf(segment.bytes)
+      expect(flags[0], `segment ${index + 1}`).toBe(0x02000000)
+      expect([...new Set(flags.slice(1))], `segment ${index + 1}`).toEqual([0x01010000])
+    }
+  })
+
+  it('carries every frame of the segment over, whole and in order', () => {
+    const mdat = topLevelBoxes(converted[0]!.bytes).find((b) => b.type === 'mdat')!
+    const payload = boxBody(converted[0]!.bytes, mdat)
+
+    const trun = findBox(converted[0]!.bytes, ['moof', 'traf', 'trun'])!
+    const body = view(boxBody(converted[0]!.bytes, trun))
+    let at = 0
+    for (let i = 0; i < body.getUint32(4); i++) at += body.getUint32(16 + i * 12)
+    expect(at).toBe(payload.byteLength)
+  })
+
+  it('gives nothing back for bytes that are not a segment of this track', () => {
+    expect(video.segment(load('webm/chunk-stream1-00001.webm'))).toBeNull()
+    expect(video.segment(load('h264/chunk-stream0-00001.m4s'))).toBeNull()
+    expect(video.segment(new Uint8Array(0))).toBeNull()
+  })
+
+  it('leaves the bytes the page appended untouched', () => {
+    const source = Uint8Array.from(videoSegments[0]!)
+    video.segment(source)
+    expect([...source]).toEqual([...videoSegments[0]!])
   })
 })

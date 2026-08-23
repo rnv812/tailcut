@@ -1,30 +1,35 @@
-import { buildAudioInit, buildFragment, type Sample } from '../iso/build'
+import { buildAudioInit, buildFragment, buildVideoInit, type Sample } from '../iso/build'
 import { opusSampleEntry } from '../opus/mp4'
 import { OPUS_SAMPLE_RATE, packetSamples, parseOpusHead } from '../opus/packets'
+import { vp9Config } from '../vp9/codec'
+import { vp9SampleEntry } from '../vp9/mp4'
 import { parseClusters, type Frame } from './fragment'
-import type { InitInfo } from '../../shared/types'
+import type { InitInfo, TrackInfo } from '../../shared/types'
 
 /**
  * A WebM track turned into an ISO BMFF one, at the boundary where its bytes arrive.
  *
  * A page hands over whatever it chose, and the two containers arrive together more often than
- * apart: YouTube serves its sound as audio/webm; codecs="opus" beside a picture that is usually
- * mp4. A saved file is one container, so somewhere the two have to meet. Here is the earliest
- * place they can, and the cheapest: the coded frames cross over untouched — an Opus packet is an
- * Opus packet in either container — and only the description around them is rewritten.
+ * apart: YouTube serves its sound as audio/webm; codecs="opus", and its picture as WebM too
+ * whenever AV1 is not on offer. A saved file is one container, so somewhere the two have to meet.
+ * Here is the earliest place they can, and the cheapest: the coded frames cross over untouched —
+ * an Opus packet is an Opus packet in either container, and so is a VP9 frame — and only the
+ * description around them is rewritten.
  *
  * Converting on the way in rather than on the way out is what keeps the rest of the program
  * single-format. The registry, the timeline, the selection of material and the muxer all go on
  * seeing nothing but ISO BMFF, and none of them grows a branch per container.
  *
- * Opus and nothing else, for now. A WebM video track is refused by codec name rather than guessed
- * at: writing a vp09 sample entry needs facts about the bitstream that Matroska does not carry,
- * and a track opened here that could never be written would swallow its segments one by one and
- * end up as a stream of nothing inside a file that claims to have one.
+ * Two codecs, and a stream in any other is refused by CodecID rather than guessed at: a track
+ * opened here that could never be written would swallow its segments one by one and end up as a
+ * stream of nothing inside a file that claims to have one. The same refusal catches a VP9 track
+ * whose shape this program cannot describe — see src/core/vp9/codec.ts for what those are and
+ * where the description comes from.
  */
 
-/** The Matroska CodecID this converter reads. */
+/** The Matroska CodecIDs this converter reads. */
 const OPUS_CODEC_ID = 'A_OPUS'
+const VP9_CODEC_ID = 'V_VP9'
 
 /**
  * track_ID of the converted track inside its own init segment. The number only has to be a legal
@@ -48,10 +53,10 @@ export interface WebmToIso {
   /** ftyp and moov of the converted track — what a saved file is built out of. */
   initBytes: Uint8Array
   /**
-   * The track as it now stands. The codec keeps the name the container gave it — A_OPUS, not the
-   * four letters the mp4 sample entry spells — because that name is what identifies the stream to
-   * the registry, and it is the page's stream that is being identified, not our rewriting of it.
-   * The timescale is the one actually written into the mdhd.
+   * The track as it now stands. The codec keeps the name the container gave it — A_OPUS and
+   * V_VP9, not the four letters the mp4 sample entry spells — because that name is what
+   * identifies the stream to the registry, and it is the page's stream that is being identified,
+   * not our rewriting of it. The timescale is the one actually written into the mdhd.
    */
   info: InitInfo
   /** One media segment across, or null when these bytes hold nothing of this track. */
@@ -59,30 +64,73 @@ export interface WebmToIso {
 }
 
 /**
+ * Everything the conversion of one track's media segments turns on, settled once when its init
+ * segment is read so that no segment has to work any of it out again.
+ */
+interface Conversion {
+  /** TrackNumber the blocks of this track address — what parseInit reported as trackId. */
+  trackNumber: number
+  /** Matroska ticks into ticks of the mp4 track. */
+  scale: number
+  /** Ticks per second the mp4 track is timed in: the number written into its mdhd. */
+  timescale: number
+  /**
+   * The samples are to state their own sync flag, one by one. A picture track has to — seeking to
+   * a frame that was predicted from one the player never decoded shows the wrong picture, or
+   * none. A sound track does not: every packet of it is a sync sample and its trex says so once.
+   */
+  statesSync: boolean
+  /**
+   * How long the final sample of a fragment lasts, in ticks of the mp4 track. Every other sample
+   * is measured by the distance to the one after it; the last has no next timestamp, and each
+   * codec answers the question with what it has — see the two implementations below.
+   */
+  tail(frame: Frame, ticks: number[]): number
+}
+
+/**
  * Sets up the conversion of one WebM track, or refuses it.
  *
+ * `mime` is the type the page opened its SourceBuffer with, verbatim. It is not needed for sound
+ * and it is the whole description of a picture: see src/core/vp9/codec.ts.
+ *
  * Refused: a stream in a codec not written here, an init declaring more than one track (a muxed
- * WebM would need every one of its tracks converted, and one of them is video), an OpusHead that
- * cannot be read, a segment whose TimestampScale leaves its times unreadable. Each of those is a
- * null and not a default, so an unsupported stream never reaches the registry looking like a
- * supported one.
+ * WebM would need every one of its tracks converted, and the numbering of the tracks inside one
+ * mp4 init is not something this converter writes), an OpusHead that cannot be read, a VP9 track
+ * with no usable description or no frame size, a segment whose TimestampScale leaves its times
+ * unreadable. Each of those is a null and not a default, so an unsupported stream never reaches
+ * the registry looking like a supported one.
  */
-export function webmToIso(info: InitInfo): WebmToIso | null {
+export function webmToIso(info: InitInfo, mime?: string): WebmToIso | null {
   const track = info.tracks.length === 1 ? info.tracks[0] : undefined
-  if (!track || track.codec !== OPUS_CODEC_ID) return null
+  if (!track) return null
 
   // Ticks per second of the Matroska timestamps. Times are scaled through it, so a zero would be
   // a division by zero on every frame.
   if (!(track.timescale > 0)) return null
 
+  if (track.codec === OPUS_CODEC_ID) return opusTrack(track)
+  if (track.codec === VP9_CODEC_ID) return vp9Track(track, mime)
+  return null
+}
+
+function opusTrack(track: TrackInfo): WebmToIso | null {
   // dOps is built out of the OpusHead and there is nothing else to build it from: the channel
   // count and the pre-skip live nowhere but there.
   const head = track.codecPrivate ? parseOpusHead(track.codecPrivate) : null
   if (!head) return null
 
-  /** Matroska ticks to mp4 ticks. Opus decodes at 48 kHz, so that is what the track counts in. */
-  const scale = OPUS_SAMPLE_RATE / track.timescale
-  const trackNumber = track.trackId
+  const conversion: Conversion = {
+    trackNumber: track.trackId,
+    // Matroska ticks to mp4 ticks. Opus decodes at 48 kHz, so that is what the track counts in.
+    scale: OPUS_SAMPLE_RATE / track.timescale,
+    timescale: OPUS_SAMPLE_RATE,
+    statesSync: false,
+    // The packet itself answers, exactly: its TOC byte says how long it is. A packet whose length
+    // cannot be read comes out as zero — the fragment then understates itself and the map shows a
+    // gap, which is what the rest of the program already does with material it cannot measure.
+    tail: (frame) => packetSamples(frame.data),
+  }
 
   return {
     initBytes: buildAudioInit({
@@ -93,49 +141,99 @@ export function webmToIso(info: InitInfo): WebmToIso | null {
     info: {
       tracks: [{ ...track, trackId: ISO_TRACK_ID, timescale: OPUS_SAMPLE_RATE }],
     },
-    segment: (bytes) => convertSegment(bytes, trackNumber, scale),
+    segment: (bytes) => convertSegment(bytes, conversion),
   }
 }
 
-function convertSegment(
-  bytes: Uint8Array,
-  trackNumber: number,
-  scale: number,
-): ConvertedSegment | null {
+function vp9Track(track: TrackInfo, mime: string | undefined): WebmToIso | null {
+  // The sample entry and the track header both state the frame size, and a picture of no size is
+  // not something either of them can describe.
+  if (!(track.width > 0 && track.height > 0)) return null
+
+  const config = vp9Config(mime, track.width, track.height)
+  if (!config) return null
+
+  // The Matroska ticks per second, kept as they are. An mp4 timescale is a whole number of ticks
+  // and the usual TimestampScale of one millisecond gives a round 1000, so the frame times cross
+  // over exactly, with no rescaling and nothing to round. An unusual scale that comes out
+  // fractional is rounded to the nearest whole number of ticks per second and the timestamps are
+  // scaled to match — the ratio is then within a tick of one, and that tick is what a timestamp
+  // was measured in anyway.
+  const timescale = Math.round(track.timescale)
+  if (!(timescale > 0)) return null
+
+  const scale = timescale / track.timescale
+
+  const conversion: Conversion = {
+    trackNumber: track.trackId,
+    scale,
+    timescale,
+    statesSync: true,
+    // A SimpleBlock states no duration and a picture frame carries none inside it either. What
+    // the container does give is the step the frames go at: a BlockGroup that stated a
+    // BlockDuration is believed, and otherwise the distance between the last two frames stands in
+    // for it. At the constant frame rate a coded picture track runs at, that step is exact.
+    tail: (frame, ticks) => {
+      if (frame.duration > 0) return Math.round(frame.duration * scale)
+      const last = ticks[ticks.length - 1]
+      const before = ticks[ticks.length - 2]
+      return last !== undefined && before !== undefined ? last - before : 0
+    },
+  }
+
+  return {
+    initBytes: buildVideoInit({
+      trackId: ISO_TRACK_ID,
+      timescale,
+      width: track.width,
+      height: track.height,
+      sampleEntry: vp9SampleEntry(config, track.width, track.height),
+    }),
+    info: {
+      tracks: [{ ...track, trackId: ISO_TRACK_ID, timescale }],
+    },
+    segment: (bytes) => convertSegment(bytes, conversion),
+  }
+}
+
+function convertSegment(bytes: Uint8Array, conversion: Conversion): ConvertedSegment | null {
   const frames: Frame[] = []
   for (const cluster of parseClusters(bytes)) {
     for (const frame of cluster.frames) {
-      if (frame.trackNumber === trackNumber) frames.push(frame)
+      if (frame.trackNumber === conversion.trackNumber) frames.push(frame)
     }
   }
 
   if (!frames.length) return null
 
-  // Blocks of one cluster are written in decode order and Opus has no reordering, but a segment
-  // may hold several clusters and a page may deliver them in any order it likes. Sorted here so
-  // that the trun states the samples in the order their times run: otherwise a difference between
-  // two timestamps — which is what the durations below are — could come out negative.
+  // Blocks of one cluster are written in decode order, but a segment may hold several clusters
+  // and a page may deliver them in any order it likes. Sorted here so that the trun states the
+  // samples in the order their times run: otherwise a difference between two timestamps — which
+  // is what the durations below are — could come out negative. Sorting is safe for both codecs
+  // this converter takes: neither Opus nor VP9 reorders, so presentation order is decode order.
   frames.sort((a, b) => a.timestamp - b.timestamp)
 
-  const ticks = frames.map((frame) => Math.round(frame.timestamp * scale))
+  const ticks = frames.map((frame) => Math.round(frame.timestamp * conversion.scale))
   const base = ticks[0]!
   // Matroska allows a block to be presented before the cluster it sits in, and the first cluster
   // of a stream can carry one. A decode time is unsigned, and there is no honest place before
   // zero to put such a fragment.
   if (base < 0) return null
 
-  const samples: Sample[] = frames.map((frame, index) => ({
-    duration: sampleDuration(frame, ticks, index),
-    bytes: frame.data,
-  }))
+  const samples: Sample[] = frames.map((frame, index) => {
+    const duration = sampleDuration(frame, ticks, index, conversion)
+    return conversion.statesSync
+      ? { duration, bytes: frame.data, keyframe: frame.keyframe }
+      : { duration, bytes: frame.data }
+  })
 
   let covered = 0
   for (const sample of samples) covered += sample.duration
 
   return {
     bytes: buildFragment(ISO_TRACK_ID, base, samples),
-    start: base / OPUS_SAMPLE_RATE,
-    end: (base + covered) / OPUS_SAMPLE_RATE,
+    start: base / conversion.timescale,
+    end: (base + covered) / conversion.timescale,
   }
 }
 
@@ -148,15 +246,19 @@ function convertSegment(
  * rounding inside the fragment, so the samples add up to exactly where the next fragment says it
  * starts and the track has no seam at the boundary. Stating the true length of every packet
  * instead would leave a fragment ending a millisecond short of the next one — a gap in the sound
- * once a segment, silent but real.
+ * once a segment, silent but real. A picture track is measured the same way and for the same
+ * reason, and there the seam would be a frame shown twice or not at all.
  *
- * The last sample has no next timestamp to measure against, and that is where the packet itself
- * answers: the TOC byte says how long it is, exactly. A packet whose length cannot be read comes
- * out as zero — the fragment then understates itself and the map shows a gap, which is what the
- * rest of the program already does with material it cannot measure.
+ * The last sample has no next timestamp to measure against, and what answers instead is the one
+ * thing that differs between the two codecs — see Conversion.tail.
  */
-function sampleDuration(frame: Frame, ticks: number[], index: number): number {
+function sampleDuration(
+  frame: Frame,
+  ticks: number[],
+  index: number,
+  conversion: Conversion,
+): number {
   const next = ticks[index + 1]
   if (next !== undefined) return next - ticks[index]!
-  return packetSamples(frame.data)
+  return conversion.tail(frame, ticks)
 }

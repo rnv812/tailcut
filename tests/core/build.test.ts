@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { buildAudioInit, buildFragment, type Sample } from '../../src/core/iso/build'
+import {
+  buildAudioInit,
+  buildFragment,
+  buildVideoInit,
+  type Sample,
+} from '../../src/core/iso/build'
 import { parseInit } from '../../src/core/iso/init'
 import { parseFragment } from '../../src/core/iso/fragment'
 import { boxBody, childBoxes, findBox, topLevelBoxes } from '../../src/core/iso/reader'
@@ -19,8 +24,30 @@ const sampleEntry = boxOf(
   u32(48000 * 0x10000),
 )
 
+/**
+ * The same for a picture: a VisualSampleEntry with a made-up name. What goes inside a real one —
+ * a vpcC, an avcC — is the business of the module that writes that codec, not of the builder.
+ */
+const visualSampleEntry = boxOf(
+  'tSt2',
+  zeroes(6),
+  u16(1),
+  u16(0, 0),
+  u32(0, 0, 0),
+  u16(320, 180),
+  u32(0x00480000, 0x00480000),
+  u32(0),
+  u16(1),
+  zeroes(32),
+  u16(0x0018),
+  u16(0xffff),
+)
+
 const TRACK_ID = 1
 const TIMESCALE = 48000
+const VIDEO_TIMESCALE = 1000
+const WIDTH = 320
+const HEIGHT = 180
 
 const init = buildAudioInit({ trackId: TRACK_ID, timescale: TIMESCALE, sampleEntry })
 
@@ -203,5 +230,147 @@ describe('an init and its fragments make a stream a parser can follow', () => {
     const declared = parseInit(init)!.tracks[0]!
     const fragment = parseFragment(buildFragment(TRACK_ID, 95088, [sample(960, 1)]))!
     expect(fragment.baseMediaDecodeTime / declared.timescale).toBeCloseTo(1.981, 6)
+  })
+})
+
+describe('buildVideoInit', () => {
+  const video = buildVideoInit({
+    trackId: TRACK_ID,
+    timescale: VIDEO_TIMESCALE,
+    width: WIDTH,
+    height: HEIGHT,
+    sampleEntry: visualSampleEntry,
+  })
+
+  it('reads back through the parser of init segments, frame size and all', () => {
+    expect(parseInit(video)).toEqual({
+      tracks: [
+        {
+          trackId: TRACK_ID,
+          kind: 'video',
+          timescale: VIDEO_TIMESCALE,
+          codec: 'tSt2',
+          width: WIDTH,
+          height: HEIGHT,
+        },
+      ],
+    })
+  })
+
+  it('describes the media with the boxes a picture is described by', () => {
+    expect(findBox(video, ['moov', 'trak', 'mdia', 'minf', 'vmhd'])).not.toBeNull()
+    expect(findBox(video, ['moov', 'trak', 'mdia', 'minf', 'smhd'])).toBeNull()
+
+    const hdlr = findBox(video, ['moov', 'trak', 'mdia', 'hdlr'])!
+    const type = boxBody(video, hdlr).subarray(8, 12)
+    expect(String.fromCharCode(...type)).toBe('vide')
+  })
+
+  it('states the frame size in the track header as a 16.16 number of pixels', () => {
+    const tkhd = findBox(video, ['moov', 'trak', 'tkhd'])!
+    const body = view(boxBody(video, tkhd))
+    expect(body.getUint32(body.byteLength - 8)).toBe(WIDTH * 0x10000)
+    expect(body.getUint32(body.byteLength - 4)).toBe(HEIGHT * 0x10000)
+  })
+
+  it('leaves the volume at zero, which is what a picture track sounds like', () => {
+    const tkhd = findBox(video, ['moov', 'trak', 'tkhd'])!
+    // layer, alternate_group, volume: the third of the three 16-bit fields after the reserved pair.
+    expect(view(boxBody(video, tkhd)).getUint16(36)).toBe(0)
+  })
+
+  it('presumes a sample is not a sync sample until its own fragment says otherwise', () => {
+    // The opposite default to the sound track above, and the reason the fragments of a picture
+    // track have to carry flags at all: a picture is mostly frames predicted from other frames,
+    // and a trex claiming otherwise would offer a player a hundred wrong places to seek to.
+    const trex = findBox(video, ['moov', 'mvex', 'trex'])!
+    expect(view(boxBody(video, trex)).getUint32(20)).toBe(0x01010000)
+  })
+
+  it('leaves the sound track without a frame size, as it had none before', () => {
+    const tkhd = findBox(init, ['moov', 'trak', 'tkhd'])!
+    const body = view(boxBody(init, tkhd))
+    expect(body.getUint32(body.byteLength - 8)).toBe(0)
+    expect(body.getUint32(body.byteLength - 4)).toBe(0)
+  })
+})
+
+describe('buildFragment: sync sample information', () => {
+  const picture = [
+    { duration: 100, bytes: Uint8Array.from([1]), keyframe: true },
+    { duration: 100, bytes: Uint8Array.from([2, 2]), keyframe: false },
+    { duration: 100, bytes: Uint8Array.from([3, 3, 3]), keyframe: false },
+  ]
+  const fragment = buildFragment(TRACK_ID, 0, picture)
+
+  /** version and flags, sample_count, data_offset: the trun before its entries. */
+  const ENTRIES_AT = 12
+
+  const trunFlags = (bytes: Uint8Array): number => {
+    const trun = findBox(bytes, ['moof', 'traf', 'trun'])!
+    return view(boxBody(bytes, trun)).getUint32(0) & 0x00ffffff
+  }
+
+  it('states a flags field per sample when the samples state one', () => {
+    // sample-duration | sample-size | sample-flags, and the data offset the run opens with.
+    expect(trunFlags(fragment) & 0x000400, 'sample-flags-present').toBeTruthy()
+  })
+
+  it('marks the frames that can be decoded on their own, and only those', () => {
+    const trun = findBox(fragment, ['moof', 'traf', 'trun'])!
+    const body = view(boxBody(fragment, trun))
+
+    const flags = [0, 1, 2].map((i) => body.getUint32(ENTRIES_AT + i * 12 + 8))
+    expect(flags).toEqual([0x02000000, 0x01010000, 0x01010000])
+  })
+
+  it('keeps the durations and the sizes where they were, a field wider apart', () => {
+    const trun = findBox(fragment, ['moof', 'traf', 'trun'])!
+    const body = view(boxBody(fragment, trun))
+
+    const entries = [0, 1, 2].map((i) => [
+      body.getUint32(ENTRIES_AT + i * 12),
+      body.getUint32(ENTRIES_AT + i * 12 + 4),
+    ])
+    expect(entries).toEqual([
+      [100, 1],
+      [100, 2],
+      [100, 3],
+    ])
+  })
+
+  it('is still read for its length by the parser the timeline is built on', () => {
+    expect(parseFragment(fragment)).toEqual({
+      trackId: TRACK_ID,
+      baseMediaDecodeTime: 0,
+      duration: 300,
+    })
+  })
+
+  it('points at the sample data across the wider entries', () => {
+    const trun = findBox(fragment, ['moof', 'traf', 'trun'])!
+    const dataOffset = view(boxBody(fragment, trun)).getUint32(8)
+    expect(fragment[dataOffset]).toBe(1)
+  })
+
+  it('states no flags at all for a track that leaves them out', () => {
+    // A sound track would otherwise pay four bytes a packet to repeat what its trex already says:
+    // fifty thousand packets in a twenty-minute recording, and not one of them news.
+    expect(trunFlags(buildFragment(TRACK_ID, 0, [sample(960, 1)])) & 0x000400).toBe(0)
+  })
+
+  it('gives the whole run flags when any one sample states its own', () => {
+    // The box has one set of present-flags for every entry, so a run is flagged or it is not.
+    // A sample saying nothing among samples that do is taken as no sync sample, which is the
+    // reading that cannot send a player to a frame it may not start from.
+    const mixed = buildFragment(TRACK_ID, 0, [
+      { duration: 100, bytes: Uint8Array.from([1]) },
+      { duration: 100, bytes: Uint8Array.from([2]), keyframe: true },
+    ])
+    const body = view(boxBody(mixed, findBox(mixed, ['moof', 'traf', 'trun'])!))
+
+    expect(trunFlags(mixed) & 0x000400).toBeTruthy()
+    expect(body.getUint32(ENTRIES_AT + 8)).toBe(0x01010000)
+    expect(body.getUint32(ENTRIES_AT + 12 + 8)).toBe(0x02000000)
   })
 })

@@ -109,7 +109,16 @@ export async function saveAll(player: Page, popup: Page): Promise<string> {
 
 export interface Probed {
   format: { duration: string }
-  streams: Array<{ codec_type: string; codec_name: string; nb_read_frames: string }>
+  streams: Array<{
+    codec_type: string
+    codec_name: string
+    nb_read_frames: string
+    /** Picture only, and read out of the sample entry and the box beside it. */
+    width?: number
+    height?: number
+    profile?: string
+    pix_fmt?: string
+  }>
 }
 
 /**
@@ -126,7 +135,8 @@ export function probeFile(file: string): Probed {
     [
       '-v', 'error',
       '-count_frames',
-      '-show_entries', 'format=duration:stream=codec_type,codec_name,nb_read_frames',
+      '-show_entries',
+      'format=duration:stream=codec_type,codec_name,nb_read_frames,width,height,profile,pix_fmt',
       '-of', 'json',
       file,
     ],
@@ -165,6 +175,80 @@ export function frameTimes(file: string, stream: 'v' | 'a'): number[] {
     .sort((a, b) => a - b)
 }
 
+/** One frame of the picture as raw RGB, taken out of a file however the arguments say. */
+function decodeOneFrame(args: string[], what: string): Buffer {
+  const run = spawnSync('ffmpeg', args, { maxBuffer: 64 * 1024 * 1024 })
+
+  expect(run.error).toBeUndefined()
+  expect(run.status, `${what}: ${run.stderr.toString()}`).toBe(0)
+
+  return run.stdout
+}
+
+/**
+ * The frame shown at `at` seconds, reached by seeking — which is to say, by the sync sample
+ * information of the container and nothing else.
+ *
+ * -ss before -i is an input seek: the demuxer looks up the last sample marked as one that can be
+ * decoded on its own, starts there and decodes forward. That is the whole of what the keyframe
+ * flags are for, and it is why this and the reading below have to agree.
+ */
+export function frameBySeeking(file: string, at: number): Buffer {
+  return decodeOneFrame(
+    [
+      '-v', 'error',
+      '-ss', String(at),
+      '-i', file,
+      '-frames:v', '1',
+      '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-',
+    ],
+    `seeking to ${at}s`,
+  )
+}
+
+/** The same frame, reached by decoding the file from its first frame and counting forward. */
+export function frameByPlaying(file: string, at: number): Buffer {
+  return decodeOneFrame(
+    [
+      '-v', 'error',
+      '-i', file,
+      '-vf', `select='gte(t\\,${at})'`,
+      '-vsync', '0',
+      '-frames:v', '1',
+      '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-',
+    ],
+    `playing up to ${at}s`,
+  )
+}
+
+/**
+ * Seeking into the saved file lands on the frame that belongs there.
+ *
+ * A sample entry says what the codec is; it says nothing about which frames a player may start
+ * from, and that is the trun's business. Get it wrong in either direction and the file still
+ * decodes from end to end: mark every frame as a keyframe and a seek starts mid-prediction and
+ * shows a smear, mark none and a seek finds nowhere to start and shows nothing at all. Both are
+ * invisible until somebody drags the play head, which is the first thing anybody does.
+ *
+ * The times are taken inside a group of pictures on purpose — a seek to a keyframe would come out
+ * right whatever the flags said.
+ */
+export function seekingLandsRight(file: string, times: number[]): void {
+  for (const at of times) {
+    const seeked = frameBySeeking(file, at)
+    const played = frameByPlaying(file, at)
+
+    expect(played.byteLength, `nothing decodes at ${at}s at all`).toBeGreaterThan(0)
+    expect(seeked.byteLength, `seeking to ${at}s found no frame to start from`).toBe(
+      played.byteLength,
+    )
+    expect(
+      seeked.equals(played),
+      `the frame at ${at}s comes out differently when seeked to than when played up to`,
+    ).toBe(true)
+  }
+}
+
 /**
  * Decodes every frame of every stream of a file and throws the result away.
  *
@@ -197,6 +281,12 @@ export interface Playback {
   audioBytes: number
   videoBytes: number
   audioTracks: number | null
+  /** Frame size the browser found in the file; zero when it found no picture. */
+  frameWidth: number
+  frameHeight: number
+  /** Colours in one frame read back out of a canvas: one is a blank field, more is a picture. */
+  frameColours: number
+  frameError: string | null
 }
 
 /**
@@ -242,6 +332,67 @@ export async function playInBrowser(file: string): Promise<Playback> {
     )
 
     return await page.evaluate(() => (window as unknown as { tc: Playback }).tc)
+  } finally {
+    await browser.close()
+  }
+}
+
+const REMUX_URL = `${PLAYBACK_ORIGIN}/remux`
+
+/** What Media Source Extensions made of a saved file: see tests/e2e/page/remux.html. */
+export interface Remuxed {
+  supported: boolean
+  error: string | null
+  appended: boolean
+  duration: number
+  reached: number
+  ended: boolean
+  width: number
+  height: number
+}
+
+/**
+ * Feeds a saved file back through Media Source Extensions and reports what happened.
+ *
+ * The reason for a second trip through a browser is that the two readings are not the same
+ * reading. `<video src>` hands the file to a full demuxer, which takes what it needs out of the
+ * coded frames and forgives a container that describes them badly; MSE parses the boxes and
+ * refuses what it cannot make sense of. An init segment missing the box that describes its codec
+ * gets past the first and not past the second — so this is where a sample entry written wrongly
+ * turns into a failure instead of into a file that happens to work in one player.
+ *
+ * `type` is offered to the page through the fragment of the address, which is not sent to the
+ * network and needs no escaping beyond the encoding.
+ */
+export async function playThroughMse(file: string, type: string): Promise<Remuxed> {
+  const browser = await chromium.launch({ headless: false })
+
+  try {
+    const page = await browser.newPage()
+    const bytes = await fs.readFile(file)
+
+    await page.route(`${PLAYBACK_ORIGIN}/saved.mp4`, async (route) => {
+      await route.fulfill({ body: bytes, contentType: 'video/mp4' })
+    })
+    await page.route(REMUX_URL, async (route) => {
+      await route.fulfill({
+        body: await fs.readFile(path.resolve('tests/e2e/page/remux.html'), 'utf8'),
+        contentType: 'text/html',
+      })
+    })
+
+    await page.goto(`${REMUX_URL}#${encodeURIComponent(type)}`)
+
+    await page.waitForFunction(
+      () => {
+        const state = (window as unknown as { tc: Remuxed }).tc
+        return state.ended || state.error != null
+      },
+      undefined,
+      { timeout: PLAYBACK_TIMEOUT_MS },
+    )
+
+    return await page.evaluate(() => (window as unknown as { tc: Remuxed }).tc)
   } finally {
     await browser.close()
   }

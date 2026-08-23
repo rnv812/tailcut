@@ -8,6 +8,11 @@
   reports a duration, still runs to the end and still fires 'ended' — in silence. What tells the
   two apart is the count of bytes each decoder actually consumed, and whether the browser lists an
   audio track at all, so both are recorded here.
+
+  The picture gets the same treatment one step further on. A byte count says the decoder was fed;
+  it does not say a frame came out of it. So a frame is taken off the element while it plays,
+  drawn into a canvas and read back: a picture described wrongly gives an element of no size, or
+  one flat colour where the material has several.
 -->
 <video id="clip" playsinline controls width="480" style="background:#000"></video>
 <!--
@@ -29,8 +34,57 @@
     videoBytes: 0,
     /** null when the browser does not offer the list at all, which is the usual case. */
     audioTracks: null,
+    /** Frame size the browser found; zero for a file it opened without a picture in it. */
+    frameWidth: 0,
+    frameHeight: 0,
+    /**
+     * Distinct colours in one decoded frame, read back out of a canvas. Zero — no frame was ever
+     * taken; one — the frame is a flat field, which is what an element that decoded nothing
+     * shows; more than one — pixels came out of the decoder.
+     */
+    frameColours: 0,
+    /** Why a frame could not be read back, if it could not. */
+    frameError: null,
   }
   window.tc = state
+
+  const canvas = document.createElement('canvas')
+  const context = canvas.getContext('2d', { willReadFrequently: true })
+
+  /**
+   * One frame of the element as it plays, counted by colour.
+   *
+   * Taken from the element and not from the file: what is under test is what a browser makes of
+   * the file, and this is the last step of that. The page and the clip share an origin, so the
+   * canvas stays readable; a taint would show up as frameError rather than as a silent zero.
+   *
+   * Once is enough. A frame with more than one colour in it settles the question, and reading
+   * back every frame of a clip would slow the playback the test is timing.
+   */
+  function sampleFrame() {
+    if (state.frameColours > 1 || state.frameError) return
+
+    const width = clip.videoWidth
+    const height = clip.videoHeight
+    if (!width || !height) return
+
+    state.frameWidth = width
+    state.frameHeight = height
+    canvas.width = width
+    canvas.height = height
+
+    try {
+      context.drawImage(clip, 0, 0, width, height)
+      const pixels = context.getImageData(0, 0, width, height).data
+      const colours = new Set()
+      for (let i = 0; i < pixels.length; i += 4) {
+        colours.add((pixels[i] << 16) | (pixels[i + 1] << 8) | pixels[i + 2])
+      }
+      state.frameColours = colours.size
+    } catch (reason) {
+      state.frameError = String(reason)
+    }
+  }
 
   function record() {
     state.reached = Math.max(state.reached, clip.currentTime)
@@ -40,7 +94,10 @@
     state.audioTracks = clip.audioTracks ? clip.audioTracks.length : null
   }
 
-  clip.addEventListener('timeupdate', record)
+  clip.addEventListener('timeupdate', () => {
+    record()
+    sampleFrame()
+  })
   clip.addEventListener('ended', () => {
     record()
     state.ended = true

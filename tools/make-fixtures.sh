@@ -60,9 +60,13 @@ rm -rf "$out/vp9" && mkdir -p "$out/vp9"
 cp "$work"/vp9/*.m4s "$out/vp9/"
 
 # WebM — the container the ISO BMFF reader cannot touch. YouTube hands its sound over as
-# audio/webm; codecs="opus", so a stream in Matroska is not an exotic case but the ordinary one.
-# Opus and VP9 together, because the WebM parser must not be shaped around a single codec any more
-# than the mp4 one was.
+# audio/webm; codecs="opus" and, whenever AV1 is not on offer, its picture as VP9 in WebM too, so a
+# stream in Matroska is not an exotic case but the ordinary one.
+#
+# Both tracks are converted into mp4 on the way in, so both are needed here: the Opus one for the
+# dOps and the packet timing, the VP9 one for the vp09 sample entry, the frame durations off the
+# cluster timeline and the keyframe flags. The key interval is two seconds, which puts a keyframe
+# at the head of every segment and nineteen frames behind it that a seek must not land on.
 #
 # The material is deliberately cheap — a flat background with one moving box, ten frames a second,
 # Opus at 24 kbit — so that the whole set stays under thirty kilobytes. What is under test is the

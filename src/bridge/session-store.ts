@@ -80,6 +80,12 @@ export interface AppendInput {
   title: string
   bytes: Uint8Array
   now: number
+  /**
+   * The type that SourceBuffer was opened with, as the page spelled it. Only the ingest boundary
+   * reads it, and only for a container that does not describe its own tracks fully — a WebM
+   * picture track is declared by the codec string and by nothing else the page sends.
+   */
+  mime?: string
 }
 
 /** A stretch of media time. */
@@ -341,7 +347,7 @@ export class SessionStore {
       if (unit.kind === 'init') {
         // An init in a container or a codec the ingest boundary will not take opens no track, and
         // the segments behind it then land nowhere. Better that than a track that cannot be saved.
-        const opened = ingestInit(unit.bytes)
+        const opened = ingestInit(unit.bytes, input.mime)
         if (opened) this.openTrack(input, opened)
         continue
       }

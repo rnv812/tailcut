@@ -1,0 +1,77 @@
+<!doctype html>
+<meta charset="utf-8" />
+<!--
+  The same strict policy as two-container.html: a site that forbids foreign frames outright is the
+  case the bridge is most at risk from, and a page whose every track comes in WebM has to stand up
+  under it just as well.
+-->
+<meta
+  http-equiv="Content-Security-Policy"
+  content="default-src 'self'; frame-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; media-src blob:"
+/>
+<title>test player, picture and sound both in webm</title>
+<!--
+  Picture and sound both in WebM — what YouTube serves whenever AV1 is not on offer, which is most
+  of the time on most machines. Which codec the site picks is not the user's choice, so this is not
+  a corner of the web: it is half of it.
+
+  Muted and looped with controls, exactly as two-container.html: six seconds of material is the
+  probation period, so the clip has to come round again for the watcher to count it through, and
+  muted playback is the one kind a browser starts without a click.
+-->
+<video id="v" controls muted loop width="640" style="background:#000"></video>
+<script>
+  const VIDEO_INIT = '/fixtures/webm/init-stream0.webm'
+  const AUDIO_INIT = '/fixtures/webm/init-stream1.webm'
+  const VIDEO = [1, 2, 3].map((n) => `/fixtures/webm/chunk-stream0-0000${n}.webm`)
+  const AUDIO = [1, 2, 3, 4].map((n) => `/fixtures/webm/chunk-stream1-0000${n}.webm`)
+
+  /**
+   * The picture is declared in the full form, fields and all, which is what a site that knows what
+   * it is serving writes and what YouTube writes for its VP9. Those fields are the only place a
+   * vp09 sample entry can be written from — Matroska carries none of them.
+   */
+  const VIDEO_TYPE = 'video/webm; codecs="vp09.00.10.08"'
+  const AUDIO_TYPE = 'audio/webm; codecs="opus"'
+
+  const video = document.getElementById('v')
+  const mediaSource = new MediaSource()
+  video.src = URL.createObjectURL(mediaSource)
+
+  window.allAppended = false
+  window.failure = null
+
+  mediaSource.addEventListener('sourceopen', async () => {
+    try {
+      const picture = mediaSource.addSourceBuffer(VIDEO_TYPE)
+      const sound = mediaSource.addSourceBuffer(AUDIO_TYPE)
+
+      const append = (buffer, into) =>
+        new Promise((resolve, reject) => {
+          into.addEventListener('updateend', resolve, { once: true })
+          into.addEventListener('error', () => reject(new Error('appendBuffer failed')), {
+            once: true,
+          })
+          into.appendBuffer(buffer)
+        })
+
+      const fetchBytes = async (url) => (await fetch(url)).arrayBuffer()
+
+      await append(await fetchBytes(VIDEO_INIT), picture)
+      await append(await fetchBytes(AUDIO_INIT), sound)
+
+      // Interleaved, the way a player loads them: the two buffers fill in step and not one
+      // after the other.
+      for (let i = 0; i < Math.max(VIDEO.length, AUDIO.length); i++) {
+        if (VIDEO[i]) await append(await fetchBytes(VIDEO[i]), picture)
+        if (AUDIO[i]) await append(await fetchBytes(AUDIO[i]), sound)
+      }
+
+      window.allAppended = true
+    } catch (error) {
+      // Otherwise a failure inside the handler sinks into a rejected promise and the test waits
+      // for allAppended until its timeout, reporting the timeout instead of the reason.
+      window.failure = String(error)
+    }
+  })
+</script>
