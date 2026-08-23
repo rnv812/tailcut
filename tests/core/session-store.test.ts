@@ -457,3 +457,143 @@ describe('SessionStore: время жизни сессии', () => {
     ])
   })
 })
+
+describe('SessionStore: вердикты отсева', () => {
+  it('отказ стирает ещё не подтверждённую сессию', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: seg1 })
+
+    store.dropPending('s1')
+
+    expect(store.list()).toEqual([])
+  })
+
+  it('отказ, пришедший раньше первых байтов, не даёт сессии родиться', () => {
+    const store = new SessionStore()
+
+    // Вердикт выносится по сигналам элемента, а байты идут своей дорогой: у баннера отказ
+    // вполне успевает обогнать его первый сегмент. Забудь хранилище про отказ — сессия
+    // родилась бы следом за ним и осталась бы в реестре навсегда: вердикт больше не менялся.
+    store.dropPending('s1')
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: seg1 })
+
+    expect(store.list()).toEqual([])
+  })
+
+  it('ожидание после отказа возвращает запись', () => {
+    const store = new SessionStore()
+
+    // Элемент увели с экрана и вернули: отказ сменился ожиданием, и материал снова копится.
+    // Без этого одного промаха отбора хватило бы, чтобы поток замолчал до конца жизни страницы.
+    store.dropPending('s1')
+    store.resumePending('s1')
+    store.append({ ...page, bytes: init })
+
+    expect(store.list()).toHaveLength(1)
+  })
+
+  it('повышение после отказа тоже возвращает запись', () => {
+    const store = new SessionStore()
+
+    // Из отказа в повышение можно попасть и минуя ожидание: у вернувшегося на экран видео
+    // испытательный срок мог быть отсижен ещё до того, как оно с экрана ушло.
+    store.dropPending('s1')
+    store.promotePending('s1')
+    store.append({ ...page, bytes: init })
+
+    expect(store.list()).toHaveLength(1)
+  })
+
+  it('подтверждённую сессию отказ уже не трогает', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.promotePending('s1')
+    store.dropPending('s1')
+
+    expect(store.list()).toHaveLength(1)
+  })
+
+  it('отказ по подтверждённой сессии замораживает запись, а накопленное оставляет', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: seg1 })
+    store.promotePending('s1')
+
+    // Пауза, скрытая вкладка, уход элемента с экрана: писать дальше незачем, но выбрасывать
+    // уже набранное — тем более. Пользователь за ним и придёт.
+    store.dropPending('s1')
+    store.append({ ...page, bytes: seg2 })
+
+    expect(store.list()).toHaveLength(1)
+    expect(store.list()[0]!.map.runs()[0]!.chunks).toEqual([{ start: 0, end: 2, bytes: seg1 }])
+  })
+
+  it('заморозка подтверждённой сессии не рвёт привязку источника', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, sourceId: 's2', bytes: init })
+    store.promotePending('s1')
+
+    // Второй элемент той же страницы увели с экрана и вернули. Сессия подтверждена соседом,
+    // так что отказ её не тронул, — и после разморозки материал обязан лечь туда же, а не
+    // пропадать до следующего init'а, которого у живого плеера может и не быть.
+    store.dropPending('s2')
+    store.resumePending('s2')
+    store.append({ ...page, sourceId: 's2', bytes: seg1 })
+
+    expect(store.list()).toHaveLength(1)
+    expect(store.list()[0]!.map.runs()[0]!.chunks).toHaveLength(1)
+  })
+
+  it('отказ по одному источнику не задевает соседний', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, sourceId: 's2', url: 'https://site.example/watch?v=other', bytes: init })
+
+    store.dropPending('s2')
+
+    expect(store.list()).toHaveLength(1)
+    expect(store.list()[0]!.url).toContain('v=abc')
+  })
+
+  it('сессию, которую набирает и второй источник, отказ не стирает', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    // Баннер и настоящий плеер на одной странице: адрес у них общий, кодек тот же — значит,
+    // и ключ сессии один. Сотри её по отказу баннера — вместе с ним умерла бы запись плеера,
+    // хотя вердикт был адресован не ему.
+    store.append({ ...page, sourceId: 's2', bytes: init })
+
+    store.dropPending('s1')
+    store.append({ ...page, sourceId: 's2', bytes: seg1 })
+
+    expect(store.list()).toHaveLength(1)
+    expect(store.list()[0]!.map.runs()[0]!.chunks).toHaveLength(1)
+  })
+
+  it('отсеянный источник больше ничего не приносит', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, sourceId: 's2', bytes: init })
+
+    store.dropPending('s1')
+    // Хук в MAIN world про вердикты не знает и копирует до последнего: отсеянный источник
+    // продолжает слать байты, и не сложи их некуда — они осели бы в соседней сессии.
+    store.append({ ...page, bytes: seg1 })
+
+    expect(store.list()[0]!.map.runs()).toEqual([])
+  })
+
+  it('вердикт по неизвестному источнику ничего не ломает', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+
+    store.dropPending('s-unknown')
+    store.promotePending('s-unknown')
+    store.resumePending('s-unknown')
+
+    expect(store.list()).toHaveLength(1)
+  })
+})

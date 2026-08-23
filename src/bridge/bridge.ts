@@ -43,6 +43,17 @@ window.addEventListener('message', (event: MessageEvent) => {
     return
   }
 
+  // Вердикт отбора выносит content script по сигналам <video>: хук в MAIN world копирует
+  // байты всегда, а решать, что из них остаётся, — работа изолированного мира. Вердикт
+  // адресный, поэтому и отказ действует ровно на свой источник.
+  if (data?.type === 'tc:verdict') {
+    const sourceId = String(data.sourceId)
+    if (data.verdict === 'reject') store.dropPending(sourceId)
+    if (data.verdict === 'hold') store.resumePending(sourceId)
+    if (data.verdict === 'promote') store.promotePending(sourceId)
+    return
+  }
+
   if (!isPageToBridge(data)) return
 
   if (data.type === 'tc:append') {

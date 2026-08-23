@@ -403,6 +403,75 @@ describe('мост и чужие сообщения', () => {
   })
 })
 
+describe('мост принимает вердикты отсева', () => {
+  /** Вердикт в том виде, в каком его шлёт мосту content script. */
+  const verdict = (win: ReturnType<typeof installWindow>, sourceId: string, value: string) =>
+    win.deliver({ type: 'tc:verdict', sourceId, verdict: value })
+
+  it('отказ стирает набранное отсеянным источником', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes, 's1')
+    win.append(seg1Bytes, 's1')
+
+    verdict(win, 's1', 'reject')
+
+    expect(win.list()).toEqual([])
+  })
+
+  it('отказ по одному источнику не трогает сессию соседнего', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes, 's1')
+    win.context('https://site.example/watch?v=second', 'Second')
+    win.append(initBytes, 's2')
+
+    // Баннер и настоящий плеер на одной странице: вердикт адресный, и отказ по первому
+    // обязан оставить второй в покое.
+    verdict(win, 's1', 'reject')
+
+    expect(win.list().map((s) => s.title)).toEqual(['Second'])
+  })
+
+  it('повышение защищает сессию от последующего отказа', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes, 's1')
+    win.append(seg1Bytes, 's1')
+
+    verdict(win, 's1', 'promote')
+    // Пауза или уход элемента с экрана: запись замирает, накопленное остаётся.
+    verdict(win, 's1', 'reject')
+
+    expect(win.list()).toMatchObject([{ runs: 1, duration: 2 }])
+  })
+
+  it('ожидание возвращает запись отсеянному источнику', async () => {
+    const win = await loadBridge()
+    win.context()
+
+    verdict(win, 's1', 'reject')
+    win.append(initBytes, 's1')
+    expect(win.list(), 'подготовка: после отказа сессии быть не должно').toEqual([])
+
+    verdict(win, 's1', 'hold')
+    win.append(initBytes, 's1')
+    win.append(seg1Bytes, 's1')
+
+    expect(win.list()).toMatchObject([{ runs: 1 }])
+  })
+
+  it('на вердикт мост не отвечает отправителю', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes, 's1')
+
+    const sender = win.deliver({ type: 'tc:verdict', sourceId: 's1', verdict: 'promote' })
+
+    expect(sender.posts, 'мост ответил на вердикт').toEqual([])
+  })
+})
+
 describe('BridgeToPage описывает всё, что мост отправляет', () => {
   it('и рукопожатие, и ответ на tc:list укладываются в объявленный союз', async () => {
     const win = await loadBridge()

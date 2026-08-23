@@ -1,4 +1,5 @@
 import { BRIDGE_PATH, isPageToBridge } from '../shared/protocol'
+import { markDrmSeen, registerSource, startWatching } from './watcher'
 
 let bridgePromise: Promise<HTMLIFrameElement> | null = null
 
@@ -46,12 +47,27 @@ window.addEventListener('message', async (event: MessageEvent) => {
   if (event.source !== window) return
   if (!isPageToBridge(event.data)) return
 
-  const iframe = await ensureBridge()
   const message = event.data
+
+  // Наблюдателю — сразу, до ожидания моста: адрес из createObjectURL нужен ему уже на
+  // ближайшем опросе, а мост к этому времени может ещё грузиться.
+  if (message.type === 'tc:source') registerSource(message.sourceId, message.objectUrl)
+  if (message.type === 'tc:drm') markDrmSeen()
+
+  const iframe = await ensureBridge()
 
   if (message.type === 'tc:append') {
     iframe.contentWindow?.postMessage(message, '*', [message.bytes])
   } else {
     iframe.contentWindow?.postMessage(message, '*')
   }
+})
+
+// Хук в MAIN world копирует байты всегда: про DOM он не знает и знать не должен, а разбор
+// на синхронном пути плеера недопустим. Решает, писать ли поток, изолированный мир — здесь,
+// по сигналам элемента, — и вердикт уходит мосту адресно, с идентификатором потока. Отказ
+// по одному <video> так не задевает соседнее на той же странице.
+startWatching(async (sourceId, verdict) => {
+  const iframe = await ensureBridge()
+  iframe.contentWindow?.postMessage({ type: 'tc:verdict', sourceId, verdict }, '*')
 })

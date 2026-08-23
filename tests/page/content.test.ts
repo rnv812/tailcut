@@ -68,10 +68,50 @@ function fakeElement(tagName: string) {
 
 type FakeElement = ReturnType<typeof fakeElement>
 
+/**
+ * Минимальный <video>: наблюдатель читает только перечисленное здесь. По умолчанию — баннер
+ * (беззвучное зациклённое превью без панели управления), которому положен отказ.
+ */
+function fakeVideo(overrides: Record<string, unknown> = {}) {
+  const rect = { width: 160, height: 90, top: 0, left: 0, bottom: 90, right: 160 }
+  return {
+    src: 'blob:banner',
+    currentSrc: 'blob:banner',
+    muted: true,
+    volume: 1,
+    loop: true,
+    controls: false,
+    paused: false,
+    ended: false,
+    readyState: 4,
+    isConnected: true,
+    mediaKeys: null,
+    getBoundingClientRect: () => rect,
+    ...overrides,
+  }
+}
+
 function installDom() {
   const created: FakeElement[] = []
   const appended: FakeElement[] = []
   const messageListeners: Array<(event: MessageEvent) => void> = []
+  /** Элементы <video> страницы: наблюдатель находит их через document.querySelectorAll. */
+  const videos: ReturnType<typeof fakeVideo>[] = []
+  /** Часы наблюдателя: время двигает tick(), а не очередь таймеров. */
+  let now = 0
+
+  // Настоящим остаётся только setTimeout: на нём держатся ожидания микрозадач ниже.
+  // Опрос наблюдателя идёт по setInterval, и тесту нужно решать самому, когда он сработает.
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+  vi.stubGlobal('performance', { now: () => now })
+  vi.stubGlobal('innerWidth', 1280)
+  vi.stubGlobal('innerHeight', 800)
+  vi.stubGlobal(
+    'MutationObserver',
+    class {
+      observe(): void {}
+    },
+  )
 
   // Окно страницы: content script слушает на нём сообщения хука и по нему же отличает
   // своё окно от чужого.
@@ -85,6 +125,8 @@ function installDom() {
 
   vi.stubGlobal('document', {
     title: PAGE_TITLE,
+    visibilityState: 'visible',
+    querySelectorAll: () => videos,
     createElement: (tagName: string) => {
       const element = fakeElement(tagName)
       created.push(element)
@@ -106,6 +148,13 @@ function installDom() {
     created,
     appended,
     pageWindow,
+    videos,
+    /** Прогоняет один опрос наблюдателя и даёт разобрать очередь микрозадач. */
+    tick: async (): Promise<void> => {
+      now += 500
+      vi.advanceTimersByTime(500)
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    },
     /**
      * Доставляет сообщение слушателю content script'а. Обработчик асинхронный — ждёт мост,
      * поэтому после доставки очередь микрозадач надо дать разобрать.
@@ -156,6 +205,7 @@ function declarations(cssText: string): Record<string, string> {
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.unstubAllGlobals()
 })
 
@@ -332,5 +382,103 @@ describe('контекст страницы для моста', () => {
       dom.created[0]!.posted.map((post) => (post.message as { type: string }).type),
       'сегмент обогнал контекст страницы',
     ).toEqual(['tc:context', 'tc:append'])
+  })
+})
+
+describe('вердикт отбора', () => {
+  /** Поднимает content script с уже загруженным мостом и отдаёт его окружение. */
+  async function withBridge() {
+    const dom = installDom()
+    await importContent()
+    dom.deliverLoad()
+    return dom
+  }
+
+  it('уходит мосту с идентификатором того потока, чей элемент его получил', async () => {
+    const dom = await withBridge()
+    dom.videos.push(fakeVideo())
+
+    // Связку потока с адресом изолированный мир узнаёт из сообщения хука — того самого,
+    // которое он же пересылает мосту.
+    await dom.deliverMessage({ type: 'tc:source', sourceId: 's1', objectUrl: 'blob:banner' })
+    await dom.tick()
+
+    expect(dom.forwarded()).toEqual([
+      {
+        message: { type: 'tc:source', sourceId: 's1', objectUrl: 'blob:banner' },
+        transfer: undefined,
+      },
+      { message: { type: 'tc:verdict', sourceId: 's1', verdict: 'reject' }, transfer: undefined },
+    ])
+  })
+
+  it('связка потока с адресом запоминается, не дожидаясь моста', async () => {
+    const dom = installDom()
+    await importContent()
+    dom.videos.push(fakeVideo())
+
+    // Хук отдаёт адрес из createObjectURL на document_start — мост в этот момент ещё грузится,
+    // и первый опрос наблюдателя вполне успевает пройти до его загрузки. Отложи изолированный
+    // мир запоминание адреса до готовности моста — вердикт этого опроса остался бы без
+    // адресата и пропал бы вовсе.
+    await dom.deliverMessage({ type: 'tc:source', sourceId: 's1', objectUrl: 'blob:banner' })
+    await dom.tick()
+
+    dom.deliverLoad()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(dom.forwarded().map((post) => post.message)).toContainEqual({
+      type: 'tc:verdict',
+      sourceId: 's1',
+      verdict: 'reject',
+    })
+  })
+
+  it('по элементу с незнакомым адресом мосту не уходит', async () => {
+    const dom = await withBridge()
+    dom.videos.push(fakeVideo({ src: 'blob:someone-else', currentSrc: 'blob:someone-else' }))
+
+    await dom.deliverMessage({ type: 'tc:source', sourceId: 's1', objectUrl: 'blob:banner' })
+    await dom.tick()
+
+    // Вердикт без адресата стёр бы в реестре чужую сессию — первую попавшуюся.
+    expect(dom.forwarded().map((post) => (post.message as { type: string }).type)).toEqual([
+      'tc:source',
+    ])
+  })
+
+  it('по запросу ключей отменяет запись и настоящему плееру', async () => {
+    const dom = await withBridge()
+    const player = fakeVideo({
+      src: 'blob:player',
+      currentSrc: 'blob:player',
+      muted: false,
+      loop: false,
+      controls: true,
+      getBoundingClientRect: () => ({
+        width: 640,
+        height: 360,
+        top: 0,
+        left: 0,
+        bottom: 360,
+        right: 640,
+      }),
+    })
+    dom.videos.push(player)
+
+    await dom.deliverMessage({ type: 'tc:source', sourceId: 's1', objectUrl: 'blob:player' })
+    await dom.tick()
+    expect(
+      dom.forwarded().map((post) => (post.message as { type: string }).type),
+      'подготовка: до запроса ключей отказывать плееру не за что',
+    ).toEqual(['tc:source'])
+
+    await dom.deliverMessage({ type: 'tc:drm', sourceId: 'page' })
+    await dom.tick()
+
+    expect(dom.forwarded().at(-1)).toEqual({
+      message: { type: 'tc:verdict', sourceId: 's1', verdict: 'reject' },
+      transfer: undefined,
+    })
   })
 })

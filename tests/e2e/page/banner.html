@@ -1,0 +1,35 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>banner page</title>
+<!-- беззвучный зациклённый автоплей размером с превью: типичный мусор -->
+<video id="v" muted loop autoplay width="160" height="90" style="background:#333"></video>
+<script>
+  const INIT = '/fixtures/h264/init-stream0.m4s'
+  const SEGMENTS = ['/fixtures/h264/chunk-stream0-00001.m4s']
+
+  const video = document.getElementById('v')
+  const mediaSource = new MediaSource()
+  video.src = URL.createObjectURL(mediaSource)
+
+  window.appended = 0
+
+  mediaSource.addEventListener('sourceopen', async () => {
+    const sb = mediaSource.addSourceBuffer('video/mp4; codecs="avc1.4d401e"')
+    const append = (buf) =>
+      new Promise((r) => {
+        sb.addEventListener('updateend', r, { once: true })
+        sb.appendBuffer(buf)
+      })
+    const bytes = async (u) => (await fetch(u)).arrayBuffer()
+
+    await append(await bytes(INIT))
+    window.appended++
+
+    for (const u of SEGMENTS) {
+      await append(await bytes(u))
+      window.appended++
+    }
+
+    window.allAppended = true
+  })
+</script>

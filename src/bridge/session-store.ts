@@ -27,12 +27,23 @@ export class SessionStore {
   private sessions = new Map<string, Session>()
   /** какой сессии принадлежит поток от конкретного MediaSource */
   private bySource = new Map<string, string>()
+  /** источник → ключ сессии, пока вердикт отбора по нему не вынесен */
+  private pendingBySource = new Map<string, string>()
+  /** сессии, которым вердикт уже дал право на жизнь */
+  private confirmed = new Set<string>()
+  /** отсеянные источники: их байты не хранятся, пока вердикт не сменится */
+  private rejected = new Set<string>()
 
   /**
    * Разбирает пришедшие байты и сам решает, что это. Хранилище кормится с чужой страницы,
    * поэтому ни один разбор здесь не имеет права упасть: непонятный кусок молча отбрасывается.
    */
   append(input: AppendInput): void {
+    // Хук в MAIN world про вердикты не знает и копирует до последнего: отбор живёт здесь.
+    // Отказ действует и вперёд, а не только на уже набранное, — иначе баннер, получивший
+    // его раньше своего первого сегмента, завёл бы сессию сразу следом.
+    if (this.rejected.has(input.sourceId)) return
+
     const info = parseInit(input.bytes)
 
     if (info) {
@@ -89,6 +100,44 @@ export class SessionStore {
     }
   }
 
+  /**
+   * Отсев: источник признан мусорным. Набранное им стирается, если сессию не подтвердили и
+   * не набирает её кто-то ещё; подтверждённая переживает отказ — запись просто замирает
+   * (пауза, скрытая вкладка, уход элемента с экрана), а накопленное остаётся.
+   */
+  dropPending(sourceId: string): void {
+    this.rejected.add(sourceId)
+
+    const key = this.pendingBySource.get(sourceId)
+    this.pendingBySource.delete(sourceId)
+    if (!key || this.confirmed.has(key)) return
+
+    this.bySource.delete(sourceId)
+
+    // Ключ сессии считается по адресу страницы и кодекам, так что у баннера и настоящего
+    // плеера рядом с ним он вполне может совпасть. Вердикт адресный: стереть сессию по
+    // отказу одного источника значило бы убить запись соседнего.
+    for (const bound of this.bySource.values()) if (bound === key) return
+
+    this.sessions.delete(key)
+  }
+
+  /** Испытательный срок пройден: сессию больше не стирает отказ по её источнику. */
+  promotePending(sourceId: string): void {
+    this.rejected.delete(sourceId)
+
+    const key = this.pendingBySource.get(sourceId)
+    if (!key) return
+
+    this.pendingBySource.delete(sourceId)
+    this.confirmed.add(key)
+  }
+
+  /** Ожидание после отказа: источник снова пишется, но права на жизнь пока не заработал. */
+  resumePending(sourceId: string): void {
+    this.rejected.delete(sourceId)
+  }
+
   private openSession(input: AppendInput, info: InitInfo): void {
     const key = sessionKey({
       url: input.url,
@@ -97,6 +146,7 @@ export class SessionStore {
     })
 
     this.bySource.set(input.sourceId, key)
+    if (!this.confirmed.has(key)) this.pendingBySource.set(input.sourceId, key)
 
     const existing = this.sessions.get(key)
     if (existing) {
