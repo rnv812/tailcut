@@ -1,6 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { spawnSync } from 'node:child_process'
-import { launchWithExtension, serveLocal } from './helpers'
+import { launchWithExtension, openPopupOn, probeFile, saveAll, serveLocal } from './helpers'
 
 const PLAYER_URL = 'https://tailcut.test/two-track'
 
@@ -11,11 +10,6 @@ const PLAYER_URL = 'https://tailcut.test/two-track'
 const PLAY_MS = 7_000
 
 type PageState = { allAppended?: boolean; failure?: string | null }
-
-interface Probed {
-  format: { duration: string }
-  streams: Array<{ codec_type: string; codec_name: string; nb_read_frames: string }>
-}
 
 /**
  * The whole path end to end: a page with a picture buffer and a sound buffer, the hook, the
@@ -41,37 +35,12 @@ test('the saved file carries both tracks of the page', async () => {
   await page.evaluate(() => document.querySelector('video')!.play())
   await page.waitForTimeout(PLAY_MS)
 
-  // The popup asks the active tab, so the player has to stay the active one: opened as an
-  // ordinary tab, the popup would be asking itself.
-  const popup = await context.newPage()
-  await page.bringToFront()
-  await popup.goto(`chrome-extension://${extensionId}/popup/popup.html`)
+  const popup = await openPopupOn(context, page, extensionId)
 
   // Picture 0…6, sound 0…6.0232: six seconds is what both tracks cover at once.
   await expect(popup.getByTestId('duration')).toHaveText('0:06')
 
-  // The download is started by the bridge — the extension frame inside the player tab.
-  const started = page.waitForEvent('download')
-  await popup.getByRole('button', { name: 'Save all' }).click()
-  const file = await (await started).path()
-
-  const probe = spawnSync(
-    'ffprobe',
-    [
-      '-v', 'error',
-      '-count_frames',
-      '-show_entries', 'format=duration:stream=codec_type,codec_name,nb_read_frames',
-      '-of', 'json',
-      file,
-    ],
-    { encoding: 'utf8' },
-  )
-
-  expect(probe.error).toBeUndefined()
-  expect(probe.status, probe.stderr).toBe(0)
-  expect(probe.stderr, 'ffprobe complains about reading the saved file').toBe('')
-
-  const probed = JSON.parse(probe.stdout) as Probed
+  const probed = probeFile(await saveAll(page, popup))
 
   expect(probed.streams.map((stream) => [stream.codec_type, stream.codec_name])).toEqual([
     ['video', 'h264'],

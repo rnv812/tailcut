@@ -1,0 +1,149 @@
+<!doctype html>
+<meta charset="utf-8" />
+<!--
+  A minute of two tracks, delivered the way a site delivers one.
+
+  two-track.html appends everything it has the moment the source opens: enough to ask whether both
+  tracks reach the file at all, and nothing like what a watched video does. Here the segments are
+  fetched as playback needs them, a dozen seconds ahead of the head, and a seek sends the loader
+  wherever the user jumped to — which is the whole point of the page. What the extension collects
+  then depends on where the video has been, and that is the shape the user's defect was reported
+  in: a minute of watching, then Save all.
+-->
+<meta
+  http-equiv="Content-Security-Policy"
+  content="default-src 'self'; frame-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; media-src blob:"
+/>
+<title>test player, one minute</title>
+<!--
+  Muted, with controls and without a loop: muted is the one kind of playback a browser starts
+  without a click, and the controls are what tells triage a player from a banner. Six hundred and
+  forty pixels wide because triage rejects anything under three hundred and twenty.
+-->
+<video id="v" controls muted width="640" style="background:#000"></video>
+<script>
+  const BASE = '/fixtures/minute'
+  /** Ten segments of six seconds. */
+  const VIDEO = Array.from({ length: 10 }, (_, i) => String(i + 1).padStart(5, '0'))
+  /** Twelve of 5.016: the two tracks are cut apart, as they always are. */
+  const AUDIO = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(5, '0'))
+
+  /** Length of the whole recording, and how far ahead of the play head the loader keeps. */
+  const TOTAL_SECONDS = 60.05
+  const AHEAD_SECONDS = 12
+
+  const video = document.getElementById('v')
+  const mediaSource = new MediaSource()
+  video.src = URL.createObjectURL(mediaSource)
+
+  window.tc = {
+    ready: false,
+    failure: null,
+    /** Indices of the segments handed to each buffer, in the order they were handed over. */
+    appended: { video: [], audio: [] },
+    seeks: 0,
+  }
+
+  const fetchBytes = async (url) => (await fetch(url)).arrayBuffer()
+
+  function append(stream, bytes) {
+    return new Promise((resolve, reject) => {
+      stream.buffer.addEventListener('updateend', resolve, { once: true })
+      stream.buffer.addEventListener('error', () => reject(new Error('appendBuffer failed')), {
+        once: true,
+      })
+      stream.buffer.appendBuffer(bytes)
+    })
+  }
+
+  mediaSource.addEventListener('sourceopen', async () => {
+    try {
+      const streams = [
+        {
+          kind: 'video',
+          buffer: mediaSource.addSourceBuffer('video/mp4; codecs="avc1.4d400b"'),
+          init: `${BASE}/init-stream0.m4s`,
+          urls: VIDEO.map((n) => `${BASE}/chunk-stream0-${n}.m4s`),
+          seconds: 6,
+          done: new Set(),
+          busy: false,
+        },
+        {
+          kind: 'audio',
+          buffer: mediaSource.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"'),
+          init: `${BASE}/init-stream1.m4s`,
+          urls: AUDIO.map((n) => `${BASE}/chunk-stream1-${n}.m4s`),
+          seconds: 60.046 / 12,
+          done: new Set(),
+          busy: false,
+        },
+      ]
+
+      // Stated up front, the way a player that has read a manifest states it: without a duration
+      // the element refuses to seek past what is buffered, and seeking past it is the point.
+      mediaSource.duration = TOTAL_SECONDS
+
+      for (const stream of streams) await append(stream, await fetchBytes(stream.init))
+
+      /** Segments covering the stretch the play head is about to cross, minus the ones already in. */
+      const wanted = (stream) => {
+        const at = video.currentTime
+        const first = Math.max(0, Math.floor(at / stream.seconds))
+        const last = Math.min(stream.urls.length - 1, Math.floor((at + AHEAD_SECONDS) / stream.seconds))
+        for (let i = first; i <= last; i++) if (!stream.done.has(i)) return i
+        return -1
+      }
+
+      const pump = async (stream) => {
+        if (stream.busy) return
+        const index = wanted(stream)
+        if (index < 0) return
+
+        stream.busy = true
+        stream.done.add(index)
+        try {
+          await append(stream, await fetchBytes(stream.urls[index]))
+          window.tc.appended[stream.kind].push(index)
+        } catch (error) {
+          window.tc.failure = String(error)
+        } finally {
+          stream.busy = false
+        }
+
+        // Nothing left to fetch anywhere: the recording is whole, and a player says so. Without
+        // it the element waits at the last frame for a continuation that is not coming, and never
+        // reaches the end of what it has.
+        const whole = streams.every((s) => s.done.size === s.urls.length && !s.busy)
+        if (whole && mediaSource.readyState === 'open') mediaSource.endOfStream()
+      }
+
+      setInterval(() => {
+        for (const stream of streams) void pump(stream)
+      }, 100)
+
+      // A player that has been jumped somewhere else re-states the stream it is decoding before
+      // sending the segments of the new place. Repeated inits are ordinary, and the registry has
+      // to take the second one as the same track rather than as a second one.
+      video.addEventListener('seeking', async () => {
+        window.tc.seeks++
+        for (const stream of streams) {
+          if (stream.busy) continue
+          stream.busy = true
+          try {
+            await append(stream, await fetchBytes(stream.init))
+          } catch (error) {
+            window.tc.failure = String(error)
+          } finally {
+            stream.busy = false
+          }
+        }
+      })
+
+      window.tc.ready = true
+    } catch (error) {
+      // Otherwise a failure inside the handler sinks into a rejected promise and the test waits
+      // out its timeout, reporting the timeout instead of the reason.
+      window.tc.failure = String(error)
+    }
+  })
+</script>
