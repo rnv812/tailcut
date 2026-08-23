@@ -114,6 +114,15 @@ describe('попап', () => {
     expect(textAt('duration')).toBe('0:06')
   })
 
+  it('сессию без заголовка подписывает словом, а не пустотой', async () => {
+    // Заголовок берётся у страницы в момент, когда мост встал: content script работает
+    // с document_start, и к его сообщению <head> бывает ещё не разобран, а у иной страницы
+    // <title> нет вовсе. Без подписи строка над адресом просто исчезает.
+    await mount({ sessions: [{ ...fresh, title: '' }] })
+
+    expect(textAt('title')).toBe('Untitled')
+  })
+
   it('показывает объём записанного', async () => {
     await mount({ sessions: [fresh, older] })
 

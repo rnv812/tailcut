@@ -676,6 +676,31 @@ describe('мост сохраняет накопленное файлом', () =
     expect(filename).not.toContain('..')
   })
 
+  it('точка и пробел с хвоста имени снимаются перед расширением', async () => {
+    const win = await loadBridge()
+    win.context(PAGE_URL, 'Серия 1.')
+    win.append(initBytes)
+    win.append(seg1Bytes)
+
+    win.save(keyFor(PAGE_URL))
+
+    // Расширение приписывается следом, и хвостовая точка заголовка удваивает разделитель:
+    // «Серия 1..mp4». Windows к тому же сама срезает точки и пробелы с конца имени.
+    expect(win.downloads[0]!.filename).toBe('Серия 1.mp4')
+  })
+
+  it('обрезанный по пробелу длинный заголовок не оставляет пробел перед расширением', async () => {
+    const win = await loadBridge()
+    // Пробел стоит сотым знаком: срез по пределу длины приходится ровно на него.
+    win.context(PAGE_URL, `${'ц'.repeat(99)} и ещё сколько-то слов`)
+    win.append(initBytes)
+    win.append(seg1Bytes)
+
+    win.save(keyFor(PAGE_URL))
+
+    expect(win.downloads[0]!.filename).toBe(`${'ц'.repeat(99)}.mp4`)
+  })
+
   it('страница без заголовка сохраняется под именем расширения', async () => {
     const win = await loadBridge()
     win.context(PAGE_URL, '   ')
