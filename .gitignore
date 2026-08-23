@@ -153,3 +153,4 @@ test-results/
 # исходные mp4 и манифесты DASH тесты не читают (tools/make-fixtures.sh)
 tests/fixtures/**/*.mp4
 tests/fixtures/**/*.mpd
+tests/tmp/
