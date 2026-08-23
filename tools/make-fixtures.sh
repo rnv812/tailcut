@@ -59,4 +59,28 @@ ffmpeg -y -i "$work/source-vp9.mp4" -c copy -f dash -seg_duration 2 \
 rm -rf "$out/vp9" && mkdir -p "$out/vp9"
 cp "$work"/vp9/*.m4s "$out/vp9/"
 
-ls -la "$out/h264" "$out/minute" "$out/vp9"
+# WebM — the container the ISO BMFF reader cannot touch. YouTube hands its sound over as
+# audio/webm; codecs="opus", so a stream in Matroska is not an exotic case but the ordinary one.
+# Opus and VP9 together, because the WebM parser must not be shaped around a single codec any more
+# than the mp4 one was.
+#
+# The material is deliberately cheap — a flat background with one moving box, ten frames a second,
+# Opus at 24 kbit — so that the whole set stays under thirty kilobytes. What is under test is the
+# element grammar, not the pixels.
+ffmpeg -y -f lavfi -i "color=c=#202040:s=256x144:r=10:d=6" \
+       -f lavfi -i "sine=frequency=440:duration=6" \
+       -vf "drawbox=x='mod(t*60\,220)':y='60+40*sin(t)':w=30:h=30:color=orange:t=fill" \
+       -c:v libvpx-vp9 -b:v 60k -g 20 -keyint_min 20 -pix_fmt yuv420p \
+       -c:a libopus -b:a 24k -ac 2 \
+       -shortest "$work/source-webm.webm"
+
+# The same DASH split as the mp4 fixtures: an init segment carrying the Tracks, media segments
+# carrying nothing but Clusters. That is the shape MSE is fed, and the shape the parser must read.
+mkdir -p "$work/webm"
+ffmpeg -y -i "$work/source-webm.webm" -c copy -f dash -seg_duration 2 \
+       -use_template 0 -use_timeline 0 -single_file 0 -dash_segment_type webm \
+       "$work/webm/out.mpd"
+rm -rf "$out/webm" && mkdir -p "$out/webm"
+cp "$work"/webm/*.webm "$out/webm/"
+
+ls -la "$out/h264" "$out/minute" "$out/vp9" "$out/webm"
