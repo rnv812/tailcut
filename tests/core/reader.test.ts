@@ -76,6 +76,16 @@ describe('findBox', () => {
     expect(tfhd.type).toBe('tfhd')
   })
 
+  it('возвращает null для пустого пути', () => {
+    // пустой путь не называет ни одного бокса, поэтому возвращать нечего:
+    // верхний уровень непуст, и отдать его первый бокс было бы соблазнительно,
+    // но такой ответ не соответствовал бы ни одному запрошенному звену
+    const top = topLevelBoxes(init)
+    expect(top.length).toBeGreaterThan(0)
+    expect(top[0]!.type).toBe('ftyp')
+    expect(findBox(init, [])).toBeNull()
+  })
+
   it('для пути из одного шага отдаёт сам верхнеуровневый бокс', () => {
     const moov = topLevelBoxes(init).find((b) => b.type === 'moov')!
     expect(findBox(init, ['moov'])).toEqual(moov)
@@ -194,6 +204,18 @@ describe('граница обхода', () => {
     expect(boxes.map((b) => b.type)).toEqual(['mdat', 'free'])
     expect(boxes[1]).toEqual({ type: 'free', start: 16, size: 8, headerSize: 8 })
   })
+
+  it('читает 64-битный бокс с пустым телом, занимающий ровно последние 16 байт', () => {
+    // largesize == 16: тело пустое, шестнадцатибайтный заголовок упирается
+    // в конец диапазона. Байт для заголовка ровно столько, сколько нужно,
+    // значит бокс обязан быть разобран, а не отброшен как обрезанный
+    const buf = concat(u32(16), ascii('mdat'), ascii('12345678'), u32(1), ascii('free'), u64(16))
+    expect(buf.byteLength).toBe(32)
+    const boxes = topLevelBoxes(buf)
+    expect(boxes.map((b) => b.type)).toEqual(['mdat', 'free'])
+    expect(boxes[1]).toEqual({ type: 'free', start: 16, size: 16, headerSize: 16 })
+    expect(boxBody(buf, boxes[1]!).byteLength).toBe(0)
+  })
 })
 
 describe('контейнер moof', () => {
@@ -222,6 +244,45 @@ describe('контейнер moof', () => {
       at += box.size
     }
     expect(at).toBe(traf.start + traf.size)
+  })
+})
+
+describe('набор контейнерных типов', () => {
+  // Список закреплён здесь целиком и намеренно продублирован: удаление любого
+  // типа из набора в reader.ts обязано ронять этот тест, а не тихо сужать
+  // область спуска. Фикстуры покрывают лишь часть типов, поэтому боксы
+  // синтетические — важен сам факт спуска, а не реальное содержимое.
+  const containers = [
+    'moov', 'trak', 'mdia', 'minf', 'stbl', 'moof', 'traf', 'mvex', 'edts', 'dinf',
+  ]
+
+  // бокс `type`, внутри которого лежит единственный потомок free размером 16
+  const withChild = (type: string): Uint8Array => {
+    const child = concat(u32(16), ascii('free'), ascii('12345678'))
+    return concat(u32(8 + child.byteLength), ascii(type), child)
+  }
+
+  it.each(containers)('childBoxes спускается внутрь %s', (type) => {
+    const buf = withChild(type)
+    const parent = topLevelBoxes(buf)[0]!
+    expect(parent).toEqual({ type, start: 0, size: 24, headerSize: 8 })
+    expect(childBoxes(buf, parent)).toEqual([
+      { type: 'free', start: 8, size: 16, headerSize: 8 },
+    ])
+    // и путь через этот контейнер доводит до потомка
+    expect(findBox(buf, [type, 'free'])).toEqual({
+      type: 'free', start: 8, size: 16, headerSize: 8,
+    })
+  })
+
+  it.each(['ftyp', 'udta', 'mdat', 'mdhd'])('не спускается внутрь %s', (type) => {
+    // набор — белый список: та же раскладка байт под неконтейнерным типом
+    // потомков давать не должна
+    const buf = withChild(type)
+    const parent = topLevelBoxes(buf)[0]!
+    expect(parent.size).toBe(24)
+    expect(childBoxes(buf, parent)).toEqual([])
+    expect(findBox(buf, [type, 'free'])).toBeNull()
   })
 })
 
