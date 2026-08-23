@@ -13,6 +13,14 @@
 <title>test player</title>
 <video id="v" controls width="640" style="background:#000"></video>
 <script>
+  // Нарушения политики видны только изнутри страницы. Без этого журнала проверки набора
+  // остались бы зелёными и на странице, где меты выше нет вовсе: негативный контроль в
+  // bridge.spec.ts вставляет обычный фрейм и требует, чтобы политика его запретила.
+  window.cspViolations = []
+  document.addEventListener('securitypolicyviolation', (e) => {
+    window.cspViolations.push({ directive: e.effectiveDirective, blockedURI: e.blockedURI })
+  })
+
   // Мост обязан встать на document_start — раньше первого скрипта страницы.
   window.bridgeAtScriptStart = !!document.querySelector('iframe[data-tailcut]')
 

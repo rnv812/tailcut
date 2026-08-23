@@ -10,7 +10,14 @@ const OTHER_PAGE_URL = 'https://some-random-site.example/player'
 /** Чужая верхняя страница, встраивающая тот же плеер во вложенный фрейм. */
 const EMBED_URL = 'https://embedder.example/watch'
 
-type Probe = { bridgeAtScriptStart?: boolean; bridgeReady?: string[] }
+/** Нарушение политики в том виде, в каком его записывает tests/e2e/page/player.html. */
+type Violation = { directive: string; blockedURI: string }
+
+type Probe = {
+  bridgeAtScriptStart?: boolean
+  bridgeReady?: string[]
+  cspViolations: Violation[]
+}
 type PlayerState = { appended: number; allAppended?: boolean }
 
 /** Ждёт фрейм, подходящий под условие; возвращает undefined, если он так и не появился. */
@@ -192,6 +199,61 @@ test('мост встаёт на странице со строгим CSP и с�
 
   // Страница со строгим CSP должна продолжать играть: мост не мешает её собственному MSE.
   expect(await page.evaluate(() => (window as unknown as PlayerState).appended)).toBe(4)
+
+  await context.close()
+})
+
+test('политика страницы работает: обычный фрейм она запрещает, а фрейм расширения — нет', async () => {
+  const { context, page, extensionId, log } = await openPlayer(PAGE_URL)
+  await bridgeFrame(page, extensionId, log)
+  await playerDone(page)
+
+  // Негативный контроль ко всему набору. Остальные проверки доказывают, что фрейм расширения
+  // встаёт вопреки `frame-src 'none'`, но сами по себе они зелёные и на странице, где политики
+  // нет вовсе: опечатка в мете или смена поведения Chrome превратили бы главный тест
+  // архитектуры в пустышку молча. Здесь страница вставляет обычный фрейм своими руками — и он
+  // обязан быть запрещён той же политикой, при которой мост живёт рядом.
+  const plain = await page.evaluate(async (url) => {
+    const probe = window as unknown as Probe
+    const before = probe.cspViolations.length
+
+    const iframe = document.createElement('iframe')
+    // Адрес — тот же, что у самой страницы, и он раздаётся тестом. Так проверка ловит и
+    // ослабление меты: без `frame-src 'none'` политика откатится к `default-src 'self'`,
+    // свой origin окажется разрешён, и фрейм загрузится по-настоящему.
+    iframe.src = url
+    document.body.appendChild(iframe)
+
+    await new Promise((resolve) => setTimeout(resolve, 1_000))
+
+    // Запрещённый фрейм остаётся с непрозрачным origin, и документа у него нет; загрузись он
+    // по своему адресу — origin был бы тот же, что у страницы, и заголовок прочитался бы.
+    let title: string
+    try {
+      title = iframe.contentDocument?.title ?? '(документа нет)'
+    } catch {
+      title = '(документа нет)'
+    }
+    return { violations: probe.cspViolations.slice(before), title }
+  }, PAGE_URL)
+
+  expect(
+    plain.violations,
+    `frame-src 'none' не сработал: страница вставила обычный фрейм без нарушения политики; консоль: ${log()}`,
+  ).toEqual([{ directive: 'frame-src', blockedURI: PAGE_URL }])
+  expect(plain.title, 'запрещённый политикой фрейм всё же загрузил свой документ').toBe(
+    '(документа нет)',
+  )
+  expect(
+    page.frames().filter((frame) => frame !== page.mainFrame() && frame.url() === PAGE_URL),
+    'запрещённый политикой фрейм появился среди фреймов страницы',
+  ).toEqual([])
+
+  // И при этой же живой политике мост стоит рядом и отвечает.
+  expect(
+    await sessionsWhen(page, oneCompleteSession),
+    `фрейм расширения перестал отвечать под работающей политикой; консоль: ${log()}`,
+  ).toEqual([await playerSession(PAGE_URL)])
 
   await context.close()
 })
