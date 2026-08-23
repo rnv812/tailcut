@@ -316,6 +316,47 @@ describe('sessionKey: компоненты ключа не перетекают 
       sessionKey({ url, codecs: ['avc11'], durationSeconds: 2 }),
     )
   })
+
+  // Запятая — легальный символ пути и разделитель внутри списка кодеков, поэтому граница
+  // «адрес | кодеки» обязана держаться на символе, которого в адресе быть не может.
+  // Иначе `…/v/1` + [avc1, mp4a] и `…/v/1,avc1` + [mp4a] дают один ключ, и фрагменты
+  // двух разных роликов лягут в одну карту.
+  it('запятая в адресе не съедает границу между адресом и кодеками', () => {
+    expect(
+      sessionKey({ url: 'https://cdn.example/v/1', codecs: ['avc1', 'mp4a'], durationSeconds: 600 }),
+    ).not.toBe(
+      sessionKey({ url: 'https://cdn.example/v/1,avc1', codecs: ['mp4a'], durationSeconds: 600 }),
+    )
+  })
+
+  it('запятая в адресе доживает до ключа и различает два адреса', () => {
+    const base = { codecs: ['avc1'], durationSeconds: 600 }
+    expect(sessionKey({ ...base, url: 'https://cdn.example/v/1,avc1' })).not.toBe(
+      sessionKey({ ...base, url: 'https://cdn.example/v/1' }),
+    )
+    expect(sessionKey({ ...base, url: 'https://cdn.example/v/1,avc1' })).toBe(
+      sessionKey({ ...base, url: 'https://cdn.example/v/1,avc1' }),
+    )
+  })
+
+  // Граница между кодеками внутри списка: склейка без разделителя стирает её, и два разных
+  // набора дорожек становятся одной сессией.
+  const glued: Array<[string[], string[]]> = [
+    [['avc1', 'mp4a'], ['avc1m', 'p4a']],
+    [['a', 'bc'], ['ab', 'c']],
+    [
+      ['avc1.640028', 'mp4a.40.2'],
+      ['avc1.640028m', 'p4a.40.2'],
+    ],
+  ]
+
+  for (const [one, two] of glued) {
+    it(`разные списки кодеков с одинаковой склейкой дают разные ключи: ${one.join('+')} и ${two.join('+')}`, () => {
+      expect(one.join('')).toBe(two.join(''))
+      const base = { url: 'https://site.example/v/1', durationSeconds: 600 }
+      expect(sessionKey({ ...base, codecs: one })).not.toBe(sessionKey({ ...base, codecs: two }))
+    })
+  }
 })
 
 describe('sessionKey: вход остаётся нетронутым', () => {
