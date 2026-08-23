@@ -1,0 +1,421 @@
+import { describe, it, expect } from 'vitest'
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { muxFragmentedMp4 } from '../../src/core/mux'
+import { boxOf, concatBytes } from '../../src/core/iso/writer'
+import { boxBody, childBoxes, topLevelBoxes, type Box } from '../../src/core/iso/reader'
+
+/** Video of the fixture: timescale 12288, three segments of two seconds, 48 frames each. */
+const videoInit = new Uint8Array(readFileSync('tests/fixtures/h264/init-stream0.m4s'))
+const videoSegments = [1, 2, 3].map(
+  (n) => new Uint8Array(readFileSync(`tests/fixtures/h264/chunk-stream0-0000${n}.m4s`)),
+)
+/** Sound of the same clip: timescale 44100, four segments, 84 + 86 + 87 + 3 samples. */
+const audioInit = new Uint8Array(readFileSync('tests/fixtures/h264/init-stream1.m4s'))
+const audioSegments = [1, 2, 3, 4].map(
+  (n) => new Uint8Array(readFileSync(`tests/fixtures/h264/chunk-stream1-0000${n}.m4s`)),
+)
+
+/** Ticks per second of the two tracks — the two scales the muxer has to reconcile. */
+const VIDEO_TIMESCALE = 12288
+const AUDIO_TIMESCALE = 44100
+
+/**
+ * Frames of the fixture, counted out of the trun boxes of its segments rather than out of what
+ * came out of the muxer: 48 + 48 + 48 samples of picture and 84 + 86 + 87 + 3 of sound.
+ */
+const VIDEO_FRAMES = 144
+const AUDIO_FRAMES = 260
+
+const view = (bytes: Uint8Array): DataView =>
+  new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+
+const u32 = (value: number): Uint8Array => {
+  const bytes = new Uint8Array(4)
+  view(bytes).setUint32(0, value)
+  return bytes
+}
+
+const u64 = (value: number): Uint8Array => {
+  const bytes = new Uint8Array(8)
+  view(bytes).setBigUint64(0, BigInt(value))
+  return bytes
+}
+
+/** A digest of bytes: comparing whole buffers without flooding the output on a mismatch. */
+function digest(...parts: Uint8Array[]): string {
+  const hash = createHash('sha256')
+  for (const part of parts) hash.update(part)
+  return hash.digest('hex')
+}
+
+/** The same bytes inside a wider buffer: a view at a non-zero offset, not the buffer's owner. */
+function viewWithOffset(bytes: Uint8Array): Uint8Array {
+  const offset = 9
+  const backing = new Uint8Array(offset + bytes.byteLength + 7).fill(0xaa)
+  backing.set(bytes, offset)
+  return backing.subarray(offset, offset + bytes.byteLength)
+}
+
+const typeIn = (boxes: Box[], type: string): Box | undefined => boxes.find((b) => b.type === type)
+
+interface Probed {
+  format: { duration: string }
+  streams: Array<{
+    codec_type: string
+    codec_name: string
+    start_time: string
+    nb_read_frames: string
+  }>
+}
+
+/**
+ * Writes the file out and reads it back through ffprobe.
+ *
+ * -count_frames drives ffprobe through every packet instead of the headers alone: material laid
+ * out wrongly inside mdat leaves the boxes intact and shows up only when the frames are actually
+ * decoded — as complaints in stderr, with the exit code still zero.
+ */
+function probe(name: string, bytes: Uint8Array): Probed {
+  mkdirSync('tests/tmp', { recursive: true })
+  const file = `tests/tmp/${name}`
+  writeFileSync(file, bytes)
+
+  const probed = spawnSync(
+    'ffprobe',
+    [
+      '-v', 'error',
+      '-count_frames',
+      '-show_entries', 'format=duration:stream=codec_type,codec_name,start_time,nb_read_frames',
+      '-of', 'json',
+      file,
+    ],
+    { encoding: 'utf8' },
+  )
+
+  expect(probed.error).toBeUndefined()
+  expect(probed.status, probed.stderr).toBe(0)
+  expect(probed.stderr, 'ffprobe complains about reading the file').toBe('')
+
+  return JSON.parse(probed.stdout) as Probed
+}
+
+/** Ticks per second of every track the moov declares, by the track_id the moov gives it. */
+function timescalesOf(file: Uint8Array): Map<number, number> {
+  const scales = new Map<number, number>()
+  const moov = typeIn(topLevelBoxes(file), 'moov')
+  if (!moov) return scales
+
+  for (const trak of childBoxes(file, moov).filter((b) => b.type === 'trak')) {
+    const tkhd = typeIn(childBoxes(file, trak), 'tkhd')
+    const mdia = typeIn(childBoxes(file, trak), 'mdia')
+    const mdhd = mdia && typeIn(childBoxes(file, mdia), 'mdhd')
+    if (!tkhd || !mdhd) continue
+
+    const head = view(boxBody(file, tkhd))
+    const media = view(boxBody(file, mdhd))
+    const trackId = head.getUint8(0) === 1 ? head.getUint32(20) : head.getUint32(12)
+    scales.set(trackId, media.getUint8(0) === 1 ? media.getUint32(20) : media.getUint32(12))
+  }
+
+  return scales
+}
+
+interface Placed {
+  trackId: number
+  /** Decode time of the fragment in seconds — the scale the tracks are compared on. */
+  time: number
+  /** Number the fragment carries in mfhd. */
+  sequence: number
+}
+
+/**
+ * Every fragment of the file in the order it lies there. Read straight out of the bytes and not
+ * out of anything the muxer returned on the side: the order of the fragments in the file is the
+ * thing being checked.
+ */
+function fragmentsOf(file: Uint8Array): Placed[] {
+  const scales = timescalesOf(file)
+  const placed: Placed[] = []
+
+  for (const moof of topLevelBoxes(file).filter((b) => b.type === 'moof')) {
+    const children = childBoxes(file, moof)
+    const mfhd = typeIn(children, 'mfhd')
+    const traf = typeIn(children, 'traf')
+    if (!mfhd || !traf) continue
+
+    const inside = childBoxes(file, traf)
+    const tfhd = typeIn(inside, 'tfhd')
+    const tfdt = typeIn(inside, 'tfdt')
+    if (!tfhd || !tfdt) continue
+
+    const trackId = view(boxBody(file, tfhd)).getUint32(4)
+    const time = view(boxBody(file, tfdt))
+    const ticks = time.getUint8(0) === 1 ? Number(time.getBigUint64(4)) : time.getUint32(4)
+
+    placed.push({
+      trackId,
+      time: ticks / (scales.get(trackId) ?? 1),
+      sequence: view(boxBody(file, mfhd)).getUint32(4),
+    })
+  }
+
+  return placed
+}
+
+/** Media data of a file: the bodies of its mdat boxes in the order they lie there. */
+const mediaOf = (file: Uint8Array): Uint8Array[] =>
+  topLevelBoxes(file)
+    .filter((b) => b.type === 'mdat')
+    .map((b) => boxBody(file, b))
+
+/**
+ * The same segment with its sample data addressed absolutely: base-data-offset-present in tfhd
+ * instead of default-base-is-moof. ffmpeg writes fragments in exactly this shape unless it is
+ * asked for `+default_base_moof`, so the form is an ordinary one — and it is the single form a
+ * muxer breaks by moving fragments about, because an absolute offset stops being true the moment
+ * its fragment lands anywhere else in the file.
+ *
+ * The base is stated from the start of the media segment, which is what the byte stream format
+ * of MSE requires of a segment appended on its own.
+ */
+function withAbsoluteDataOffset(segment: Uint8Array): Uint8Array {
+  const moof = typeIn(topLevelBoxes(segment), 'moof')!
+  const traf = typeIn(childBoxes(segment, moof), 'traf')!
+
+  const inside = childBoxes(segment, traf).map((child) => {
+    const body = boxBody(segment, child)
+
+    if (child.type === 'tfhd') {
+      // base_data_offset stands right after track_id and pushes the fields behind it by eight
+      // bytes; default-base-is-moof goes out, because the two ways of stating the base exclude
+      // each other.
+      const flags = (view(body).getUint32(0) & ~0x020000) | 0x000001
+      return boxOf('tfhd', u32(flags), body.subarray(4, 8), u64(moof.start), body.subarray(8))
+    }
+
+    if (child.type === 'trun') {
+      // data_offset follows the flags and the sample count. It is counted from the base, and the
+      // eight new bytes of tfhd push the data that much further from it.
+      const patched = body.slice()
+      view(patched).setUint32(8, view(patched).getUint32(8) + 8)
+      return boxOf('trun', patched)
+    }
+
+    return segment.slice(child.start, child.start + child.size)
+  })
+
+  const rebuilt = childBoxes(segment, moof).map((child) =>
+    child.type === 'traf'
+      ? boxOf('traf', ...inside)
+      : segment.slice(child.start, child.start + child.size),
+  )
+
+  return concatBytes([
+    segment.slice(0, moof.start),
+    boxOf('moof', ...rebuilt),
+    segment.slice(moof.start + moof.size),
+  ])
+}
+
+const video = { initBytes: videoInit, segments: videoSegments }
+const audio = { initBytes: audioInit, segments: audioSegments }
+
+describe('muxFragmentedMp4', () => {
+  it('gathers both tracks under one ftyp and one moov', () => {
+    const file = muxFragmentedMp4([video, audio])
+    const types = topLevelBoxes(file).map((b) => b.type)
+
+    // Two init segments laid one after the other are two ftyp boxes and two moov boxes — a file
+    // no player reads past the first track.
+    expect(types.filter((t) => t === 'ftyp')).toHaveLength(1)
+    expect(types.filter((t) => t === 'moov')).toHaveLength(1)
+    expect(types[0]).toBe('ftyp')
+    expect(types[1]).toBe('moov')
+
+    // Nothing else survives from the media segments: the styp and the sidx of a segment describe
+    // it as a standalone delivery, and inside a file they address bytes that have moved.
+    expect(types.slice(2)).toEqual(
+      Array.from({ length: videoSegments.length + audioSegments.length }, () => ['moof', 'mdat'])
+        .flat(),
+    )
+  })
+
+  it('describes every track in the moov: a trak of its own and a trex of its own', () => {
+    const file = muxFragmentedMp4([video, audio])
+    const moov = typeIn(topLevelBoxes(file), 'moov')!
+    const inside = childBoxes(file, moov)
+    const mvex = typeIn(inside, 'mvex')!
+
+    expect(inside.filter((b) => b.type === 'trak')).toHaveLength(2)
+    expect(childBoxes(file, mvex).filter((b) => b.type === 'trex')).toHaveLength(2)
+
+    // Both fixtures call their track number one. Left as they came, the two traks would claim the
+    // same number and every fragment would land on whichever of them the player looked up first.
+    expect([...timescalesOf(file).entries()]).toEqual([
+      [1, VIDEO_TIMESCALE],
+      [2, AUDIO_TIMESCALE],
+    ])
+
+    // The defaults of a fragment are read out of the trex of its track, so the trex boxes have to
+    // be renumbered along with the traks — otherwise the sound takes the sample size of the
+    // picture.
+    const trexIds = childBoxes(file, mvex)
+      .filter((b) => b.type === 'trex')
+      .map((b) => view(boxBody(file, b)).getUint32(4))
+    expect(trexIds).toEqual([1, 2])
+  })
+
+  it('lays the fragments of the two tracks in one order of time', () => {
+    const placed = fragmentsOf(muxFragmentedMp4([video, audio]))
+
+    // Video at 0, 2, 4 seconds; sound at 0, 1.951, 3.947, 5.968. Interleaved, that is the order
+    // any multiplexed stream comes in — sound of the second second before picture of the third,
+    // so a player reading the file front to back always has both tracks for the moment it is at.
+    expect(placed.map((f) => f.trackId)).toEqual([1, 2, 2, 1, 2, 1, 2])
+
+    const times = placed.map((f) => f.time)
+    expect(times).toEqual([...times].sort((a, b) => a - b))
+
+    // Numbered along the file rather than each track from one: the sequence number then says what
+    // it is meant to say, which is the order the fragments lie in.
+    expect(placed.map((f) => f.sequence)).toEqual([1, 2, 3, 4, 5, 6, 7])
+  })
+
+  it('gives ffprobe a file of two streams, picture and sound, decoding without complaint', () => {
+    const probed = probe('mux-two-track.mp4', muxFragmentedMp4([video, audio]))
+
+    expect(probed.streams.map((s) => [s.codec_type, s.codec_name])).toEqual([
+      ['video', 'h264'],
+      ['audio', 'aac'],
+    ])
+
+    // Six seconds of source: 144 frames of picture at 24 a second, 260 frames of sound of 1024
+    // samples each at 44100.
+    expect(probed.streams.map((s) => Number(s.nb_read_frames))).toEqual([
+      VIDEO_FRAMES,
+      AUDIO_FRAMES,
+    ])
+
+    const seconds = Number(probed.format.duration)
+    expect(seconds).toBeGreaterThan(5.9)
+    expect(seconds).toBeLessThan(6.1)
+  })
+
+  it('keeps the offset between the tracks when the clip starts in the middle', () => {
+    // A clip cut out of the middle: picture from 2.0 seconds, sound from 1.951 — the two tracks
+    // are cut into segments of different length and never begin at the same instant.
+    const tail = muxFragmentedMp4([
+      { initBytes: videoInit, segments: videoSegments.slice(1) },
+      { initBytes: audioInit, segments: audioSegments.slice(1) },
+    ])
+    const probed = probe('mux-tail.mp4', tail)
+
+    // Both tracks are moved back by one and the same stretch of real time — the earliest of them
+    // — so the file starts at zero and the 49 milliseconds between the tracks stay where they
+    // were. Moving each track back to its own first fragment would zero that offset out and drag
+    // the sound onto the wrong picture.
+    const offset = 24576 / VIDEO_TIMESCALE - 86016 / AUDIO_TIMESCALE
+    expect(offset).toBeCloseTo(0.0494, 3)
+
+    const started = probed.streams.map((s) => Number(s.start_time))
+    // The sound is the earlier of the two, so it is the one that defines the origin and opens the
+    // file. ffprobe shows it a shade before zero: the edit list of the source skips the priming
+    // samples of the encoder, and that edit is carried over as it was.
+    expect(started[1]!).toBeLessThan(0.001)
+    expect(started[1]!).toBeGreaterThan(-0.05)
+    // The picture keeps the 49 milliseconds it stood behind the sound by.
+    expect(started[0]!).toBeGreaterThan(offset - 0.01)
+    expect(started[0]!).toBeLessThan(offset + 0.01)
+
+    // 96 frames of picture and 176 of sound left in the two of them.
+    expect(probed.streams.map((s) => Number(s.nb_read_frames))).toEqual([96, 176])
+
+    const seconds = Number(probed.format.duration)
+    expect(seconds).toBeGreaterThan(4.0)
+    expect(seconds).toBeLessThan(4.2)
+  })
+
+  it('starts the file at zero however deep into the video the clip was cut', () => {
+    const tail = muxFragmentedMp4([{ initBytes: videoInit, segments: videoSegments.slice(2) }])
+
+    // The fragment carried a decode time of four seconds. Left as it was, the file would announce
+    // six seconds of which the first four hold nothing at all.
+    expect(fragmentsOf(tail).map((f) => f.time)).toEqual([0])
+
+    const seconds = Number(probe('mux-late.mp4', tail).format.duration)
+    expect(seconds).toBeGreaterThan(1.9)
+    expect(seconds).toBeLessThan(2.1)
+  })
+
+  it('makes a playable file out of a single track too', () => {
+    const probed = probe('mux-one-track.mp4', muxFragmentedMp4([video]))
+
+    expect(probed.streams.map((s) => [s.codec_type, s.codec_name])).toEqual([['video', 'h264']])
+    expect(probed.streams.map((s) => Number(s.nb_read_frames))).toEqual([VIDEO_FRAMES])
+
+    const seconds = Number(probed.format.duration)
+    expect(seconds).toBeGreaterThan(5.9)
+    expect(seconds).toBeLessThan(6.1)
+  })
+
+  it('carries the media data over whole and in the order of the fragments', () => {
+    const file = muxFragmentedMp4([video, audio])
+
+    // Not a byte of the material is rewritten: the muxer works on the boxes around it. The order
+    // is the interleaved one, so this fixes both what got into the file and where.
+    expect(digest(...mediaOf(file))).toBe(
+      digest(
+        ...mediaOf(videoSegments[0]!),
+        ...mediaOf(audioSegments[0]!),
+        ...mediaOf(audioSegments[1]!),
+        ...mediaOf(videoSegments[1]!),
+        ...mediaOf(audioSegments[2]!),
+        ...mediaOf(videoSegments[2]!),
+        ...mediaOf(audioSegments[3]!),
+      ),
+    )
+  })
+
+  it('follows an absolute data offset to where the fragment ended up', () => {
+    const absolute = videoSegments.map(withAbsoluteDataOffset)
+    const probed = probe(
+      'mux-absolute-offsets.mp4',
+      muxFragmentedMp4([{ initBytes: videoInit, segments: absolute }]),
+    )
+
+    // The offset was true of the segment on its own and false of the file: a fragment that keeps
+    // it reads its samples out of the moov, and the decoder is handed noise.
+    expect(probed.streams.map((s) => Number(s.nb_read_frames))).toEqual([VIDEO_FRAMES])
+  })
+
+  it('reads the body of a view, not the buffer under it', () => {
+    const file = muxFragmentedMp4([
+      { initBytes: viewWithOffset(videoInit), segments: videoSegments.map(viewWithOffset) },
+      { initBytes: viewWithOffset(audioInit), segments: audioSegments.map(viewWithOffset) },
+    ])
+
+    expect(digest(file)).toBe(digest(muxFragmentedMp4([video, audio])))
+  })
+
+  it('leaves the material it was given untouched', () => {
+    const before = digest(videoInit, ...videoSegments, audioInit, ...audioSegments)
+    muxFragmentedMp4([video, audio])
+
+    // The init and the fragments belong to a live session and are saved again on the next click.
+    // Renumbering them in place would leave the second file numbered after the first.
+    expect(digest(videoInit, ...videoSegments, audioInit, ...audioSegments)).toBe(before)
+  })
+
+  it('gives the header alone for a track that has collected nothing yet', () => {
+    const file = muxFragmentedMp4([{ initBytes: videoInit, segments: [] }])
+
+    expect(topLevelBoxes(file).map((b) => b.type)).toEqual(['ftyp', 'moov'])
+  })
+
+  it('gives no file at all when there is nothing to put in one', () => {
+    expect(muxFragmentedMp4([])).toHaveLength(0)
+    expect(muxFragmentedMp4([{ initBytes: videoSegments[0]!, segments: [] }])).toHaveLength(0)
+  })
+})

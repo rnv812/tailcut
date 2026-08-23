@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { SessionStore, summarize, type Session } from '../../src/bridge/session-store'
+import {
+  SessionStore,
+  selectMaterial,
+  summarize,
+  type Session,
+} from '../../src/bridge/session-store'
 import { sessionKey } from '../../src/core/session-key'
 import type { Chunk } from '../../src/shared/types'
 
@@ -920,5 +925,117 @@ describe('summarize', () => {
     store.append({ ...videoBuffer, bytes: init })
 
     expect(summarize(store.list()[0]!)).toEqual({ duration: 0, bytes: 0, runs: 0 })
+  })
+})
+
+describe('selectMaterial', () => {
+  const videoBuffer = { ...page, bufferId: 'b1' }
+  const audioBuffer = { ...page, bufferId: 'b2' }
+
+  /**
+   * Fixtures by name. The selection answers with the very buffers it was fed, and naming them
+   * says which segment went where; comparing megabytes of media data would say the same thing in
+   * a diff nobody can read.
+   */
+  const names = new Map<Uint8Array, string>([
+    [init, 'video init'],
+    [audioInit, 'audio init'],
+    [vp9Init, 'vp9 init'],
+    [vp9Seg, 'vp9 0…2'],
+    [vp9Seg2, 'vp9 2…4'],
+    ...videoSegs.map((bytes, i): [Uint8Array, string] => [bytes, `video ${i * 2}…${i * 2 + 2}`]),
+    ...audioSegs.map((bytes, i): [Uint8Array, string] => [bytes, `audio ${i + 1}`]),
+  ])
+
+  /** What the selection came back with: the init of every track it chose, then its segments. */
+  const chosen = (store: SessionStore): string[][] =>
+    selectMaterial(store.list()[0]!).map((track) =>
+      [track.initBytes, ...track.segments].map((bytes) => names.get(bytes) ?? 'a stranger'),
+    )
+
+  it('hands over both tracks with the init each of them was opened with', () => {
+    const store = new SessionStore()
+    store.append({ ...videoBuffer, bytes: init })
+    store.append({ ...audioBuffer, bytes: audioInit })
+    for (const bytes of videoSegs) store.append({ ...videoBuffer, bytes })
+    for (const bytes of audioSegs) store.append({ ...audioBuffer, bytes })
+
+    // The picture goes first: stream zero of a file is the one a player shows, and a viewer
+    // opening a clip expects to see it rather than a waveform.
+    expect(chosen(store)).toEqual([
+      ['video init', 'video 0…2', 'video 2…4', 'video 4…6'],
+      ['audio init', 'audio 1', 'audio 2', 'audio 3', 'audio 4'],
+    ])
+  })
+
+  it('puts the picture first however the buffers were opened', () => {
+    const store = new SessionStore()
+    // On real YouTube the audio SourceBuffer is the one created first.
+    store.append({ ...audioBuffer, bytes: audioInit })
+    store.append({ ...videoBuffer, bytes: init })
+    store.append({ ...audioBuffer, bytes: audioSegs[0]! })
+    store.append({ ...videoBuffer, bytes: videoSegs[0]! })
+
+    expect(chosen(store).map((track) => track[0])).toEqual(['video init', 'audio init'])
+  })
+
+  it('takes the longest stretch where both tracks are there at once', () => {
+    const store = new SessionStore()
+    store.append({ ...videoBuffer, bytes: init })
+    store.append({ ...audioBuffer, bytes: audioInit })
+    for (const bytes of videoSegs) store.append({ ...videoBuffer, bytes })
+    // The sound was loaded in two goes with a jump between them: 0…1.95 and 3.95…6.02.
+    store.append({ ...audioBuffer, bytes: audioSegs[0]! })
+    store.append({ ...audioBuffer, bytes: audioSegs[2]! })
+    store.append({ ...audioBuffer, bytes: audioSegs[3]! })
+
+    // Picture runs 0…6 whole, so the choice is between 0…1.95 and 3.95…6.02 — the later, longer
+    // one. The video fragment 2…4 comes with it: it reaches into the stretch, and segments go
+    // into a file whole or not at all.
+    expect(chosen(store)).toEqual([
+      ['video init', 'video 2…4', 'video 4…6'],
+      ['audio init', 'audio 3', 'audio 4'],
+    ])
+  })
+
+  it('takes one representation of a kind, the one holding the most', () => {
+    const store = new SessionStore()
+    store.append({ ...videoBuffer, bytes: init })
+    for (const bytes of videoSegs) store.append({ ...videoBuffer, bytes })
+    // A switch of quality opens a second representation of the same kind (§6.2). Both in one
+    // file would give it two video streams of different frame size where a player expects one.
+    store.append({ ...videoBuffer, bytes: vp9Init })
+    store.append({ ...videoBuffer, bytes: vp9Seg })
+
+    expect(chosen(store)).toEqual([['video init', 'video 0…2', 'video 2…4', 'video 4…6']])
+  })
+
+  it('saves the longest run of a session that has only one track', () => {
+    const store = new SessionStore()
+    store.append({ ...audioBuffer, bytes: audioInit })
+    // Runs 0…1.95 and 3.95…6.02: the second one is longer.
+    store.append({ ...audioBuffer, bytes: audioSegs[0]! })
+    store.append({ ...audioBuffer, bytes: audioSegs[2]! })
+    store.append({ ...audioBuffer, bytes: audioSegs[3]! })
+
+    expect(chosen(store)).toEqual([['audio init', 'audio 3', 'audio 4']])
+  })
+
+  it('has nothing to give while a kind is still without a fragment', () => {
+    const store = new SessionStore()
+    store.append({ ...videoBuffer, bytes: init })
+    store.append({ ...audioBuffer, bytes: audioInit })
+    for (const bytes of videoSegs) store.append({ ...videoBuffer, bytes })
+
+    // The gap between the init of the second buffer and its first segment lasts moments, and a
+    // clip made in one of them would be a silent film. Better nothing than that.
+    expect(chosen(store)).toEqual([])
+  })
+
+  it('has nothing to give from a session made of init segments alone', () => {
+    const store = new SessionStore()
+    store.append({ ...videoBuffer, bytes: init })
+
+    expect(chosen(store)).toEqual([])
   })
 })

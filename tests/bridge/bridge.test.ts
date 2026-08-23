@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { sessionKey } from '../../src/core/session-key'
+import { boxBody, childBoxes, topLevelBoxes } from '../../src/core/iso/reader'
 import type { BridgeToPage, SessionSummary } from '../../src/shared/protocol'
 
 const initBytes = new Uint8Array(readFileSync('tests/fixtures/h264/init-stream0.m4s'))
@@ -20,6 +21,17 @@ const audioInitBytes = new Uint8Array(readFileSync('tests/fixtures/h264/init-str
 const audioBytes = [1, 2, 3, 4].map(
   (n) => new Uint8Array(readFileSync(`tests/fixtures/h264/chunk-stream1-0000${n}.m4s`)),
 )
+
+/**
+ * Media data of a file: the bodies of its mdat boxes in the order they lie there. The muxer
+ * rewrites the boxes around the material and never the material itself, so this is what says
+ * which segments went into a file and in what order — the boxes around them differ from the
+ * captured segments by design.
+ */
+const mediaOf = (file: Uint8Array): Uint8Array[] =>
+  topLevelBoxes(file)
+    .filter((box) => box.type === 'mdat')
+    .map((box) => boxBody(file, box))
 
 /** A digest of bytes: comparing whole buffers without flooding the output on a mismatch. */
 function digest(...parts: Uint8Array[]): string {
@@ -626,8 +638,8 @@ describe('the bridge saves what it collected as a file', () => {
 
     win.save(audioKey)
 
-    expect(digest(await win.savedBytes())).toBe(
-      digest(audioInitBytes, audioBytes[2]!, audioBytes[3]!),
+    expect(digest(...mediaOf(await win.savedBytes()))).toBe(
+      digest(...mediaOf(audioBytes[2]!), ...mediaOf(audioBytes[3]!)),
     )
   })
 
@@ -638,8 +650,8 @@ describe('the bridge saves what it collected as a file', () => {
 
     win.save(audioKey)
 
-    expect(digest(await win.savedBytes())).toBe(
-      digest(audioInitBytes, audioBytes[0]!, audioBytes[1]!),
+    expect(digest(...mediaOf(await win.savedBytes()))).toBe(
+      digest(...mediaOf(audioBytes[0]!), ...mediaOf(audioBytes[1]!)),
     )
   })
 
@@ -929,19 +941,32 @@ describe('the bridge tells apart the buffers of one media source', () => {
     expect(win.list()[0]!.bytes).toBe(allBytes)
   })
 
-  it('saves the picture of a two-track session, not a mix of both tracks', async () => {
+  it('saves both tracks of a two-track session, interleaved by time', async () => {
     const win = await loadBridge()
     win.context()
     feedBothTracks(win)
 
     win.save(keyFor(PAGE_URL, ['avc1', 'mp4a']))
 
-    // Assembly can put one init together with the fragments of one track; the sound needs two
-    // moov boxes merged into one, and that is not written yet. Until then the file carries the
-    // picture whole rather than the moov of one track with the fragments of both — the mix is
-    // what made the decoder fall over on the first audio mdat.
-    expect(digest(await win.savedBytes())).toBe(
-      digest(initBytes, seg1Bytes, seg2Bytes, seg3Bytes),
+    const file = await win.savedBytes()
+    const moov = topLevelBoxes(file).find((box) => box.type === 'moov')!
+
+    // The moov of one track with the fragments of both is what made the decoder fall over on the
+    // first mdat of the sound: the file has to describe every track it carries.
+    expect(childBoxes(file, moov).filter((box) => box.type === 'trak')).toHaveLength(2)
+
+    // Picture at 0, 2, 4 seconds and sound at 0, 1.95, 3.95, 5.97, laid out in one order of time
+    // the way any multiplexed stream is.
+    expect(digest(...mediaOf(file))).toBe(
+      digest(
+        ...mediaOf(seg1Bytes),
+        ...mediaOf(audioBytes[0]!),
+        ...mediaOf(audioBytes[1]!),
+        ...mediaOf(seg2Bytes),
+        ...mediaOf(audioBytes[2]!),
+        ...mediaOf(seg3Bytes),
+        ...mediaOf(audioBytes[3]!),
+      ),
     )
   })
 })

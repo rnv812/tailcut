@@ -2,6 +2,7 @@ import { parseInit } from '../core/iso/init'
 import { parseFragment } from '../core/iso/fragment'
 import { continuesRun, PtsMap } from '../core/timeline/map'
 import { normalizeUrl, sessionKey } from '../core/session-key'
+import type { MuxTrack } from '../core/mux'
 import type { Chunk, InitInfo, TrackKind } from '../shared/types'
 
 /**
@@ -183,6 +184,86 @@ export function summarize(session: Session): { duration: number; bytes: number; 
   for (const span of available) duration += span.end - span.start
 
   return { duration, bytes, runs: available.length }
+}
+
+/**
+ * One track per media kind — the one holding the most of it.
+ *
+ * A switch of quality opens a second representation of the same kind (§6.2), and both of them in
+ * one file would give it two video streams of different frame size where a player expects one.
+ * Which of them to take is a question for the editor, where the zones are drawn on the timeline
+ * and the user is asked; the button that saves everything answers it by weight of material.
+ *
+ * The picture comes first: stream zero of a file is the one a player shows.
+ */
+function mainTracks(session: Session): Track[] {
+  const chosen: Track[] = []
+  const kinds: TrackKind[] = ['video', 'audio']
+
+  for (const kind of kinds) {
+    let best: Track | undefined
+    for (const track of session.tracks) {
+      if (!track.kinds.includes(kind)) continue
+      if (!best || track.map.duration() > best.map.duration()) best = track
+    }
+    // A muxed init carries both kinds on one track: chosen for either of them, taken once.
+    if (best && !chosen.includes(best)) chosen.push(best)
+  }
+
+  return chosen
+}
+
+/** The longest of the stretches; undefined — there are none. */
+function longestOf(spans: Span[]): Span | undefined {
+  let longest: Span | undefined
+  for (const span of spans) {
+    if (!longest || span.end - span.start > longest.end - longest.start) longest = span
+  }
+  return longest
+}
+
+/** Segments of the track that reach into the stretch. Whole ones: nothing is cut here. */
+function segmentsIn(track: Track, span: Span): Uint8Array[] {
+  const segments: Uint8Array[] = []
+
+  for (const run of track.map.runs()) {
+    for (const chunk of run.chunks) {
+      if (chunk.end > span.start && chunk.start < span.end) segments.push(chunk.bytes)
+    }
+  }
+
+  return segments
+}
+
+/**
+ * The material a saved file is built out of: the tracks and, of each of them, the segments over
+ * the longest stretch of time where every kind is present at once.
+ *
+ * The stretch is common to the tracks and not the longest run of any one of them, because a clip
+ * is cut out of what can be shown: past the end of the sound there is picture with silence under
+ * it, and that is not the file the button promises. An empty answer means there is nothing to
+ * cut — a session of init segments alone, or one whose second buffer has not brought a fragment
+ * yet.
+ */
+export function selectMaterial(session: Session): MuxTrack[] {
+  const chosen = mainTracks(session)
+  if (!chosen.length) return []
+
+  let common: Span[] | null = null
+  for (const track of chosen) {
+    const runs = track.map.runs().map((run) => ({ start: run.start, end: run.end }))
+    common = common === null ? runs : intersectSpans(common, runs)
+  }
+
+  const longest = longestOf(common ?? [])
+  if (!longest) return []
+
+  // Every chosen track covers the whole of that stretch — it is their common part — so none of
+  // them comes out of this with nothing, and no track reaches the file as an empty stream.
+  return chosen.map((track) => ({
+    initBytes: track.initBytes,
+    segments: segmentsIn(track, longest),
+  }))
 }
 
 export class SessionStore {

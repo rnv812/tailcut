@@ -4,9 +4,8 @@ import {
   type SaveResult,
   type SessionSummary,
 } from '../shared/protocol'
-import { assembleFragmentedMp4 } from '../core/assemble'
-import { SessionStore, summarize, type Session, type Track } from './session-store'
-import type { Run } from '../shared/types'
+import { muxFragmentedMp4 } from '../core/mux'
+import { SessionStore, selectMaterial, summarize } from './session-store'
 
 const store = new SessionStore()
 
@@ -38,27 +37,6 @@ function summaries(): SessionSummary[] {
     title: session.title,
     ...summarize(session),
   }))
-}
-
-/** The longest run: a file carries a continuous piece, not a splice across gaps. */
-function longestRun(runs: Run[]): Run | undefined {
-  let longest: Run | undefined
-  for (const run of runs) {
-    if (!longest || run.end - run.start > longest.end - longest.start) longest = run
-  }
-  return longest
-}
-
-/**
- * The track a saved file is built out of.
- *
- * A session holds a track per SourceBuffer, and a real player gives the picture and the sound
- * separately. Building a file out of both means merging two moov boxes into one and interleaving
- * their fragments by time; assembly cannot do that yet, so the picture goes out — a clip without
- * sound is at least watchable, whereas a bare audio track is not what the button promises.
- */
-function primaryTrack(session: Session): Track | undefined {
-  return session.tracks.find((track) => track.kinds.includes('video')) ?? session.tracks[0]
 }
 
 /**
@@ -98,26 +76,27 @@ window.addEventListener('message', (event: MessageEvent) => {
     return
   }
 
-  // Assembly happens here and not in the popup: the bytes live in this frame, and pushing
-  // megabytes through extension messages would copy them twice and through JSON.
+  // The file is put together here and not in the popup: the bytes live in this frame, and
+  // pushing megabytes through extension messages would copy them twice and through JSON.
   if (data?.type === 'tc:save') {
     const port = event.ports[0]
     const session = store.get(String(data.key))
-    const track = session && primaryTrack(session)
-    const run = track && longestRun(track.map.runs())
+    // Every track of the session over the stretch where all of them are there at once: a session
+    // holds a track per SourceBuffer, and a real player gives the picture and the sound apart.
+    const material = session ? selectMaterial(session) : []
 
     // Triage may have evicted the session and the page may have reloaded while the popup was
-    // open: the popup key then points at nothing. There is nothing to save in a session made of
-    // one init segment either: it has no runs.
-    if (!session || !track || !run) {
+    // open: the popup key then points at nothing. A session made of init segments alone has
+    // nothing to cut either, and neither has one whose second buffer is yet to bring a fragment.
+    if (!session || !material.length) {
       const empty: SaveResult = { ok: false }
       port?.postMessage(empty)
       return
     }
 
     // A Blob only takes a view over a plain ArrayBuffer, while Uint8Array allows shared memory
-    // by type. Assembly allocates the buffer itself and it is never shared.
-    const file = assembleFragmentedMp4(track.initBytes, run) as Uint8Array<ArrayBuffer>
+    // by type. The muxer allocates the buffer itself and it is never shared.
+    const file = muxFragmentedMp4(material) as Uint8Array<ArrayBuffer>
     const url = URL.createObjectURL(new Blob([file], { type: 'video/mp4' }))
 
     chrome.downloads.download({ url, filename: fileNameFor(session.title) }, (downloadId) => {
