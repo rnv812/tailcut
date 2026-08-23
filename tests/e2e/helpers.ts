@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import os from 'node:os'
 import fs from 'node:fs/promises'
+import fsSync from 'node:fs'
 
 const EXT = path.resolve('dist')
 
@@ -122,14 +123,14 @@ export interface Probed {
 }
 
 /**
- * Reads a saved file back through ffprobe.
+ * Runs ffprobe over every frame of a file and hands back what it said, complaints and all.
  *
  * -count_frames drives ffprobe through every frame instead of the headers alone: material laid
  * out wrongly inside mdat leaves the boxes intact and shows up only when the frames are actually
- * read — as complaints in stderr, with the exit code still zero. An empty stderr is therefore
- * part of what is being checked, not a detail of how it is checked.
+ * read — as complaints in stderr, with the exit code still zero. So stderr is a finding and not
+ * plumbing, and this is the one reader that returns it rather than asserting it away.
  */
-export function probeFile(file: string): Probed {
+function runProbe(file: string): { status: number | null; stdout: string; stderr: string } {
   const probe = spawnSync(
     'ffprobe',
     [
@@ -144,6 +145,16 @@ export function probeFile(file: string): Probed {
   )
 
   expect(probe.error).toBeUndefined()
+  return { status: probe.status, stdout: probe.stdout, stderr: probe.stderr }
+}
+
+/**
+ * Reads a saved file back through ffprobe, insisting that it had nothing to complain about.
+ * See runProbe for why an empty stderr is part of what is being checked.
+ */
+export function probeFile(file: string): Probed {
+  const probe = runProbe(file)
+
   expect(probe.status, probe.stderr).toBe(0)
   expect(probe.stderr, 'ffprobe complains about reading the saved file').toBe('')
 
@@ -257,13 +268,58 @@ export function seekingLandsRight(file: string, times: number[]): void {
  * turns it into words on stderr — which is why the empty stderr is the assertion here.
  */
 export function decodeFile(file: string): void {
+  const run = runDecode(file)
+
+  expect(run.status, run.stderr).toBe(0)
+  expect(run.stderr, 'decoding the saved file produces warnings').toBe('')
+}
+
+/** The same decode, handing back what it said instead of insisting it said nothing. */
+function runDecode(file: string): { status: number | null; stderr: string } {
   const run = spawnSync('ffmpeg', ['-v', 'warning', '-i', file, '-f', 'null', '-'], {
     encoding: 'utf8',
   })
 
   expect(run.error).toBeUndefined()
-  expect(run.status, run.stderr).toBe(0)
-  expect(run.stderr, 'decoding the saved file produces warnings').toBe('')
+  return { status: run.status, stderr: run.stderr }
+}
+
+/** Everything a reader and a decoder can say about a saved file, none of it turned into a verdict. */
+export interface FileFacts {
+  /** Weight of the file on disk. */
+  bytes: number
+  /** What the format box says the clip lasts, in seconds; NaN when it says nothing. */
+  duration: number
+  streams: Probed['streams']
+  /** Exit code and complaints of the frame-by-frame read. */
+  probeStatus: number | null
+  probeStderr: string
+  /** Exit code and complaints of a decode from end to end. */
+  decodeStatus: number | null
+  decodeStderr: string
+}
+
+/**
+ * Reads a saved file every way the suite knows how and reports the facts.
+ *
+ * Deliberately assertion-free past the two spawns: a matrix of codecs is answered by a table of
+ * what each one produced, and a helper that threw on the first complaint would leave the rest of
+ * the row unmeasured. The caller decides which of these facts is a failure.
+ */
+export function inspectFile(file: string): FileFacts {
+  const probe = runProbe(file)
+  const decode = runDecode(file)
+  const probed = probe.status === 0 ? (JSON.parse(probe.stdout) as Probed) : undefined
+
+  return {
+    bytes: fsSync.statSync(file).size,
+    duration: Number(probed?.format?.duration ?? NaN),
+    streams: probed?.streams ?? [],
+    probeStatus: probe.status,
+    probeStderr: probe.stderr,
+    decodeStatus: decode.status,
+    decodeStderr: decode.stderr,
+  }
 }
 
 const PLAYBACK_ORIGIN = 'https://tailcut.test'

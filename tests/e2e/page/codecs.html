@@ -1,0 +1,86 @@
+<!doctype html>
+<meta charset="utf-8" />
+<!--
+  The same strict policy as the other player pages: a site that forbids foreign frames outright is
+  the case the bridge is most at risk from, and every combination of codecs has to stand up under
+  it just as well.
+-->
+<meta
+  http-equiv="Content-Security-Policy"
+  content="default-src 'self'; frame-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; media-src blob:"
+/>
+<title>test player, one feed per track</title>
+<!--
+  A player whose tracks are named by whoever opens it, rather than written into the page.
+
+  Which codec and which container a site serves is not one arrangement but a matrix of them, and
+  the pages that spell one out apiece have already been copied four times over. The feeds come in
+  through the fragment of the address instead: an array of {mime, init, chunks}, one per
+  SourceBuffer, in the order the page is to open them. One buffer for a stream with no sound and
+  no picture, two for everything else.
+
+  Muted and looped with controls, exactly as the pages it replaces: six seconds of material is the
+  probation period, so the clip has to come round again for the watcher to count it through, and
+  muted playback is the one kind a browser starts without a click of its own. A banner is told
+  from a player by the controls, and those are here.
+-->
+<video id="v" controls muted loop width="640" style="background:#000"></video>
+<script>
+  /** [{ mime, init, chunks: [...] }] — one entry per SourceBuffer. */
+  const FEEDS = JSON.parse(decodeURIComponent(location.hash.slice(1)))
+
+  const video = document.getElementById('v')
+
+  window.allAppended = false
+  window.failure = null
+  /**
+   * Types this browser will not take at all, if any. Kept apart from `failure`: a browser
+   * without an AV1 decoder is not a defect of the extension, and a run that reported it as one
+   * would be claiming a combination it never tested.
+   */
+  window.unsupported = null
+
+  const refused = FEEDS.filter((feed) => !MediaSource.isTypeSupported(feed.mime))
+  if (refused.length) {
+    window.unsupported = refused.map((feed) => feed.mime).join(', ')
+  } else {
+    const mediaSource = new MediaSource()
+    video.src = URL.createObjectURL(mediaSource)
+
+    mediaSource.addEventListener('sourceopen', async () => {
+      try {
+        const buffers = FEEDS.map((feed) => mediaSource.addSourceBuffer(feed.mime))
+
+        const append = (buffer, into) =>
+          new Promise((resolve, reject) => {
+            into.addEventListener('updateend', resolve, { once: true })
+            into.addEventListener('error', () => reject(new Error('appendBuffer failed')), {
+              once: true,
+            })
+            into.appendBuffer(buffer)
+          })
+
+        const fetchBytes = async (url) => (await fetch(url)).arrayBuffer()
+
+        for (const [index, feed] of FEEDS.entries()) {
+          await append(await fetchBytes(feed.init), buffers[index])
+        }
+
+        // Interleaved, the way a player loads them: the buffers fill in step and not one after
+        // the other.
+        const longest = Math.max(...FEEDS.map((feed) => feed.chunks.length))
+        for (let i = 0; i < longest; i++) {
+          for (const [index, feed] of FEEDS.entries()) {
+            if (feed.chunks[i]) await append(await fetchBytes(feed.chunks[i]), buffers[index])
+          }
+        }
+
+        window.allAppended = true
+      } catch (error) {
+        // Otherwise a failure inside the handler sinks into a rejected promise and the test waits
+        // for allAppended until its timeout, reporting the timeout instead of the reason.
+        window.failure = String(error)
+      }
+    })
+  }
+</script>

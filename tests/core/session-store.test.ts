@@ -35,6 +35,24 @@ const webmAudioSegs = [1, 2, 3, 4].map(
 const webmVideoInit = new Uint8Array(readFileSync('tests/fixtures/webm/init-stream0.webm'))
 const webmVideoSeg = new Uint8Array(readFileSync('tests/fixtures/webm/chunk-stream0-00001.webm'))
 
+/**
+ * A clip whose two tracks are cut into segments of different length: the picture into six-second
+ * ones, the sound into five-second ones. That is the ordinary shape of a real site — YouTube
+ * packages its sound in longer pieces than its picture and downloads it further ahead — and the
+ * only shape in which one buffer's last segment can reach far past where the other's material
+ * ends.
+ */
+const aheadVideoInit = new Uint8Array(readFileSync('tests/fixtures/minute/init-stream0.m4s'))
+/** Two segments of six seconds: 0…12. */
+const aheadVideoSegs = [1, 2].map(
+  (n) => new Uint8Array(readFileSync(`tests/fixtures/minute/chunk-stream0-0000${n}.m4s`)),
+)
+const aheadAudioInit = new Uint8Array(readFileSync('tests/fixtures/minute/init-stream1.m4s'))
+/** Three segments of five seconds: 0…15.0465, the last of them mostly past the picture. */
+const aheadAudioSegs = [1, 2, 3].map(
+  (n) => new Uint8Array(readFileSync(`tests/fixtures/minute/chunk-stream1-0000${n}.m4s`)),
+)
+
 /** Video track of the h264 fixture: timescale 12288, three segments of two seconds each. */
 const videoSegs = [1, 2, 3].map(
   (n) => new Uint8Array(readFileSync(`tests/fixtures/h264/chunk-stream0-0000${n}.m4s`)),
@@ -1078,7 +1096,13 @@ describe('summarize', () => {
 
     // Sound alone bridges no gap: two cuttable stretches of two seconds each, and a save writes
     // one continuous clip. Four seconds here would be four seconds of a two-second file.
-    expect(summarize(store.list()[0]!)).toMatchObject({ duration: 2, omits: 'gap' })
+    //
+    // 1.9505 and not a round two: the sound of this clip is cut at 1.9505, and the segment after
+    // that one reaches only fifty milliseconds into the stretch — it stays out, and the clip is
+    // as long as the sound that is in it.
+    const summary = summarize(store.list()[0]!)
+    expect(summary.duration).toBeCloseTo(1.9505, 4)
+    expect(summary.omits).toBe('gap')
   })
 
   it('reports the one representation a save takes, not the two together', () => {
@@ -1183,10 +1207,11 @@ describe('selectMaterial', () => {
     store.append({ ...audioBuffer, bytes: audioSegs[3]! })
 
     // Picture runs 0…6 whole, so the choice is between 0…1.95 and 3.95…6.02 — the later, longer
-    // one. The video fragment 2…4 comes with it: it reaches into the stretch, and segments go
-    // into a file whole or not at all.
+    // one. The video fragment 2…4 is left behind: the clip begins at 3.95 and holds fifty
+    // milliseconds of it, so taking it whole would put two seconds of silent picture in front of
+    // a two-second clip. The fragment 4…6 is the picture of the stretch itself.
     expect(chosen(store)).toEqual([
-      ['video init', 'video 2…4', 'video 4…6'],
+      ['video init', 'video 4…6'],
       ['audio init', 'audio 3', 'audio 4'],
     ])
   })
@@ -1335,12 +1360,40 @@ describe('the summary and the file it promises', () => {
     return store.list()[0]!
   }
 
+  /**
+   * The sound downloaded further ahead than the picture, in longer segments: twelve seconds of
+   * picture in two segments, fifteen of sound in three. The last segment of sound begins inside
+   * the picture and runs five seconds past the end of it.
+   */
+  function soundBufferedAhead(): Session {
+    const store = new SessionStore()
+    store.append({ ...videoBuffer, bytes: aheadVideoInit })
+    store.append({ ...audioBuffer, bytes: aheadAudioInit })
+    for (const bytes of aheadVideoSegs) store.append({ ...videoBuffer, bytes })
+    for (const bytes of aheadAudioSegs) store.append({ ...audioBuffer, bytes })
+    return store.list()[0]!
+  }
+
+  /** The whole length of the file: from the first of its material to the last of it. */
+  function fileSeconds(material: MuxTrack[]): number {
+    let start = Infinity
+    let end = -Infinity
+    for (const track of material) {
+      const span = coveredSpan(track)
+      if (!span) continue
+      start = Math.min(start, span.start)
+      end = Math.max(end, span.end)
+    }
+    return end > start ? end - start : 0
+  }
+
   const sessions: [string, () => Session][] = [
     ['both tracks whole', bothTracks],
     ['a switch of quality', switchedQuality],
     ['a jump forward over the middle', jumpedForward],
     ['the picture refused', pictureRefused],
     ['the sound not started yet', soundNotStartedYet],
+    ['the sound buffered ahead of the picture', soundBufferedAhead],
   ]
 
   it.each(sessions)('promises no more than a save of %s writes', (_name, build) => {
@@ -1404,6 +1457,67 @@ describe('the summary and the file it promises', () => {
 
   it('says nothing when the file holds everything the session has', () => {
     expect(summarize(bothTracks()).omits).toBeUndefined()
+  })
+
+  /**
+   * A segment that lies almost entirely past the end of the clip.
+   *
+   * Segments reach the file whole, and at the edges of the clip that costs a rounding: the last
+   * one of a track runs a fraction past the stretch every track covers at once. The fraction is
+   * the whole of the licence. A site whose sound comes in five-second pieces while its picture
+   * comes in six leaves a piece of sound that begins two seconds before the picture runs out and
+   * ends three seconds after it — and taken whole, that piece turns a twelve-second clip into a
+   * fifteen-second one whose last three seconds are sound over a picture that has stopped.
+   *
+   * Seen on the real site: a save off YouTube promised twenty seconds and wrote a file of
+   * twenty-nine, the last ten of them a frozen frame with sound running over it. The picture came
+   * in WebM segments of about four seconds and the sound in mp4 segments of ten, and one of those
+   * ten-second pieces began a sixth of a second before the picture ran out.
+   */
+  it('leaves out a segment the clip holds almost none of', () => {
+    const material = selectMaterial(soundBufferedAhead())
+
+    // Two segments of picture, and two of the three of sound: the third begins at 10.031 and runs
+    // to 15.0465, of which the clip holds 1.97 seconds and leaves 3.05 behind.
+    expect(material.map((track) => track.segments.length)).toEqual([2, 2])
+  })
+
+  it('does not write sound over a picture that has run out', () => {
+    const material = selectMaterial(soundBufferedAhead())
+    const [picture, sound] = material.map(coveredSpan)
+
+    expect(picture).not.toBeNull()
+    expect(sound).not.toBeNull()
+    // The file may end with picture that has no sound under it — a segment of sound cannot be cut
+    // to fit, and half a second of silence at the tail is not what anybody notices. It must not
+    // end the other way about.
+    expect(sound!.end).toBeLessThanOrEqual(picture!.end)
+  })
+
+  it('promises the stretch the file plays with both of its tracks', () => {
+    const session = soundBufferedAhead()
+
+    // Sound to 10.031, picture to 12: the file plays with both of them for the first ten seconds.
+    expect(summarize(session).duration).toBeCloseTo(10.031, 3)
+    expect(summarize(session).duration).toBeCloseTo(savedSeconds(selectMaterial(session)), 9)
+  })
+
+  it('keeps a segment the clip holds most of', () => {
+    // The other side of the same rule. The sound of the ordinary fixture runs to 6.0232 against a
+    // picture of six seconds flat, so its last segment hangs 23 milliseconds over the edge —
+    // dropping that one would cost real sound to save a rounding.
+    expect(selectMaterial(bothTracks()).map((track) => track.segments.length)).toEqual([3, 4])
+  })
+
+  it.each(sessions)('writes no more than a moment past what it promises for %s', (_name, build) => {
+    const session = build()
+    const material = selectMaterial(session)
+    if (!material.length) return
+
+    // The file may run past its promise by the tail of a segment that had material inside the
+    // clip. What it must not do is run past it by a piece of the video the popup never counted:
+    // half a segment is the whole of the licence, and the longest segment here is six seconds.
+    expect(fileSeconds(material)).toBeLessThanOrEqual(summarize(session).duration + 3)
   })
 })
 

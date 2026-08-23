@@ -201,17 +201,66 @@ function longestOf(spans: Span[]): Span | undefined {
   return longest
 }
 
-/** Segments of the track that reach into the stretch. Whole ones: nothing is cut here. */
-function segmentsIn(track: Track, span: Span): Uint8Array[] {
-  const segments: Uint8Array[] = []
+/**
+ * Whether the clip holds most of a segment: at least as much of it as it leaves outside.
+ *
+ * The question only arises at the two edges. Segments reach the file whole — a fragment is
+ * written into it byte for byte, and cutting one would mean rewriting the sample table that
+ * describes it — so a segment straddling an edge either comes in with its overhang or stays out
+ * with the material it holds inside.
+ *
+ * Which of the two is right turns on how much of it is overhang, and the honest measure of that
+ * is the segment itself. The tracks of a video are cut into pieces of different length: a site
+ * packages its sound in five- and ten-second pieces where its picture goes in two- and four-
+ * second ones, and it downloads the sound further ahead. The last piece of sound then begins
+ * inside the picture and ends well past it. Taken whole, it is the tail of a clip that shows
+ * nothing — the file runs half again as long as the popup promised, with a frozen frame under
+ * the sound. Left out, the clip loses the fraction of a second of sound that did lie inside it.
+ *
+ * Measured against the segment and not against the clip: a two-second piece of picture reaching
+ * a tenth of a second past the sound is the rounding this licence exists for, and it is the same
+ * tenth of a second whether the clip is ten seconds long or ten minutes.
+ */
+function mostlyInside(chunk: Chunk, span: Span): boolean {
+  const inside = Math.min(chunk.end, span.end) - Math.max(chunk.start, span.start)
+  return inside * 2 >= chunk.end - chunk.start
+}
+
+/**
+ * Segments of the track the clip is made of. Whole ones: nothing is cut here.
+ *
+ * A track all of whose segments hang over an edge keeps them: that happens when one segment
+ * covers the whole clip and more, and a file short of a whole kind of media is a worse answer
+ * than one that runs long.
+ */
+function chunksIn(track: Track, span: Span): Chunk[] {
+  const kept: Chunk[] = []
+  const reaching: Chunk[] = []
 
   for (const run of track.map.runs()) {
     for (const chunk of run.chunks) {
-      if (chunk.end > span.start && chunk.start < span.end) segments.push(chunk.bytes)
+      if (!(chunk.end > span.start && chunk.start < span.end)) continue
+      reaching.push(chunk)
+      if (mostlyInside(chunk, span)) kept.push(chunk)
     }
   }
 
-  return segments
+  return kept.length ? kept : reaching
+}
+
+/** Where a track's chosen segments begin and end; null when it has none. */
+function extentOf(chunks: Chunk[]): Span | null {
+  const first = chunks[0]
+  if (!first) return null
+
+  let start = first.start
+  let end = first.end
+  for (const chunk of chunks) {
+    if (chunk.start < start) start = chunk.start
+    if (chunk.end > end) end = chunk.end
+  }
+
+  return { start, end }
 }
 
 /**
@@ -268,22 +317,48 @@ export function planSave(session: Session): SavePlan {
 
   // Every chosen track covers the whole of that stretch — it is their common part — so none of
   // them comes out of this with nothing, and no track reaches the file as an empty stream.
-  const material: MuxTrack[] = longest
-    ? chosen.map((track) => ({
-        initBytes: track.initBytes,
-        segments: segmentsIn(track, longest),
-      }))
-    : []
+  const picked = longest ? chosen.map((track) => chunksIn(track, longest)) : []
+
+  const material: MuxTrack[] = picked.map((chunks, index) => ({
+    initBytes: chosen[index]!.initBytes,
+    segments: chunks.map((chunk) => chunk.bytes),
+  }))
 
   let bytes = 0
   for (const track of material) for (const segment of track.segments) bytes += segment.byteLength
 
   return {
     material,
-    duration: longest ? longest.end - longest.start : 0,
+    duration: longest ? lengthOf(picked, longest) : 0,
     bytes,
     omitted: omissionsOf(session, chosen, stretches),
   }
+}
+
+/**
+ * How long the clip is: the part of the stretch that every chosen track really covers.
+ *
+ * Not the stretch itself. A segment left out at an edge (see chunksIn) shortens the track it
+ * belonged to, and the number the popup shows has to be the one the file delivers with all of
+ * its tracks present — a promise of more than is there is the failure this whole computation
+ * exists to prevent. Whole segments then carry the file a rounding past this number at the other
+ * edge, and running a moment longer than promised is not the same kind of lie.
+ */
+function lengthOf(picked: Chunk[][], stretch: Span): number {
+  let start = stretch.start
+  let end = stretch.end
+
+  for (const chunks of picked) {
+    const extent = extentOf(chunks)
+    // A chosen track with no segment at all: nothing of the clip can be shown, so it is of no
+    // length. chunksIn does not produce this — every chosen track has material in the stretch —
+    // and the guard is here so that a future caller of it cannot make the number a lie.
+    if (!extent) return 0
+    if (extent.start > start) start = extent.start
+    if (extent.end < end) end = extent.end
+  }
+
+  return Math.max(0, end - start)
 }
 
 /**

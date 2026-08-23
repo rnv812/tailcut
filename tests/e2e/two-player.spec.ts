@@ -101,10 +101,13 @@ test('two players on one page save as two files, neither holding the other', asy
   expect(framesOf(alpha)).toEqual([144, 260])
 
   // The vp9 track runs four seconds against six of Opus, so four is what the two cover at once —
-  // 96 frames of picture, and the sound of the clusters that reach into those four seconds.
+  // 96 frames of picture, and the sound that lies inside those four seconds: 199 packets of 20
+  // milliseconds, running to 3.98. The segment of sound after that one begins at 3.98 and ends
+  // at 5.98, so the clip holds a hundredth of it; taken whole it would have carried the file two
+  // seconds past the end of the picture.
   const [betaPicture, betaSound] = framesOf(beta)
   expect(betaPicture).toBe(96)
-  expect(betaSound).toBeGreaterThanOrEqual(200)
+  expect(betaSound).toBe(199)
 
   // Neither file merely opens: both are decoded frame by frame without a word of complaint.
   decodeFile(alpha)

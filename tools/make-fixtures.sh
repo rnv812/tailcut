@@ -59,6 +59,27 @@ ffmpeg -y -i "$work/source-vp9.mp4" -c copy -f dash -seg_duration 2 \
 rm -rf "$out/vp9" && mkdir -p "$out/vp9"
 cp "$work"/vp9/*.m4s "$out/vp9/"
 
+# AV1 in mp4 — what YouTube serves whenever the machine can decode it, and the one picture codec
+# that arrives in mp4 without an avc1 sample entry. Nothing above the container reads the codec,
+# which is exactly the claim this fixture is here to hold to: the bytes cross into the saved file
+# untouched and only the boxes around them are rewritten.
+#
+# The same cheap material as the WebM set and the same six seconds, so that a page can pair this
+# picture with the Opus sound of that set and both tracks cover one stretch of the timeline.
+ffmpeg -y -f lavfi -i "color=c=#202040:s=256x144:r=10:d=6" \
+       -vf "drawbox=x='mod(t*60\,220)':y='60+40*sin(t)':w=30:h=30:color=orange:t=fill" \
+       -c:v libaom-av1 -cpu-used 8 -b:v 60k -g 20 -keyint_min 20 -pix_fmt yuv420p \
+       "$work/source-av1.mp4"
+
+mkdir -p "$work/av1"
+# -dash_segment_type mp4 for the same reason as the VP9 set: left to itself the muxer would pick
+# webm for a codec it knows from there.
+ffmpeg -y -i "$work/source-av1.mp4" -c copy -f dash -seg_duration 2 \
+       -use_template 0 -use_timeline 0 -single_file 0 -dash_segment_type mp4 \
+       "$work/av1/out.mpd"
+rm -rf "$out/av1" && mkdir -p "$out/av1"
+cp "$work"/av1/*.m4s "$out/av1/"
+
 # WebM — the container the ISO BMFF reader cannot touch. YouTube hands its sound over as
 # audio/webm; codecs="opus" and, whenever AV1 is not on offer, its picture as VP9 in WebM too, so a
 # stream in Matroska is not an exotic case but the ordinary one.
@@ -87,4 +108,4 @@ ffmpeg -y -i "$work/source-webm.webm" -c copy -f dash -seg_duration 2 \
 rm -rf "$out/webm" && mkdir -p "$out/webm"
 cp "$work"/webm/*.webm "$out/webm/"
 
-ls -la "$out/h264" "$out/minute" "$out/vp9" "$out/webm"
+ls -la "$out/h264" "$out/minute" "$out/vp9" "$out/av1" "$out/webm"
