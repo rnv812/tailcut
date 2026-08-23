@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { sessionKey } from '../../src/core/session-key'
+import type { BridgeToPage, SessionSummary } from '../../src/shared/protocol'
 
 const initBytes = new Uint8Array(readFileSync('tests/fixtures/h264/init-stream0.m4s'))
 const seg1Bytes = new Uint8Array(readFileSync('tests/fixtures/h264/chunk-stream0-00001.m4s'))
@@ -55,14 +56,36 @@ function port() {
 type Receiver = ReturnType<typeof receiver>
 type MessageListener = (event: MessageEvent) => void
 
-/** Что мост отдаёт в ответ на tc:list. Тот же вид, что попап ждёт от расширения. */
-type Summary = {
-  key: string
-  url: string
-  title: string
-  duration: number
-  bytes: number
-  runs: number
+/**
+ * Что мост отдаёт в ответ на tc:list. Тип берётся из протокола, а не переписывается здесь:
+ * иначе набор проверял бы мост против собственного представления о нём, а не против
+ * объявленного протокола, и расхождение между ними осталось бы незамеченным.
+ */
+type Summary = SessionSummary
+
+/** Признак сводки сессии по факту: у postMessage типов нет, проверять приходится значение. */
+function isSummary(value: unknown): value is SessionSummary {
+  if (typeof value !== 'object' || value === null) return false
+  const summary = value as Record<string, unknown>
+  return (
+    Object.keys(summary).length === 6 &&
+    typeof summary.key === 'string' &&
+    typeof summary.url === 'string' &&
+    typeof summary.title === 'string' &&
+    typeof summary.duration === 'number' &&
+    typeof summary.bytes === 'number' &&
+    typeof summary.runs === 'number'
+  )
+}
+
+/** Вариант союза BridgeToPage, под который подходит значение; null — не подходит ни под один. */
+function variantOf(value: unknown): 'tc:ready' | 'сводки сессий' | null {
+  if (Array.isArray(value)) return value.every(isSummary) ? 'сводки сессий' : null
+  if (typeof value === 'object' && value !== null) {
+    const fields = value as Record<string, unknown>
+    if (fields.type === 'tc:ready' && Object.keys(fields).length === 1) return 'tc:ready'
+  }
+  return null
 }
 
 /**
@@ -377,5 +400,40 @@ describe('мост и чужие сообщения', () => {
     // которая догадается прислать мосту tc:list.
     expect(sender.posts, 'список сессий ушёл в окно страницы').toEqual([])
     expect(reply.received).toHaveLength(1)
+  })
+})
+
+describe('BridgeToPage описывает всё, что мост отправляет', () => {
+  it('и рукопожатие, и ответ на tc:list укладываются в объявленный союз', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+
+    const reply = port()
+    win.deliver({ type: 'tc:list' }, { ports: [reply] })
+
+    // Мост отправляет двумя каналами: окну-родителю и в порт запроса. Оба конца собираются
+    // вместе, потому что тип объявлен один на оба: вид сообщения, посланный мимо союза,
+    // получателю неизвестен, а следующий читатель протокола о нём попросту не узнает.
+    const sent: unknown[] = [...win.parent.posts.map((post) => post.message), ...reply.received]
+    expect(sent.map(variantOf), 'мост отправил сообщение, не описанное в BridgeToPage').toEqual([
+      'tc:ready',
+      'сводки сессий',
+    ])
+  })
+
+  it('оба варианта берутся из союза, а не из представлений набора о нём', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+
+    // Проверка компилятора: присваивание не пройдёт typecheck, если союз потеряет вариант
+    // (`BridgeToPage = { type: 'tc:ready' }` — как было до этой правки) или разойдётся со
+    // сводкой, которую мост отдаёт на самом деле.
+    const handshake: BridgeToPage = { type: 'tc:ready' }
+    const list: BridgeToPage = win.list()
+
+    expect([variantOf(handshake), variantOf(list)]).toEqual(['tc:ready', 'сводки сессий'])
   })
 })

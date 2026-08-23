@@ -1,4 +1,4 @@
-import { isPageToBridge } from '../shared/protocol'
+import { isPageToBridge, type BridgeToPage, type SessionSummary } from '../shared/protocol'
 import { SessionStore } from './session-store'
 
 const store = new SessionStore()
@@ -14,7 +14,7 @@ interface PageContext {
  */
 let pageContext: PageContext = { url: document.referrer, title: '' }
 
-function summaries() {
+function summaries(): SessionSummary[] {
   return store.list().map((s) => ({
     key: s.key,
     url: s.url,
@@ -36,7 +36,10 @@ window.addEventListener('message', (event: MessageEvent) => {
   // Запросы от попапа приходят через порт: chrome.runtime.sendMessage
   // до этого iframe не доходит, он адресуется content script'у.
   if (data?.type === 'tc:list') {
-    event.ports[0]?.postMessage(summaries())
+    // Через объявленный союз, а не напрямую: postMessage принимает что угодно, и молча
+    // разошедшийся с BridgeToPage ответ обнаружился бы только у получателя.
+    const reply: BridgeToPage = summaries()
+    event.ports[0]?.postMessage(reply)
     return
   }
 
@@ -56,4 +59,5 @@ window.addEventListener('message', (event: MessageEvent) => {
 // Рукопожатие — окну своего фрейма, а не window.top: мост встаёт в каждом фрейме страницы
 // (all_frames в манифесте), и для плеера во вложенном фрейме верхняя страница посторонняя —
 // о мосте должен узнать тот документ, который его и вставил.
-window.parent.postMessage({ type: 'tc:ready' }, '*')
+const handshake: BridgeToPage = { type: 'tc:ready' }
+window.parent.postMessage(handshake, '*')
