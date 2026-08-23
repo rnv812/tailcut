@@ -252,9 +252,19 @@ function readElementAt(data: Uint8Array, at: number, to: number): Element | null
     return { id: id.id, start: at, size: end - at, headerSize, unknownSize: true }
   }
 
-  // The body has to lie inside the range being read, whole. Reading half an element would hand
-  // out a truncated body as if it were complete.
-  if (size.value > to - at - headerSize) return null
+  if (size.value > to - at - headerSize) {
+    // The body has to lie inside the range being read, whole. Reading half an element would hand
+    // out a truncated body as if it were complete.
+    //
+    // One element is exempt, and it is the one a live stream is delivered inside of: the Segment
+    // wraps the whole recording and states its length before any of it has been written. A page
+    // is handed that stream a piece at a time, so the Segment always outruns the bytes in hand,
+    // and refusing it would hide the Tracks that have already arrived within it. It is cut back
+    // to what is here; every child is still measured against its own stated length, so nothing
+    // truncated is handed out as whole.
+    if (id.id !== ID.segment) return null
+    return { id: id.id, start: at, size: to - at, headerSize, unknownSize: false }
+  }
 
   return { id: id.id, start: at, size: headerSize + size.value, headerSize, unknownSize: false }
 }

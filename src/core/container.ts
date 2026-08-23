@@ -3,7 +3,9 @@ import { parseFragment as parseIsoFragment } from './iso/fragment'
 import { parseInit as parseWebmInit } from './webm/init'
 import { parseFragment as parseWebmFragment } from './webm/fragment'
 import { webmToIso, type ConvertedSegment } from './webm/to-iso'
-import type { FragmentInfo, InitInfo } from '../shared/types'
+import { isoResync, isoUnitStartsAt, splitIso } from './iso/split'
+import { webmResync, webmUnitStartsAt, splitWebm } from './webm/split'
+import type { FragmentInfo, InitInfo, Split } from '../shared/types'
 
 /**
  * The two containers a page delivers media in, behind one interface.
@@ -26,18 +28,33 @@ export interface ContainerParser {
   parseInit(bytes: Uint8Array): InitInfo | null
   /** Where a media segment sits in the time of its track, or null when it is not one. */
   parseFragment(bytes: Uint8Array): FragmentInfo | null
+  /**
+   * Cuts every complete segment off the front of a buffer of this container's byte stream — see
+   * src/core/stream.ts for why a buffer of appends is not a segment.
+   */
+  split(bytes: Uint8Array): Split
+  /** Whether the head of a segment stands at `at`, or bytes too few to tell yet. */
+  unitStartsAt(bytes: Uint8Array, at: number): boolean
+  /** The next offset from `from` where a stream of this container starts; -1 when none. */
+  resync(bytes: Uint8Array, from: number): number
 }
 
 export const isoParser: ContainerParser = {
   container: 'iso',
   parseInit: parseIsoInit,
   parseFragment: parseIsoFragment,
+  split: splitIso,
+  unitStartsAt: isoUnitStartsAt,
+  resync: isoResync,
 }
 
 export const webmParser: ContainerParser = {
   container: 'webm',
   parseInit: parseWebmInit,
   parseFragment: parseWebmFragment,
+  split: splitWebm,
+  unitStartsAt: webmUnitStartsAt,
+  resync: webmResync,
 }
 
 /**

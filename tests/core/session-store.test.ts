@@ -61,6 +61,9 @@ const only = (session: Session) => session.tracks[0]!
  */
 const shapeOf = (chunk: Chunk) => [chunk.start, chunk.end, chunk.bytes.byteLength]
 
+const sameBytes = (a: Uint8Array, b: Uint8Array): boolean =>
+  a.byteLength === b.byteLength && a.every((byte, i) => byte === b[i])
+
 /** Codecs a session holds, whatever track they sit on. */
 const codecsOf = (session: Session) =>
   session.tracks.flatMap((t) => t.info.tracks.map((iso) => iso.codec)).sort()
@@ -126,10 +129,15 @@ const abrPage = { ...page, url: 'https://site.example/watch?v=abr' }
 /** The same init with a harmless tail: same codecs, other bytes — a swap would show. */
 const initWithTail = new Uint8Array([...init, ...box('free', zeros(4))])
 
-/** A moof whose duration sits in tfhd: trun only gives the number of samples. */
+/**
+ * A media segment whose duration sits in tfhd: trun only gives the number of samples.
+ *
+ * The mdat behind the moof is what makes it a segment rather than a header: a stream is read as
+ * the byte stream it is, and a moof closes nothing — the mdat its samples live in does.
+ */
 function moof(trackId: number, baseTime: number, samples: number, sampleDuration: number) {
-  return new Uint8Array(
-    box(
+  return new Uint8Array([
+    ...box(
       'moof',
       box(
         'traf',
@@ -139,7 +147,8 @@ function moof(trackId: number, baseTime: number, samples: number, sampleDuration
         box('trun', u32(0), u32(samples)),
       ),
     ),
-  )
+    ...box('mdat', zeros(16)),
+  ])
 }
 
 describe('SessionStore', () => {
@@ -370,16 +379,19 @@ describe('SessionStore: what ends up in a session', () => {
   it('opens a session by the moov of an init glued to the first fragment', () => {
     const store = new SessionStore()
 
-    // A self-initialising segment: moov and the first moof in one appendBuffer. Were the bridge
-    // to parse the fragment before the init, the moof would be found first, the source would be
-    // left without a session, and the whole stream would be lost rather than one segment.
+    // A self-initialising segment: moov and the first moof in one appendBuffer. The buffer is
+    // read as the byte stream it is, so both come out of it — the init opens the session and the
+    // fragment behind it lands on the map, without the moov being carried along into it.
     store.append({ ...page, bytes: new Uint8Array([...init, ...seg1]) })
 
     expect(store.list()).toHaveLength(1)
     expect(only(store.list()[0]!).info.tracks[0]!.codec).toBe('avc1')
-    // The media part of such a buffer does not go on the map: it would go there together with
-    // the moov, which is already in initBytes, and the built file would carry the moov twice.
-    expect(only(store.list()[0]!).map.runs()).toEqual([])
+    expect(only(store.list()[0]!).map.runs().map((r) => [r.start, r.end])).toEqual([[0, 2]])
+    // The fragment alone: the moov is in initBytes already, and a file built with it twice over
+    // is not a file.
+    expect(only(store.list()[0]!).map.runs()[0]!.chunks.map(shapeOf)).toEqual([
+      [0, 2, seg1.byteLength],
+    ])
   })
 
   it('opens a separate session for another media source at the same address', () => {
@@ -392,6 +404,70 @@ describe('SessionStore: what ends up in a session', () => {
     // The two tracks of one video look different — same sourceId, different bufferId.
     expect(store.list()).toHaveLength(2)
     expect(store.list().flatMap(codecsOf).sort()).toEqual(['avc1', 'mp4a'])
+  })
+})
+
+describe('SessionStore: a stream appended in slices', () => {
+  /**
+   * What YouTube does: a SourceBuffer is handed the download as it arrives rather than a segment
+   * at a time, and the pieces are sixteen kilobytes each. Read piece by piece, the picture keeps
+   * the few appends that happen to begin with a moof — in half, without the mdat their samples
+   * live in — and the sound, whose WebM init is cut in two, opens no track at all.
+   */
+  const slices = (data: Uint8Array, size: number): Uint8Array[] => {
+    const out: Uint8Array[] = []
+    for (let at = 0; at < data.byteLength; at += size) {
+      out.push(data.subarray(at, Math.min(at + size, data.byteLength)))
+    }
+    return out
+  }
+
+  const feed = (store: SessionStore, where: typeof page, parts: Uint8Array[], size: number) => {
+    for (const part of parts) {
+      for (const slice of slices(part, size)) store.append({ ...where, bytes: slice })
+    }
+  }
+
+  it('collects the same material as the same stream appended whole', () => {
+    const whole = new SessionStore()
+    feed(whole, page, [init, ...videoSegs], Number.MAX_SAFE_INTEGER)
+
+    const sliced = new SessionStore()
+    feed(sliced, page, [init, ...videoSegs], 16 * 1024)
+
+    const runs = (store: SessionStore) =>
+      only(store.list()[0]!).map.runs().flatMap((r) => r.chunks.map(shapeOf))
+
+    expect(runs(sliced)).toEqual(runs(whole))
+    expect(runs(sliced)).toEqual([[0, 2, videoSegs[0]!.byteLength],
+      [2, 4, videoSegs[1]!.byteLength], [4, 6, videoSegs[2]!.byteLength]])
+  })
+
+  it('opens a WebM track whose init was cut across two appends', () => {
+    const store = new SessionStore()
+    // The init of YouTube's Opus stream is a couple of hundred bytes, and the boundary of the
+    // download falls inside it as readily as anywhere else.
+    feed(store, page, [webmAudioInit, ...webmAudioSegs], 64)
+
+    const session = store.list()[0]!
+    expect(session.tracks.map((t) => t.kinds)).toEqual([['audio']])
+    expect(only(session).map.runs()).toHaveLength(1)
+    expect(only(session).map.duration()).toBeGreaterThan(5.9)
+  })
+
+  it('gathers both tracks of a page that slices each of them', () => {
+    const store = new SessionStore()
+    const video = { ...page, bufferId: 'b1' }
+    const audio = { ...page, bufferId: 'b2' }
+
+    feed(store, video, [init, ...videoSegs], 4096)
+    feed(store, audio, [webmAudioInit, ...webmAudioSegs], 4096)
+
+    const session = store.list()[0]!
+    expect(session.tracks.map((t) => t.kinds)).toEqual([['video'], ['audio']])
+    // Every kind is there over the whole of the shared stretch, which is what a saved file is.
+    expect(summarize(session).duration).toBeGreaterThan(5.9)
+    expect(selectMaterial(session).map((m) => m.segments.length)).toEqual([3, 4])
   })
 })
 
@@ -566,12 +642,12 @@ describe('SessionStore: session lifetime', () => {
 
     // The first rendition keeps the init it was opened with and the material collected under it.
     expect(tracks[0]!.initBytes).toEqual(sdInit)
-    expect(tracks[0]!.map.runs().flatMap((r) => r.chunks.map(shapeOf))).toEqual([[0, 2, 68]])
+    expect(tracks[0]!.map.runs().flatMap((r) => r.chunks.map(shapeOf))).toEqual([[0, 2, 92]])
 
     // The fragments after the switch are read against the new init: at the timescale of the old
     // one the very same fragment would be laid down at 180…360 seconds.
     expect(tracks[1]!.initBytes).toEqual(hdInit)
-    expect(tracks[1]!.map.runs().flatMap((r) => r.chunks.map(shapeOf))).toEqual([[2, 4, 68]])
+    expect(tracks[1]!.map.runs().flatMap((r) => r.chunks.map(shapeOf))).toEqual([[2, 4, 92]])
   })
 
   it('starts a new session when the source moves on to another video', () => {
@@ -1043,11 +1119,14 @@ describe('selectMaterial', () => {
   const audioBuffer = { ...page, bufferId: 'b2' }
 
   /**
-   * Fixtures by name. The selection answers with the very buffers it was fed, and naming them
-   * says which segment went where; comparing megabytes of media data would say the same thing in
-   * a diff nobody can read.
+   * Fixtures by name. Naming them says which segment went where; comparing megabytes of media
+   * data would say the same thing in a diff nobody can read.
+   *
+   * Matched on content and not on identity: a segment reaches the store inside a run of appends
+   * and comes back as the bytes cut out of that run, which is the same material in a view of its
+   * own.
    */
-  const names = new Map<Uint8Array, string>([
+  const names: [Uint8Array, string][] = [
     [init, 'video init'],
     [audioInit, 'audio init'],
     [vp9Init, 'vp9 init'],
@@ -1055,12 +1134,15 @@ describe('selectMaterial', () => {
     [vp9Seg2, 'vp9 2…4'],
     ...videoSegs.map((bytes, i): [Uint8Array, string] => [bytes, `video ${i * 2}…${i * 2 + 2}`]),
     ...audioSegs.map((bytes, i): [Uint8Array, string] => [bytes, `audio ${i + 1}`]),
-  ])
+  ]
+
+  const nameOf = (bytes: Uint8Array): string =>
+    names.find(([fixture]) => sameBytes(fixture, bytes))?.[1] ?? 'a stranger'
 
   /** What the selection came back with: the init of every track it chose, then its segments. */
   const chosen = (store: SessionStore): string[][] =>
     selectMaterial(store.list()[0]!).map((track) =>
-      [track.initBytes, ...track.segments].map((bytes) => names.get(bytes) ?? 'a stranger'),
+      [track.initBytes, ...track.segments].map(nameOf),
     )
 
   it('hands over both tracks with the init each of them was opened with', () => {

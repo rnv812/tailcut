@@ -49,3 +49,25 @@ export interface Run {
   end: number
   chunks: Chunk[]
 }
+
+/**
+ * A complete piece of a media byte stream, cut out of the run of appends a page makes.
+ *
+ * MSE hands a SourceBuffer a byte stream, not a list of segments: a player is free to pass on the
+ * download as it arrives, and YouTube does exactly that — sixteen kilobytes at a time, with every
+ * boundary of the container falling in the middle of a call. What the rest of the program works
+ * on is the segment, so the two have to be put back together before anything is read out of them.
+ */
+export interface StreamUnit {
+  /** An init segment opens a track; a media segment carries its material. */
+  kind: 'init' | 'media'
+  /** The unit's bytes, exactly as the stream spelled them. A view, not a copy. */
+  bytes: Uint8Array
+}
+
+/** What one pass of a splitter made of a buffer. */
+export interface Split {
+  units: StreamUnit[]
+  /** Bytes from the front of the buffer that are now accounted for and need not be kept. */
+  consumed: number
+}

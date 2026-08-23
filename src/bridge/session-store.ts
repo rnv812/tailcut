@@ -1,5 +1,6 @@
 import { parseFragment } from '../core/iso/fragment'
 import { ingestInit, type IngestedInit, type SegmentConverter } from '../core/container'
+import { SegmentStream } from '../core/stream'
 import { continuesRun, PtsMap } from '../core/timeline/map'
 import { normalizeUrl, sessionKey } from '../core/session-key'
 import type { MuxTrack } from '../core/mux'
@@ -317,13 +318,18 @@ export class SessionStore {
   private sessions = new Map<string, StoredSession>()
   /** What each MediaSource of the page feeds, and where. */
   private sources = new Map<string, SourceState>()
+  /** sourceId and bufferId → the byte stream that SourceBuffer is being fed, half-read. */
+  private streams = new Map<string, SegmentStream>()
   /** Rejected sources: their bytes are not kept while the verdict stands. */
   private rejected = new Set<string>()
 
   /**
-   * Parses the incoming bytes and works out for itself what they are. The store is fed from a
-   * foreign page, so no parse here is allowed to throw: a piece it cannot make sense of is
-   * dropped silently.
+   * Takes what a page appended to one of its SourceBuffers and works out for itself what it is.
+   * The store is fed from a foreign page, so no parse here is allowed to throw: a piece it cannot
+   * make sense of is dropped silently.
+   *
+   * What arrives is a piece of a byte stream and not necessarily a segment — see
+   * src/core/stream.ts — so the segments are recovered first, and only whole ones are read.
    */
   append(input: AppendInput): void {
     // The MAIN world hook knows nothing about verdicts and copies to the last: triage lives here.
@@ -331,26 +337,33 @@ export class SessionStore {
     // its first segment would open a session right after it.
     if (this.rejected.has(input.sourceId)) return
 
-    const opened = ingestInit(input.bytes)
+    for (const unit of this.streamOf(input).push(input.bytes)) {
+      if (unit.kind === 'init') {
+        // An init in a container or a codec the ingest boundary will not take opens no track, and
+        // the segments behind it then land nowhere. Better that than a track that cannot be saved.
+        const opened = ingestInit(unit.bytes)
+        if (opened) this.openTrack(input, opened)
+        continue
+      }
 
-    if (opened) {
-      this.openTrack(input, opened)
-      return
+      this.take(input, unit.bytes)
     }
+  }
 
-    // Not an init, so a media segment — and which container it is written in was settled when the
-    // init of its buffer arrived. The track is found first and the bytes read second, through
-    // whichever reading its own buffer was opened with.
-    //
-    // A fragment before its init is a normal thing: the page may have started playing before the
-    // bridge stood up. There is nowhere to put it, and that is not an error.
+  /**
+   * One media segment onto the map of the track it belongs to. Which container it is written in
+   * was settled when the init of its buffer arrived: the track is found first and the bytes read
+   * second, through whichever reading its own buffer was opened with.
+   *
+   * A segment before its init is a normal thing: the page may have started playing before the
+   * bridge stood up. There is nowhere to put it, and that is not an error.
+   */
+  private take(input: AppendInput, bytes: Uint8Array): void {
     const found = this.locate(input)
     if (!found) return
 
     const { session, track } = found
-    const chunk = track.convert
-      ? convertedChunk(track.convert, input.bytes)
-      : isoChunk(track, input.bytes)
+    const chunk = track.convert ? convertedChunk(track.convert, bytes) : isoChunk(track, bytes)
     if (!chunk) return
 
     // The map is per buffer, so the deduplication rule of PtsMap ("the same start means the same
@@ -359,6 +372,17 @@ export class SessionStore {
     // all of its tracks in one call.
     track.map.insert(chunk)
     session.lastSeenAt = input.now
+  }
+
+  /** The reassembly of one SourceBuffer's byte stream; opened the first time it is fed. */
+  private streamOf(input: AppendInput): SegmentStream {
+    const key = `${input.sourceId}\u0000${input.bufferId}`
+    let stream = this.streams.get(key)
+    if (!stream) {
+      stream = new SegmentStream()
+      this.streams.set(key, stream)
+    }
+    return stream
   }
 
   get(key: string): Session | undefined {
@@ -414,6 +438,11 @@ export class SessionStore {
     if (session?.confirmed) return
 
     this.sources.delete(sourceId)
+    // The half-read segments of its buffers go with it: nobody will finish them now, and they
+    // would be assembled onto a track that no longer exists.
+    for (const key of this.streams.keys()) {
+      if (key.startsWith(`${sourceId}\u0000`)) this.streams.delete(key)
+    }
     if (!session) return
 
     // The verdict is addressed: a session that a neighbouring source is also feeding stays. The

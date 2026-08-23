@@ -1,0 +1,120 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>two players at once</title>
+<!--
+  Two real players on one page, four SourceBuffers between them, and every one of them fed the way
+  YouTube feeds its own: not a segment per call but the download as it arrives, in slices, with
+  every boundary of the container falling in the middle of a call.
+
+  The four streams are appended concurrently, so their slices interleave in time as they do on a
+  page with a feed of players. Each SourceBuffer is one byte stream and has to be put back
+  together on its own; keep one reassembly for the page, or one per media source, and the slices
+  of four streams would be spliced into each other.
+
+  The codecs of the two players differ on purpose. The session key is built from the address and
+  the codecs, and the address here is one: on the same codecs the two would merge into a single
+  session by design, and there would be nothing left to tell mixing from merging.
+-->
+<style>
+  video { display: block; width: 480px; height: 200px; background: #000; margin: 0 0 4px }
+</style>
+<video id="alpha" controls muted></video>
+<video id="beta" controls muted></video>
+<script>
+  const PLAYERS = {
+    alpha: {
+      video: {
+        mime: 'video/mp4; codecs="avc1.4d401e"',
+        files: [
+          '/fixtures/h264/init-stream0.m4s',
+          '/fixtures/h264/chunk-stream0-00001.m4s',
+          '/fixtures/h264/chunk-stream0-00002.m4s',
+          '/fixtures/h264/chunk-stream0-00003.m4s',
+        ],
+      },
+      audio: {
+        mime: 'audio/mp4; codecs="mp4a.40.2"',
+        files: [
+          '/fixtures/h264/init-stream1.m4s',
+          '/fixtures/h264/chunk-stream1-00001.m4s',
+          '/fixtures/h264/chunk-stream1-00002.m4s',
+          '/fixtures/h264/chunk-stream1-00003.m4s',
+          '/fixtures/h264/chunk-stream1-00004.m4s',
+        ],
+      },
+    },
+    beta: {
+      video: {
+        mime: 'video/mp4; codecs="vp09.00.10.08"',
+        files: [
+          '/fixtures/vp9/init-stream0.m4s',
+          '/fixtures/vp9/chunk-stream0-00001.m4s',
+          '/fixtures/vp9/chunk-stream0-00002.m4s',
+        ],
+      },
+      audio: {
+        mime: 'audio/webm; codecs="opus"',
+        files: [
+          '/fixtures/webm/init-stream1.webm',
+          '/fixtures/webm/chunk-stream1-00001.webm',
+          '/fixtures/webm/chunk-stream1-00002.webm',
+          '/fixtures/webm/chunk-stream1-00003.webm',
+          '/fixtures/webm/chunk-stream1-00004.webm',
+        ],
+      },
+    },
+  }
+
+  /** Small enough that every fixture segment is cut into several pieces. */
+  const SLICE_BYTES = 4096
+
+  window.allAppended = false
+  window.failure = null
+
+  const fetchBytes = async (url) => new Uint8Array(await (await fetch(url)).arrayBuffer())
+
+  const append = (buffer, into) =>
+    new Promise((resolve, reject) => {
+      into.addEventListener('updateend', resolve, { once: true })
+      into.addEventListener('error', () => reject(new Error('appendBuffer failed')), { once: true })
+      into.appendBuffer(buffer)
+    })
+
+  /** Everything the stream is made of, one slice per call, in order. */
+  async function feed(buffer, files) {
+    for (const url of files) {
+      const bytes = await fetchBytes(url)
+      for (let at = 0; at < bytes.byteLength; at += SLICE_BYTES) {
+        await append(bytes.subarray(at, Math.min(at + SLICE_BYTES, bytes.byteLength)), buffer)
+      }
+    }
+  }
+
+  async function start(id) {
+    const { video: picture, audio: sound } = PLAYERS[id]
+    const element = document.getElementById(id)
+    const mediaSource = new MediaSource()
+    element.src = URL.createObjectURL(mediaSource)
+
+    await new Promise((r) => mediaSource.addEventListener('sourceopen', r, { once: true }))
+
+    const buffers = [
+      [mediaSource.addSourceBuffer(picture.mime), picture.files],
+      [mediaSource.addSourceBuffer(sound.mime), sound.files],
+    ]
+
+    // Both buffers of the player at once, and both players at once above: four streams whose
+    // slices arrive shuffled together, which is what a page with two players looks like.
+    await Promise.all(buffers.map(([buffer, files]) => feed(buffer, files)))
+  }
+
+  Promise.all(Object.keys(PLAYERS).map(start))
+    .then(() => {
+      window.allAppended = true
+    })
+    // Otherwise a failure sinks into a rejected promise and the test waits for allAppended until
+    // its timeout, reporting the timeout instead of the reason.
+    .catch((error) => {
+      window.failure = String(error)
+    })
+</script>

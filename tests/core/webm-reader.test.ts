@@ -377,6 +377,45 @@ describe('elements of unknown size', () => {
   })
 })
 
+describe('a Segment still arriving', () => {
+  /** The fixture's Segment with a length written into it: 4 bytes of id, then 8 bytes of size. */
+  const declaring = (length: number): Uint8Array => {
+    const out = init.slice()
+    const segment = topLevelElements(out).find((e) => e.id === ID.segment)!
+    out.set(size(length, 8), segment.start + 4)
+    return out
+  }
+
+  it('reads inside a Segment that states a length the arrived bytes do not reach', () => {
+    // What a live stream looks like on the wire: the Segment states the length of the whole
+    // recording, and the player has been handed its first few hundred bytes. Refusing the
+    // element over the bytes still in flight would hide the Tracks that have arrived.
+    const streaming = declaring(10_000_000)
+
+    const segment = topLevelElements(streaming).find((e) => e.id === ID.segment)
+    expect(segment).toBeDefined()
+    expect(segment!.size).toBe(streaming.byteLength - segment!.start)
+    expect(childElements(streaming, segment!).map((e) => e.id)).toEqual([
+      ID.seekHead, ID.void, ID.info, ID.tracks, ID.tags,
+    ])
+  })
+
+  it('leaves a Segment that does fit exactly as it is', () => {
+    const whole = declaring(init.byteLength - 48)
+
+    const segment = topLevelElements(whole).find((e) => e.id === ID.segment)!
+    expect(segment.size).toBe(whole.byteLength - segment.start)
+    expect(segment.unknownSize).toBe(false)
+  })
+
+  it('still refuses a Cluster whose body has not all arrived', () => {
+    // Only the Segment wraps bytes yet to come. A Cluster states the length of material that is
+    // already written, and half of one is half a frame.
+    const buf = buffer([...id(ID.cluster), ...size(64)], [1, 2, 3, 4])
+    expect(topLevelElements(buf)).toEqual([])
+  })
+})
+
 describe('broken sizes', () => {
   it('does not give out an element whose body reaches past the buffer', () => {
     const buf = buffer([...id(ID.cluster), ...size(64)], [1, 2, 3, 4])
