@@ -9,7 +9,6 @@ const summary: SessionSummary = {
   title: 'Clip — site.example',
   duration: 6,
   bytes: 1_543_210,
-  runs: 1,
 }
 
 /** What the popup sent the tab: the message and its addressee inside it. */

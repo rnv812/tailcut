@@ -7,7 +7,6 @@ const summary = (duration: number): SessionSummary => ({
   title: 'Clip',
   duration,
   bytes: 1_543_210,
-  runs: 1,
 })
 
 type Alarm = { name: string; options: unknown }
@@ -15,27 +14,27 @@ type BadgeText = { tabId?: number; text: string }
 type Sent = { tabId: number; message: unknown; options: unknown }
 
 /**
- * Активная вкладка соседнего окна. Окон у пользователя бывает несколько, а вкладки Chrome
- * перечисляет по окнам: в ответ на запрос без `currentWindow` соседнее окно попадает раньше
- * текущего, и первой в списке оказывается его вкладка.
+ * The active tab of a neighbouring window. A user has several windows open, and Chrome lists tabs
+ * by window: answering a query without `currentWindow`, the neighbouring window comes before the
+ * current one, and its tab ends up first in the list.
  */
 const OTHER_WINDOW_TAB = { id: 42 }
 
 /**
- * Вкладка текущего окна на заднем плане. В ответ на запрос без `active` она попадает
- * раньше активной: вкладки одного окна перечисляются слева направо.
+ * A background tab of the current window. Answering a query without `active` it comes before the
+ * active one: the tabs of one window are listed left to right.
  */
 const BACKGROUND_TAB = { id: 5 }
 
-/** Чем ограничен запрос вкладок: ровно те поля, которыми пользуется расширение. */
+/** What the tab query is narrowed by: exactly the fields the extension uses. */
 type QueryInfo = { active?: boolean; currentWindow?: boolean }
 
 /**
- * Подменяет chrome для service worker: слушатели он вешает при загрузке модуля, а зовёт их
- * потом браузер. Тест их и зовёт — установку и срабатывание будильника.
+ * Replaces chrome for the service worker: it hangs its listeners when the module loads, and the
+ * browser calls them later. Here the test calls them — the installation and the alarm going off.
  *
- * Вкладки заданы списком: это активные вкладки текущего окна. Рядом с ними живут соседнее
- * окно и вкладка на заднем плане — их запрос обязан отсеять сам.
+ * The tabs are given as a list: these are the active tabs of the current window. Beside them live
+ * a neighbouring window and a background tab — the query has to sift those out itself.
  */
 function installChrome(options: { tabs?: Array<{ id?: number }>; reply?: unknown } = {}) {
   const alarms: Alarm[] = []
@@ -90,11 +89,11 @@ function installChrome(options: { tabs?: Array<{ id?: number }>; reply?: unknown
     fire: async (name = 'tc:badge') => {
       for (const listener of alarmFired) await listener({ name })
     },
-    /** Страница без content script: sendMessage отказывает «receiving end does not exist». */
+    /** A page with no content script: sendMessage refuses with "receiving end does not exist". */
     breakTab: () => {
       failure = new Error('Could not establish connection. Receiving end does not exist.')
     },
-    /** Вкладка закрылась, пока шёл опрос: бейдж ставить уже некому. */
+    /** The tab closed while the poll was running: there is nobody left to badge. */
     breakBadge: () => {
       badgeFailure = new Error('No tab with id: 7.')
     },
@@ -110,8 +109,8 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe('установка', () => {
-  it('красит бейдж и заводит будильник пересчёта', async () => {
+describe('installation', () => {
+  it('paints the badge and sets the alarm that recounts it', async () => {
     const chrome = installChrome()
     await importWorker()
 
@@ -122,24 +121,24 @@ describe('установка', () => {
     expect(chrome.alarms[0]!.name).toBe('tc:badge')
   })
 
-  it('будильник периодический: пересчёт переживает сон воркера', async () => {
+  it('sets a repeating alarm: the recount outlives the sleep of the worker', async () => {
     const chrome = installChrome()
     await importWorker()
 
     chrome.install()
 
-    // Одноразовый будильник (delayInMinutes/when) поставил бы бейдж ровно один раз, а
-    // setInterval уснул бы вместе с воркером через полминуты бездействия.
+    // A one-shot alarm (delayInMinutes/when) would set the badge exactly once, and a setInterval
+    // would fall asleep with the worker after half a minute of idling.
     const options = chrome.alarms[0]!.options as { periodInMinutes?: number }
-    expect(options.periodInMinutes, 'будильник не повторяется').toBeGreaterThan(0)
-    expect(options.periodInMinutes, 'бейдж отстаёт от записи больше чем на полминуты').toBeLessThan(
+    expect(options.periodInMinutes, 'the alarm does not repeat').toBeGreaterThan(0)
+    expect(options.periodInMinutes, 'the badge lags the recording by over half a minute').toBeLessThan(
       0.5,
     )
   })
 })
 
-describe('пересчёт бейджа', () => {
-  it('спрашивает активную вкладку и ставит бейдж ей', async () => {
+describe('recounting the badge', () => {
+  it('asks the active tab and badges that tab', async () => {
     const chrome = installChrome()
     await importWorker()
 
@@ -148,24 +147,24 @@ describe('пересчёт бейджа', () => {
     expect(chrome.sent).toEqual([
       { tabId: 7, message: { type: 'tc:list' }, options: { frameId: 0 } },
     ])
-    // Бейдж без tabId — общий: запись одной вкладки светилась бы на всех остальных.
+    // A badge without a tabId is global: the recording of one tab would show on all the others.
     expect(chrome.badgeText).toEqual([{ tabId: 7, text: '6s' }])
   })
 
-  it('считает по активной вкладке текущего окна, а не соседнего', async () => {
+  it('counts by the active tab of the current window, not of a neighbouring one', async () => {
     const chrome = installChrome()
     await importWorker()
 
     await chrome.fire()
 
-    // Окон открыто два, и запрос без currentWindow вернёт активную вкладку каждого —
-    // первой чужую. Бейдж тогда посчитан по чужой записи и поставлен чужой вкладке,
-    // а на той, где сидит пользователь, замирает на прежнем значении.
+    // Two windows are open, and a query without currentWindow gives back the active tab of each —
+    // somebody else's first. The badge is then counted from somebody else's recording and put on
+    // somebody else's tab, while the one the user is sitting on freezes at its previous value.
     expect(chrome.sent.map((item) => item.tabId)).toEqual([7])
     expect(chrome.badgeText.map((item) => item.tabId)).toEqual([7])
   })
 
-  it('чужой будильник не трогает', async () => {
+  it('leaves an alarm of somebody else alone', async () => {
     const chrome = installChrome()
     await importWorker()
 
@@ -175,7 +174,7 @@ describe('пересчёт бейджа', () => {
     expect(chrome.badgeText).toEqual([])
   })
 
-  it('на вкладке без записи бейдж пуст', async () => {
+  it('shows an empty badge on a tab with no recording', async () => {
     const chrome = installChrome({ reply: [] })
     await importWorker()
 
@@ -184,19 +183,31 @@ describe('пересчёт бейджа', () => {
     expect(chrome.badgeText).toEqual([{ tabId: 7, text: '' }])
   })
 
-  it('на вкладке без content script бейдж стирается', async () => {
+  it('badges the length that would be saved, not the length that was watched', async () => {
+    // The badge reads the very summary the popup shows, and `duration` in it is the length of the
+    // file "Save all" would write — see summarize(). A session whose material cannot be cut into
+    // a clip at all badges nothing, however many megabytes stand behind it.
+    const chrome = installChrome({ reply: [{ ...summary(0), omits: 'track' as const }] })
+    await importWorker()
+
+    await chrome.fire()
+
+    expect(chrome.badgeText).toEqual([{ tabId: 7, text: '' }])
+  })
+
+  it('wipes the badge on a tab with no content script', async () => {
     const chrome = installChrome()
     chrome.breakTab()
     await importWorker()
 
     await chrome.fire()
 
-    // chrome://, магазин расширений, вкладка старше установки. Оставь бейдж как есть —
-    // на ней светилось бы чужое время.
+    // chrome://, the extension store, a tab older than the installation. Leave the badge as it is
+    // and somebody else's time would be showing on it.
     expect(chrome.badgeText).toEqual([{ tabId: 7, text: '' }])
   })
 
-  it('без активной вкладки ничего не ставит', async () => {
+  it('sets nothing when there is no active tab', async () => {
     const chrome = installChrome({ tabs: [] })
     await importWorker()
 
@@ -206,23 +217,23 @@ describe('пересчёт бейджа', () => {
     expect(chrome.badgeText).toEqual([])
   })
 
-  it('закрывшаяся вкладка не роняет обработчик', async () => {
+  it('does not fall over on a tab that closed', async () => {
     const chrome = installChrome()
     chrome.breakBadge()
     await importWorker()
 
-    // Вкладка успевает закрыться, пока идёт опрос: setBadgeText отказывает промисом,
-    // и непойманный отказ разбудил бы воркер сообщением об ошибке.
+    // The tab manages to close while the poll is running: setBadgeText refuses with a promise,
+    // and an unhandled rejection would wake the worker with an error message.
     await expect(chrome.fire()).resolves.toBeUndefined()
   })
 
-  it('берёт самую свежую сессию вкладки', async () => {
+  it('takes the freshest session of the tab', async () => {
     const chrome = installChrome({ reply: [summary(12), summary(300)] })
     await importWorker()
 
     await chrome.fire()
 
-    // Список приходит от свежих к старым: на бейдже то, что пишется прямо сейчас.
+    // The list comes newest first: on the badge is what is being recorded right now.
     expect(chrome.badgeText).toEqual([{ tabId: 7, text: '12s' }])
   })
 })
@@ -231,37 +242,38 @@ describe('formatBadge', () => {
   it.each([
     [0, ''],
     [0.4, ''],
-    // Меньше секунды писать нечего, а «0s» на кнопке обещал бы записанное.
+    // Under a second there is nothing to record, and "0s" on the button would promise otherwise.
     [0.99, ''],
-    // Длительность приходит из чужого разбора, и число в ней бывает не числом. Развилка
-    // написана так, что NaN уходит в пустую подпись: «NaNh» на кнопке — не подпись.
+    // The length comes out of a foreign parse, and the number in it is sometimes not a number.
+    // The fork is written so that NaN goes to an empty caption: "NaNh" on the button is no
+    // caption at all.
     [NaN, ''],
     [1, '1s'],
     [6, '6s'],
     [6.4, '6s'],
     [59, '59s'],
-    // Секунды округляются, а не отбрасываются: без четверти минуты на бейдже уже минута.
+    // Seconds are rounded rather than dropped: a quarter to a minute is already a minute here.
     [59.7, '1m'],
     [60, '1m'],
     [95, '2m'],
     [3599, '60m'],
     [3600, '1h'],
     [7000, '2h'],
-  ])('%s секунд → «%s»', async (seconds, expected) => {
+  ])('%s seconds → "%s"', async (seconds, expected) => {
     installChrome()
     const { formatBadge } = await importWorker()
 
     expect(formatBadge(seconds)).toBe(expected)
   })
 
-  it('не пишет на бейдже больше четырёх знаков', async () => {
+  it('writes no more than four characters on the badge', async () => {
     installChrome()
     const { formatBadge } = await importWorker()
 
-    // Больше на кнопке не помещается: Chrome обрезает подпись сам, без предупреждения.
-    // Верхняя граница — четверо суток записи: дольше буфер в памяти не живёт.
+    // More does not fit on the button: Chrome trims the caption itself, without warning. The
+    // upper bound is four days of recording: a buffer in memory does not live longer.
     for (const seconds of [1, 59, 60, 3599, 3600, 36_000, 359_940]) {
-      expect(formatBadge(seconds).length, `${seconds} секунд`).toBeLessThanOrEqual(4)
+      expect(formatBadge(seconds).length, `${seconds} seconds`).toBeLessThanOrEqual(4)
     }
   })
 })

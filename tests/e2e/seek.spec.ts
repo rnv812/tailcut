@@ -48,6 +48,12 @@ async function playUntil(page: Page, seconds: number): Promise<void> {
   expect((await state(page)).failure).toBeNull()
 }
 
+/** The popup's own "m:ss" read back as seconds. */
+function secondsOf(shown: string): number {
+  const [minutes, seconds] = shown.split(':')
+  return Number(minutes) * 60 + Number(seconds)
+}
+
 /** The largest step between one frame and the next: a hole in playback shows up here. */
 function widestStep(times: number[]): number {
   let widest = 0
@@ -96,10 +102,21 @@ test('a file saved after seeking has no hole in it', async () => {
   expect(Math.max(...played.appended.video)).toBeGreaterThanOrEqual(7)
 
   const popup = await openPopupOn(context, page, extensionId)
-  await expect(popup.getByTestId('runs')).toHaveText('2 runs')
+  // The material is in two pieces and the file will hold one of them. The popup says so in a
+  // line, and — this is the point — the length beside it is the length of that one piece: the
+  // sum of the two would promise a clip half of which no file will ever contain.
+  await expect(popup.getByTestId('omits')).toHaveText(
+    'Recording has gaps: the longest piece is saved.',
+  )
+  const promised = secondsOf(await popup.getByTestId('duration').innerText())
 
   const file = await saveAll(page, popup)
   const probed = probeFile(file)
+
+  // What was promised against what was written. Whole segments go into the file, so it may run a
+  // little past the stretch they were chosen over; shorter than the promise is the failure.
+  expect(promised).toBeLessThanOrEqual(Number(probed.format.duration) + 1)
+  expect(promised, 'the popup promised a clip of nothing').toBeGreaterThan(10)
 
   expect(probed.streams.map((s) => [s.codec_type, s.codec_name])).toEqual([
     ['video', 'h264'],

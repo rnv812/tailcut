@@ -63,7 +63,6 @@ const SUMMARY: SessionSummary = {
   title: 'Clip — site.example',
   duration: 6,
   bytes: 1_543_210,
-  runs: 1,
 }
 
 /** A second session of the same page: another video of a feed, left behind with its material. */
@@ -73,7 +72,6 @@ const OLDER: SessionSummary = {
   title: 'The previous video',
   duration: 300,
   bytes: 90_000_000,
-  runs: 4,
 }
 
 type Answer = (sessions: SessionSummary[]) => Promise<void>
@@ -287,6 +285,25 @@ test('the popup reaches the other sessions of the page', async () => {
   await expect(popup.getByTestId('title')).toHaveText(OLDER.title)
   await expect(popup.getByTestId('duration')).toHaveText('5:00')
   await expect(popup.getByTestId('session')).toContainText(SUMMARY.title)
+
+  await browser.close()
+})
+
+test('the popup says what a save will leave out, and only while there is something', async () => {
+  const { browser, popup, answer } = await offlinePopup()
+
+  // The length shown is already the length of the file, so the notice does not correct a number
+  // — it says why the number is shorter than the time spent watching.
+  await answer([{ ...SUMMARY, omits: 'gap' }, OLDER])
+  await expect(popup.getByTestId('omits')).toHaveText(
+    'Recording has gaps: the longest piece is saved.',
+  )
+
+  // The notice belongs to the session it was sent about: the one picked out of the list will be
+  // saved whole, and a line left over from the previous one would be a warning about nothing.
+  await popup.getByTestId('session').first().click()
+  await expect(popup.getByTestId('title')).toHaveText(OLDER.title)
+  await expect(popup.getByTestId('omits')).toHaveCount(0)
 
   await browser.close()
 })

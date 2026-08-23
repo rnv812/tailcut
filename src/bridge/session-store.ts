@@ -1,9 +1,10 @@
 import { parseFragment } from '../core/iso/fragment'
 import { ingestInit, type IngestedInit, type SegmentConverter } from '../core/container'
 import { SegmentStream } from '../core/stream'
-import { continuesRun, PtsMap } from '../core/timeline/map'
+import { PtsMap } from '../core/timeline/map'
 import { normalizeUrl, sessionKey } from '../core/session-key'
 import type { MuxTrack } from '../core/mux'
+import type { Omission } from '../shared/protocol'
 import type { Chunk, InitInfo, TrackKind } from '../shared/types'
 
 /**
@@ -47,6 +48,13 @@ export interface Session {
   tracks: Track[]
   createdAt: number
   lastSeenAt: number
+  /**
+   * A buffer of this video declared a track the ingest boundary would not take — a container or
+   * a codec that cannot be written out. No track was opened and nothing of that stream was
+   * collected, so the session itself shows no sign of it; the flag is that sign, and without it
+   * a file that is sound alone would be promised as if it were the whole video.
+   */
+  refusedTracks: boolean
 }
 
 /** Bookkeeping of the registry itself: consumers of a session never need it. */
@@ -70,6 +78,13 @@ interface SourceState {
    * of all of them, so it describes the video as a whole and not the init that came last.
    */
   codecs: string[]
+  /**
+   * One of this source's buffers declared a track that could not be taken in. Remembered on the
+   * source because the refusal usually comes before there is a session to remember it on: the
+   * picture buffer opens first and the sound buffer, the one that ends up creating the session,
+   * a moment later.
+   */
+  refused: boolean
 }
 
 export interface AppendInput {
@@ -114,20 +129,6 @@ function kindsOf(info: InitInfo): TrackKind[] {
   return kinds
 }
 
-/** Joins overlapping and touching spans; a gap within the tolerance is rounding, not a gap. */
-function mergeSpans(spans: Span[]): Span[] {
-  const sorted = [...spans].sort((a, b) => a.start - b.start)
-  const merged: Span[] = []
-
-  for (const span of sorted) {
-    const last = merged[merged.length - 1]
-    if (last && continuesRun(last.end, span.start)) last.end = Math.max(last.end, span.end)
-    else merged.push({ ...span })
-  }
-
-  return merged
-}
-
 /** Common part of two sorted lists of disjoint spans. */
 function intersectSpans(a: Span[], b: Span[]): Span[] {
   const common: Span[] = []
@@ -143,61 +144,6 @@ function intersectSpans(a: Span[], b: Span[]): Span[] {
   }
 
   return common
-}
-
-/** Time covered by one media kind: the union of the runs of every track that carries it. */
-function coverageOf(session: Session, kind: TrackKind): Span[] {
-  const spans: Span[] = []
-
-  for (const track of session.tracks) {
-    if (!track.kinds.includes(kind)) continue
-    for (const run of track.map.runs()) spans.push({ start: run.start, end: run.end })
-  }
-
-  return mergeSpans(spans)
-}
-
-/**
- * What the session amounts to for the popup and the badge.
- *
- * The length is the part of the timeline where **every** kind is present — the intersection of
- * the tracks, not their sum and not the longest of them. That is the only number that answers
- * the question the popup is asked: how much can be cut out right now. A sum would count the same
- * six seconds twice over the two tracks and promise twelve; the maximum would promise the tail of
- * the audio track, where there is no picture to go with it. Both would show material a clip
- * cannot be made of.
- *
- * Within one kind the representations are united rather than intersected: after a switch of
- * quality the picture of the first half comes from one of them and of the second half from the
- * other, and the material is there either way. Intersecting them would report an empty
- * intersection of two halves and turn a full recording into "0:00".
- *
- * A kind that has an init but not a single fragment yet leaves the intersection empty, and this
- * is honest: a clip with a silent track is not what the user asked for. It lasts as long as the
- * gap between the init of the second buffer and its first segment.
- *
- * Runs are counted on the same intersection: they are the pieces that can actually be cut whole.
- * Gaps and runs of a single track stay the property of that track and live on its own map.
- */
-export function summarize(session: Session): { duration: number; bytes: number; runs: number } {
-  let bytes = 0
-  for (const track of session.tracks) bytes += track.map.totalBytes()
-
-  const kinds: TrackKind[] = []
-  for (const track of session.tracks) {
-    for (const kind of track.kinds) if (!kinds.includes(kind)) kinds.push(kind)
-  }
-
-  let available: Span[] = []
-  for (const [index, kind] of kinds.entries()) {
-    const coverage = coverageOf(session, kind)
-    available = index === 0 ? coverage : mergeSpans(intersectSpans(available, coverage))
-  }
-
-  let duration = 0
-  for (const span of available) duration += span.end - span.start
-
-  return { duration, bytes, runs: available.length }
 }
 
 /**
@@ -227,6 +173,25 @@ function mainTracks(session: Session): Track[] {
   return chosen
 }
 
+/**
+ * The stretches of time where every chosen track has material at once, in order.
+ *
+ * The intersection and not the sum: a clip is cut out of what can be shown, and past the end of
+ * the sound there is picture with silence under it. A kind that has an init but not a single
+ * fragment yet leaves the list empty, and that is honest too — it lasts as long as the gap
+ * between the init of the second buffer and its first segment.
+ */
+function commonStretches(chosen: Track[]): Span[] {
+  let common: Span[] | null = null
+
+  for (const track of chosen) {
+    const runs = track.map.runs().map((run) => ({ start: run.start, end: run.end }))
+    common = common === null ? runs : intersectSpans(common, runs)
+  }
+
+  return common ?? []
+}
+
 /** The longest of the stretches; undefined — there are none. */
 function longestOf(spans: Span[]): Span | undefined {
   let longest: Span | undefined
@@ -250,34 +215,109 @@ function segmentsIn(track: Track, span: Span): Uint8Array[] {
 }
 
 /**
- * The material a saved file is built out of: the tracks and, of each of them, the segments over
- * the longest stretch of time where every kind is present at once.
+ * What of the session the file will not hold, the heaviest loss first.
  *
- * The stretch is common to the tracks and not the longest run of any one of them, because a clip
- * is cut out of what can be shown: past the end of the sound there is picture with silence under
- * it, and that is not the file the button promises. An empty answer means there is nothing to
- * cut — a session of init segments alone, or one whose second buffer has not brought a fragment
- * yet.
+ * Ordered because the popup has one line for this and the interface is minimal by design: the
+ * first of these is the one that changes the file most. A missing kind of media is a file that
+ * plays without a picture; a rendition and a gap only shorten it, and the length in the summary
+ * has already counted them.
  */
-export function selectMaterial(session: Session): MuxTrack[] {
+function omissionsOf(session: Session, chosen: Track[], stretches: Span[]): Omission[] {
+  const omitted: Omission[] = []
+
+  if (session.refusedTracks) omitted.push('track')
+  // Only a rendition that holds something is a loss. A second init with no fragment under it
+  // costs the file nothing, and warning about it would be a warning about every quality switch
+  // the moment it happens.
+  const dropped = session.tracks.some((t) => !chosen.includes(t) && t.map.duration() > 0)
+  if (dropped) omitted.push('rendition')
+  if (stretches.length > 1) omitted.push('gap')
+
+  return omitted
+}
+
+/** What a save of this session would write, and what it would leave behind. */
+export interface SavePlan {
+  /** The streams of the file, in the order the muxer writes them: the picture first. */
+  material: MuxTrack[]
+  /** Length of the clip in seconds: the stretch its material was chosen over. */
+  duration: number
+  /** Weight of the media data that goes into it; the boxes around it are a kilobyte or two. */
+  bytes: number
+  /** What the file will not hold of what the session has; empty when it holds all of it. */
+  omitted: Omission[]
+}
+
+/**
+ * One computation for two questions that must never disagree: the popup asks how much there is
+ * to save, and the button asks what to write. Answered apart they agree by convention alone, and
+ * the convention has broken twice — a summary that summed the tracks promised fifty seconds of a
+ * file that held sound only, and a summary that united the renditions promised the material of
+ * two qualities where a file carries one. So the summary is not written to resemble the
+ * selection: both are read off this.
+ *
+ * What comes out is one continuous clip — the tracks the file will hold, the stretch of time it
+ * will cover, the weight of the media data going into it, and what stayed behind. Material of
+ * nothing means there is nothing to cut: a session of init segments alone, or one whose second
+ * buffer has not brought a fragment yet.
+ */
+export function planSave(session: Session): SavePlan {
   const chosen = mainTracks(session)
-  if (!chosen.length) return []
-
-  let common: Span[] | null = null
-  for (const track of chosen) {
-    const runs = track.map.runs().map((run) => ({ start: run.start, end: run.end }))
-    common = common === null ? runs : intersectSpans(common, runs)
-  }
-
-  const longest = longestOf(common ?? [])
-  if (!longest) return []
+  const stretches = commonStretches(chosen)
+  const longest = longestOf(stretches)
 
   // Every chosen track covers the whole of that stretch — it is their common part — so none of
   // them comes out of this with nothing, and no track reaches the file as an empty stream.
-  return chosen.map((track) => ({
-    initBytes: track.initBytes,
-    segments: segmentsIn(track, longest),
-  }))
+  const material: MuxTrack[] = longest
+    ? chosen.map((track) => ({
+        initBytes: track.initBytes,
+        segments: segmentsIn(track, longest),
+      }))
+    : []
+
+  let bytes = 0
+  for (const track of material) for (const segment of track.segments) bytes += segment.byteLength
+
+  return {
+    material,
+    duration: longest ? longest.end - longest.start : 0,
+    bytes,
+    omitted: omissionsOf(session, chosen, stretches),
+  }
+}
+
+/**
+ * What the session amounts to for the popup and the badge: the file the button would write,
+ * described in the two numbers the interface has room for and a word about what is missing from
+ * it. Every one of them comes off the plan — see planSave for why the summary is not computed
+ * beside the selection but out of it.
+ *
+ * Whole segments reach the file, so it can run a fraction longer at its edges than the stretch
+ * they were chosen over. The summary keeps to the stretch: a clip that turns out slightly longer
+ * than promised is not the failure a clip that turns out shorter is.
+ */
+export function summarize(session: Session): {
+  duration: number
+  bytes: number
+  omits?: Omission
+} {
+  const plan = planSave(session)
+  const summary: { duration: number; bytes: number; omits?: Omission } = {
+    duration: plan.duration,
+    bytes: plan.bytes,
+  }
+
+  // The field is left off rather than set to nothing: it travels through postMessage into the
+  // popup, and a key that is always there says less than one that appears when there is a loss.
+  const [heaviest] = plan.omitted
+  if (heaviest) summary.omits = heaviest
+
+  return summary
+}
+
+/** The material a saved file is built out of. */
+export function selectMaterial(session: Session): MuxTrack[] {
+  return planSave(session).material
 }
 
 /**
@@ -346,9 +386,12 @@ export class SessionStore {
     for (const unit of this.streamOf(input).push(input.bytes)) {
       if (unit.kind === 'init') {
         // An init in a container or a codec the ingest boundary will not take opens no track, and
-        // the segments behind it then land nowhere. Better that than a track that cannot be saved.
+        // the segments behind it then land nowhere. Better that than a track that cannot be saved
+        // — but the loss is written down, because a file short of a whole kind of media must not
+        // be offered as if it were the video.
         const opened = ingestInit(unit.bytes, input.mime)
         if (opened) this.openTrack(input, opened)
+        else this.refuse(input)
         continue
       }
 
@@ -378,6 +421,21 @@ export class SessionStore {
     // all of its tracks in one call.
     track.map.insert(chunk)
     session.lastSeenAt = input.now
+  }
+
+  /**
+   * A buffer of this source declared a track that cannot be written out. Nothing of that stream
+   * is collected, so the session shows no trace of it — the note is kept instead, and travels to
+   * whatever session the source ends up feeding: the refusal usually comes before there is one,
+   * the picture buffer being opened first and refused while the sound buffer opens the session a
+   * moment later.
+   */
+  private refuse(input: AppendInput): void {
+    const source = this.sourceFor(input)
+    source.refused = true
+
+    const session = this.sessions.get(source.key)
+    if (session) session.refusedTracks = true
   }
 
   /** The reassembly of one SourceBuffer's byte stream; opened the first time it is fed. */
@@ -481,19 +539,7 @@ export class SessionStore {
    */
   private openTrack(input: AppendInput, opened: IngestedInit): void {
     const { info } = opened
-    const source = this.sourceState(input.sourceId)
-    const url = normalizeUrl(input.url)
-
-    // The page moved on to another video without letting go of its MediaSource — a feed of short
-    // clips does exactly that. What the source collected belongs to the previous video and stays
-    // in its session; here the source starts from scratch.
-    if (source.url !== url) {
-      source.url = url
-      source.key = ''
-      source.codecs = []
-      source.buffers.clear()
-    }
-
+    const source = this.sourceFor(input)
     const representation = representationOf(info)
 
     source.buffers.set(input.bufferId, representation)
@@ -503,6 +549,9 @@ export class SessionStore {
 
     const session = this.bind(source, input)
     session.lastSeenAt = input.now
+    // A buffer refused before this one was opened: the loss is the session's from the moment it
+    // has one.
+    if (source.refused) session.refusedTracks = true
 
     // The representation is already known: this is a reload, a return to the previous quality or
     // simply a repeated init. The session keeps the init it was opened with — the material
@@ -520,12 +569,30 @@ export class SessionStore {
     })
   }
 
-  private sourceState(sourceId: string): SourceState {
-    let source = this.sources.get(sourceId)
+  /**
+   * What the registry knows about the source these bytes came from, up to date about which video
+   * it is playing.
+   *
+   * The page moved on to another video without letting go of its MediaSource — a feed of short
+   * clips does exactly that. What the source collected belongs to the previous video and stays in
+   * its session; here the source starts from scratch, refusals and all.
+   */
+  private sourceFor(input: AppendInput): SourceState {
+    let source = this.sources.get(input.sourceId)
     if (!source) {
-      source = { key: '', url: '', buffers: new Map(), codecs: [] }
-      this.sources.set(sourceId, source)
+      source = { key: '', url: '', buffers: new Map(), codecs: [], refused: false }
+      this.sources.set(input.sourceId, source)
     }
+
+    const url = normalizeUrl(input.url)
+    if (source.url !== url) {
+      source.url = url
+      source.key = ''
+      source.codecs = []
+      source.buffers.clear()
+      source.refused = false
+    }
+
     return source
   }
 
@@ -587,6 +654,7 @@ export class SessionStore {
       tracks: [],
       createdAt: input.now,
       lastSeenAt: input.now,
+      refusedTracks: false,
       sources: new Set(),
       confirmed: false,
     }
@@ -636,6 +704,8 @@ function absorb(target: StoredSession, absorbed: StoredSession): void {
   }
   target.lastSeenAt = Math.max(target.lastSeenAt, absorbed.lastSeenAt)
   target.confirmed = target.confirmed || absorbed.confirmed
+  // A track refused on either visit is a track missing from the file either way.
+  target.refusedTracks = target.refusedTracks || absorbed.refusedTracks
   for (const sourceId of absorbed.sources) target.sources.add(sourceId)
 }
 

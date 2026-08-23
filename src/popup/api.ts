@@ -1,13 +1,14 @@
 import {
   TOP_FRAME,
   type ExtensionToTab,
+  type Omission,
   type SaveResult,
   type SessionSummary,
 } from '../shared/protocol'
 
 // The summary is described by the protocol and not by the popup: let the two descriptions drift
 // apart and the popup would read fields the bridge does not send, showing undefined in silence.
-export type { SaveResult, SessionSummary }
+export type { Omission, SaveResult, SessionSummary }
 
 /**
  * The tab the popup took its list from. Remembered because the session to save has to be exactly

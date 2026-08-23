@@ -97,18 +97,23 @@ type MessageListener = (event: MessageEvent) => void
  */
 type Summary = SessionSummary
 
+/** The reasons a summary may give for the file holding less than the session does. */
+const OMISSIONS = ['track', 'rendition', 'gap']
+
 /** A session summary by the facts: postMessage has no types, so the value has to be checked. */
 function isSummary(value: unknown): value is SessionSummary {
   if (typeof value !== 'object' || value === null) return false
   const summary = value as Record<string, unknown>
+  const known = ['key', 'url', 'title', 'duration', 'bytes', 'omits']
   return (
-    Object.keys(summary).length === 6 &&
+    Object.keys(summary).every((field) => known.includes(field)) &&
     typeof summary.key === 'string' &&
     typeof summary.url === 'string' &&
     typeof summary.title === 'string' &&
     typeof summary.duration === 'number' &&
     typeof summary.bytes === 'number' &&
-    typeof summary.runs === 'number'
+    // Absent on a session the file will hold whole; one of the declared reasons otherwise.
+    (summary.omits === undefined || OMISSIONS.includes(summary.omits as string))
   )
 }
 
@@ -335,12 +340,11 @@ describe('the bridge puts segments into the session registry', () => {
         title: PAGE_TITLE,
         duration: 0,
         bytes: 0,
-        runs: 0,
       },
     ])
   })
 
-  it('collects duration, volume and runs from media fragments', async () => {
+  it('collects duration and volume from media fragments', async () => {
     const win = await loadBridge()
     win.context()
 
@@ -348,13 +352,15 @@ describe('the bridge puts segments into the session registry', () => {
     win.append(seg1Bytes)
     win.append(seg2Bytes)
 
-    // Fixture: two seconds per fragment, both in a row — one run of four seconds.
+    // Fixture: two seconds per fragment, both in a row — four seconds of clip, and all of it
+    // reaches the file.
     expect(win.list()).toMatchObject([
-      { duration: 4, bytes: seg1Bytes.byteLength + seg2Bytes.byteLength, runs: 1 },
+      { duration: 4, bytes: seg1Bytes.byteLength + seg2Bytes.byteLength },
     ])
+    expect(win.list()[0]!.omits).toBeUndefined()
   })
 
-  it('shows a gap in the buffer in the summary: two runs and a duration without it', async () => {
+  it('promises the piece a gapped buffer can be saved as, and says a piece was left out', async () => {
     const win = await loadBridge()
     win.context()
 
@@ -364,17 +370,17 @@ describe('the bridge puts segments into the session registry', () => {
     // player went on loading from a new position. A two-second gap is a gap, not rounding.
     win.append(seg3Bytes)
 
-    // The popup draws what can be cut out at all from this summary. One run here would promise a
-    // continuous piece that does not exist; six seconds from start to end would promise material
-    // that does not exist either: between the 2nd and the 4th second the registry is empty.
+    // The popup draws the file from this summary. Six seconds from start to end would promise
+    // material that does not exist — between the 2nd and the 4th second the registry is empty —
+    // and four seconds would promise both pieces where a save writes one continuous clip.
     expect(win.list()).toEqual([
       {
         key: keyFor(PAGE_URL),
         url: PAGE_URL,
         title: PAGE_TITLE,
-        duration: 4,
-        bytes: seg1Bytes.byteLength + seg3Bytes.byteLength,
-        runs: 2,
+        duration: 2,
+        bytes: seg1Bytes.byteLength,
+        omits: 'gap',
       },
     ])
   })
@@ -460,9 +466,9 @@ describe('the bridge puts segments into the session registry', () => {
     // The first player goes on playing: its fragment has to land in its own session.
     win.append(seg1Bytes, 's1')
 
-    expect(win.list().map((s) => [s.url, s.runs])).toEqual(
+    expect(win.list().map((s) => [s.url, s.duration])).toEqual(
       expect.arrayContaining([
-        [PAGE_URL, 1],
+        [PAGE_URL, 2],
         ['https://site.example/watch?v=second', 0],
       ]),
     )
@@ -586,7 +592,7 @@ describe('the bridge takes triage verdicts', () => {
     // A pause or the element leaving the screen: recording freezes, what was collected stays.
     verdict(win, 's1', 'reject')
 
-    expect(win.list()).toMatchObject([{ runs: 1, duration: 2 }])
+    expect(win.list()).toMatchObject([{ duration: 2 }])
   })
 
   it('returns recording to a screened-out source on a hold', async () => {
@@ -601,7 +607,7 @@ describe('the bridge takes triage verdicts', () => {
     win.append(initBytes, 's1')
     win.append(seg1Bytes, 's1')
 
-    expect(win.list()).toMatchObject([{ runs: 1 }])
+    expect(win.list()).toMatchObject([{ duration: 2 }])
   })
 
   it('does not answer the sender of a verdict', async () => {
@@ -956,7 +962,6 @@ describe('the bridge tells apart the buffers of one media source', () => {
         title: PAGE_TITLE,
         duration: 6,
         bytes: allBytes,
-        runs: 1,
       },
     ])
   })

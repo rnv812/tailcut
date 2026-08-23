@@ -156,11 +156,12 @@ function fragmentOrder(file: Uint8Array): number[] {
 describe('a clip whose sound came in WebM and whose picture came in mp4', () => {
   it('adds up to one session the popup can offer', () => {
     const session = recordedSession().list()[0]!
-    const { duration, runs } = summarize(session)
+    const { duration, omits } = summarize(session)
 
     expect(session.tracks.map((t) => t.kinds)).toEqual([['video'], ['audio']])
     expect(duration).toBeCloseTo(6, 6)
-    expect(runs).toBe(1)
+    // Nothing of the recording is left behind: the popup promises the file whole.
+    expect(omits).toBeUndefined()
   })
 
   it('gives ffprobe a file of two streams, picture and sound, decoding without complaint', () => {

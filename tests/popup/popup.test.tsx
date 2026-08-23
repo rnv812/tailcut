@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import type { SaveResult, SessionSummary } from '../../src/shared/protocol'
+import type { Omission, SaveResult, SessionSummary } from '../../src/shared/protocol'
 
 /**
  * The freshest session of the tab: the list comes newest first, and this is the one the popup is
@@ -12,7 +12,6 @@ const fresh: SessionSummary = {
   title: 'Clip — site.example',
   duration: 6,
   bytes: 1_543_210,
-  runs: 1,
 }
 
 /**
@@ -26,7 +25,6 @@ const older: SessionSummary = {
   title: 'Older session',
   duration: 300,
   bytes: 90_000_000,
-  runs: 4,
 }
 
 type Sent = { tabId: number; message: unknown }
@@ -149,13 +147,44 @@ describe('the popup', () => {
     expect(textAt('bytes')).toBe('1.5 MB')
   })
 
-  it('speaks of repeated runs and stays quiet about a single one', async () => {
-    await mount({ sessions: [{ ...fresh, runs: 3 }] })
-    expect(textAt('runs')).toBe('3 runs')
+  it.each<[Omission, string]>([
+    ['track', 'One track is in a format tailcut cannot save.'],
+    ['rendition', 'Recorded at more than one quality; one is saved.'],
+    ['gap', 'Recording has gaps: the longest piece is saved.'],
+  ])('says what the file will be missing when part of it cannot be saved (%s)', async (
+    omits,
+    line,
+  ) => {
+    await mount({ sessions: [{ ...fresh, omits }] })
 
+    // The length above the line is already the length of the file, so the user is not misled by
+    // the number — but a clip shorter than the time they spent watching needs its reason said
+    // out loud, or the extension looks like it lost the rest.
+    expect(textAt('omits')).toBe(line)
+  })
+
+  it('stays quiet when the file will hold everything that was recorded', async () => {
     await mount({ sessions: [fresh] })
-    // One run is nothing to talk about: "1 runs" both lies in number and confuses.
-    expect(at('runs')).toBeNull()
+
+    // The ordinary case, and the popup is minimal by design: a line that is always there is a
+    // line nobody reads on the day it matters.
+    expect(at('omits')).toBeNull()
+  })
+
+  it('says nothing for a reason it has no words for', async () => {
+    await mount({ sessions: [{ ...fresh, omits: 'something-new' as Omission }] })
+
+    // The bridge and the popup ship together, but a version of one against the other must not
+    // draw an empty amber box under the length.
+    expect(at('omits')).toBeNull()
+  })
+
+  it('carries the notice of the session it shows, not of the one it showed', async () => {
+    await mount({ sessions: [{ ...fresh, omits: 'gap' }, older] })
+
+    await click(allAt('session')[0]!)
+
+    expect(at('omits'), 'the notice of the previous session stayed on screen').toBeNull()
   })
 
   it('saves the session it showed', async () => {

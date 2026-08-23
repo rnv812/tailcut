@@ -23,11 +23,11 @@ const accepted: [string, PageToBridge][] = [
   ['tc:drm', drm],
 ]
 
-/** Оба варианта обратной стороны протокола: это мост отправляет, а не принимает. */
+/** Both variants of the other side of the protocol: the bridge sends these, it does not take them. */
 const bridgeToPage: [string, BridgeToPage][] = [
-  ['рукопожатие', { type: 'tc:ready' }],
+  ['the handshake', { type: 'tc:ready' }],
   [
-    'список сессий',
+    'a list of sessions',
     [
       {
         key: 'https://site.example/watch|avc1|inf',
@@ -35,102 +35,108 @@ const bridgeToPage: [string, BridgeToPage][] = [
         title: 'Clip',
         duration: 6,
         bytes: 1543,
-        runs: 1,
+        omits: 'gap',
       },
     ],
   ],
 ]
 
-/** Мост слушает окно страницы: туда прилетает всё, что шлёт сама страница и её скрипты. */
+/** The bridge listens to the page's window: everything the page and its scripts send lands there. */
 const rejected: [string, unknown][] = [
   ['null', null],
   ['undefined', undefined],
-  ['строку', 'tc:append'],
-  ['число', 42],
-  ['массив', ['tc:append']],
-  ['объект без type', { sourceId: 's' }],
-  ['нестроковый type', { type: 1 }],
-  ['чужой type', { type: 'webpackHotUpdate' }],
-  // Служебные сообщения самого расширения. Content script пересылает мосту всё, что признал
-  // здесь своим, а прилетают они из окна страницы — то есть и от её собственных скриптов.
-  // Признай он контекст, любая страница переписала бы мосту адрес и заголовок чужой сессии;
-  // признай запрос списка — выманила бы историю просмотра.
+  ['a string', 'tc:append'],
+  ['a number', 42],
+  ['an array', ['tc:append']],
+  ['an object without a type', { sourceId: 's' }],
+  ['a non-string type', { type: 1 }],
+  ["somebody else's type", { type: 'webpackHotUpdate' }],
+  // Messages of the extension itself. The content script passes on to the bridge whatever it
+  // recognised here as its own, and they arrive from the page's window — that is, from the page's
+  // own scripts too. Recognise the context and any page could rewrite the address and the title
+  // of a session that is not its own; recognise the list request and it would lure out the
+  // browsing history.
   [
-    'контекст страницы: его шлёт сам content script',
+    'the page context: the content script sends that itself',
     { type: 'tc:context', url: 'https://site.example/', title: 'Clip' },
   ],
-  ['запрос списка сессий: он адресуется мосту напрямую', { type: 'tc:list' }],
-  // Вердикт отбора выносит content script по сигналам элемента; страница о нём знать не
-  // должна вовсе. Признай он вердикт своим — любой скрипт страницы стёр бы чужую сессию,
-  // прислав в своё же окно отказ по чужому источнику.
+  ['a list request: it is addressed to the bridge directly', { type: 'tc:list' }],
+  // The triage verdict is passed by the content script on signals from the element; the page must
+  // know nothing of it at all. Recognise a verdict as its own and any page script could erase a
+  // session that is not its own by posting a rejection for a foreign source into its own window.
   [
-    'вердикт отбора: его выносит content script',
+    'a triage verdict: the content script passes that',
     { type: 'tc:verdict', sourceId: 's', verdict: 'reject' },
   ],
-  // Обратная сторона протокола целиком: всё, что мост отправляет, к мосту не адресуется.
-  // Content script пересылает мосту то, что признал здесь своим, а рукопожатие и сводки
-  // прилетают в то же окно страницы — признай он их, ответ моста поехал бы обратно в мост.
-  ...bridgeToPage.map(([name, message]): [string, unknown] => [`ответ моста: ${name}`, message]),
+  // The whole of the other side of the protocol: nothing the bridge sends is addressed to the
+  // bridge. The content script passes on what it recognised here as its own, and the handshake
+  // and the summaries arrive in that same window of the page — recognise them and the bridge's
+  // answer would travel back into the bridge.
+  ...bridgeToPage.map(([name, message]): [string, unknown] => [
+    `an answer of the bridge: ${name}`,
+    message,
+  ]),
 ]
 
 describe('isPageToBridge', () => {
-  it.each(accepted)('пропускает %s', (_name, message) => {
+  it.each(accepted)('lets %s through', (_name, message) => {
     expect(isPageToBridge(message)).toBe(true)
   })
 
-  it.each(rejected)('отбивает %s', (_name, value) => {
+  it.each(rejected)('turns %s away', (_name, value) => {
     expect(isPageToBridge(value)).toBe(false)
   })
 
-  it('отбивает функцию с подходящим type: постороннее значение не объект', () => {
+  it('turns away a function with a fitting type: a stranger is not an object', () => {
     const fn = Object.assign(() => {}, { type: 'tc:append' })
     expect(isPageToBridge(fn)).toBe(false)
   })
 
-  it('сужает тип до объединения PageToBridge', () => {
+  it('narrows the type down to the PageToBridge union', () => {
     const value: unknown = append
-    if (!isPageToBridge(value)) throw new Error('ожидался tc:append')
-    if (value.type !== 'tc:append') throw new Error('ожидался tc:append')
+    if (!isPageToBridge(value)) throw new Error('expected tc:append')
+    if (value.type !== 'tc:append') throw new Error('expected tc:append')
     expect(value.bytes.byteLength).toBe(4)
   })
 })
 
-/** Запросы попапа и service worker к content script вкладки. */
+/** Requests of the popup and the service worker to the content script of a tab. */
 const tabRequests: [string, ExtensionToTab][] = [
-  ['запрос списка', { type: 'tc:list' }],
-  ['запрос сохранения', { type: 'tc:save', key: 'https://site.example/watch|avc1|inf' }],
+  ['a list request', { type: 'tc:list' }],
+  ['a save request', { type: 'tc:save', key: 'https://site.example/watch|avc1|inf' }],
 ]
 
 describe('isExtensionToTab', () => {
-  it.each(tabRequests)('пропускает %s', (_name, message) => {
+  it.each(tabRequests)('lets %s through', (_name, message) => {
     expect(isExtensionToTab(message)).toBe(true)
   })
 
-  // Content script слушает chrome.runtime.onMessage: туда приходит всё, что шлют попап и
-  // service worker, включая сообщения будущих этапов. Непонятное он обязан оставить другим
-  // слушателям, а не отвечать на него от имени моста.
+  // The content script listens to chrome.runtime.onMessage: everything the popup and the service
+  // worker send arrives there, messages of stages yet to come included. What it does not
+  // understand it must leave to the other listeners rather than answer for the bridge.
   it.each([
     ['null', null],
     ['undefined', undefined],
-    ['строку', 'tc:list'],
-    ['массив', [{ type: 'tc:list' }]],
-    ['объект без type', { key: 'k' }],
-    ['чужой type', { type: 'tc:ping' }],
-    ['сохранение без ключа', { type: 'tc:save' }],
-    ['сохранение с нестроковым ключом', { type: 'tc:save', key: 42 }],
-    // Сторона страницы: эти сообщения ходят через window.postMessage и до content script'а
-    // приезжают другим путём. Признай он их здесь — попап получил бы ответ на чужой запрос.
-    ['сообщение хука', { type: 'tc:append', sourceId: 's', bufferId: 'b', mime: 'video/mp4' }],
-    ['вердикт отбора', { type: 'tc:verdict', sourceId: 's', verdict: 'reject' }],
-    ['рукопожатие моста', { type: 'tc:ready' }],
-  ])('отбивает %s', (_name, value) => {
+    ['a string', 'tc:list'],
+    ['an array', [{ type: 'tc:list' }]],
+    ['an object without a type', { key: 'k' }],
+    ["somebody else's type", { type: 'tc:ping' }],
+    ['a save without a key', { type: 'tc:save' }],
+    ['a save with a non-string key', { type: 'tc:save', key: 42 }],
+    // The page's side: these messages travel through window.postMessage and reach the content
+    // script by another road. Recognise them here and the popup would get the answer to a request
+    // that was never its own.
+    ['a message of the hook', { type: 'tc:append', sourceId: 's', bufferId: 'b', mime: 'video/mp4' }],
+    ['a triage verdict', { type: 'tc:verdict', sourceId: 's', verdict: 'reject' }],
+    ['the handshake of the bridge', { type: 'tc:ready' }],
+  ])('turns %s away', (_name, value) => {
     expect(isExtensionToTab(value)).toBe(false)
   })
 
-  it('сужает тип до объединения ExtensionToTab', () => {
+  it('narrows the type down to the ExtensionToTab union', () => {
     const value: unknown = { type: 'tc:save', key: 'k' }
-    if (!isExtensionToTab(value)) throw new Error('ожидался tc:save')
-    if (value.type !== 'tc:save') throw new Error('ожидался tc:save')
+    if (!isExtensionToTab(value)) throw new Error('expected tc:save')
+    if (value.type !== 'tc:save') throw new Error('expected tc:save')
     expect(value.key).toBe('k')
   })
 })

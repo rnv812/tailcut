@@ -6,36 +6,36 @@ import { sessionKey } from '../../src/core/session-key'
 
 const BANNER_URL = 'https://tailcut.test/banner'
 const PLAYER_URL = 'https://tailcut.test/player'
-/** Баннер и настоящий плеер на одной странице: вердикт по одному не должен трогать второй. */
+/** A banner and a real player on one page: a verdict about one must not touch the other. */
 const MIXED_URL = 'https://tailcut.test/mixed'
 
-/** Вердикт в том виде, в каком content script отправляет его мосту. */
+/** A verdict in the form the content script sends it to the bridge in. */
 type SeenVerdict = { sourceId: string; verdict: string }
-/** Связка потока с адресом из createObjectURL: по ней вердикт сводится с элементом. */
+/** The tie between a stream and the address from createObjectURL: it matches a verdict to an element. */
 type SeenSource = { sourceId: string; objectUrl: string }
 
-/** Что собрал слушатель, поставленный тестом в каждом документе страницы. */
+/** What the listener the test plants in every document of the page has gathered. */
 type Probe = { tcVerdict: SeenVerdict[]; tcSource: SeenSource[]; tcAppend: number }
 type PageState = { allAppended?: boolean }
 
-/** Сводка сессии в том виде, в каком мост отдаёт её на запрос tc:list. */
+/** A session summary in the form the bridge answers a tc:list request with. */
 type Summary = {
   key: string
   url: string
   title: string
   duration: number
   bytes: number
-  runs: number
+  omits?: string
 }
 
-/** Медиафрагменты, которые дописывает плеер тестовых страниц. */
+/** The media fragments the player of the test pages appends. */
 const CHUNKS = [
   'h264/chunk-stream0-00001.m4s',
   'h264/chunk-stream0-00002.m4s',
   'h264/chunk-stream0-00003.m4s',
 ]
 
-/** Суммарный объём фрагментов на диске: столько байтов обязано остаться в реестре. */
+/** Weight of the fragments on disk: that many bytes have to stay in the registry. */
 async function chunkBytes(): Promise<number> {
   const sizes = await Promise.all(
     CHUNKS.map(async (rel) => (await fs.stat(path.resolve('tests/fixtures', rel))).size),
@@ -44,9 +44,9 @@ async function chunkBytes(): Promise<number> {
 }
 
 /**
- * Открывает страницу с расширением и слушателем сообщений, поставленным до любого её скрипта.
- * Слушатель ставится во всех документах, включая фрейм моста: вердикт уходит туда, а связка
- * источника с адресом видна только в окне самой страницы.
+ * Opens the page with the extension and a message listener planted before any script of its own.
+ * The listener goes into every document, the bridge frame included: the verdict travels there,
+ * while the tie between a source and an address is visible only in the window of the page itself.
  */
 async function open(htmlFile: string, url: string) {
   const { context, extensionId } = await launchWithExtension()
@@ -82,28 +82,30 @@ async function open(htmlFile: string, url: string) {
     context,
     page,
     extensionId,
-    log: () => consoleLog.join(' | ') || '(пусто)',
+    log: () => consoleLog.join(' | ') || '(empty)',
   }
 }
 
-/** Отдаёт документ моста; тест ставит в него тот же слушатель, что и в страницу. */
+/** Gives back the document of the bridge; the test plants the page's listener in it as well. */
 async function bridgeFrame(page: Page, extensionId: string, log: () => string): Promise<Frame> {
   const deadline = Date.now() + 5_000
   for (;;) {
     const frame = page.frames().find((candidate) => candidate.url().includes(extensionId))
     if (frame) return frame
-    expect(Date.now(), `фрейм моста не появился; консоль страницы: ${log()}`).toBeLessThan(deadline)
+    expect(Date.now(), `the bridge frame never appeared; page console: ${log()}`).toBeLessThan(
+      deadline,
+    )
     await page.waitForTimeout(50)
   }
 }
 
-/** Ждёт, пока страница допишет все свои сегменты. */
+/** Waits until the page has appended every one of its segments. */
 const pageDone = (page: Page) =>
   page.waitForFunction(() => (window as unknown as PageState).allAppended === true, undefined, {
     timeout: 15_000,
   })
 
-/** Идентификатор потока того <video>, что стоит под указанным селектором. */
+/** Stream identifier of the <video> standing under the given selector. */
 function sourceIdOf(page: Page, selector: string): Promise<string> {
   return page.evaluate((sel) => {
     const probe = window as unknown as Probe
@@ -112,14 +114,15 @@ function sourceIdOf(page: Page, selector: string): Promise<string> {
   }, selector)
 }
 
-/** Последний вердикт по указанному источнику; undefined — по нему не приходило ничего. */
+/** The last verdict about the given source; undefined — nothing came about it at all. */
 const latest = (seen: SeenVerdict[], sourceId: string): string | undefined =>
   [...seen].reverse().find((item) => item.sourceId === sourceId)?.verdict
 
 /**
- * Ждёт, пока вердикты у моста придут в ожидаемый вид, и отдаёт последнее увиденное. Ожидание
- * нужно только на испытательный срок; вердикт выносит проверка в самом тесте — на срыв
- * ожидания она получит то, что мост успел услышать, и покажет это в сообщении.
+ * Waits until the verdicts at the bridge come to the expected shape and gives back the last thing
+ * seen. The wait is only there for the probation; the verdict is passed by the check in the test
+ * itself — on a wait that ran out it gets whatever the bridge managed to hear and shows it in the
+ * message.
  */
 async function verdictsWhen(
   bridge: Frame,
@@ -135,8 +138,8 @@ async function verdictsWhen(
 }
 
 /**
- * Спрашивает у моста список сессий тем же каналом, каким это делает попап: сообщение с
- * портом MessageChannel, ответ приходит в порт. null — за отведённое время не ответил.
+ * Asks the bridge for the list of sessions through the same channel the popup uses: a message
+ * with a MessageChannel port, the answer arriving in the port. null — it did not answer in time.
  */
 function listSessions(page: Page, timeout = 3_000): Promise<Summary[] | null> {
   return page.evaluate(async (limit) => {
@@ -154,7 +157,7 @@ function listSessions(page: Page, timeout = 3_000): Promise<Summary[] | null> {
   }, timeout)
 }
 
-/** Ждёт, пока реестр придёт в ожидаемый вид, и отдаёт последнее увиденное. */
+/** Waits until the registry comes to the expected shape and gives back the last thing seen. */
 async function sessionsWhen(
   page: Page,
   ready: (sessions: Summary[]) => boolean,
@@ -170,7 +173,7 @@ async function sessionsWhen(
   }
 }
 
-/** Сессия, набранная плеером тестовой страницы: три фрагмента по две секунды подряд. */
+/** The session the player of the test page gathers: three fragments of two seconds in a row. */
 async function playerSession(url: string, title: string): Promise<Summary> {
   return {
     key: sessionKey({ url, codecs: ['avc1'], durationSeconds: Infinity }),
@@ -178,55 +181,63 @@ async function playerSession(url: string, title: string): Promise<Summary> {
     title,
     duration: 6,
     bytes: await chunkBytes(),
-    runs: 1,
   }
 }
 
+/**
+ * One session, whole: six seconds of material and nothing that a save would leave behind. The
+ * summary describes the file the popup offers, so a session with a piece missing out of it is
+ * not the one this page collected.
+ */
 const oneCompleteSession = (sessions: Summary[]): boolean =>
-  sessions.length === 1 && sessions[0]!.runs === 1 && sessions[0]!.duration === 6
+  sessions.length === 1 && sessions[0]!.duration === 6 && sessions[0]!.omits === undefined
 
-test('баннер не оставляет в реестре следа', async () => {
+test('a banner leaves no trace in the registry', async () => {
   const { context, page, extensionId, log } = await open('banner.html', BANNER_URL)
   const bridge = await bridgeFrame(page, extensionId, log)
   await pageDone(page)
 
-  // Байты баннера обязаны доехать до моста: хук в MAIN world копирует всегда, решение
-  // принимает изолированный мир. Не проверь мы этого — пустой реестр ничего не доказывал бы.
+  // The bytes of the banner have to reach the bridge: the hook in the MAIN world always copies,
+  // and the isolated world takes the decision. Without checking that, an empty registry would
+  // prove nothing.
   await bridge
     .waitForFunction(() => (window as unknown as Probe).tcAppend >= 2, undefined, { timeout: 5_000 })
     .catch(() => undefined)
   expect(
     await bridge.evaluate(() => (window as unknown as Probe).tcAppend),
-    `сегменты баннера не доехали до моста; консоль страницы: ${log()}`,
+    `the segments of the banner never reached the bridge; page console: ${log()}`,
   ).toBe(2)
 
   const banner = await sourceIdOf(page, '#v')
-  expect(banner, `поток баннера не связан с его адресом; консоль страницы: ${log()}`).not.toBe('')
+  expect(banner, `the stream of the banner is tied to no address; page console: ${log()}`).not.toBe(
+    '',
+  )
 
   const seen = await verdictsWhen(bridge, (list) => latest(list, banner) === 'reject', 5_000)
-  expect(latest(seen, banner), `баннер не получил отказа; консоль страницы: ${log()}`).toBe('reject')
+  expect(latest(seen, banner), `the banner got no rejection; page console: ${log()}`).toBe('reject')
   expect(
     seen.map((item) => item.verdict),
-    'беззвучный зациклённый автоплей размером с превью не должен доживать до повышения',
+    'a silent looping autoplay the size of a preview must not live to be promoted',
   ).not.toContain('promote')
 
-  // Отказ стирает набранное: сессия, заведённая первым init-сегментом, до попапа не доживает.
+  // A rejection erases what was gathered: the session opened by the first init segment does not
+  // live to reach the popup.
   expect(
     await sessionsWhen(page, (sessions) => sessions.length === 0),
-    `материал баннера остался в реестре; консоль страницы: ${log()}`,
+    `the material of the banner stayed in the registry; page console: ${log()}`,
   ).toEqual([])
 
   await context.close()
 })
 
-test('настоящий плеер доживает до сессии', async () => {
+test('a real player lives to have a session', async () => {
   const { context, page, extensionId, log } = await open('player.html', PLAYER_URL)
   const bridge = await bridgeFrame(page, extensionId, log)
   await pageDone(page)
 
-  // Испытательный срок отмеряется реально сыгранным временем, а материала у страницы ровно
-  // на шесть секунд — впритык к порогу. Зацикливание оставляет запас, а панель управления
-  // на месте, так что баннерное правило (беззвучное + зациклённое + без панели) не сработает.
+  // The probation is measured in time actually played, and the page holds exactly six seconds of
+  // material — right on the threshold. Looping leaves room to spare, and the controls are in
+  // place, so the banner rule (silent + looping + no controls) will not fire.
   await page.evaluate(() => {
     const video = document.querySelector('video')!
     video.loop = true
@@ -236,23 +247,23 @@ test('настоящий плеер доживает до сессии', async (
   const player = await sourceIdOf(page, 'video')
   const seen = await verdictsWhen(bridge, (list) => latest(list, player) === 'promote')
 
-  expect(latest(seen, player), `плеер не дожил до повышения; консоль страницы: ${log()}`).toBe(
+  expect(latest(seen, player), `the player was never promoted; page console: ${log()}`).toBe(
     'promote',
   )
   expect(
     seen.filter((item) => item.verdict === 'reject'),
-    'настоящему плееру отказ приходить не должен',
+    'a real player must get no rejection',
   ).toEqual([])
 
   expect(
     await sessionsWhen(page, oneCompleteSession),
-    `мост должен сохранить сессию плеера; консоль страницы: ${log()}`,
+    `the bridge should have kept the session of the player; page console: ${log()}`,
   ).toEqual([await playerSession(PLAYER_URL, 'test player')])
 
   await context.close()
 })
 
-test('отказ по баннеру не задевает плеер на той же странице', async () => {
+test('a rejection of the banner does not touch the player on the same page', async () => {
   const { context, page, extensionId, log } = await open('mixed.html', MIXED_URL)
   const bridge = await bridgeFrame(page, extensionId, log)
   await pageDone(page)
@@ -263,24 +274,25 @@ test('отказ по баннеру не задевает плеер на то�
   const player = await sourceIdOf(page, '#player')
   expect(
     new Set([banner, player]).size,
-    `два плеера страницы должны получить разные потоки; консоль страницы: ${log()}`,
+    `the two players of the page should get different streams; page console: ${log()}`,
   ).toBe(2)
 
   const seen = await verdictsWhen(
     bridge,
     (list) => latest(list, banner) === 'reject' && latest(list, player) === 'promote',
   )
-  expect(latest(seen, banner), `баннер не получил отказа; консоль страницы: ${log()}`).toBe('reject')
-  expect(latest(seen, player), `плеер не дожил до повышения; консоль страницы: ${log()}`).toBe(
+  expect(latest(seen, banner), `the banner got no rejection; page console: ${log()}`).toBe('reject')
+  expect(latest(seen, player), `the player was never promoted; page console: ${log()}`).toBe(
     'promote',
   )
 
-  // Вердикт адресный: у баннера свой поток и своя сессия (кодеки в ключе разные), и стереть
-  // его материал мост обязан, не тронув материал соседа. Отказ, снимающий заодно и соседа,
-  // оставил бы реестр пустым; отказ, не снимающий ничего, — двумя сессиями.
+  // The verdict is addressed: the banner has a stream and a session of its own (the codecs in the
+  // key differ), and the bridge has to erase its material without touching the neighbour's. A
+  // rejection that took the neighbour with it would leave the registry empty; one that took
+  // nothing would leave two sessions.
   expect(
     await sessionsWhen(page, oneCompleteSession),
-    `отказ по баннеру не должен был трогать сессию плеера; консоль страницы: ${log()}`,
+    `the rejection of the banner should not have touched the player session; page console: ${log()}`,
   ).toEqual([await playerSession(MIXED_URL, 'banner and player')])
 
   await context.close()

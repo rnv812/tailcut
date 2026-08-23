@@ -6,11 +6,26 @@ import {
   hostOf,
   listSessions,
   saveAll,
+  type Omission,
   type SessionSummary,
 } from './api'
 
 /** How a session is signed when the page never told its title. */
 const UNTITLED = 'Untitled'
+
+/**
+ * What the file will be missing, in the words the user is shown.
+ *
+ * The length above this line is already the length of the file and not of the recording, so the
+ * line does not correct a number — it says why the number is smaller than the time spent
+ * watching. One line and one loss: several can hold at once and the bridge sends the heaviest,
+ * because a popup that explains itself in three lines has stopped being a popup.
+ */
+const OMITTED: Record<Omission, string> = {
+  track: 'One track is in a format tailcut cannot save.',
+  rendition: 'Recorded at more than one quality; one is saved.',
+  gap: 'Recording has gaps: the longest piece is saved.',
+}
 
 function Popup() {
   // null — the tab has not answered yet. An empty array differs from it: on that the popup
@@ -44,6 +59,10 @@ function Popup() {
     setFailed(false)
   }
 
+  // A code the popup has no words for shows nothing rather than an empty box: the bridge and the
+  // popup ship together, but the popup is the one that would be left drawing the gap.
+  const omitted = current.omits ? OMITTED[current.omits] : undefined
+
   const save = async () => {
     setSaving(true)
     setFailed(false)
@@ -70,12 +89,12 @@ function Popup() {
           <span class="muted" data-testid="bytes">
             {formatBytes(current.bytes)}
           </span>
-          {current.runs > 1 && (
-            <span class="muted" data-testid="runs">
-              {current.runs} runs
-            </span>
-          )}
         </div>
+        {omitted && (
+          <div class="omits" data-testid="omits">
+            {omitted}
+          </div>
+        )}
         <button class="primary" data-testid="save" disabled={saving} onClick={() => void save()}>
           {saving ? 'Saving…' : 'Save all'}
         </button>

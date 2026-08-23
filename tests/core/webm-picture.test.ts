@@ -163,13 +163,13 @@ function byPlaying(file: string, at: number): Buffer {
 describe('a clip whose picture and sound both came in WebM', () => {
   it('adds up to one session the popup can offer', () => {
     const session = recordedSession().list()[0]!
-    const { duration, runs } = summarize(session)
+    const { duration, omits } = summarize(session)
 
     expect(session.tracks.map((t) => t.kinds)).toEqual([['video'], ['audio']])
     // The picture opens fourteen milliseconds in and the sound at zero; what can be cut is where
     // the two overlap.
     expect(duration).toBeCloseTo(5.987, 6)
-    expect(runs).toBe(1)
+    expect(omits).toBeUndefined()
   })
 
   it('gives ffprobe a file of two streams, picture and sound, decoding without complaint', () => {

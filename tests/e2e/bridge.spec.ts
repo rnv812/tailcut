@@ -5,12 +5,12 @@ import { launchWithExtension, routeLocal, serveLocal } from './helpers'
 import { sessionKey } from '../../src/core/session-key'
 
 const PAGE_URL = 'https://tailcut.test/player'
-/** Второй адрес отличает работу «на любом сайте» от работы на одном знакомом хосте. */
+/** A second address tells working "on any site" apart from working on one familiar host. */
 const OTHER_PAGE_URL = 'https://some-random-site.example/player'
-/** Чужая верхняя страница, встраивающая тот же плеер во вложенный фрейм. */
+/** A foreign top page embedding the same player in a nested frame. */
 const EMBED_URL = 'https://embedder.example/watch'
 
-/** Нарушение политики в том виде, в каком его записывает tests/e2e/page/player.html. */
+/** A policy violation in the form tests/e2e/page/player.html writes it down. */
 type Violation = { directive: string; blockedURI: string }
 
 type Probe = {
@@ -20,7 +20,7 @@ type Probe = {
 }
 type PlayerState = { appended: number; allAppended?: boolean }
 
-/** Ждёт фрейм, подходящий под условие; возвращает undefined, если он так и не появился. */
+/** Waits for a frame fitting the condition; gives back undefined if none ever appeared. */
 async function waitForFrame(
   page: Page,
   match: (frame: Frame) => boolean,
@@ -35,16 +35,16 @@ async function waitForFrame(
   }
 }
 
-/** Ждёт появления фрейма с origin расширения; возвращает undefined, если он так и не встал. */
+/** Waits for a frame on the extension origin; undefined if it never stood up. */
 const waitForExtensionFrame = (page: Page, extensionId: string) =>
   waitForFrame(page, (frame) => frame.url().includes(extensionId))
 
 type LocalPage = { url: string; html: string }
 
 /**
- * Открывает локальную страницу; остальные раскладываются по своим адресам, чтобы страница
- * могла их встроить. Нарушение CSP видно только в консоли страницы. Собираем её, чтобы при
- * провале отличить запрет политики от ошибки вставки.
+ * Opens a local page; the rest are laid out under their own addresses so that the page can embed
+ * them. A CSP violation is visible only in the console of the page. It is collected so that a
+ * failure tells a policy refusal apart from a mistake in the insertion.
  */
 async function openPage(entry: LocalPage, ...embedded: LocalPage[]) {
   const { context, extensionId } = await launchWithExtension()
@@ -57,19 +57,19 @@ async function openPage(entry: LocalPage, ...embedded: LocalPage[]) {
   for (const inner of embedded) await routeLocal(page, inner.html, inner.url)
   await serveLocal(page, entry.html, entry.url)
 
-  return { context, page, extensionId, consoleLog, log: () => consoleLog.join(' | ') || '(пусто)' }
+  return { context, page, extensionId, consoleLog, log: () => consoleLog.join(' | ') || '(empty)' }
 }
 
-/** Открывает тестовый плеер верхним документом по указанному адресу. */
+/** Opens the test player as the top document under the given address. */
 const openPlayer = (url: string) => openPage({ url, html: 'player.html' })
 
-/** Открывает чужую страницу, встраивающую тот же плеер во вложенный фрейм. */
+/** Opens a foreign page embedding the same player in a nested frame. */
 const openEmbeddedPlayer = () =>
   openPage({ url: EMBED_URL, html: 'embed.html' }, { url: PAGE_URL, html: 'player.html' })
 
 /**
- * Ждёт рукопожатий в указанном документе и отдаёт origin их отправителей;
- * null — за отведённое время не пришло ни одного.
+ * Waits for handshakes in the given document and gives back the origins of their senders;
+ * null — not one arrived in the time allowed.
  */
 async function handshakes(target: Page | Frame, timeout = 5_000): Promise<string[] | null> {
   return target
@@ -89,30 +89,30 @@ async function bridgeFrame(page: Page, extensionId: string, log: () => string): 
   const frame = await waitForExtensionFrame(page, extensionId)
   expect(
     frame,
-    `iframe расширения должен появиться несмотря на frame-src none; консоль страницы: ${log()}`,
+    `the extension iframe should appear despite frame-src none; page console: ${log()}`,
   ).toBeTruthy()
   await frame!.waitForLoadState('domcontentloaded')
   return frame!
 }
 
-/** Сводка сессии в том виде, в каком мост отдаёт её на запрос tc:list. */
+/** A session summary in the form the bridge answers a tc:list request with. */
 type Summary = {
   key: string
   url: string
   title: string
   duration: number
   bytes: number
-  runs: number
+  omits?: string
 }
 
-/** Медиафрагменты, которые дописывает tests/e2e/page/player.html. */
+/** The media fragments tests/e2e/page/player.html appends. */
 const CHUNKS = [
   'h264/chunk-stream0-00001.m4s',
   'h264/chunk-stream0-00002.m4s',
   'h264/chunk-stream0-00003.m4s',
 ]
 
-/** Суммарный объём фрагментов на диске: столько байтов обязано доехать до реестра. */
+/** Weight of the fragments on disk: that many bytes have to reach the registry. */
 async function chunkBytes(): Promise<number> {
   const sizes = await Promise.all(
     CHUNKS.map(async (rel) => (await fs.stat(path.resolve('tests/fixtures', rel))).size),
@@ -121,8 +121,8 @@ async function chunkBytes(): Promise<number> {
 }
 
 /**
- * Спрашивает у моста список сессий тем же каналом, каким это делает попап: сообщение с
- * портом MessageChannel, ответ приходит в порт. null — за отведённое время не ответил.
+ * Asks the bridge for the list of sessions through the same channel the popup uses: a message
+ * with a MessageChannel port, the answer arriving in the port. null — it did not answer in time.
  */
 function listSessions(page: Page, timeout = 3_000): Promise<Summary[] | null> {
   return page.evaluate(async (limit) => {
@@ -141,9 +141,10 @@ function listSessions(page: Page, timeout = 3_000): Promise<Summary[] | null> {
 }
 
 /**
- * Ждёт, пока реестр придёт в ожидаемый вид, и отдаёт последнее увиденное. Ожидание нужно
- * только на дорогу сегментов до моста; вердикт выносит проверка в самом тесте — на срыв
- * ожидания она получит то, что реестр успел набрать, и покажет это в сообщении.
+ * Waits until the registry comes to the expected shape and gives back the last thing seen. The
+ * wait is only there for the road the segments travel to the bridge; the verdict is passed by the
+ * check in the test itself — on a wait that ran out it gets whatever the registry managed to
+ * gather and shows it in the message.
  */
 async function sessionsWhen(
   page: Page,
@@ -160,120 +161,127 @@ async function sessionsWhen(
   }
 }
 
-/** Ждёт, пока плеер страницы допишет все свои сегменты. */
+/** Waits until the player of the page has appended every one of its segments. */
 const playerDone = (page: Page) =>
   page.waitForFunction(() => (window as unknown as PlayerState).allAppended === true)
 
-/** Сессия, набранная плеером тестовой страницы: три фрагмента по две секунды подряд. */
+/** The session the player of the test page gathers: three fragments of two seconds in a row. */
 async function playerSession(url: string): Promise<Summary> {
   return {
-    // Ключ, которым попап потом запросит эту сессию у реестра: адрес страницы им не
-    // является — метки перехода из него срезаны, а кодеки дописаны. Плеер страницы
-    // играет одну видеодорожку avc1, длительность на этом этапе ещё неизвестна.
+    // The key the popup will later ask the registry for this session by: the address of the page
+    // is not one — the referral marks are cut out of it and the codecs appended. The player of
+    // the page plays a single avc1 video track, and the length is unknown at this stage.
     key: sessionKey({ url, codecs: ['avc1'], durationSeconds: Infinity }),
     url,
-    // Заголовок мост может узнать только из tc:context: на своём origin он его не видит,
-    // а referrer несёт лишь адрес. Пустая строка здесь означала бы, что контекст не дошёл.
+    // The title the bridge can learn only from tc:context: on its own origin it does not see one,
+    // and the referrer carries the address alone. An empty string here would mean the context
+    // never arrived.
     title: 'test player',
     duration: 6,
     bytes: await chunkBytes(),
-    runs: 1,
   }
 }
 
+/**
+ * One session, whole: six seconds of material and nothing a save would leave behind. The summary
+ * describes the file the popup offers, so an omission here would mean the registry gathered
+ * something other than the three fragments of the page.
+ */
 const oneCompleteSession = (sessions: Summary[]): boolean =>
-  sessions.length === 1 && sessions[0]!.runs === 1 && sessions[0]!.duration === 6
+  sessions.length === 1 && sessions[0]!.duration === 6 && sessions[0]!.omits === undefined
 
-test('мост встаёт на странице со строгим CSP и складывает её сегменты в сессию', async () => {
+test('the bridge stands up on a page with a strict CSP and gathers its segments into a session', async () => {
   const { context, page, extensionId, log } = await openPlayer(PAGE_URL)
   await bridgeFrame(page, extensionId, log)
   await playerDone(page)
 
-  // Весь путь целиком: обёртки в MAIN world, пересылка content script'ом, разбор боксов в
-  // мосте и укладка на шкалу времени. Точные величины, а не «что-то накопилось»: длительность
-  // берётся из moof и timescale, объём — из самих байтов. Реестр, набравший мусор, их не даст.
+  // The whole road at once: the wrappers in the MAIN world, the relaying by the content script,
+  // the parsing of the boxes in the bridge and the laying out on the timeline. Exact figures
+  // rather than "something gathered": the length comes from the moof and the timescale, the
+  // weight from the bytes themselves. A registry that gathered junk gives neither.
   expect(
     await sessionsWhen(page, oneCompleteSession),
-    `мост должен собрать сессию из сегментов страницы; консоль страницы: ${log()}`,
+    `the bridge should gather a session out of the page's segments; page console: ${log()}`,
   ).toEqual([await playerSession(PAGE_URL)])
 
-  // Страница со строгим CSP должна продолжать играть: мост не мешает её собственному MSE.
+  // A page with a strict CSP has to go on playing: the bridge does not disturb its own MSE.
   expect(await page.evaluate(() => (window as unknown as PlayerState).appended)).toBe(4)
 
   await context.close()
 })
 
-test('политика страницы работает: обычный фрейм она запрещает, а фрейм расширения — нет', async () => {
+test('the policy of the page works: it forbids an ordinary frame and not the extension frame', async () => {
   const { context, page, extensionId, log } = await openPlayer(PAGE_URL)
   await bridgeFrame(page, extensionId, log)
   await playerDone(page)
 
-  // Негативный контроль ко всему набору. Остальные проверки доказывают, что фрейм расширения
-  // встаёт вопреки `frame-src 'none'`, но сами по себе они зелёные и на странице, где политики
-  // нет вовсе: опечатка в мете или смена поведения Chrome превратили бы главный тест
-  // архитектуры в пустышку молча. Здесь страница вставляет обычный фрейм своими руками — и он
-  // обязан быть запрещён той же политикой, при которой мост живёт рядом.
+  // The negative control for the whole set. The other checks prove that the extension frame
+  // stands up in spite of `frame-src 'none'`, but on their own they are green on a page with no
+  // policy at all: a typo in the meta or a change in Chrome's behaviour would turn the main test
+  // of the architecture into an empty one, silently. Here the page inserts an ordinary frame with
+  // its own hands — and it must be forbidden by the very policy the bridge lives beside.
   const plain = await page.evaluate(async (url) => {
     const probe = window as unknown as Probe
     const before = probe.cspViolations.length
 
     const iframe = document.createElement('iframe')
-    // Адрес — тот же, что у самой страницы, и он раздаётся тестом. Так проверка ловит и
-    // ослабление меты: без `frame-src 'none'` политика откатится к `default-src 'self'`,
-    // свой origin окажется разрешён, и фрейм загрузится по-настоящему.
+    // The address is the same as the page's own, and it is served by the test. That way the check
+    // also catches a weakened meta: without `frame-src 'none'` the policy falls back to
+    // `default-src 'self'`, its own origin turns out to be allowed, and the frame really loads.
     iframe.src = url
     document.body.appendChild(iframe)
 
     await new Promise((resolve) => setTimeout(resolve, 1_000))
 
-    // Запрещённый фрейм остаётся с непрозрачным origin, и документа у него нет; загрузись он
-    // по своему адресу — origin был бы тот же, что у страницы, и заголовок прочитался бы.
+    // A forbidden frame is left with an opaque origin and has no document; had it loaded from its
+    // address, the origin would be the page's own and the title would read.
     let title: string
     try {
-      title = iframe.contentDocument?.title ?? '(документа нет)'
+      title = iframe.contentDocument?.title ?? '(no document)'
     } catch {
-      title = '(документа нет)'
+      title = '(no document)'
     }
     return { violations: probe.cspViolations.slice(before), title }
   }, PAGE_URL)
 
   expect(
     plain.violations,
-    `frame-src 'none' не сработал: страница вставила обычный фрейм без нарушения политики; консоль: ${log()}`,
+    `frame-src 'none' did not fire: the page inserted an ordinary frame without a violation; console: ${log()}`,
   ).toEqual([{ directive: 'frame-src', blockedURI: PAGE_URL }])
-  expect(plain.title, 'запрещённый политикой фрейм всё же загрузил свой документ').toBe(
-    '(документа нет)',
+  expect(plain.title, 'a frame forbidden by the policy loaded its document anyway').toBe(
+    '(no document)',
   )
   expect(
     page.frames().filter((frame) => frame !== page.mainFrame() && frame.url() === PAGE_URL),
-    'запрещённый политикой фрейм появился среди фреймов страницы',
+    'a frame forbidden by the policy turned up among the frames of the page',
   ).toEqual([])
 
-  // И при этой же живой политике мост стоит рядом и отвечает.
+  // And under that same live policy the bridge stands beside it and answers.
   expect(
     await sessionsWhen(page, oneCompleteSession),
-    `фрейм расширения перестал отвечать под работающей политикой; консоль: ${log()}`,
+    `the extension frame stopped answering under a working policy; console: ${log()}`,
   ).toEqual([await playerSession(PAGE_URL)])
 
   await context.close()
 })
 
-test('мост собирает сессию на любом origin, а не только на знакомом', async () => {
-  // Тот же плеер на постороннем хосте: расширение объявлено на <all_urls>, и адрес сессии
-  // обязан прийти от самой страницы. Реестр, знающий один адрес, здесь выдал бы чужой.
+test('the bridge gathers a session on any origin, not only on a familiar one', async () => {
+  // The same player on a stranger's host: the extension is declared on <all_urls>, and the
+  // address of the session has to come from the page itself. A registry that knows one address
+  // would give somebody else's here.
   const { context, page, extensionId, log } = await openPlayer(OTHER_PAGE_URL)
   await bridgeFrame(page, extensionId, log)
   await playerDone(page)
 
   expect(
     await sessionsWhen(page, oneCompleteSession),
-    `мост должен собрать сессию на любом origin; консоль страницы: ${log()}`,
+    `the bridge should gather a session on any origin; page console: ${log()}`,
   ).toEqual([await playerSession(OTHER_PAGE_URL)])
 
   await context.close()
 })
 
-test('мост не виден на странице и не занимает места', async () => {
+test('the bridge is invisible on the page and takes up no room', async () => {
   const { context, page, extensionId, log } = await openPlayer(PAGE_URL)
   await bridgeFrame(page, extensionId, log)
 
@@ -308,80 +316,82 @@ test('мост не виден на странице и не занимает м
   await context.close()
 })
 
-test('мост встаёт раньше первого скрипта страницы', async () => {
-  // Ожидание фрейма «когда-нибудь» ничего не стоит: плеер начинает буферизацию
-  // из своего же скрипта, и мост, вставший после DOMContentLoaded, пропустит начало.
+test('the bridge stands up before the first script of the page', async () => {
+  // Waiting for the frame "eventually" costs nothing: the player starts buffering from its own
+  // script, and a bridge that stood up after DOMContentLoaded would miss the beginning.
   const { context, page, extensionId, log } = await openPlayer(PAGE_URL)
   await bridgeFrame(page, extensionId, log)
 
   expect(
     await page.evaluate(() => (window as unknown as Probe).bridgeAtScriptStart),
-    `мост должен стоять в DOM к моменту первого скрипта страницы; консоль страницы: ${log()}`,
+    `the bridge should be in the DOM by the time of the page's first script; page console: ${log()}`,
   ).toBe(true)
 
   await context.close()
 })
 
-// Расширение объявлено на <all_urls>, поэтому рукопожатие проверяется на обоих адресах:
-// на одном тестовом адресе прибитый targetOrigin неотличим от «любого родителя», а страница
-// узнаёт о мосте только из этого сообщения — на всех прочих сайтах оно пропало бы молча.
+// The extension is declared on <all_urls>, so the handshake is checked at both addresses: on a
+// single test address a hard-wired targetOrigin is indistinguishable from "any parent", and the
+// page learns of the bridge from this message alone — on every other site it would go missing
+// silently.
 for (const url of [PAGE_URL, OTHER_PAGE_URL]) {
   const host = new URL(url).host
 
-  test(`мост здоровается со страницей после загрузки (${host})`, async () => {
+  test(`the bridge greets the page once loaded (${host})`, async () => {
     const { context, page, extensionId, log } = await openPlayer(url)
     await bridgeFrame(page, extensionId, log)
 
     expect(
       await handshakes(page),
-      `мост должен прислать tc:ready странице на ${host}; консоль страницы: ${log()}`,
+      `the bridge should send tc:ready to the page on ${host}; page console: ${log()}`,
     ).toEqual([`chrome-extension://${extensionId}`])
 
     await context.close()
   })
 }
 
-test('мост вложенного фрейма здоровается со своим фреймом, а не с верхней страницей', async () => {
-  // Плеер во вложенном фрейме — обычнейшая раскладка (встроенные YouTube, Vimeo, JW).
-  // Мост объявлен на all_frames и встаёт внутри такого фрейма; знать о нём должен тот
-  // документ, который его и вставил, — иначе плеер о мосте не узнает никогда, а верхняя
-  // страница получит рукопожатие от моста, к которому ей не за чем обращаться.
+test('the bridge of a nested frame greets its own frame, not the top page', async () => {
+  // A player in a nested frame is the most ordinary layout there is (embedded YouTube, Vimeo,
+  // JW). The bridge is declared on all_frames and stands up inside such a frame; the document
+  // that inserted it is the one that must know of it — otherwise the player never learns of the
+  // bridge, and the top page gets a handshake from a bridge it has no reason to address.
   const { context, page, extensionId, log } = await openEmbeddedPlayer()
 
   const player = await waitForFrame(page, (frame) => frame.url() === PAGE_URL)
-  expect(player, `фрейм с плеером должен появиться; консоль страницы: ${log()}`).toBeTruthy()
+  expect(player, `the frame with the player should appear; page console: ${log()}`).toBeTruthy()
 
   expect(
     await handshakes(player!),
-    `мост должен прислать tc:ready своему фрейму; консоль страницы: ${log()}`,
+    `the bridge should send tc:ready to its own frame; page console: ${log()}`,
   ).toEqual([`chrome-extension://${extensionId}`])
 
-  // Верхняя страница слышит только собственный мост: второе рукопожатие означало бы,
-  // что мост вложенного фрейма стучится наверх, мимо своего документа.
+  // The top page hears only its own bridge: a second handshake would mean the bridge of the
+  // nested frame knocking upwards, past its own document.
   expect(
     await handshakes(page),
-    `верхняя страница получила чужое рукопожатие; консоль страницы: ${log()}`,
+    `the top page got a handshake that was not its own; page console: ${log()}`,
   ).toEqual([`chrome-extension://${extensionId}`])
 
   await context.close()
 })
 
-test('чужие сообщения не заводят сессий и не роняют мост', async () => {
+test('foreign messages open no sessions and do not bring the bridge down', async () => {
   const { context, page, extensionId, consoleLog, log } = await openPlayer(PAGE_URL)
   await bridgeFrame(page, extensionId, log)
   await playerDone(page)
 
   const before = await sessionsWhen(page, oneCompleteSession)
-  expect(before, `подготовка: мост должен набрать сессию плеера; консоль: ${log()}`).toEqual([
+  expect(before, `setup: the bridge should gather the player's session; console: ${log()}`).toEqual([
     await playerSession(PAGE_URL),
   ])
 
   await page.evaluate(async () => {
     const target = document.querySelector<HTMLIFrameElement>('iframe[data-tailcut]')!.contentWindow!
 
-    // На живых страницах в окна летят сообщения сборщиков, аналитики и рекламы, а байты
-    // в tc:append приходят с произвольного сайта и сегментом быть не обязаны. Исключение
-    // на любом из них остановило бы приём всего последующего: слушатель у моста один.
+    // On live pages the windows are flooded with messages from bundlers, analytics and adverts,
+    // and the bytes in a tc:append arrive from an arbitrary site and need not be a segment at
+    // all. An exception on any of them would stop everything that follows from being taken in:
+    // the bridge has one listener.
     target.postMessage(null, '*')
     target.postMessage({ type: 'tc:drm', sourceId: 's' }, '*')
     target.postMessage({ type: 'tc:source', sourceId: 's', objectUrl: 'blob:x' }, '*')
@@ -398,30 +408,32 @@ test('чужие сообщения не заводят сессий и не р�
     await new Promise((resolve) => setTimeout(resolve, 500))
   })
 
-  expect(await listSessions(page), `реестр пострадал от чужих сообщений; консоль: ${log()}`).toEqual(
-    before,
-  )
+  expect(
+    await listSessions(page),
+    `the registry suffered from foreign messages; console: ${log()}`,
+  ).toEqual(before)
   expect(
     consoleLog.filter((line) => line.startsWith('pageerror')),
-    `мост не должен падать на чужих сообщениях; консоль страницы: ${log()}`,
+    `the bridge must not fall over on foreign messages; page console: ${log()}`,
   ).toEqual([])
 
   await context.close()
 })
 
-test('второй источник того же видео дополняет сессию, а не заводит новую', async () => {
+test('a second source of the same video fills in the session instead of opening a new one', async () => {
   const { context, page, extensionId, log } = await openPlayer(PAGE_URL)
   await bridgeFrame(page, extensionId, log)
   await playerDone(page)
 
   const before = await sessionsWhen(page, oneCompleteSession)
-  expect(before, `подготовка: мост должен набрать сессию плеера; консоль: ${log()}`).toEqual([
+  expect(before, `setup: the bridge should gather the player's session; console: ${log()}`).toEqual([
     await playerSession(PAGE_URL),
   ])
 
-  // Второй плеер того же ролика на той же странице — перезапуск после перемотки или второе
-  // <video>. Адрес и кодеки те же, значит это та же сессия, а повторный фрагмент в её карте
-  // уже лежит. Заодно видно, что байты уходят передачей: у отправителя буфер отсоединяется.
+  // A second player of the same clip on the same page — a restart after a seek, or a second
+  // <video>. The address and the codecs are the same, so it is the same session, and the repeated
+  // fragment is already on its map. It also shows that the bytes travel by transfer: the buffer
+  // is detached at the sender.
   const detached = await page.evaluate(async () => {
     const target = document.querySelector<HTMLIFrameElement>('iframe[data-tailcut]')!.contentWindow!
     const load = async (rel: string): Promise<ArrayBuffer> =>
@@ -443,10 +455,10 @@ test('второй источник того же видео дополняет 
     return segments.every((bytes) => bytes.byteLength === 0)
   })
 
-  expect(detached, `буфер не ушёл передачей; консоль страницы: ${log()}`).toBe(true)
+  expect(detached, `the buffer did not travel by transfer; page console: ${log()}`).toBe(true)
   expect(
     await listSessions(page),
-    `материал того же ролика разъехался по сессиям; консоль: ${log()}`,
+    `the material of one clip scattered across sessions; console: ${log()}`,
   ).toEqual(before)
 
   await context.close()

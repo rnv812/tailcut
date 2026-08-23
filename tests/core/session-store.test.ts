@@ -9,6 +9,7 @@ import {
 import { sessionKey } from '../../src/core/session-key'
 import { parseInit } from '../../src/core/iso/init'
 import { parseFragment } from '../../src/core/iso/fragment'
+import type { MuxTrack } from '../../src/core/mux'
 import type { Chunk } from '../../src/shared/types'
 
 const init = new Uint8Array(readFileSync('tests/fixtures/h264/init-stream0.m4s'))
@@ -1049,7 +1050,7 @@ describe('summarize', () => {
     // seconds. Summing the tracks would promise twelve, and the tail of the audio track is not
     // a clip — there is no picture under it.
     const fed = [...videoSegs, ...audioSegs].reduce((total, b) => total + b.byteLength, 0)
-    expect(summarize(store.list()[0]!)).toEqual({ duration: 6, bytes: fed, runs: 1 })
+    expect(summarize(store.list()[0]!)).toEqual({ duration: 6, bytes: fed })
   })
 
   it('shrinks to the track that holds less', () => {
@@ -1063,7 +1064,6 @@ describe('summarize', () => {
     store.append({ ...audioBuffer, bytes: audioSegs[0]! })
 
     const summary = summarize(store.list()[0]!)
-    expect(summary.runs).toBe(1)
     expect(summary.duration).toBeCloseTo(1.9505, 4)
   })
 
@@ -1076,21 +1076,23 @@ describe('summarize', () => {
     store.append({ ...videoBuffer, bytes: videoSegs[2]! })
     for (const bytes of audioSegs) store.append({ ...audioBuffer, bytes })
 
-    // Sound alone bridges no gap: two cuttable stretches of two seconds each.
-    expect(summarize(store.list()[0]!)).toMatchObject({ duration: 4, runs: 2 })
+    // Sound alone bridges no gap: two cuttable stretches of two seconds each, and a save writes
+    // one continuous clip. Four seconds here would be four seconds of a two-second file.
+    expect(summarize(store.list()[0]!)).toMatchObject({ duration: 2, omits: 'gap' })
   })
 
-  it('unites the representations of one kind instead of intersecting them', () => {
+  it('reports the one representation a save takes, not the two together', () => {
     const store = new SessionStore()
     store.append({ ...videoBuffer, bytes: init })
     store.append({ ...videoBuffer, bytes: videoSegs[0]! })
     // A switch of quality in the middle of the clip: the first two seconds came in one
-    // representation, the next two in another. Intersect the two halves and a full recording
-    // would show as 0:00; the material is there either way, so they are united.
+    // representation, the next two in another. The material is there either way — and a file
+    // holds one video stream, so a save takes one of them and the popup says four seconds of a
+    // two-second clip unless it says the same.
     store.append({ ...videoBuffer, bytes: vp9Init })
     store.append({ ...videoBuffer, bytes: vp9Seg2 })
 
-    expect(summarize(store.list()[0]!)).toMatchObject({ duration: 4, runs: 1 })
+    expect(summarize(store.list()[0]!)).toMatchObject({ duration: 2, omits: 'rendition' })
   })
 
   it('summarises a single-track session by that track', () => {
@@ -1102,7 +1104,6 @@ describe('summarize', () => {
     expect(summarize(store.list()[0]!)).toEqual({
       duration: 4,
       bytes: videoSegs[0]!.byteLength + videoSegs[1]!.byteLength,
-      runs: 1,
     })
   })
 
@@ -1110,7 +1111,7 @@ describe('summarize', () => {
     const store = new SessionStore()
     store.append({ ...videoBuffer, bytes: init })
 
-    expect(summarize(store.list()[0]!)).toEqual({ duration: 0, bytes: 0, runs: 0 })
+    expect(summarize(store.list()[0]!)).toEqual({ duration: 0, bytes: 0 })
   })
 })
 
@@ -1232,6 +1233,180 @@ describe('selectMaterial', () => {
   })
 })
 
+/**
+ * What the popup says against what the button writes.
+ *
+ * The two answers come from one place on purpose (see planSave), and this set is what says so:
+ * every number the popup shows is measured here out of the bytes handed to the muxer, and not
+ * out of the same map the summary counted. A summary computed beside the selection agrees with
+ * it only by convention, and convention is what broke — the popup promised the material of two
+ * renditions while a save could take one of them.
+ */
+describe('the summary and the file it promises', () => {
+  const videoBuffer = { ...page, bufferId: 'b1' }
+  const audioBuffer = { ...page, bufferId: 'b2' }
+
+  /** Where the segments of one track lie in seconds, read back out of their own bytes. */
+  function coveredSpan(track: MuxTrack): { start: number; end: number } | null {
+    const info = parseInit(track.initBytes)
+    if (!info) return null
+
+    let start = Infinity
+    let end = -Infinity
+    for (const segment of track.segments) {
+      const fragment = parseFragment(segment)
+      if (!fragment) continue
+      const declared = info.tracks.find((t) => t.trackId === fragment.trackId) ?? info.tracks[0]!
+      start = Math.min(start, fragment.baseMediaDecodeTime / declared.timescale)
+      end = Math.max(end, (fragment.baseMediaDecodeTime + fragment.duration) / declared.timescale)
+    }
+
+    return start < end ? { start, end } : null
+  }
+
+  /** How long the saved file plays with every one of its tracks present — its useful length. */
+  function savedSeconds(material: MuxTrack[]): number {
+    if (!material.length) return 0
+
+    let start = -Infinity
+    let end = Infinity
+    for (const track of material) {
+      const span = coveredSpan(track)
+      if (!span) return 0
+      start = Math.max(start, span.start)
+      end = Math.min(end, span.end)
+    }
+
+    return Math.max(0, end - start)
+  }
+
+  /** Weight of the media data the muxer is handed: what the file is built out of. */
+  const savedBytes = (material: MuxTrack[]): number =>
+    material.reduce((total, track) => total + track.segments.reduce((n, s) => n + s.byteLength, 0), 0)
+
+  /** A session with the picture and the sound of one page, whole. */
+  function bothTracks(): Session {
+    const store = new SessionStore()
+    store.append({ ...videoBuffer, bytes: init })
+    store.append({ ...audioBuffer, bytes: audioInit })
+    for (const bytes of videoSegs) store.append({ ...videoBuffer, bytes })
+    for (const bytes of audioSegs) store.append({ ...audioBuffer, bytes })
+    return store.list()[0]!
+  }
+
+  /**
+   * A switch of quality: one codec, two frame sizes, two seconds under each of them. This is
+   * what ABR delivers, and one file holds one of the two.
+   */
+  function switchedQuality(): Session {
+    const store = new SessionStore()
+    store.append({ ...abrPage, bytes: sdInit })
+    store.append({ ...abrPage, bytes: moof(1, 0, 1, 2000) })
+    store.append({ ...abrPage, bytes: hdInit })
+    store.append({ ...abrPage, bytes: moof(1, 180_000, 1, 180_000) })
+    return store.list()[0]!
+  }
+
+  /** A jump forward over the middle: two stretches of material with a hole between them. */
+  function jumpedForward(): Session {
+    const store = new SessionStore()
+    store.append({ ...videoBuffer, bytes: init })
+    store.append({ ...videoBuffer, bytes: videoSegs[0]! })
+    store.append({ ...videoBuffer, bytes: videoSegs[2]! })
+    return store.list()[0]!
+  }
+
+  /** The sound taken in and the picture refused: its container names a codec we cannot write. */
+  function pictureRefused(): Session {
+    const store = new SessionStore()
+    store.append({ ...videoBuffer, bytes: webmVideoInit })
+    store.append({ ...audioBuffer, bytes: webmAudioInit })
+    store.append({ ...videoBuffer, bytes: webmVideoSeg })
+    for (const bytes of webmAudioSegs) store.append({ ...audioBuffer, bytes })
+    return store.list()[0]!
+  }
+
+  /** The second buffer has its init and not one fragment yet: there is nothing to cut at all. */
+  function soundNotStartedYet(): Session {
+    const store = new SessionStore()
+    store.append({ ...videoBuffer, bytes: init })
+    store.append({ ...audioBuffer, bytes: audioInit })
+    for (const bytes of videoSegs) store.append({ ...videoBuffer, bytes })
+    return store.list()[0]!
+  }
+
+  const sessions: [string, () => Session][] = [
+    ['both tracks whole', bothTracks],
+    ['a switch of quality', switchedQuality],
+    ['a jump forward over the middle', jumpedForward],
+    ['the picture refused', pictureRefused],
+    ['the sound not started yet', soundNotStartedYet],
+  ]
+
+  it.each(sessions)('promises no more than a save of %s writes', (_name, build) => {
+    const session = build()
+    const material = selectMaterial(session)
+
+    // Whole segments reach the file, so it may run a fraction longer at the edges than the
+    // stretch it was cut over — over-delivering is not the lie. Promising what will not be
+    // there is, and that is what this bounds.
+    expect(summarize(session).duration).toBeLessThanOrEqual(savedSeconds(material) + 1e-9)
+    expect(summarize(session).bytes).toBeLessThanOrEqual(savedBytes(material))
+  })
+
+  it('promises one rendition after a switch of quality, not both', () => {
+    const session = switchedQuality()
+
+    // Two seconds at 640x360 and two more at 1280x720. A file holds one video stream, so a save
+    // takes the material of one of them: the popup that adds them up promises a clip twice the
+    // length of the one the button writes.
+    expect(summarize(session).duration).toBe(2)
+    expect(summarize(session).duration).toBe(savedSeconds(selectMaterial(session)))
+  })
+
+  it('counts the bytes of the rendition it saves, not of both', () => {
+    const session = switchedQuality()
+
+    expect(summarize(session).bytes).toBe(savedBytes(selectMaterial(session)))
+  })
+
+  it('promises the run a save takes, not the sum of the runs', () => {
+    const session = jumpedForward()
+
+    // Two seconds watched, the middle skipped, two more watched. A save writes one continuous
+    // stretch, so four seconds in the popup is two seconds of file.
+    expect(summarize(session).duration).toBe(2)
+    expect(summarize(session).duration).toBe(savedSeconds(selectMaterial(session)))
+  })
+
+  it('promises nothing at all while there is nothing to cut', () => {
+    const session = soundNotStartedYet()
+
+    // Megabytes of picture are collected and not one of them can be saved: the sound has an init
+    // and no material, and a clip with a silent track is not what the button makes. A weight
+    // beside a zero length reads as a file that is nearly ready.
+    expect(summarize(session)).toMatchObject({ duration: 0, bytes: 0 })
+  })
+
+  it('says a rendition will be left out', () => {
+    expect(summarize(switchedQuality()).omits).toBe('rendition')
+  })
+
+  it('says the material is in pieces and one of them is saved', () => {
+    expect(summarize(jumpedForward()).omits).toBe('gap')
+  })
+
+  it('says a track was refused before it says anything else', () => {
+    // Nothing of the picture was collected — the codec cannot be written — and the file will be
+    // sound alone. The length beside it is honest and says nothing of the missing kind.
+    expect(summarize(pictureRefused()).omits).toBe('track')
+  })
+
+  it('says nothing when the file holds everything the session has', () => {
+    expect(summarize(bothTracks()).omits).toBeUndefined()
+  })
+})
+
 describe('SessionStore: a track that did not arrive in mp4', () => {
   const videoBuffer = { ...page, bufferId: 'b1' }
   const audioBuffer = { ...page, bufferId: 'b2' }
@@ -1297,10 +1472,10 @@ describe('SessionStore: a track that did not arrive in mp4', () => {
     const store = new SessionStore()
     feedMixedContainers(store)
 
-    const { duration, runs } = summarize(store.list()[0]!)
-    // Picture 0…6, sound 0…6.001: six seconds is what a clip can be cut out of.
+    const { duration, omits } = summarize(store.list()[0]!)
+    // Picture 0…6, sound 0…6.001: six seconds is what a clip can be cut out of, whole.
     expect(duration).toBeCloseTo(6, 6)
-    expect(runs).toBe(1)
+    expect(omits).toBeUndefined()
   })
 
   it('hands both tracks to the muxer with the init each of them is written under', () => {
@@ -1338,6 +1513,37 @@ describe('SessionStore: a track that did not arrive in mp4', () => {
     const session = store.list()[0]!
     expect(session.tracks.map((t) => t.kinds)).toEqual([['audio']])
     expect(summarize(session).duration).toBeCloseTo(6.001, 6)
+  })
+
+  it('remembers a track refused after the session had opened', () => {
+    const store = new SessionStore()
+    // The sound buffer opens first, as it does on YouTube, and the session is born on it; the
+    // picture is refused a moment later, on a session that already exists.
+    store.append({ ...audioBuffer, bytes: webmAudioInit })
+    for (const bytes of webmAudioSegs) store.append({ ...audioBuffer, bytes })
+    store.append({ ...videoBuffer, bytes: webmVideoInit })
+
+    expect(summarize(store.list()[0]!).omits).toBe('track')
+  })
+
+  it('leaves the next video of the page unmarked by the refusal of the previous one', () => {
+    const store = new SessionStore()
+    store.append({ ...videoBuffer, bytes: webmVideoInit })
+    store.append({ ...audioBuffer, bytes: webmAudioInit })
+    for (const bytes of webmAudioSegs) store.append({ ...audioBuffer, bytes })
+
+    // A feed of short clips: the page moves on without letting go of its MediaSource, opens a
+    // buffer for the next video and this time delivers it in mp4, whole. The refusal belonged to
+    // the previous video — carried over, it would warn about a file that is missing nothing.
+    const next = { ...page, url: 'https://site.example/watch?v=next', bufferId: 'b3', now: 2000 }
+    store.append({ ...next, bytes: init })
+    for (const bytes of videoSegs) store.append({ ...next, bytes })
+
+    const [fresh, previous] = store.list()
+    expect(fresh!.url).toContain('v=next')
+    expect(summarize(fresh!).omits).toBeUndefined()
+    // And the video it did belong to keeps it: that file really is sound alone.
+    expect(summarize(previous!).omits).toBe('track')
   })
 
   it('drops a WebM segment that reaches the wrong buffer instead of guessing at it', () => {
