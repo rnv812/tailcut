@@ -6,6 +6,8 @@ import { launchWithExtension, serveLocal } from './helpers'
 const PAGE_URL = 'https://tailcut.test/player'
 /** Страница без строгой политики: на ней проверяется, что чужие вызовы API не сломаны. */
 const PLAIN_URL = 'https://tailcut.test/plain'
+/** Обычный http: расширение объявлено на <all_urls>, а контекст здесь незащищённый. */
+const INSECURE_URL = 'http://insecure.test/plain'
 
 /** Сегменты в том порядке, в каком их дописывает tests/e2e/page/player.html. */
 const APPENDED = [
@@ -227,6 +229,88 @@ test('копия снимается синхронно, до возврата и
   await close(context)
 })
 
+test('буфер страницы переживает отправку: тот же ArrayBuffer дописывается повторно', async () => {
+  const { context, page, log } = await openPlayer()
+  await playerDone(page)
+
+  // Плееры дописывают голый ArrayBuffer из (await fetch(...)).arrayBuffer(), и тот же буфер идёт
+  // в дело второй раз, когда кеш сегментов дописывает его после перемотки. Отдай обёртка наружу
+  // сам буфер страницы, transferable-отправка отсоединила бы его. Это отказ хуже исключения:
+  // повторный appendBuffer отсоединённого буфера штатно резолвит updateend, ничего не дописав, —
+  // плеер молча встаёт без ошибки.
+  const replay = await page.evaluate(async (mime) => {
+    const seen = window as unknown as Probe
+    const before = seen.tcAppend.length
+    const source = new MediaSource()
+    const video = document.createElement('video')
+    video.src = URL.createObjectURL(source)
+    document.body.appendChild(video)
+
+    await new Promise((resolve) => source.addEventListener('sourceopen', resolve, { once: true }))
+    const sourceBuffer = source.addSourceBuffer(mime)
+
+    const update = (act: () => void): Promise<unknown> =>
+      new Promise((resolve) => {
+        sourceBuffer.addEventListener('updateend', resolve, { once: true })
+        act()
+      })
+    const fetchBuffer = async (path: string): Promise<ArrayBuffer> =>
+      (await fetch(path)).arrayBuffer()
+    const bufferedEnd = (): number =>
+      sourceBuffer.buffered.length ? sourceBuffer.buffered.end(0) : 0
+    const settle = async (count: number): Promise<void> => {
+      const deadline = Date.now() + 3_000
+      while (seen.tcAppend.length < before + count && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+    }
+
+    const init = await fetchBuffer('/fixtures/h264/init-stream0.m4s')
+    const chunk = await fetchBuffer('/fixtures/h264/chunk-stream0-00001.m4s')
+    const size = chunk.byteLength
+    const expected = seen.tcDigest(chunk.slice(0))
+
+    await update(() => sourceBuffer.appendBuffer(init))
+    await update(() => sourceBuffer.appendBuffer(chunk))
+    const firstPass = bufferedEnd()
+
+    // Отсоединение случилось бы именно на отправке: ждём, пока хук отдаст оба сегмента.
+    await settle(2)
+    const sizeAfterSend = chunk.byteLength
+
+    // Перемотка: плеер выкидывает накопленное и дописывает тот же кусок заново из своего кеша.
+    await update(() => sourceBuffer.remove(0, Infinity))
+    const cleared = sourceBuffer.buffered.length
+    await update(() => sourceBuffer.appendBuffer(chunk))
+    const secondPass = bufferedEnd()
+    await settle(3)
+
+    return {
+      size,
+      sizeAfterSend,
+      firstPass,
+      cleared,
+      secondPass,
+      expected,
+      digests: seen.tcAppend.slice(before + 1).map((item) => item.digest),
+      error: video.error ? video.error.code : null,
+    }
+  }, MIME)
+
+  expect(replay.sizeAfterSend, `отправка мосту отсоединила буфер страницы; консоль: ${log()}`).toBe(
+    replay.size,
+  )
+  expect(replay.cleared, 'подготовка: перед повтором буфер должен был опустеть').toBe(0)
+  expect(replay.firstPass, 'подготовка: первый проход ничего не набрал').toBeGreaterThan(0)
+  expect(replay.secondPass, 'повторный appendBuffer не дописал ничего — плеер встал молча').toBe(
+    replay.firstPass,
+  )
+  expect(replay.digests, 'мосту доехали не те байты').toEqual([replay.expected, replay.expected])
+  expect(replay.error, 'плеер не должен получить ошибку из-за обёрток').toBeNull()
+
+  await close(context)
+})
+
 test('сегменты доезжают до фрейма моста', async () => {
   const { context, page, extensionId, log } = await openPlayer()
   await playerDone(page)
@@ -297,6 +381,38 @@ test('обращение к DRM видно, а сам вызов работае�
     keySystem: 'org.w3.clearkey',
     failed: '',
   })
+
+  await close(context)
+})
+
+test('на http-странице EME не выдумывается', async () => {
+  const { context, page, log } = await open(
+    INSECURE_URL,
+    '<!doctype html><meta charset="utf-8"><title>insecure</title>',
+  )
+
+  const observed = await page.evaluate(async () => {
+    const seen = window as unknown as Probe
+    // Сперва — доказательство, что хук на этой странице вообще стоит: иначе проверка ниже
+    // прошла бы и на странице без расширения, то есть не значила бы ничего.
+    URL.createObjectURL(new MediaSource())
+    await new Promise((resolve) => setTimeout(resolve, 100))
+
+    return {
+      hooked: seen.tcSource.length,
+      // Ровно та последовательность, что делают shaka, dash.js и hls.js: проверили наличие
+      // метода — и только потом зовут.
+      eme: typeof navigator.requestMediaKeySystemAccess,
+      secure: window.isSecureContext,
+    }
+  })
+
+  expect(observed.hooked, `хук не встал на http-страницу; консоль страницы: ${log()}`).toBe(1)
+  expect(observed.secure, 'подготовка: страница должна быть незащищённым контекстом').toBe(false)
+  // Вне защищённого контекста Chrome не отдаёт requestMediaKeySystemAccess вовсе. Обёртка,
+  // поставленная поверх пустого места, выдумала бы возможность, которой у браузера нет:
+  // проверка наличия прошла бы, а вызов упал бы уже внутри обёртки.
+  expect(observed.eme, 'хук объявил EME там, где браузер его не даёт').toBe('undefined')
 
   await close(context)
 })

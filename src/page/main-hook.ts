@@ -17,6 +17,10 @@ function send(message: PageToBridge, transfer: Transferable[] = []): void {
 }
 
 function copyOf(data: BufferSource): ArrayBuffer {
+  // Именно копия, а не сам буфер страницы: наружу он уходит передачей и у страницы
+  // отсоединяется. Плеер, который дописывает свой сегмент повторно (кеш после перемотки),
+  // получил бы тогда отсоединённый буфер, а это отказ хуже исключения — appendBuffer штатно
+  // резолвит updateend, не дописав ничего, и воспроизведение молча встаёт.
   if (data instanceof ArrayBuffer) return data.slice(0)
 
   // Только окно вида, а не весь буфер под ним. Копия делается в свой ArrayBuffer, а не срезом
@@ -49,7 +53,14 @@ MediaSource.prototype.addSourceBuffer = function (mime: string): SourceBuffer {
 
   let sourceId = sourceIds.get(this)
   if (!sourceId) {
-    // MediaSource, привязанный через srcObject: адреса у него нет.
+    // MediaSource, не проходивший через обёрнутый createObjectURL: адреса у него нет.
+    // В этом реалме такого не бывает и тестом не воспроизводится: srcObject для MediaSource
+    // здесь не работает (MediaSource.prototype.handle отсутствует, а video.srcObject =
+    // mediaSource бросает TypeError), addSourceBuffer на неприсоединённом MediaSource бросает
+    // InvalidStateError — значит, всё дошедшее сюда уже получило адрес. Ветка держится для
+    // объектов из чужого реалма (кадр about:blank, куда хук не попал) и для браузеров, где
+    // srcObject у MediaSource заработает: без адреса наблюдатель не свяжет поток с <video>,
+    // но байты продолжат доезжать до моста.
     sourceId = nextId('s')
     sourceIds.set(this, sourceId)
     send({ type: 'tc:source', sourceId, objectUrl: '' })
@@ -63,6 +74,10 @@ const originalAppendBuffer = SourceBuffer.prototype.appendBuffer
 SourceBuffer.prototype.appendBuffer = function (data: BufferSource): void {
   const tracked = buffers.get(this)
 
+  // Записи нет только у SourceBuffer из чужого реалма — например, если страница дёрнет этот
+  // appendBuffer на объекте из кадра about:blank, куда хук не попал: свои приходят из
+  // обёрнутого addSourceBuffer. Без охраны такой вызов сыпал бы TypeError из микрозадачи —
+  // необъяснимой ошибкой в консоли на каждый сегмент.
   if (tracked) {
     const bytes = copyOf(data)
     // Отправляем в микрозадаче: синхронный путь плеера остаётся пустым.
@@ -75,6 +90,7 @@ SourceBuffer.prototype.appendBuffer = function (data: BufferSource): void {
           mime: tracked.mime,
           bytes,
         },
+        // Список передачи: копия принадлежит нам, и лишний проход по каждому сегменту не нужен.
         [bytes],
       )
     })
@@ -84,6 +100,10 @@ SourceBuffer.prototype.appendBuffer = function (data: BufferSource): void {
 }
 
 const originalRequestMediaKeySystemAccess = navigator.requestMediaKeySystemAccess
+// Охрана обязательна: расширение объявлено на <all_urls>, а на http-страницах Chrome не отдаёт
+// navigator.requestMediaKeySystemAccess вовсе. Обёртка без проверки выдумала бы возможность,
+// которой у браузера нет: плееры сперва проверяют наличие метода, а потом зовут его — и вызов
+// упал бы внутри обёртки, на пустом оригинале.
 if (originalRequestMediaKeySystemAccess) {
   navigator.requestMediaKeySystemAccess = function (
     keySystem: string,
