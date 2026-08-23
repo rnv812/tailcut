@@ -1,0 +1,50 @@
+<!doctype html>
+<meta charset="utf-8" />
+<!--
+  Намеренно строгая политика: frame-src 'none' запрещает странице любые посторонние фреймы —
+  тот самый случай, которого мы опасаемся для моста. media-src blob: и style-src 'unsafe-inline'
+  добавлены только чтобы страница вообще играла: default-src 'self' блокирует и blob-источник
+  MediaSource, и style-атрибут <video>. Запрет фреймов при этом не ослаблен.
+-->
+<meta
+  http-equiv="Content-Security-Policy"
+  content="default-src 'self'; frame-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; media-src blob:"
+/>
+<title>test player</title>
+<video id="v" controls width="640" style="background:#000"></video>
+<script>
+  const INIT = '/fixtures/h264/init-stream0.m4s'
+  const SEGMENTS = [
+    '/fixtures/h264/chunk-stream0-00001.m4s',
+    '/fixtures/h264/chunk-stream0-00002.m4s',
+    '/fixtures/h264/chunk-stream0-00003.m4s',
+  ]
+
+  const video = document.getElementById('v')
+  const mediaSource = new MediaSource()
+  video.src = URL.createObjectURL(mediaSource)
+
+  window.appended = 0
+
+  mediaSource.addEventListener('sourceopen', async () => {
+    const sb = mediaSource.addSourceBuffer('video/mp4; codecs="avc1.4d401e"')
+
+    const append = (buffer) =>
+      new Promise((resolve) => {
+        sb.addEventListener('updateend', resolve, { once: true })
+        sb.appendBuffer(buffer)
+      })
+
+    const fetchBytes = async (url) => (await fetch(url)).arrayBuffer()
+
+    await append(await fetchBytes(INIT))
+    window.appended++
+
+    for (const url of SEGMENTS) {
+      await append(await fetchBytes(url))
+      window.appended++
+    }
+
+    window.allAppended = true
+  })
+</script>
