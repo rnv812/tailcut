@@ -1,4 +1,17 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+
+const initBytes = new Uint8Array(readFileSync('tests/fixtures/h264/init-stream0.m4s'))
+const seg1Bytes = new Uint8Array(readFileSync('tests/fixtures/h264/chunk-stream0-00001.m4s'))
+const seg2Bytes = new Uint8Array(readFileSync('tests/fixtures/h264/chunk-stream0-00002.m4s'))
+
+/** Байты уходят мосту передачей, то есть отдельным ArrayBuffer, а не видом на фикстуру. */
+const buffer = (bytes: Uint8Array): ArrayBuffer => bytes.slice().buffer
+
+/** Адрес и заголовок страницы, которая вставила мост. */
+const PAGE_URL = 'https://site.example/watch?v=abc'
+const PAGE_TITLE = 'Clip — site.example'
+const REFERRER = 'https://referrer.example/from'
 
 /**
  * Второй аргумент postMessage как есть: и строка targetOrigin, и объект опций — законные его
@@ -18,8 +31,29 @@ function receiver() {
   }
 }
 
+/** Порт из MessageChannel: этим каналом мост отвечает на запрос списка сессий. */
+function port() {
+  const received: unknown[] = []
+  return {
+    received,
+    postMessage(message: unknown) {
+      received.push(message)
+    },
+  }
+}
+
 type Receiver = ReturnType<typeof receiver>
 type MessageListener = (event: MessageEvent) => void
+
+/** Что мост отдаёт в ответ на tc:list. Тот же вид, что попап ждёт от расширения. */
+type Summary = {
+  key: string
+  url: string
+  title: string
+  duration: number
+  bytes: number
+  runs: number
+}
 
 /**
  * Адрес получателя из второго аргумента postMessage: окно принимает и строку targetOrigin,
@@ -33,14 +67,14 @@ function targetOriginOf(to: unknown): unknown {
 
 /**
  * Подменяет окно, в котором живёт мост: слушателя он вешает на window, рукопожатие шлёт
- * window.parent, а эхо — тому окну, что пришло в event.source. Родитель, верхняя страница и
- * отправитель здесь разные объекты: только так видно, кому мост на самом деле ответил.
+ * window.parent. Родитель, верхняя страница и отправитель здесь разные объекты: только так
+ * видно, кому мост на самом деле ответил.
  *
  * Иерархия не выдумана: оба content-скрипта объявлены с all_frames, поэтому мост встаёт и во
  * вложенном фрейме, где window.parent (окно того самого фрейма) и window.top (верхняя
  * страница) — разные окна.
  */
-function installWindow() {
+function installWindow(referrer = REFERRER) {
   const listeners: MessageListener[] = []
   const parent = receiver()
   const top = receiver()
@@ -52,36 +86,59 @@ function installWindow() {
     parent,
     top,
   })
+  // Документ моста живёт на origin расширения; referrer — единственное, что он знает
+  // о вставившей его странице до прихода tc:context.
+  vi.stubGlobal('document', { referrer })
+
+  const deliver = (
+    data: unknown,
+    options: { from?: Receiver; ports?: ReturnType<typeof port>[] } = {},
+  ): Receiver => {
+    const from = options.from ?? receiver()
+    const event = { data, source: from, ports: options.ports ?? [] }
+    for (const listener of listeners) listener(event as unknown as MessageEvent)
+    return from
+  }
 
   return {
     parent,
     top,
-    /** Доставляет мосту сообщение от указанного окна и отдаёт это окно для проверок. */
-    deliver(data: unknown, from: Receiver = receiver()): Receiver {
-      for (const listener of listeners) listener({ data, source: from } as unknown as MessageEvent)
-      return from
+    deliver,
+    /** Спрашивает у моста список сессий тем же способом, что попап: каналом сообщений. */
+    list(): Summary[] {
+      const reply = port()
+      deliver({ type: 'tc:list' }, { ports: [reply] })
+      expect(reply.received, 'мост не ответил на запрос списка сессий').toHaveLength(1)
+      return reply.received[0] as Summary[]
+    },
+    /** Отдаёт мосту сегмент так, как его присылает content script. */
+    append(bytes: Uint8Array, sourceId = 's1'): void {
+      deliver({
+        type: 'tc:append',
+        sourceId,
+        bufferId: 'b1',
+        mime: 'video/mp4',
+        bytes: buffer(bytes),
+      })
+    },
+    /** Сообщает мосту, на какой странице он стоит. */
+    context(url = PAGE_URL, title = PAGE_TITLE): void {
+      deliver({ type: 'tc:context', url, title })
     },
   }
 }
 
 /** Мост ставит слушателя и здоровается прямо при загрузке модуля. */
-async function loadBridge() {
-  const win = installWindow()
+async function loadBridge(referrer?: string) {
+  const win = installWindow(referrer)
   vi.resetModules()
   await import('../../src/bridge/bridge')
   return win
 }
 
-const append = (bytes: ArrayBuffer) => ({
-  type: 'tc:append',
-  sourceId: 's',
-  bufferId: 'b',
-  mime: 'video/mp4',
-  bytes,
-})
-
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.useRealTimers()
 })
 
 describe('рукопожатие моста', () => {
@@ -113,41 +170,87 @@ describe('рукопожатие моста', () => {
   })
 })
 
-describe('эхо моста на tc:append', () => {
-  // Нулевая длина в списке не для полноты: appendBuffer с пустым буфером легален, изредка
-  // приходит от плееров, и молчание моста на нём потеряло бы сообщение целиком.
-  it.each([0, 7, 4096, 65_536])(
-    'подтверждает ровно длину пришедшего буфера (%i байт)',
-    async (size) => {
-      const win = await loadBridge()
-      const bytes = new ArrayBuffer(size)
-
-      const sender = win.deliver(append(bytes))
-
-      // Длина — единственное свидетельство, что буфер доехал с содержимым: константа вместо
-      // чтения byteLength означала бы, что мост до самих байтов не дотянулся.
-      expect(sender.posts.map((p) => p.message)).toEqual([{ type: 'tc:echo', length: size }])
-    },
-  )
-
-  it('уходит окну-отправителю, а не родителю моста', async () => {
+describe('мост складывает сегменты в реестр сессий', () => {
+  it('на пустом реестре отдаёт пустой список', async () => {
     const win = await loadBridge()
 
-    const sender = win.deliver(append(new ArrayBuffer(32)))
-
-    expect(sender.posts, 'отправитель не получил подтверждения').toHaveLength(1)
-    expect(
-      win.parent.posts.map((p) => p.message),
-      'эхо ушло родителю вместо того, кто прислал байты',
-    ).toEqual([{ type: 'tc:ready' }])
+    expect(win.list()).toEqual([])
   })
 
-  it('адресовано любому origin: страница-отправитель может быть какой угодно', async () => {
+  it('init-сегмент заводит сессию под адресом и заголовком страницы', async () => {
+    const win = await loadBridge()
+    win.context()
+
+    win.append(initBytes)
+
+    expect(win.list()).toEqual([
+      {
+        key: expect.stringContaining(PAGE_URL),
+        url: PAGE_URL,
+        title: PAGE_TITLE,
+        duration: 0,
+        bytes: 0,
+        runs: 0,
+      },
+    ])
+  })
+
+  it('медиафрагменты набирают длительность, объём и прогоны', async () => {
+    const win = await loadBridge()
+    win.context()
+
+    win.append(initBytes)
+    win.append(seg1Bytes)
+    win.append(seg2Bytes)
+
+    // Фикстура: по две секунды на фрагмент, оба подряд — один прогон на четыре секунды.
+    expect(win.list()).toMatchObject([
+      { duration: 4, bytes: seg1Bytes.byteLength + seg2Bytes.byteLength, runs: 1 },
+    ])
+  })
+
+  it('до прихода контекста сессия достаётся referrer’у, а не пустому адресу', async () => {
     const win = await loadBridge()
 
-    const sender = win.deliver(append(new ArrayBuffer(32)))
+    // Content script присылает контекст сразу после загрузки моста, но сегменты хука идут тем
+    // же путём: если он когда-нибудь обгонит контекст, сессия должна остаться узнаваемой.
+    win.append(initBytes)
 
-    expect(targetOriginOf(sender.posts[0]?.to)).toBe('*')
+    expect(win.list()).toMatchObject([{ url: REFERRER, title: '' }])
+  })
+
+  it('сегменты разных источников не сливаются в одну сессию', async () => {
+    const win = await loadBridge()
+    win.context()
+
+    win.append(initBytes, 's1')
+    win.context('https://site.example/watch?v=second', 'Second')
+    win.append(initBytes, 's2')
+    // Первый плеер продолжает играть: его фрагмент обязан лечь в свою сессию.
+    win.append(seg1Bytes, 's1')
+
+    expect(win.list().map((s) => [s.url, s.runs])).toEqual(
+      expect.arrayContaining([
+        [PAGE_URL, 1],
+        ['https://site.example/watch?v=second', 0],
+      ]),
+    )
+  })
+
+  it('свежая сессия идёт в списке первой', async () => {
+    vi.useFakeTimers()
+    const win = await loadBridge()
+
+    vi.setSystemTime(new Date('2026-08-22T10:00:00Z'))
+    win.context(PAGE_URL, 'Первое')
+    win.append(initBytes, 's1')
+
+    vi.setSystemTime(new Date('2026-08-22T10:05:00Z'))
+    win.context('https://site.example/watch?v=later', 'Второе')
+    win.append(initBytes, 's2')
+
+    // Время сессии — часы моста: без него порядок в попапе выродится в порядок вставки.
+    expect(win.list().map((s) => s.title)).toEqual(['Второе', 'Первое'])
   })
 })
 
@@ -158,13 +261,56 @@ describe('мост и чужие сообщения', () => {
     ['чужой type', { type: 'webpackHotUpdate' }],
     ['null', null],
     ['строку', 'tc:append'],
+    ['число', 42],
   ]
 
-  it.each(foreign)('не отвечает на %s и не падает', async (_name, data) => {
+  it.each(foreign)('не отвечает на %s и не заводит сессию', async (_name, data) => {
     const win = await loadBridge()
+    win.context()
 
     const sender = win.deliver(data)
 
     expect(sender.posts, 'мост ответил на сообщение не своего типа').toEqual([])
+    expect(win.list()).toEqual([])
+  })
+
+  const junk: [string, Uint8Array][] = [
+    ['пустой буфер', new Uint8Array(0)],
+    ['страницу с ошибкой вместо сегмента', new Uint8Array([60, 33, 100, 111, 99])],
+  ]
+
+  it.each(junk)('%s в tc:append не роняет мост', async (_name, bytes) => {
+    const win = await loadBridge()
+    win.context()
+
+    // Байты приходят с произвольного сайта, а исключение здесь остановило бы приём
+    // всего последующего: слушатель у моста один.
+    expect(() => win.append(bytes)).not.toThrow()
+    win.append(initBytes)
+
+    expect(win.list(), 'мост перестал принимать сегменты после мусора').toHaveLength(1)
+  })
+
+  it('запрос списка без канала для ответа не роняет мост', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+
+    expect(() => win.deliver({ type: 'tc:list' })).not.toThrow()
+    expect(win.list(), 'реестр пострадал от запроса без порта').toHaveLength(1)
+  })
+
+  it('ответ на tc:list уходит только в канал, а не в окно-отправитель', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+
+    const reply = port()
+    const sender = win.deliver({ type: 'tc:list' }, { ports: [reply] })
+
+    // Список сессий — это история просмотра. Ответ в окно раздал бы её любой странице,
+    // которая догадается прислать мосту tc:list.
+    expect(sender.posts, 'список сессий ушёл в окно страницы').toEqual([])
+    expect(reply.received).toHaveLength(1)
   })
 })

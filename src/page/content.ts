@@ -16,7 +16,20 @@ export function ensureBridge(): Promise<HTMLIFrameElement> {
     iframe.style.cssText =
       'position:fixed;width:0;height:0;border:0;visibility:hidden;pointer-events:none;left:-9999px'
 
-    iframe.addEventListener('load', () => resolve(iframe), { once: true })
+    iframe.addEventListener(
+      'load',
+      () => {
+        // Мост стоит на origin расширения и адреса страницы не знает: заголовок ему взять
+        // неоткуда вовсе, а document.referrer у него пустеет при referrer-policy сайта.
+        // Контекст уходит до resolve — иначе первые сегменты попали бы в сессию без адреса.
+        iframe.contentWindow?.postMessage(
+          { type: 'tc:context', url: location.href, title: document.title },
+          '*',
+        )
+        resolve(iframe)
+      },
+      { once: true },
+    )
 
     // Скрипт работает на document_start: <html> уже разобран, <head> и <body> ещё нет,
     // поэтому мост встаёт прямым ребёнком documentElement сразу. Ждать DOMContentLoaded

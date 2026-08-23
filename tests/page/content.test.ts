@@ -7,6 +7,11 @@ const BRIDGE_URL = `${EXTENSION_ORIGIN}/${BRIDGE_PATH}`
 /** Куда браузер ведёт вставленный фрейм, у которого адрес ещё не задан. */
 const BLANK = 'about:blank'
 
+/** Страница, на которой стоит content script: её адрес и заголовок уходят мосту. */
+const PAGE_URL = 'https://site.example/watch?v=abc'
+const PAGE_TITLE = 'Clip — site.example'
+const CONTEXT = { type: 'tc:context', url: PAGE_URL, title: PAGE_TITLE }
+
 /**
  * Минимальный элемент: content script трогает только эти свойства. Фрейм при этом ходит по
  * адресам как в браузере: пока он вне документа, присвоение src ничего не грузит; вставка
@@ -76,8 +81,10 @@ function installDom() {
     },
   }
   vi.stubGlobal('window', pageWindow)
+  vi.stubGlobal('location', { href: PAGE_URL })
 
   vi.stubGlobal('document', {
+    title: PAGE_TITLE,
     createElement: (tagName: string) => {
       const element = fakeElement(tagName)
       created.push(element)
@@ -107,6 +114,17 @@ function installDom() {
       for (const listener of messageListeners) listener({ data, source } as MessageEvent)
       await new Promise((resolve) => setTimeout(resolve, 0))
     },
+    /**
+     * Что ушло в документ моста помимо контекста страницы: его мост получает при загрузке,
+     * отдельно от пересылки, и в проверках пересылки только мешает. Что он вообще уходит,
+     * проверяет describe «контекст страницы».
+     */
+    forwarded: (): Array<{ message: unknown; transfer: unknown }> =>
+      created.flatMap((element) =>
+        element.posted.filter(
+          (post) => (post.message as { type?: unknown } | null)?.type !== 'tc:context',
+        ),
+      ),
     /** Адреса, которые фреймы уже начали грузить и ещё не отработали. */
     pendingLoads: (): string[] => created.flatMap((element) => element.pending),
     /** Отрабатывает ближайшую навигацию: браузер шлёт load по каждой, about:blank включая. */
@@ -246,9 +264,7 @@ describe('пересылка сообщений хука в мост', () => {
     await dom.deliverMessage(append(buffer))
 
     // Копия на этом участке стоила бы лишнего прохода по каждому сегменту.
-    expect(dom.created[0]!.posted).toEqual([
-      { message: append(buffer), transfer: [buffer] },
-    ])
+    expect(dom.forwarded()).toEqual([{ message: append(buffer), transfer: [buffer] }])
   })
 
   it('служебные сообщения уходят без списка передачи', async () => {
@@ -257,7 +273,7 @@ describe('пересылка сообщений хука в мост', () => {
 
     await dom.deliverMessage(message)
 
-    expect(dom.created[0]!.posted).toEqual([{ message, transfer: undefined }])
+    expect(dom.forwarded()).toEqual([{ message, transfer: undefined }])
   })
 
   it('чужие сообщения в мост не уходят', async () => {
@@ -268,7 +284,7 @@ describe('пересылка сообщений хука в мост', () => {
     await dom.deliverMessage(null)
     await dom.deliverMessage('tc:append')
 
-    expect(dom.created[0]!.posted).toEqual([])
+    expect(dom.forwarded()).toEqual([])
   })
 
   it('сообщение не из окна страницы игнорируется', async () => {
@@ -278,6 +294,43 @@ describe('пересылка сообщений хука в мост', () => {
     // Приняв его, content script гонял бы чужие байты по кругу.
     await dom.deliverMessage(append(bytes()), { name: 'другое окно' })
 
-    expect(dom.created[0]!.posted).toEqual([])
+    expect(dom.forwarded()).toEqual([])
+  })
+})
+
+describe('контекст страницы для моста', () => {
+  it('уходит мосту сразу после его загрузки', async () => {
+    const dom = installDom()
+    await importContent()
+
+    // До load мост ещё не выполнил свой скрипт: сообщение, отправленное раньше, пропало бы
+    // молча — без слушателя и без ошибки.
+    expect(dom.created[0]!.posted, 'контекст ушёл в мост до его загрузки').toEqual([])
+
+    dom.deliverLoad()
+
+    // Заголовок и адрес страницы: на origin расширения мост ни того, ни другого не знает.
+    expect(dom.created[0]!.posted).toEqual([{ message: CONTEXT, transfer: undefined }])
+  })
+
+  it('уходит раньше первого пересланного сегмента', async () => {
+    const dom = installDom()
+    await importContent()
+    dom.deliverLoad()
+
+    await dom.deliverMessage({
+      type: 'tc:append',
+      sourceId: 's1',
+      bufferId: 'b1',
+      mime: 'video/mp4',
+      bytes: new ArrayBuffer(8),
+    })
+
+    // Порядок здесь и есть суть: сессия заводится первым init-сегментом, и адрес с
+    // заголовком должны быть у моста к этому моменту, иначе сессия родится безымянной.
+    expect(
+      dom.created[0]!.posted.map((post) => (post.message as { type: string }).type),
+      'сегмент обогнал контекст страницы',
+    ).toEqual(['tc:context', 'tc:append'])
   })
 })
