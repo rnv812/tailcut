@@ -2,17 +2,45 @@ import { describe, it, expect, afterEach, vi } from 'vitest'
 import { BRIDGE_PATH } from '../../src/shared/protocol'
 
 const EXTENSION_ORIGIN = 'chrome-extension://abcdefghijklmnopabcdefghijklmnop'
+const BRIDGE_URL = `${EXTENSION_ORIGIN}/${BRIDGE_PATH}`
 
-/** Минимальный элемент: content script трогает только эти свойства. */
+/** Куда браузер ведёт вставленный фрейм, у которого адрес ещё не задан. */
+const BLANK = 'about:blank'
+
+/**
+ * Минимальный элемент: content script трогает только эти свойства. Фрейм при этом ходит по
+ * адресам как в браузере: пока он вне документа, присвоение src ничего не грузит; вставка
+ * начинает загрузку текущего адреса — а у фрейма без адреса это about:blank; присвоение src
+ * уже вставленному фрейму начинает ещё одну загрузку. Каждая заканчивается своим load.
+ */
 function fakeElement(tagName: string) {
   const listeners: Record<string, Array<() => void>> = {}
   const attributes: Record<string, string> = {}
+  /** Начатые и ещё не отработавшие load навигации, в порядке начала. */
+  const pending: string[] = []
+  let attached = false
+  let src = ''
+
   return {
     tagName,
-    src: '',
     dataset: {} as Record<string, string>,
     style: { cssText: '' },
     attributes,
+    pending,
+    /** Адрес, чью загрузку фрейм уже отработал; до первого load — пусто. */
+    loaded: '',
+    get src(): string {
+      return src
+    },
+    set src(value: string) {
+      src = value
+      if (attached) pending.push(value)
+    },
+    /** Вставка в документ: с этого момента фрейм грузит то, что стоит в его src. */
+    attach: () => {
+      attached = true
+      pending.push(src || BLANK)
+    },
     setAttribute: (name: string, value: string) => {
       attributes[name] = value
     },
@@ -40,6 +68,7 @@ function installDom() {
     documentElement: {
       appendChild: (element: FakeElement) => {
         appended.push(element)
+        element.attach()
         return element
       },
     },
@@ -48,7 +77,20 @@ function installDom() {
     runtime: { getURL: (path: string) => `${EXTENSION_ORIGIN}/${path}` },
   })
 
-  return { created, appended }
+  return {
+    created,
+    appended,
+    /** Адреса, которые фреймы уже начали грузить и ещё не отработали. */
+    pendingLoads: (): string[] => created.flatMap((element) => element.pending),
+    /** Отрабатывает ближайшую навигацию: браузер шлёт load по каждой, about:blank включая. */
+    deliverLoad: (): string => {
+      const element = created.find((candidate) => candidate.pending.length > 0)
+      if (!element) throw new Error('ни один фрейм не начинал загрузку')
+      element.loaded = element.pending.shift()!
+      element.fire('load')
+      return element.loaded
+    },
+  }
 }
 
 /** Импорт сам вставляет мост: в модуле есть вызов ensureBridge() на верхнем уровне. */
@@ -83,7 +125,7 @@ describe('ensureBridge', () => {
     // Адрес строится из той же константы, что и в коде: здесь проверяется путь до неё —
     // chrome.runtime.getURL от BRIDGE_PATH. Что сама константа указывает на существующий
     // и объявленный в манифесте файл, проверяет tests/build/dist.test.ts.
-    expect(iframe.src).toBe(`${EXTENSION_ORIGIN}/${BRIDGE_PATH}`)
+    expect(iframe.src).toBe(BRIDGE_URL)
     expect(iframe.dataset.tailcut).toBe('bridge')
     expect(iframe.attributes['aria-hidden']).toBe('true')
     expect(dom.appended).toEqual([iframe])
@@ -127,8 +169,27 @@ describe('ensureBridge', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(settled).toBeNull()
 
-    dom.created[0]!.fire('load')
+    dom.deliverLoad()
     await pending
     expect(settled).toBe(dom.created[0])
+  })
+
+  it('отдаёт фрейм, загрузивший страницу моста, а не пустую страницу перед ней', async () => {
+    const dom = installDom()
+    const { ensureBridge } = await importContent()
+
+    let loadedAtResolve: unknown = null
+    const pending = ensureBridge().then((iframe) => {
+      loadedAtResolve = (iframe as unknown as FakeElement).loaded
+    })
+
+    // Фрейм, вставленный раньше присвоения src, успевает сходить на about:blank, и слушатель
+    // с { once: true } срабатывает на ней. Потребитель промиса получил бы фрейм без моста:
+    // postMessage в такой contentWindow пропадает молча, без ошибки и без адресата.
+    dom.deliverLoad()
+    await pending
+
+    expect(loadedAtResolve, 'промис отдал фрейм до загрузки моста').toBe(BRIDGE_URL)
+    expect(dom.pendingLoads(), 'фрейм ходил куда-то помимо страницы моста').toEqual([])
   })
 })

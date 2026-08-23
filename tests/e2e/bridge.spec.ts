@@ -1,34 +1,42 @@
 import { test, expect, type Frame, type Page } from '@playwright/test'
-import { launchWithExtension, serveLocal } from './helpers'
+import { launchWithExtension, routeLocal, serveLocal } from './helpers'
 
 const PAGE_URL = 'https://tailcut.test/player'
 /** Второй адрес отличает «ответить отправителю» от «ответить на заранее известный хост». */
 const OTHER_PAGE_URL = 'https://some-random-site.example/player'
+/** Чужая верхняя страница, встраивающая тот же плеер во вложенный фрейм. */
+const EMBED_URL = 'https://embedder.example/watch'
 
 type Probe = { bridgeAtScriptStart?: boolean; bridgeReady?: string[] }
 type PlayerState = { appended: number; allAppended?: boolean }
 
-/** Ждёт появления фрейма с origin расширения; возвращает undefined, если он так и не встал. */
-async function waitForExtensionFrame(
+/** Ждёт фрейм, подходящий под условие; возвращает undefined, если он так и не появился. */
+async function waitForFrame(
   page: Page,
-  extensionId: string,
+  match: (frame: Frame) => boolean,
   timeout = 5_000,
 ): Promise<Frame | undefined> {
   const deadline = Date.now() + timeout
   for (;;) {
-    const frame = page.frames().find((f) => f.url().includes(extensionId))
+    const frame = page.frames().find(match)
     if (frame) return frame
     if (Date.now() > deadline) return undefined
     await page.waitForTimeout(100)
   }
 }
 
+/** Ждёт появления фрейма с origin расширения; возвращает undefined, если он так и не встал. */
+const waitForExtensionFrame = (page: Page, extensionId: string) =>
+  waitForFrame(page, (frame) => frame.url().includes(extensionId))
+
+type LocalPage = { url: string; html: string }
+
 /**
- * Открывает тестовый плеер по указанному адресу.
- * Нарушение CSP видно только в консоли страницы. Собираем её, чтобы при провале
- * отличить запрет политики от ошибки вставки.
+ * Открывает локальную страницу; остальные раскладываются по своим адресам, чтобы страница
+ * могла их встроить. Нарушение CSP видно только в консоли страницы. Собираем её, чтобы при
+ * провале отличить запрет политики от ошибки вставки.
  */
-async function openPlayer(url: string) {
+async function openPage(entry: LocalPage, ...embedded: LocalPage[]) {
   const { context, extensionId } = await launchWithExtension()
   const page = await context.newPage()
 
@@ -36,9 +44,35 @@ async function openPlayer(url: string) {
   page.on('console', (msg) => consoleLog.push(`${msg.type()}: ${msg.text()}`))
   page.on('pageerror', (err) => consoleLog.push(`pageerror: ${err.message}`))
 
-  await serveLocal(page, 'player.html', url)
+  for (const inner of embedded) await routeLocal(page, inner.html, inner.url)
+  await serveLocal(page, entry.html, entry.url)
 
   return { context, page, extensionId, consoleLog, log: () => consoleLog.join(' | ') || '(пусто)' }
+}
+
+/** Открывает тестовый плеер верхним документом по указанному адресу. */
+const openPlayer = (url: string) => openPage({ url, html: 'player.html' })
+
+/** Открывает чужую страницу, встраивающую тот же плеер во вложенный фрейм. */
+const openEmbeddedPlayer = () =>
+  openPage({ url: EMBED_URL, html: 'embed.html' }, { url: PAGE_URL, html: 'player.html' })
+
+/**
+ * Ждёт рукопожатий в указанном документе и отдаёт origin их отправителей;
+ * null — за отведённое время не пришло ни одного.
+ */
+async function handshakes(target: Page | Frame, timeout = 5_000): Promise<string[] | null> {
+  return target
+    .waitForFunction(
+      () => {
+        const ready = (window as unknown as Probe).bridgeReady
+        return ready && ready.length > 0 ? ready : null
+      },
+      undefined,
+      { timeout },
+    )
+    .then((value) => value.jsonValue())
+    .catch(() => null)
 }
 
 async function bridgeFrame(page: Page, extensionId: string, log: () => string): Promise<Frame> {
@@ -182,26 +216,39 @@ for (const url of [PAGE_URL, OTHER_PAGE_URL]) {
     const { context, page, extensionId, log } = await openPlayer(url)
     await bridgeFrame(page, extensionId, log)
 
-    const handshake = await page
-      .waitForFunction(
-        () => {
-          const ready = (window as unknown as Probe).bridgeReady
-          return ready && ready.length > 0 ? ready : null
-        },
-        undefined,
-        { timeout: 5_000 },
-      )
-      .then((value) => value.jsonValue())
-      .catch(() => null)
-
     expect(
-      handshake,
+      await handshakes(page),
       `мост должен прислать tc:ready странице на ${host}; консоль страницы: ${log()}`,
     ).toEqual([`chrome-extension://${extensionId}`])
 
     await context.close()
   })
 }
+
+test('мост вложенного фрейма здоровается со своим фреймом, а не с верхней страницей', async () => {
+  // Плеер во вложенном фрейме — обычнейшая раскладка (встроенные YouTube, Vimeo, JW).
+  // Мост объявлен на all_frames и встаёт внутри такого фрейма; знать о нём должен тот
+  // документ, который его и вставил, — иначе плеер о мосте не узнает никогда, а верхняя
+  // страница получит рукопожатие от моста, к которому ей не за чем обращаться.
+  const { context, page, extensionId, log } = await openEmbeddedPlayer()
+
+  const player = await waitForFrame(page, (frame) => frame.url() === PAGE_URL)
+  expect(player, `фрейм с плеером должен появиться; консоль страницы: ${log()}`).toBeTruthy()
+
+  expect(
+    await handshakes(player!),
+    `мост должен прислать tc:ready своему фрейму; консоль страницы: ${log()}`,
+  ).toEqual([`chrome-extension://${extensionId}`])
+
+  // Верхняя страница слышит только собственный мост: второе рукопожатие означало бы,
+  // что мост вложенного фрейма стучится наверх, мимо своего документа.
+  expect(
+    await handshakes(page),
+    `верхняя страница получила чужое рукопожатие; консоль страницы: ${log()}`,
+  ).toEqual([`chrome-extension://${extensionId}`])
+
+  await context.close()
+})
 
 test('мост отвечает только на tc:append и не спотыкается о чужие сообщения', async () => {
   const { context, page, extensionId, consoleLog, log } = await openPlayer(PAGE_URL)

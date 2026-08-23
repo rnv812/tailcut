@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8" />
+<!--
+  Обычнейшая раскладка: плеер живёт во вложенном фрейме, а верхняя страница — чужой хост.
+  Content-скрипты объявлены с all_frames, поэтому мост встаёт в обоих документах, и рукопожатие
+  каждого обязано прийти своему фрейму. Адрес плеера здесь тот же, что PAGE_URL в bridge.spec.ts.
+-->
+<title>embedding host</title>
+<script>
+  // Слушатель ставится до фрейма с плеером: рукопожатие, ушедшее не туда, всплывёт здесь.
+  window.bridgeReady = []
+  window.addEventListener('message', (e) => {
+    if (e.data && e.data.type === 'tc:ready') window.bridgeReady.push(e.origin)
+  })
+</script>
+<iframe id="player" src="https://tailcut.test/player" width="640" height="360"></iframe>

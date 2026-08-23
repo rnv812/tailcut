@@ -22,8 +22,12 @@ export async function launchWithExtension(): Promise<{
   return { context, extensionId: new URL(sw.url()).host }
 }
 
-/** Отдаёт локальную страницу и фикстуры по вымышленному адресу. */
-export async function serveLocal(page: Page, htmlFile: string, url: string): Promise<void> {
+/**
+ * Готовит локальную страницу и фикстуры к выдаче по вымышленному адресу, не открывая её.
+ * Отдельно от перехода это нужно странице, которая встраивает другую: обе раскладываются
+ * по своим адресам заранее, а открывается только внешняя.
+ */
+export async function routeLocal(page: Page, htmlFile: string, url: string): Promise<void> {
   await page.route('**/fixtures/**', async (route) => {
     const rel = new URL(route.request().url()).pathname.replace('/fixtures/', '')
     const body = await fs.readFile(path.resolve('tests/fixtures', rel))
@@ -34,6 +38,10 @@ export async function serveLocal(page: Page, htmlFile: string, url: string): Pro
     const body = await fs.readFile(path.resolve('tests/e2e/page', htmlFile), 'utf8')
     await route.fulfill({ body, contentType: 'text/html' })
   })
+}
 
+/** Отдаёт локальную страницу и фикстуры по вымышленному адресу и открывает её. */
+export async function serveLocal(page: Page, htmlFile: string, url: string): Promise<void> {
+  await routeLocal(page, htmlFile, url)
   await page.goto(url)
 }

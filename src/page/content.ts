@@ -8,6 +8,8 @@ export function ensureBridge(): Promise<HTMLIFrameElement> {
 
   bridgePromise = new Promise((resolve) => {
     const iframe = document.createElement('iframe')
+    // Адрес — до вставки в документ: фрейм, вставленный без него, сначала грузит about:blank,
+    // и слушатель ниже отдал бы промис на этой загрузке, то есть фрейм ещё без моста.
     iframe.src = chrome.runtime.getURL(BRIDGE_PATH)
     iframe.dataset.tailcut = 'bridge'
     iframe.setAttribute('aria-hidden', 'true')
