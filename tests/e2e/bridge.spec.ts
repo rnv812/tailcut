@@ -92,8 +92,14 @@ type Echo = { length: number; detachedAtSender: boolean }
  * Шлёт мосту transferable-буфер заданного размера и ждёт подтверждения. Размер у каждого
  * вызова свой: подтверждение обязано повторять длину пришедшего буфера, а не какое-то число,
  * и только это доказывает, что байты доехали до моста, а не потерялись по дороге.
+ *
+ * Перед отправкой ждём, пока уляжется эхо на настоящие сегменты плеера: хук отправляет их
+ * мосту тем же путём, и без паузы первым ответом оказался бы чужой.
  */
 async function echoRoundTrip(page: Page, size: number, timeout = 3_000): Promise<Echo> {
+  await page.waitForFunction(() => (window as unknown as PlayerState).allAppended === true)
+  await page.waitForTimeout(500)
+
   return page.evaluate(
     async ({ size, limit }) => {
       const iframe = document.querySelector<HTMLIFrameElement>('iframe[data-tailcut]')!
@@ -136,7 +142,6 @@ test('мост встаёт на странице со строгим CSP и п�
   ).toEqual({ length: 4096, detachedAtSender: true })
 
   // Страница со строгим CSP должна продолжать играть: мост не мешает её собственному MSE.
-  await page.waitForFunction(() => (window as unknown as PlayerState).allAppended === true)
   expect(await page.evaluate(() => (window as unknown as PlayerState).appended)).toBe(4)
 
   await context.close()
@@ -254,6 +259,11 @@ test('мост отвечает только на tc:append и не спотык
   const { context, page, extensionId, consoleLog, log } = await openPlayer(PAGE_URL)
   await bridgeFrame(page, extensionId, log)
 
+  // Плеер этой страницы дописывает свои сегменты, и хук отправляет их в мост тем же путём:
+  // эхо на них придёт вперемешку с проверяемым. Ждём, пока эта волна уляжется, и считаем
+  // только ответы на сообщения самого теста.
+  await page.waitForFunction(() => (window as unknown as PlayerState).allAppended === true)
+
   // Порядок доставки postMessage сохраняется: эхо на мусор пришло бы раньше эха на tc:append.
   const echoes = await page.evaluate(async () => {
     const iframe = document.querySelector<HTMLIFrameElement>('iframe[data-tailcut]')!
@@ -262,6 +272,9 @@ test('мост отвечает только на tc:append и не спотык
     window.addEventListener('message', (e) => {
       if (e.data?.type === 'tc:echo') seen.push(e.data)
     })
+
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    seen.length = 0
 
     target.postMessage(null, '*')
     target.postMessage({ type: 'tc:drm', sourceId: 's' }, '*')

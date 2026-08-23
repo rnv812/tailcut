@@ -1,4 +1,4 @@
-import { BRIDGE_PATH } from '../shared/protocol'
+import { BRIDGE_PATH, isPageToBridge } from '../shared/protocol'
 
 let bridgePromise: Promise<HTMLIFrameElement> | null = null
 
@@ -28,3 +28,17 @@ export function ensureBridge(): Promise<HTMLIFrameElement> {
 }
 
 ensureBridge()
+
+window.addEventListener('message', async (event: MessageEvent) => {
+  if (event.source !== window) return
+  if (!isPageToBridge(event.data)) return
+
+  const iframe = await ensureBridge()
+  const message = event.data
+
+  if (message.type === 'tc:append') {
+    iframe.contentWindow?.postMessage(message, '*', [message.bytes])
+  } else {
+    iframe.contentWindow?.postMessage(message, '*')
+  }
+})

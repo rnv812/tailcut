@@ -18,11 +18,19 @@ function fakeElement(tagName: string) {
   const attributes: Record<string, string> = {}
   /** Начатые и ещё не отработавшие load навигации, в порядке начала. */
   const pending: string[] = []
+  /** Что content script отправил в документ фрейма. */
+  const posted: Array<{ message: unknown; transfer: unknown }> = []
   let attached = false
   let src = ''
 
   return {
     tagName,
+    posted,
+    contentWindow: {
+      postMessage: (message: unknown, _targetOrigin: string, transfer?: unknown) => {
+        posted.push({ message, transfer })
+      },
+    },
     dataset: {} as Record<string, string>,
     style: { cssText: '' },
     attributes,
@@ -58,6 +66,16 @@ type FakeElement = ReturnType<typeof fakeElement>
 function installDom() {
   const created: FakeElement[] = []
   const appended: FakeElement[] = []
+  const messageListeners: Array<(event: MessageEvent) => void> = []
+
+  // Окно страницы: content script слушает на нём сообщения хука и по нему же отличает
+  // своё окно от чужого.
+  const pageWindow = {
+    addEventListener: (type: string, listener: (event: MessageEvent) => void) => {
+      if (type === 'message') messageListeners.push(listener)
+    },
+  }
+  vi.stubGlobal('window', pageWindow)
 
   vi.stubGlobal('document', {
     createElement: (tagName: string) => {
@@ -80,6 +98,15 @@ function installDom() {
   return {
     created,
     appended,
+    pageWindow,
+    /**
+     * Доставляет сообщение слушателю content script'а. Обработчик асинхронный — ждёт мост,
+     * поэтому после доставки очередь микрозадач надо дать разобрать.
+     */
+    deliverMessage: async (data: unknown, source: unknown = pageWindow): Promise<void> => {
+      for (const listener of messageListeners) listener({ data, source } as MessageEvent)
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    },
     /** Адреса, которые фреймы уже начали грузить и ещё не отработали. */
     pendingLoads: (): string[] => created.flatMap((element) => element.pending),
     /** Отрабатывает ближайшую навигацию: браузер шлёт load по каждой, about:blank включая. */
@@ -191,5 +218,66 @@ describe('ensureBridge', () => {
 
     expect(loadedAtResolve, 'промис отдал фрейм до загрузки моста').toBe(BRIDGE_URL)
     expect(dom.pendingLoads(), 'фрейм ходил куда-то помимо страницы моста').toEqual([])
+  })
+})
+
+describe('пересылка сообщений хука в мост', () => {
+  const bytes = () => new ArrayBuffer(8)
+  const append = (buffer: ArrayBuffer) => ({
+    type: 'tc:append',
+    sourceId: 's1',
+    bufferId: 'b1',
+    mime: 'video/mp4',
+    bytes: buffer,
+  })
+
+  /** Поднимает content script с уже загруженным мостом и отдаёт его окружение. */
+  async function withBridge() {
+    const dom = installDom()
+    await importContent()
+    dom.deliverLoad()
+    return dom
+  }
+
+  it('отдаёт сегмент мосту передачей буфера, а не копией', async () => {
+    const dom = await withBridge()
+    const buffer = bytes()
+
+    await dom.deliverMessage(append(buffer))
+
+    // Копия на этом участке стоила бы лишнего прохода по каждому сегменту.
+    expect(dom.created[0]!.posted).toEqual([
+      { message: append(buffer), transfer: [buffer] },
+    ])
+  })
+
+  it('служебные сообщения уходят без списка передачи', async () => {
+    const dom = await withBridge()
+    const message = { type: 'tc:source', sourceId: 's1', objectUrl: 'blob:https://site.example/x' }
+
+    await dom.deliverMessage(message)
+
+    expect(dom.created[0]!.posted).toEqual([{ message, transfer: undefined }])
+  })
+
+  it('чужие сообщения в мост не уходят', async () => {
+    const dom = await withBridge()
+
+    // На живых страницах в окно летят сообщения сборщиков, аналитики и рекламы.
+    await dom.deliverMessage({ type: 'webpackHotUpdate' })
+    await dom.deliverMessage(null)
+    await dom.deliverMessage('tc:append')
+
+    expect(dom.created[0]!.posted).toEqual([])
+  })
+
+  it('сообщение не из окна страницы игнорируется', async () => {
+    const dom = await withBridge()
+
+    // Источник — не наше окно: так выглядит сообщение из вложенного фрейма или от самого моста.
+    // Приняв его, content script гонял бы чужие байты по кругу.
+    await dom.deliverMessage(append(bytes()), { name: 'другое окно' })
+
+    expect(dom.created[0]!.posted).toEqual([])
   })
 })
