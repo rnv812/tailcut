@@ -1,6 +1,8 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 
 const MIME = 'video/mp4; codecs="avc1.4d401e"'
+/** Звуковая дорожка: у любого DASH/HLS-потока она живёт своим SourceBuffer на том же MediaSource. */
+const AUDIO_MIME = 'audio/mp4; codecs="mp4a.40.2"'
 
 /** FNV-1a, 32 бита: сравниваем содержимое, а не длину — кусок памяти той же длины не пройдёт. */
 function digest(bytes: Uint8Array): string {
@@ -55,8 +57,15 @@ function installPage(options: { eme?: boolean } = {}) {
 
   class FakeSourceBuffer {
     readonly appended: Array<{ byteLength: number; digest: string }> = []
+    /**
+     * Чем браузер ответит на дописку вместо неё самой. Исключения из appendBuffer — штатная
+     * работа MSE: QuotaExceededError на полном буфере, InvalidStateError на дописке во время
+     * update. Настоящий appendBuffer бросает до того, как что-либо примет.
+     */
+    failWith: unknown = null
     constructor(readonly mime: string) {}
     appendBuffer(data: BufferSource): void {
+      if (this.failWith !== null) throw this.failWith
       this.appended.push(snapshot(data))
     }
   }
@@ -153,9 +162,16 @@ async function trapAsyncErrors(body: () => Promise<void>): Promise<unknown[]> {
 /** Заводит источник как плеер: адрес из createObjectURL уходит в video.src. */
 function openSource(page: ReturnType<typeof installPage>) {
   const mediaSource = new page.MediaSource()
-  URL.createObjectURL(mediaSource as unknown as MediaSource)
-  return mediaSource.addSourceBuffer(MIME)
+  const objectUrl = URL.createObjectURL(mediaSource as unknown as MediaSource)
+  return { mediaSource, objectUrl, sourceBuffer: mediaSource.addSourceBuffer(MIME) }
 }
+
+/** Идентификаторы, с которыми сообщение ушло наружу: ими мост различает потоки и дорожки. */
+const labelsOf = (item: Posted) => ({
+  sourceId: String(item.message.sourceId),
+  bufferId: String(item.message.bufferId),
+  mime: String(item.message.mime),
+})
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -166,7 +182,7 @@ describe('копия сегмента', () => {
   it('не отсоединяет буфер страницы: голый ArrayBuffer дописывается повторно', async () => {
     const page = installPage()
     await importHook()
-    const sourceBuffer = openSource(page)
+    const { sourceBuffer } = openSource(page)
 
     // Плееры дописывают именно голый ArrayBuffer (`(await fetch(url)).arrayBuffer()`), и тот же
     // буфер идёт в дело второй раз, когда кеш сегментов дописывает его после перемотки. Отдай
@@ -196,7 +212,7 @@ describe('копия сегмента', () => {
   it('снимается по окну вида, а не по всему буферу под ним', async () => {
     const page = installPage()
     await importHook()
-    const sourceBuffer = openSource(page)
+    const { sourceBuffer } = openSource(page)
 
     const padded = new Uint8Array(64 + 11)
     padded.set(pattern(64), 7)
@@ -218,7 +234,7 @@ describe('копия сегмента', () => {
   it('уходит мосту списком передачи, а не копией', async () => {
     const page = installPage()
     await importHook()
-    const sourceBuffer = openSource(page)
+    const { sourceBuffer } = openSource(page)
 
     sourceBuffer.appendBuffer(segment(128))
     await flush()
@@ -286,5 +302,119 @@ describe('EME', () => {
       'хук объявил EME там, где браузер его не даёт',
     ).toBe('undefined')
     expect(page.posted).toEqual([])
+  })
+})
+
+describe('идентификаторы', () => {
+  it('видео и звук одного MediaSource различаются bufferId', async () => {
+    const page = installPage()
+    await importHook()
+
+    // Ровно то, что делает любой DASH/HLS-плеер: один MediaSource, два SourceBuffer — дорожка
+    // видео и дорожка звука. bufferId существует ровно затем, чтобы мост их различал: с общим
+    // значением обе дорожки уезжают мосту как одна и склеиваются в кашу.
+    const { mediaSource, sourceBuffer: video } = openSource(page)
+    const audio = mediaSource.addSourceBuffer(AUDIO_MIME)
+
+    video.appendBuffer(segment(64))
+    audio.appendBuffer(segment(48))
+    video.appendBuffer(segment(96))
+    await flush()
+
+    const seen = page.of('tc:append').map(labelsOf)
+    expect(seen.map((item) => item.mime)).toEqual([MIME, AUDIO_MIME, MIME])
+    expect(
+      new Set(seen.map((item) => item.sourceId)).size,
+      'дорожки одного MediaSource — один источник',
+    ).toBe(1)
+    expect(seen[2]!.bufferId, 'сегменты одной дорожки разъехались по bufferId').toBe(
+      seen[0]!.bufferId,
+    )
+    expect(
+      seen[1]!.bufferId,
+      'звук уехал под тем же bufferId, что видео: различать дорожки на мосту нечем',
+    ).not.toBe(seen[0]!.bufferId)
+  })
+
+  it('два MediaSource страницы различаются sourceId', async () => {
+    const page = installPage()
+    await importHook()
+
+    // Второй MediaSource на странице — штатное дело: плеер пересоздаёт его при смене качества
+    // и при перезапуске, да и двух <video> на странице никто не запрещал.
+    const first = openSource(page)
+    const second = openSource(page)
+
+    first.sourceBuffer.appendBuffer(segment(64))
+    second.sourceBuffer.appendBuffer(segment(48))
+    await flush()
+
+    const sources = page.of('tc:source').map((item) => ({
+      sourceId: String(item.message.sourceId),
+      objectUrl: String(item.message.objectUrl),
+    }))
+    expect(
+      sources.map((item) => item.objectUrl),
+      'подготовка: у источников должны быть разные адреса',
+    ).toEqual([first.objectUrl, second.objectUrl])
+    expect(
+      sources[1]!.sourceId,
+      'два независимых потока уехали под одним sourceId: мост сольёт их в один',
+    ).not.toBe(sources[0]!.sourceId)
+
+    const seen = page.of('tc:append').map(labelsOf)
+    expect(seen.map((item) => item.sourceId)).toEqual([
+      sources[0]!.sourceId,
+      sources[1]!.sourceId,
+    ])
+    expect(seen[1]!.bufferId, 'дорожки разных источников уехали под одним bufferId').not.toBe(
+      seen[0]!.bufferId,
+    )
+  })
+})
+
+describe('прозрачность appendBuffer', () => {
+  it('исключение от браузера доходит до плеера, а не съедается обёрткой', async () => {
+    const page = installPage()
+    await importHook()
+    const { sourceBuffer } = openSource(page)
+
+    // QuotaExceededError — обычная работа MSE, а не экзотика: именно по нему плеер чистит
+    // buffered-диапазоны и дописывает сегмент заново. Съеденное обёрткой исключение оставляет
+    // его без сигнала — он не эвиктит и молча встаёт.
+    const quota = new DOMException('buffer full', 'QuotaExceededError')
+    sourceBuffer.failWith = quota
+
+    let thrown: unknown = '(обёртка ничего не бросила)'
+    try {
+      sourceBuffer.appendBuffer(segment(64))
+    } catch (error) {
+      thrown = error
+    }
+    await flush()
+
+    expect(thrown, 'обёртка съела исключение appendBuffer').toBe(quota)
+  })
+})
+
+describe('синхронный путь плеера', () => {
+  it('отправка уходит в микрозадачу, а не в вызов appendBuffer', async () => {
+    const page = installPage()
+    await importHook()
+    const { sourceBuffer } = openSource(page)
+
+    sourceBuffer.appendBuffer(segment(256))
+
+    // Structured clone и отсоединение буфера — не работа синхронного пути: позови обёртка send
+    // прямо здесь, они легли бы в вызов плеера на каждый сегмент.
+    expect(page.of('tc:append'), 'обёртка отправила сообщение прямо в вызове плеера').toEqual([])
+    expect(sourceBuffer.appended, 'подготовка: плеер получает свои байты сразу').toHaveLength(1)
+
+    // Микрозадача, а не таймер: очередь разбирается до возврата в цикл событий, и мост получает
+    // сегмент в том же тике.
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(page.of('tc:append'), 'отправка отложена дальше микрозадачи').toHaveLength(1)
   })
 })

@@ -18,6 +18,14 @@ const APPENDED = [
 ]
 
 const MIME = 'video/mp4; codecs="avc1.4d401e"'
+/** Звуковая дорожка того же потока: tests/fixtures/h264/*-stream1.m4s — mp4a/soun. */
+const AUDIO_MIME = 'audio/mp4; codecs="mp4a.40.2"'
+
+/** Двухдорожечный поток так и раскладывается: один MediaSource, свой SourceBuffer на дорожку. */
+const TRACKS = {
+  video: { mime: MIME, files: ['h264/init-stream0.m4s', 'h264/chunk-stream0-00001.m4s'] },
+  audio: { mime: AUDIO_MIME, files: ['h264/init-stream1.m4s', 'h264/chunk-stream1-00001.m4s'] },
+}
 
 /**
  * FNV-1a, 32 бита. Тот же алгоритм считается в браузере: сравниваются не длины, а содержимое —
@@ -29,9 +37,9 @@ function digest(bytes: Uint8Array): string {
   return `${bytes.byteLength}:${hash}`
 }
 
-async function fixtureDigests(): Promise<string[]> {
+async function fixtureDigests(list: string[] = APPENDED): Promise<string[]> {
   const files = await Promise.all(
-    APPENDED.map((rel) => fs.readFile(path.resolve('tests/fixtures', rel))),
+    list.map((rel) => fs.readFile(path.resolve('tests/fixtures', rel))),
   )
   return files.map((file) => digest(new Uint8Array(file)))
 }
@@ -413,6 +421,205 @@ test('на http-странице EME не выдумывается', async () =>
   // поставленная поверх пустого места, выдумала бы возможность, которой у браузера нет:
   // проверка наличия прошла бы, а вызов упал бы уже внутри обёртки.
   expect(observed.eme, 'хук объявил EME там, где браузер его не даёт').toBe('undefined')
+
+  await close(context)
+})
+
+test('дорожки одного MediaSource различаются bufferId', async () => {
+  const { context, page, log } = await openPlayer()
+  await playerDone(page)
+
+  // Один MediaSource и два SourceBuffer — раскладка любого DASH/HLS-плеера: видео отдельно,
+  // звук отдельно. bufferId существует ровно затем, чтобы мост их различал.
+  const observed = await page.evaluate(async (tracks) => {
+    const seen = window as unknown as Probe
+    const before = seen.tcAppend.length
+    const source = new MediaSource()
+    const element = document.createElement('video')
+    element.src = URL.createObjectURL(source)
+    document.body.appendChild(element)
+
+    await new Promise((resolve) => source.addEventListener('sourceopen', resolve, { once: true }))
+
+    const load = async (rel: string): Promise<ArrayBuffer> =>
+      (await fetch(`/fixtures/${rel}`)).arrayBuffer()
+    const append = (buffer: SourceBuffer, bytes: ArrayBuffer): Promise<unknown> =>
+      new Promise((resolve) => {
+        buffer.addEventListener('updateend', resolve, { once: true })
+        buffer.appendBuffer(bytes)
+      })
+
+    const video = source.addSourceBuffer(tracks.video.mime)
+    const audio = source.addSourceBuffer(tracks.audio.mime)
+
+    for (const rel of tracks.video.files) await append(video, await load(rel))
+    for (const rel of tracks.audio.files) await append(audio, await load(rel))
+
+    const wanted = tracks.video.files.length + tracks.audio.files.length
+    const deadline = Date.now() + 3_000
+    while (seen.tcAppend.length < before + wanted && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+
+    return {
+      captured: seen.tcAppend.slice(before),
+      error: element.error ? element.error.code : null,
+    }
+  }, TRACKS)
+
+  const video = observed.captured.filter((item) => item.mime === MIME)
+  const audio = observed.captured.filter((item) => item.mime === AUDIO_MIME)
+
+  expect(
+    video.map((item) => item.digest),
+    `звук или видео не доехали; консоль страницы: ${log()}`,
+  ).toEqual(await fixtureDigests(TRACKS.video.files))
+  expect(audio.map((item) => item.digest)).toEqual(await fixtureDigests(TRACKS.audio.files))
+
+  // Источник у дорожек общий, а сами дорожки обязаны различаться.
+  expect(new Set(observed.captured.map((item) => item.sourceId)).size).toBe(1)
+  expect(
+    new Set(video.map((item) => item.bufferId)).size,
+    'сегменты одной дорожки разъехались по bufferId',
+  ).toBe(1)
+  expect(new Set(audio.map((item) => item.bufferId)).size).toBe(1)
+  expect(
+    audio[0]!.bufferId,
+    'звук уехал под тем же bufferId, что видео: различать дорожки на мосту нечем',
+  ).not.toBe(video[0]!.bufferId)
+  expect(observed.error, 'плеер не должен получить ошибку из-за обёрток').toBeNull()
+
+  await close(context)
+})
+
+test('два MediaSource на странице не сливаются в один источник', async () => {
+  const { context, page, log } = await openPlayer()
+  await playerDone(page)
+
+  // Второй MediaSource — штатное дело: плеер пересоздаёт его при смене качества и при
+  // перезапуске, да и двух <video> на странице никто не запрещал. С общим sourceId два
+  // независимых потока сливаются в один.
+  const observed = await page.evaluate(async (mime) => {
+    const seen = window as unknown as Probe
+    const beforeAppend = seen.tcAppend.length
+    const beforeSource = seen.tcSource.length
+
+    const load = async (rel: string): Promise<ArrayBuffer> =>
+      (await fetch(`/fixtures/${rel}`)).arrayBuffer()
+
+    const openStream = async (chunk: string): Promise<string> => {
+      const source = new MediaSource()
+      const element = document.createElement('video')
+      element.src = URL.createObjectURL(source)
+      document.body.appendChild(element)
+      await new Promise((resolve) => source.addEventListener('sourceopen', resolve, { once: true }))
+
+      const buffer = source.addSourceBuffer(mime)
+      const append = (bytes: ArrayBuffer): Promise<unknown> =>
+        new Promise((resolve) => {
+          buffer.addEventListener('updateend', resolve, { once: true })
+          buffer.appendBuffer(bytes)
+        })
+
+      await append(await load('h264/init-stream0.m4s'))
+      await append(await load(chunk))
+      return element.src
+    }
+
+    const first = await openStream('h264/chunk-stream0-00001.m4s')
+    const second = await openStream('h264/chunk-stream0-00002.m4s')
+
+    const deadline = Date.now() + 3_000
+    while (seen.tcAppend.length < beforeAppend + 4 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+
+    return {
+      urls: [first, second],
+      sources: seen.tcSource.slice(beforeSource),
+      captured: seen.tcAppend.slice(beforeAppend),
+    }
+  }, MIME)
+
+  expect(
+    observed.sources.map((item) => item.objectUrl),
+    `подготовка: два источника со своими адресами; консоль страницы: ${log()}`,
+  ).toEqual(observed.urls)
+
+  const [first, second] = observed.sources
+  expect(
+    second!.sourceId,
+    'два независимых потока уехали под одним sourceId: мост сольёт их в один',
+  ).not.toBe(first!.sourceId)
+
+  // Сегменты разложились по своим источникам, а не свалились в кучу.
+  const digestsOf = (sourceId: string): string[] =>
+    observed.captured.filter((item) => item.sourceId === sourceId).map((item) => item.digest)
+  expect(digestsOf(first!.sourceId)).toEqual(
+    await fixtureDigests(['h264/init-stream0.m4s', 'h264/chunk-stream0-00001.m4s']),
+  )
+  expect(digestsOf(second!.sourceId)).toEqual(
+    await fixtureDigests(['h264/init-stream0.m4s', 'h264/chunk-stream0-00002.m4s']),
+  )
+  // Дорожки у разных источников тоже свои: иначе в дорожку подмешаются чужие сегменты.
+  expect(new Set(observed.captured.map((item) => item.bufferId)).size).toBe(2)
+
+  await close(context)
+})
+
+test('исключение из appendBuffer доходит до плеера', async () => {
+  const { context, page, log } = await openPlayer()
+  await playerDone(page)
+
+  // Исключения из appendBuffer — обычная работа браузерного API: InvalidStateError прилетает
+  // при дописке во время update, QuotaExceededError — когда буфер полон, и именно по ним плеер
+  // чистит buffered-диапазоны и дописывает заново. Съеденное обёрткой исключение оставляет его
+  // без сигнала: он не эвиктит, не повторяет дописку и молча встаёт.
+  const observed = await page.evaluate(async (mime) => {
+    const source = new MediaSource()
+    const element = document.createElement('video')
+    element.src = URL.createObjectURL(source)
+    document.body.appendChild(element)
+    await new Promise((resolve) => source.addEventListener('sourceopen', resolve, { once: true }))
+
+    const buffer = source.addSourceBuffer(mime)
+    const load = async (rel: string): Promise<ArrayBuffer> =>
+      (await fetch(`/fixtures/${rel}`)).arrayBuffer()
+    const settled = (): Promise<unknown> =>
+      new Promise((resolve) => buffer.addEventListener('updateend', resolve, { once: true }))
+
+    const init = await load('h264/init-stream0.m4s')
+    const chunk = await load('h264/chunk-stream0-00001.m4s')
+
+    const first = settled()
+    buffer.appendBuffer(init)
+
+    let thrown = '(обёртка ничего не бросила)'
+    try {
+      // Дописка, пока предыдущая не закончилась: браузер отвечает InvalidStateError.
+      buffer.appendBuffer(chunk)
+    } catch (error) {
+      thrown = (error as DOMException).name
+    }
+    await first
+
+    // Ровно то, что делает плеер, получив отказ: повторяет дописку, когда буфер освободился.
+    const retried = settled()
+    buffer.appendBuffer(chunk)
+    await retried
+
+    return {
+      thrown,
+      buffered: buffer.buffered.length ? buffer.buffered.end(0) : 0,
+      error: element.error ? element.error.code : null,
+    }
+  }, MIME)
+
+  expect(observed.thrown, `обёртка съела исключение appendBuffer; консоль: ${log()}`).toBe(
+    'InvalidStateError',
+  )
+  expect(observed.buffered, 'повторная дописка после отказа ничего не набрала').toBeGreaterThan(0)
+  expect(observed.error, 'плеер не должен получить ошибку из-за обёрток').toBeNull()
 
   await close(context)
 })
