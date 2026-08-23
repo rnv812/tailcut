@@ -168,14 +168,32 @@ function installWindow(referrer = REFERRER) {
   }
   vi.stubGlobal('URL', TestURL)
 
-  const runtime: { lastError?: { message: string } } = {}
+  /**
+   * Отказы, о которых Chrome написал бы в консоль «Unchecked runtime.lastError»: обработчик
+   * скачивания вернул управление, так и не прочитав chrome.runtime.lastError.
+   */
+  const uncheckedErrors: string[] = []
+  /** Отказ живёт ровно на время обработчика — так его отдаёт и Chrome. */
+  let lastError: { message: string } | undefined
+  let lastErrorRead = false
+
   vi.stubGlobal('chrome', {
-    runtime,
+    runtime: {
+      get lastError() {
+        lastErrorRead = true
+        return lastError
+      },
+    },
     downloads: {
       download(options: Download, done: (id?: number) => void) {
         downloads.push(options)
-        runtime.lastError = downloadId === undefined ? { message: 'Download failed' } : undefined
+        lastError = downloadId === undefined ? { message: 'Download failed' } : undefined
+        lastErrorRead = false
+
         done(downloadId)
+
+        if (lastError && !lastErrorRead) uncheckedErrors.push(lastError.message)
+        lastError = undefined
       },
     },
   })
@@ -223,6 +241,7 @@ function installWindow(referrer = REFERRER) {
     },
     downloads,
     revoked,
+    uncheckedErrors,
     /** Байты файла, которые мост отдал Chrome на скачивание. */
     async savedBytes(index = 0): Promise<Uint8Array> {
       const started = downloads[index]
@@ -651,14 +670,19 @@ describe('мост сохраняет накопленное файлом', () =
 
   it('в имени файла не остаётся запрещённых знаков', async () => {
     const win = await loadBridge()
-    win.context(PAGE_URL, 'A/B: "C" <D> | E?')
+    // Заголовок задаёт страница, и здесь он доходит до файловой системы: в проверке стоит
+    // весь запрещённый набор разом, потому что выпавший из него знак дошёл бы туда молча.
+    win.context(PAGE_URL, 'A/B: "C" <D> | E? AC\\DC * F\u0001G')
     win.append(initBytes)
     win.append(seg1Bytes)
 
     win.save(keyFor(PAGE_URL))
 
-    // Косая черта увела бы файл в подкаталог, двоеточие и звёздочка запрещены Windows.
-    expect(win.downloads[0]!.filename).toBe('A B C D E.mp4')
+    // Обе косые Chrome читает разделителем пути: «AC\DC.mp4» уходит не файлом, а каталогом
+    // AC с файлом DC.mp4 внутри — пользователь нажал «Save all» и клипа на месте не нашёл.
+    // Звёздочку и двоеточие Windows в именах не принимает вовсе: скачивание отклоняется,
+    // и попап об этом молчит. Управляющие знаки — оттуда же.
+    expect(win.downloads[0]!.filename).toBe('A B C D E AC DC F G.mp4')
   })
 
   it('заголовок из одних точек не превращается в скрытый файл', async () => {
@@ -772,6 +796,21 @@ describe('мост сохраняет накопленное файлом', () =
     const reply = win.save(keyFor(PAGE_URL))
 
     expect(reply.received).toEqual([{ ok: false }])
+  })
+
+  it('отказ Chrome прочитан, а не оставлен консоли фрейма', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+    win.failDownloads()
+
+    win.save(keyFor(PAGE_URL))
+
+    // Отказ Chrome отдаёт через chrome.runtime.lastError и, если обработчик его не прочитал,
+    // пишет о нём сам: консоль фрейма моста набирается «Unchecked runtime.lastError» — на вид
+    // необработанными ошибками расширения там, где отказ на самом деле разобран.
+    expect(win.uncheckedErrors, 'отказ скачивания остался непрочитанным').toEqual([])
   })
 
   it('адрес блоба живёт, пока Chrome читает файл, и снимается потом', async () => {

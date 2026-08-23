@@ -1,7 +1,10 @@
-import { test, expect, type BrowserContext, type Page } from '@playwright/test'
+import { chromium, test, expect, type Browser, type BrowserContext, type Page } from '@playwright/test'
 import { spawnSync } from 'node:child_process'
 import { statSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
+import path from 'node:path'
 import { launchWithExtension, serveLocal } from './helpers'
+import type { SessionSummary } from '../../src/shared/protocol'
 
 const PLAYER_URL = 'https://tailcut.test/player'
 
@@ -45,6 +48,59 @@ async function openPopup(context: BrowserContext, page: Page, extensionId: strin
   await page.bringToFront()
   await popup.goto(`chrome-extension://${extensionId}/popup/popup.html`)
   return popup
+}
+
+/** Адрес, по которому попапу отдаётся его же сборка из dist. Вымышленный, как и у плеера. */
+const POPUP_URL = 'https://tailcut.test/popup/popup.html'
+
+/** Сводка, которой «вкладка» отвечает попапу по команде теста. */
+const SUMMARY: SessionSummary = {
+  key: 'https://site.example/watch|avc1|inf',
+  url: 'https://site.example/watch?v=abc',
+  title: 'Clip — site.example',
+  duration: 6,
+  bytes: 1_543_210,
+  runs: 1,
+}
+
+type Answer = (sessions: SessionSummary[]) => Promise<void>
+
+/**
+ * Открывает попап из dist без запуска расширения и оставляет ответ вкладки за тестом:
+ * состояние ожидания здесь не мгновенное, как с живым content script, а держится ровно до
+ * вызова answer. Меряется при этом настоящая вёрстка попапа настоящим движком — высоту,
+ * которой Chrome открывает окно попапа, взять больше неоткуда.
+ */
+async function offlinePopup(): Promise<{ browser: Browser; popup: Page; answer: Answer }> {
+  const browser = await chromium.launch()
+  const popup = await browser.newPage()
+
+  await popup.route('**/popup/*', async (route) => {
+    const file = path.basename(new URL(route.request().url()).pathname)
+    const body = await readFile(path.resolve('dist/popup', file), 'utf8')
+    const contentType = file.endsWith('.js') ? 'text/javascript' : 'text/html'
+    await route.fulfill({ body, contentType })
+  })
+
+  await popup.addInitScript(() => {
+    const asked = new Promise((resolve) => {
+      Object.assign(window, { __answer: resolve })
+    })
+    // Из всего chrome.* попапу нужна одна вкладка и её ответ: остальное к вёрстке отношения
+    // не имеет, а живой вкладке нечем растянуть молчание на время замера.
+    Object.assign(window, {
+      chrome: { tabs: { query: async () => [{ id: 1 }], sendMessage: () => asked } },
+    })
+  })
+
+  await popup.goto(POPUP_URL)
+
+  const answer: Answer = (sessions) =>
+    popup.evaluate((list) => {
+      ;(window as unknown as { __answer: (value: unknown) => void }).__answer(list)
+    }, sessions)
+
+  return { browser, popup, answer }
 }
 
 test('попап показывает накопленное и сохраняет его файлом mp4', async () => {
@@ -131,4 +187,27 @@ test('бейдж показывает накопленное на вкладке
   await expect.poll(badgeText, { timeout: 10_000 }).toBe('6s')
 
   await context.close()
+})
+
+test('попап открывается в свой рост, а не полоской «Loading…»', async () => {
+  const { browser, popup, answer } = await offlinePopup()
+  const bodyHeight = () => popup.evaluate(() => document.body.getBoundingClientRect().height)
+
+  const loading = popup.getByText('Loading…')
+  await expect(loading).toBeVisible()
+  const strip = (await loading.boundingBox())!.height
+  const waiting = await bodyHeight()
+
+  await answer([SUMMARY])
+  await expect(popup.getByTestId('title')).toHaveText(SUMMARY.title)
+  const ready = await bodyHeight()
+
+  // Без пола высоты тело попапа обжимает единственную строку «Loading…»: окно открывается
+  // в её рост и подпрыгивает, когда приходит ответ вкладки.
+  expect(waiting, 'попап открылся полоской в одну строку').toBeGreaterThan(strip)
+  // Точный рост готового попапа зависит от шрифта системы, поэтому сверяется не равенство,
+  // а порядок: открылся попап примерно в свой рост, а не вырос на ответе вдвое.
+  expect(ready, 'на ответе вкладки попап вырос вдвое').toBeLessThan(waiting * 2)
+
+  await browser.close()
 })
