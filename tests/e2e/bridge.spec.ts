@@ -2,6 +2,7 @@ import { test, expect, type Frame, type Page } from '@playwright/test'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { launchWithExtension, routeLocal, serveLocal } from './helpers'
+import { sessionKey } from '../../src/core/session-key'
 
 const PAGE_URL = 'https://tailcut.test/player'
 /** Второй адрес отличает работу «на любом сайте» от работы на одном знакомом хосте. */
@@ -159,7 +160,10 @@ const playerDone = (page: Page) =>
 /** Сессия, набранная плеером тестовой страницы: три фрагмента по две секунды подряд. */
 async function playerSession(url: string): Promise<Summary> {
   return {
-    key: expect.any(String) as unknown as string,
+    // Ключ, которым попап потом запросит эту сессию у реестра: адрес страницы им не
+    // является — метки перехода из него срезаны, а кодеки дописаны. Плеер страницы
+    // играет одну видеодорожку avc1, длительность на этом этапе ещё неизвестна.
+    key: sessionKey({ url, codecs: ['avc1'], durationSeconds: Infinity }),
     url,
     // Заголовок мост может узнать только из tc:context: на своём origin он его не видит,
     // а referrer несёт лишь адрес. Пустая строка здесь означала бы, что контекст не дошёл.

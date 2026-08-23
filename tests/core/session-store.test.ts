@@ -54,6 +54,10 @@ function trak(trackId: number, timescale: number, handler: string, codec: string
 const muxedInit = new Uint8Array(
   box('moov', ...[trak(1, 1000, 'vide', 'avc1'), trak(2, 8000, 'soun', 'mp4a')]),
 )
+const muxedPage = { ...page, url: 'https://site.example/watch?v=muxed' }
+
+/** Тот же init с безобидным хвостом: кодеки те же, байты другие — видно подмену. */
+const initWithTail = new Uint8Array([...init, ...box('free', zeros(4))])
 
 /** moof, у которого длительность лежит в tfhd: trun отдаёт только число сэмплов. */
 function moof(trackId: number, baseTime: number, samples: number, sampleDuration: number) {
@@ -203,6 +207,33 @@ describe('SessionStore: что попадает в сессию', () => {
     expect(store.get('нет такого ключа')).toBeUndefined()
   })
 
+  it('в ключ идут кодеки всех дорожек, а не только первой', () => {
+    const store = new SessionStore()
+    store.append({ ...muxedPage, bytes: muxedInit })
+
+    // Муксованный init: видео и звук одним представлением. Обрежь список до первого кодека —
+    // и video-only avc1 с того же адреса получил бы тот же ключ, что avc1+mp4a: два разных
+    // представления сложились бы в одну карту, из которой файл уже не собрать.
+    expect(store.list()[0]!.key).toBe(
+      sessionKey({ url: muxedPage.url, codecs: ['avc1', 'mp4a'], durationSeconds: Infinity }),
+    )
+  })
+
+  it('init, приклеенный к первому фрагменту, заводит сессию по своему moov', () => {
+    const store = new SessionStore()
+
+    // Самоинициализирующийся сегмент: moov и первый moof одним appendBuffer. Разбирай мост
+    // фрагмент раньше init'а — moof нашёлся бы первым, источник остался бы без сессии,
+    // и поток пропал бы целиком, а не одним сегментом.
+    store.append({ ...page, bytes: new Uint8Array([...init, ...seg1]) })
+
+    expect(store.list()).toHaveLength(1)
+    expect(store.list()[0]!.info.tracks[0]!.codec).toBe('avc1')
+    // Медиачасть такого буфера в карту не идёт: она поехала бы туда вместе с moov, который
+    // уже лежит в initBytes, и в собранном файле moov оказался бы дважды.
+    expect(store.list()[0]!.map.runs()).toEqual([])
+  })
+
   it('другой кодек на том же адресе — отдельная сессия', () => {
     const store = new SessionStore()
     store.append({ ...page, bytes: init })
@@ -242,6 +273,20 @@ describe('SessionStore: чужие и битые данные', () => {
     expect(store.list()).toEqual([])
   })
 
+  it('фрагмент нулевой длительности на карту не ложится', () => {
+    const store = new SessionStore()
+    store.append({ ...muxedPage, bytes: muxedInit })
+
+    // Нулевая длительность означает, что взять её из moof не вышло: в trun её нет, а tfhd
+    // отдал ноль (у DASH она нередко лежит в trex, куда разбор не заглядывает). Участка
+    // времени у такого фрагмента нет, и волосок нулевой ширины его не заменит: прогон
+    // обещал бы материал, которого в нём нет. Цена — потерянные байты сегмента.
+    store.append({ ...muxedPage, bytes: moof(1, 5_000, 4, 0) })
+
+    expect(store.list()[0]!.map.runs()).toEqual([])
+    expect(store.list()[0]!.map.totalBytes()).toBe(0)
+  })
+
   it('мусор не портит уже открытую сессию', () => {
     const store = new SessionStore()
     store.append({ ...page, bytes: init })
@@ -255,8 +300,6 @@ describe('SessionStore: чужие и битые данные', () => {
 })
 
 describe('SessionStore: выбор дорожки под фрагмент', () => {
-  const muxedPage = { ...page, url: 'https://site.example/watch?v=muxed' }
-
   it('времена считаются по timescale своей дорожки, а не первой попавшейся', () => {
     const store = new SessionStore()
     store.append({ ...muxedPage, bytes: muxedInit })
@@ -321,6 +364,27 @@ describe('SessionStore: время жизни сессии', () => {
     store.append({ ...page, sourceId: 's2', url: page.url + '&t=30', bytes: init, now: 5000 })
 
     expect(store.list()[0]).toMatchObject({ createdAt: 1000, lastSeenAt: 5000 })
+  })
+
+  it('слияние не переписывает адрес, заголовок и init сессии', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init, now: 1000 })
+    store.append({
+      ...page,
+      sourceId: 's2',
+      url: page.url + '&t=30',
+      title: 'Clip — второй заход',
+      bytes: initWithTail,
+      now: 5000,
+    })
+
+    // Сессия остаётся той, какой её завели. Второй заход приходит со своим адресом (метка
+    // перемотки), своим заголовком и своим init'ом, но ролик тот же самый: переписывать
+    // ими подпись в попапе не за чем, а init обязан остаться тем, с которым уже собран
+    // материал в карте — иначе к старым фрагментам уедет чужой заголовок дорожки.
+    expect(store.list()).toHaveLength(1)
+    expect(store.list()[0]).toMatchObject({ url: page.url, title: 'Clip' })
+    expect(store.list()[0]!.initBytes).toEqual(init)
   })
 
   it('evictAll подрезает карты всех сессий, а не только первой', () => {

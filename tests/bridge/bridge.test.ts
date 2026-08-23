@@ -1,9 +1,12 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { sessionKey } from '../../src/core/session-key'
 
 const initBytes = new Uint8Array(readFileSync('tests/fixtures/h264/init-stream0.m4s'))
 const seg1Bytes = new Uint8Array(readFileSync('tests/fixtures/h264/chunk-stream0-00001.m4s'))
 const seg2Bytes = new Uint8Array(readFileSync('tests/fixtures/h264/chunk-stream0-00002.m4s'))
+/** Фрагмент через один после первого: вместе они дают буфер с разрывом посередине. */
+const seg3Bytes = new Uint8Array(readFileSync('tests/fixtures/h264/chunk-stream0-00003.m4s'))
 
 /** Байты уходят мосту передачей, то есть отдельным ArrayBuffer, а не видом на фикстуру. */
 const buffer = (bytes: Uint8Array): ArrayBuffer => bytes.slice().buffer
@@ -12,6 +15,13 @@ const buffer = (bytes: Uint8Array): ArrayBuffer => bytes.slice().buffer
 const PAGE_URL = 'https://site.example/watch?v=abc'
 const PAGE_TITLE = 'Clip — site.example'
 const REFERRER = 'https://referrer.example/from'
+
+/**
+ * Ключ, под которым реестр держит сессию этой страницы. Адресом он не является никогда:
+ * normalizeUrl срезает метки перехода, а к остатку приписываются кодеки и длительность.
+ */
+const keyFor = (url: string, codecs: string[] = ['avc1']): string =>
+  sessionKey({ url, codecs, durationSeconds: Infinity })
 
 /**
  * Второй аргумент postMessage как есть: и строка targetOrigin, и объект опций — законные его
@@ -185,7 +195,7 @@ describe('мост складывает сегменты в реестр сес�
 
     expect(win.list()).toEqual([
       {
-        key: expect.stringContaining(PAGE_URL),
+        key: keyFor(PAGE_URL),
         url: PAGE_URL,
         title: PAGE_TITLE,
         duration: 0,
@@ -207,6 +217,48 @@ describe('мост складывает сегменты в реестр сес�
     expect(win.list()).toMatchObject([
       { duration: 4, bytes: seg1Bytes.byteLength + seg2Bytes.byteLength, runs: 1 },
     ])
+  })
+
+  it('разрыв в буфере виден в сводке: два прогона и длительность без провала', async () => {
+    const win = await loadBridge()
+    win.context()
+
+    win.append(initBytes)
+    win.append(seg1Bytes)
+    // Второй фрагмент пропущен: пользователь перемотал вперёд, или вкладку придушили и плеер
+    // продолжил догружать уже с новой позиции. Зазор в две секунды — разрыв, а не округление.
+    win.append(seg3Bytes)
+
+    // Сводкой попап рисует, что вообще можно вырезать. Один прогон здесь обещал бы
+    // непрерывный кусок, которого нет; шесть секунд от начала до конца — материал,
+    // которого нет тоже: между 2-й и 4-й секундой в реестре пусто.
+    expect(win.list()).toEqual([
+      {
+        key: keyFor(PAGE_URL),
+        url: PAGE_URL,
+        title: PAGE_TITLE,
+        duration: 4,
+        bytes: seg1Bytes.byteLength + seg3Bytes.byteLength,
+        runs: 2,
+      },
+    ])
+  })
+
+  it('ключ сессии в сводке — ключ реестра, а не адрес страницы', async () => {
+    const win = await loadBridge()
+    // Живой адрес почти всегда несёт метки перехода: ?t= с перемотки, utm_ из рассылки.
+    const url = `${PAGE_URL}&t=42&utm_source=tg`
+    win.context(url, PAGE_TITLE)
+
+    win.append(initBytes)
+
+    const summary = win.list()[0]!
+
+    // key — ручка, которой попап запросит эту сессию у реестра. Адрес страницы ею не
+    // является: метки перехода из ключа срезаны, а кодеки в него дописаны, так что
+    // запрос по адресу не найдёт ничего и выгружать клип будет нечего.
+    expect(summary.key).toBe(keyFor(PAGE_URL))
+    expect(summary.url).toBe(url)
   })
 
   it('до прихода контекста сессия достаётся referrer’у, а не пустому адресу', async () => {
