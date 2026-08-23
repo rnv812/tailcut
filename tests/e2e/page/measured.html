@@ -1,0 +1,98 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>measured player</title>
+<video id="v" controls width="640" style="background: #000"></video>
+<script>
+  const INIT = '/fixtures/h264/init-stream0.m4s'
+  const SEGMENTS = [
+    '/fixtures/h264/chunk-stream0-00001.m4s',
+    '/fixtures/h264/chunk-stream0-00002.m4s',
+    '/fixtures/h264/chunk-stream0-00003.m4s',
+  ]
+
+  // Проходы по одним и тем же сегментам. Один вызов appendBuffer занимает синхронный путь на
+  // десятки микросекунд — меньше зернистости performance.now() (в Chrome это 100 мкс), так что
+  // на единичном замере не видно ничего. На сотнях замеров зернистость усредняется: доля
+  // ненулевых отсчётов пропорциональна настоящей длительности.
+  const WARMUP_PASSES = 2
+  const MEASURED_PASSES = 100
+  const PASS_SECONDS = 6
+  // Калибровка: короткими партиями и помногу. Длинная партия выделяет десятки мегабайт и
+  // гарантированно ловит паузу сборщика, а среди коротких находится хоть одна, прошедшая
+  // между паузами, — она и есть чистая цена копии.
+  const COPY_BATCH_PASSES = 20
+  const COPY_RUNS = 25
+
+  // Каждый замер отдельно, а не одной суммой: тесту нужно и число отсчётов (страница
+  // отработала целиком), и возможность посмотреть на распределение при разборе падения.
+  window.appendSamples = []
+  // Цена одной копии тех же байтов на этой же машине. Порог теста выражен в этих копиях, а не
+  // в миллисекундах: обёртка обязана стоить одну копию сегмента, и на вдвое более медленной
+  // машине обе величины растут вместе.
+  window.copyBaselineMs = 0
+  window.copyCount = COPY_BATCH_PASSES * SEGMENTS.length
+  window.measured = false
+  window.failure = null
+
+  const video = document.getElementById('v')
+  const mediaSource = new MediaSource()
+  video.src = URL.createObjectURL(mediaSource)
+
+  mediaSource.addEventListener('sourceopen', async () => {
+    try {
+      const sb = mediaSource.addSourceBuffer('video/mp4; codecs="avc1.4d401e"')
+
+      // Байты забираются один раз: сеть в измерение попадать не должна, а перевыдача фикстур
+      // через маршрутизатор Playwright стоит куда дороже самого appendBuffer.
+      const fetchBytes = async (url) => (await fetch(url)).arrayBuffer()
+      const initBytes = await fetchBytes(INIT)
+      const segmentBytes = await Promise.all(SEGMENTS.map(fetchBytes))
+
+      const append = (buffer, record) =>
+        new Promise((resolve, reject) => {
+          sb.addEventListener('updateend', resolve, { once: true })
+          sb.addEventListener('error', () => reject(new Error('appendBuffer failed')), {
+            once: true,
+          })
+          const t0 = performance.now()
+          sb.appendBuffer(buffer)
+          const spent = performance.now() - t0
+          if (record) window.appendSamples.push(spent)
+        })
+
+      // Фаза 1: время внутри appendBuffer.
+      await append(initBytes, false)
+      for (let pass = 0; pass < WARMUP_PASSES + MEASURED_PASSES; pass++) {
+        // Прогрев не считается: на первых проходах заводится декодер и растут внутренние
+        // буферы MSE, и эта разовая цена одинаково искажает оба замера.
+        const record = pass >= WARMUP_PASSES
+        for (const bytes of segmentBytes) await append(bytes, record)
+        sb.timestampOffset += PASS_SECONDS
+      }
+
+      // Фаза 2: калибровка — на той же прогретой машине и тех же байтах. Часы читаются один
+      // раз на весь прогон, поэтому зернистость роли не играет. Берётся минимум, а не среднее:
+      // копирование выделяет память, и в среднее попадают паузы сборщика мусора, а минимум —
+      // это чистая цена копии, устойчивая от прогона к прогону. Идёт после замеров: сотни
+      // выделений подряд оставляют после себя работу сборщику мусора, и приходиться эта
+      // работа должна не на измеряемый путь.
+      const copyOnce = () => {
+        const t0 = performance.now()
+        for (let pass = 0; pass < COPY_BATCH_PASSES; pass++) {
+          for (const bytes of segmentBytes) window.copySink = bytes.slice(0)
+        }
+        return performance.now() - t0
+      }
+      copyOnce()
+      let best = Infinity
+      for (let run = 0; run < COPY_RUNS; run++) best = Math.min(best, copyOnce())
+      window.copyBaselineMs = best
+
+      window.measured = true
+    } catch (error) {
+      // Иначе отказ внутри обработчика утонет в отклонённом промисе, а тест будет ждать
+      // window.measured до самого таймаута и скажет про таймаут, а не про причину.
+      window.failure = String(error)
+    }
+  })
+</script>
