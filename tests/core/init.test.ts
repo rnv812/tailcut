@@ -81,8 +81,10 @@ interface TrackSpec {
   codec?: string | null
   /** готовый stsd вместо собранного по codec — для битых и усечённых боксов */
   stsd?: Uint8Array
+  /** ещё один mdhd следом за первым: контейнер с двумя одноимёнными боксами */
+  extraTimescale?: number
   /** обязательный бокс, который не класть в дорожку: неполный moov с чужого сайта */
-  omit?: 'tkhd' | 'mdia' | 'mdhd' | 'hdlr'
+  omit?: 'tkhd' | 'mdia' | 'mdhd' | 'hdlr' | 'minf' | 'stbl'
 }
 
 function tkhd(spec: TrackSpec): Uint8Array {
@@ -120,11 +122,13 @@ function trak(spec: TrackSpec): Uint8Array {
   const codec = spec.codec === undefined ? 'avc1' : spec.codec
   const stsd = spec.stsd ?? (codec === null ? null : box('stsd', zeros(4), u32(1), box(codec, zeros(8))))
   const stbl = stsd === null ? box('stbl') : box('stbl', stsd)
+  const minf = box('minf', ...(spec.omit === 'stbl' ? [] : [stbl]))
   const mdia = box(
     'mdia',
     ...(spec.omit === 'mdhd' ? [] : [mdhd(spec)]),
+    ...(spec.extraTimescale === undefined ? [] : [mdhd({ ...spec, timescale: spec.extraTimescale })]),
     ...(spec.omit === 'hdlr' ? [] : [box('hdlr', zeros(4), zeros(4), ascii(spec.handler), zeros(4))]),
-    box('minf', stbl),
+    ...(spec.omit === 'minf' ? [] : [minf]),
   )
   return box(
     'trak',
@@ -146,6 +150,30 @@ describe('parseInit на синтетических init-сегментах', ()
     expect(video.width).toBe(853)
     expect(video.height).toBe(480)
     expect(video.trackId).toBe(7)
+  })
+
+  it('делит 16.16 ровно на 65536: доли по обе стороны от половины пикселя', () => {
+    // 640 + 32767/65536 — на волос ниже половины пикселя, 360 + 32769/65536 — на
+    // волос выше. Делитель 65535 растянул бы ширину через границу округления
+    // (641), делитель 65537 сжал бы высоту обратно (360).
+    const init = moov(trak({
+      trackId: 5, handler: 'vide', timescale: 12800,
+      width: 640 + 32767 / 65536, height: 360 + 32769 / 65536,
+    }))
+    const video = parseInit(init)!.tracks.find((t) => t.kind === 'video')!
+    expect(video.width).toBe(640)
+    expect(video.height).toBe(361)
+  })
+
+  it('берёт первый mdhd, когда в mdia их два', () => {
+    // два mdhd в одном контейнере — нарушение спецификации, но байты приходят
+    // со стороннего сайта: выбор обязан быть предсказуемым, а не «победил последний»
+    const init = moov(trak({
+      trackId: 1, handler: 'vide', timescale: 12288, extraTimescale: 90000, width: 320, height: 240,
+    }))
+    expect(parseInit(init)).toEqual({
+      tracks: [{ trackId: 1, kind: 'video', timescale: 12288, codec: 'avc1', width: 320, height: 240 }],
+    })
   })
 
   it('читает track_ID и timescale по смещениям версии 1', () => {
@@ -233,7 +261,7 @@ describe('parseInit на синтетических init-сегментах', ()
   // parseInit кормится произвольными байтами со стороннего сайта: обязательного
   // бокса может не быть вовсе, и это должно кончаться отброшенной дорожкой,
   // а не исключением на разборе undefined.
-  describe.each(['tkhd', 'mdia', 'mdhd', 'hdlr'] as const)('дорожка без %s', (omit) => {
+  describe.each(['tkhd', 'mdia', 'mdhd', 'hdlr', 'minf', 'stbl'] as const)('дорожка без %s', (omit) => {
     const broken = trak({ trackId: 2, handler: 'vide', timescale: 90000, width: 640, height: 360, omit })
 
     it('отбрасывается, не мешая разбору соседней целой дорожки', () => {
