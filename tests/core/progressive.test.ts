@@ -11,7 +11,8 @@ import {
 import { editOffset, samplesInSegment, trackDefaults } from '../../src/core/iso/samples'
 import { sampleEntryBytes, videoSampleEntry } from '../../src/core/iso/entry'
 import { parseInit } from '../../src/core/iso/init'
-import { boxBody, childBoxes, findBox, topLevelBoxes, type Box } from '../../src/core/iso/reader'
+import { boxBody, boxesIn, childBoxes, findBox, topLevelBoxes, type Box }
+  from '../../src/core/iso/reader'
 import { concatBytes } from '../../src/core/iso/writer'
 import { decodeWarnings, frameBySeeking, frameByPlaying, frameTimes, probeFile, writeTemp }
   from '../support/media'
@@ -57,6 +58,27 @@ function trackOf(
     // Rebuilding the fixture into itself: the head it hid stays hidden.
     skipTicks: editOffset(init, declared.trackId),
   }
+}
+
+/**
+ * The same sample entry with its pasp cut out, and its size put right.
+ *
+ * Every fixture in this repository carries a pasp copied from the packager that made it, and a
+ * pasp is where ffmpeg reads the pixel aspect from when there is one — which hides whatever the
+ * tkhd states. The entries this program writes itself have none: vp9SampleEntry
+ * (src/core/vp9/mp4.ts) writes no such box, so on any WebM capture the shape of the picture rests
+ * on the track header alone. This makes that entry out of one that has it.
+ */
+function withoutPasp(entry: Uint8Array): Uint8Array {
+  // A video sample entry states 86 bytes of fixed fields before the boxes that describe the codec.
+  const FIELDS = 86
+  const kept = boxesIn(entry, FIELDS, entry.byteLength).filter((box) => box.type !== 'pasp')
+  const out = concatBytes([
+    entry.subarray(0, FIELDS),
+    ...kept.map((box) => entry.subarray(box.start, box.start + box.size)),
+  ])
+  new DataView(out.buffer, out.byteOffset, out.byteLength).setUint32(0, out.byteLength)
+  return out
 }
 
 const videoSegments = [1, 2, 3].map((n) => `tests/fixtures/h264/chunk-stream0-0000${n}.m4s`)
@@ -115,6 +137,63 @@ describe('buildProgressiveMp4', () => {
     const mvhd = boxBody(bytes, findBox(bytes, ['moov', 'mvhd'])!)
     const view = new DataView(mvhd.buffer, mvhd.byteOffset, mvhd.byteLength)
     expect(view.getUint32(mvhd.byteLength - 4)).toBe(3)
+  })
+
+  it('states in every track header the number of the track, its shape and its volume', () => {
+    const bytes = buildProgressiveMp4([video, audio])
+    const traks = childBoxes(bytes, findBox(bytes, ['moov'])!).filter((b) => b.type === 'trak')
+
+    /** tkhd version 0, read from the first byte of its body: the fields the duration test
+     *  skips over. */
+    const header = (index: number): Record<string, number> => {
+      const box = childBoxes(bytes, traks[index]!).find((b) => b.type === 'tkhd')!
+      const body = boxBody(bytes, box)
+      const view = new DataView(body.buffer, body.byteOffset, body.byteLength)
+      return {
+        // version and flags, creation, modification, then the number of the track.
+        trackId: view.getUint32(12),
+        // reserved pair, layer, alternate_group, then volume as an 8.8 number.
+        volume: view.getUint16(36),
+        // the matrix, then the display size as two 16.16 numbers of pixels.
+        width: view.getUint32(76),
+        height: view.getUint32(80),
+      }
+    }
+
+    // The display size is not decoration and it is not the coded size restated: with no pasp in
+    // the sample entry ffmpeg reads the shape of the picture out of this box and nothing else —
+    // see the test below, which builds that file. Measured on a writer that hands the two over
+    // the other way round: ffprobe answers SAR 9:16 and DAR 3:4 for material that is square
+    // pixelled and 4:3, and every player built on ffmpeg shows it squeezed.
+    expect(header(0)).toEqual({
+      trackId: 1,
+      volume: 0,
+      width: 320 * 0x10000,
+      height: 240 * 0x10000,
+    })
+
+    // The sound is the mirror of it: no frame size, and full volume. ffmpeg and Chromium make
+    // nothing of the volume field — measured, a zero there changes neither — and the readers that
+    // do honour it, QuickTime among them, would open this clip and play it silent. The track_ID
+    // has to be its own as well: two tracks numbered alike make the next_track_ID above a lie and
+    // hand a remuxer two tracks it cannot tell apart. Measured on a writer that numbers both 1,
+    // ffprobe still counts 144 and 259 frames and Chromium still plays the file to its end, so
+    // this line is the only place either mistake is visible at all.
+    expect(header(1)).toEqual({ trackId: 2, volume: 0x0100, width: 0, height: 0 })
+  })
+
+  it('carries the shape of the picture when the sample entry does not', () => {
+    // The fixture's own entry states a pasp, which is what ffprobe answers out of above; strip it
+    // and the tkhd is the only thing left saying how wide the picture is shown. This is the file
+    // this program writes from a WebM capture, where the entry it builds carries no pasp at all.
+    const stripped: ProgressiveTrack = { ...video, sampleEntry: withoutPasp(video.sampleEntry) }
+    const file = writeTemp('progressive-no-pasp.mp4', buildProgressiveMp4([stripped]))
+
+    const probe = probeFile(file)
+    expect(probe.stderr).toBe('')
+    const shape = probe.probed!.streams[0]!
+    expect([shape.sample_aspect_ratio, shape.display_aspect_ratio]).toEqual(['1:1', '4:3'])
+    expect(Number(shape.nb_read_frames)).toBe(144)
   })
 
   it('gives back the frames of the fixture, at the times the fixture gives them', () => {

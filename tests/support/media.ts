@@ -17,6 +17,9 @@ export interface Probed {
     start_time: string
     duration: string
     nb_read_frames: string
+    /** The shape of the picture as the reader worked it out. Absent on a sound track. */
+    sample_aspect_ratio?: string
+    display_aspect_ratio?: string
   }>
 }
 
@@ -41,7 +44,8 @@ export function probeFile(file: string): ProbeResult {
       '-v', 'error',
       '-count_frames',
       '-show_entries',
-      'format=duration:stream=codec_type,codec_name,start_time,duration,nb_read_frames',
+      'format=duration:stream=codec_type,codec_name,start_time,duration,nb_read_frames,' +
+        'sample_aspect_ratio,display_aspect_ratio',
       '-of', 'json',
       file,
     ],
