@@ -215,6 +215,36 @@ describe('FrameTable', () => {
     }
   })
 
+  it('asks on the clock of the file and not on the clock of the session', () => {
+    // The two clocks part company wherever an export plan closed a hole or hid a head, and this
+    // number is a currentTime of the preview — a file that plan wrote. Here the clip enters two
+    // seconds into the recording: every frame lies two seconds earlier in the file than the
+    // session says, and asked for on the session clock the last of them is past the end of it.
+    const rows = table([SEGMENTS[1]!, SEGMENTS[2]!]).frames()
+    const shifted = FrameTable.of(
+      retimeToPlan(rows, {
+        timescale: TIMESCALE,
+        skipTicks: 0,
+        samples: rows.map((frame) => ({ source: frame.source, duration: 512, cts: 0 })),
+      }),
+    )
+
+    const first = shifted.at(0)!
+    expect(first.out).toBe(0)
+    expect(first.pts).toBeCloseTo(2, 9)
+    expect(shifted.seekTimeOf(0)).toBeCloseTo(first.duration / 2, 9)
+
+    const end = shifted.count() - 1
+    const last = shifted.at(end)!
+    const fileEnds = last.out + last.duration
+    expect(last.pts - last.out).toBeCloseTo(2, 9)
+    expect(shifted.seekTimeOf(end)).toBeGreaterThan(last.out)
+    expect(shifted.seekTimeOf(end)).toBeLessThan(fileEnds)
+    // The same frame on the session clock is asked for two seconds past the end of the file,
+    // where the player clamps to the end and shows a frame nobody asked for.
+    expect(last.pts).toBeGreaterThan(fileEnds)
+  })
+
   it('pulls an index off the end back onto the material instead of giving NaN', () => {
     expect(whole.seekTimeOf(-5)).toBeCloseTo(whole.seekTimeOf(0), 9)
     expect(whole.seekTimeOf(9_999)).toBeCloseTo(whole.seekTimeOf(143), 9)

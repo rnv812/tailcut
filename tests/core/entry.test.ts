@@ -4,10 +4,12 @@ import {
   audioSampleEntry,
   sampleEntryBytes,
   sampleEntryOf,
+  trackIdOf,
   videoSampleEntry,
 } from '../../src/core/iso/entry'
 import { ingestInit } from '../../src/core/container'
 import { findBox, boxBody } from '../../src/core/iso/reader'
+import { boxOf, fullBoxOf, u32, u64, zeroes } from '../../src/core/iso/writer'
 
 const read = (path: string): Uint8Array => new Uint8Array(readFileSync(path))
 
@@ -128,6 +130,36 @@ describe('sampleEntryBytes', () => {
   it('answers null for a track the init does not declare', () => {
     expect(sampleEntryBytes(h264Video, 7)).toBeNull()
     expect(sampleEntryOf(h264Video, 7)).toBeNull()
+  })
+})
+
+describe('trackIdOf', () => {
+  /**
+   * A stamp with a different number in each half, so that a read taken at the wrong offset comes
+   * back with a plausible track_ID rather than with the zero every reserved field would give.
+   */
+  const CREATED = 7 * 2 ** 32 + 42
+
+  /** The box under test, in the only place a reader ever finds one. */
+  function movieWith(tkhd: Uint8Array): Uint8Array {
+    return boxOf('moov', boxOf('trak', tkhd))
+  }
+
+  const idOf = (movie: Uint8Array): number =>
+    trackIdOf(movie, findBox(movie, ['moov', 'trak', 'tkhd'])!)
+
+  it('reads the track_ID out of either version of the box', () => {
+    // Every fixture here carries a version-0 tkhd — that is what ffmpeg writes — and the two
+    // versions hold the field eight bytes apart: version 1 states creation_time and
+    // modification_time in 64 bits each. Read at the version-0 offset, a version-1 box hands
+    // back the top half of modification_time, which is a number and not an error.
+    const zero = movieWith(fullBoxOf('tkhd', 0, 3, u32(42, 42, 2, 0, 0), zeroes(60)))
+    const one = movieWith(
+      fullBoxOf('tkhd', 1, 3, u64(CREATED), u64(CREATED), u32(2, 0), u64(0), zeroes(60)),
+    )
+
+    expect(idOf(zero)).toBe(2)
+    expect(idOf(one)).toBe(2)
   })
 })
 

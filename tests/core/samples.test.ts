@@ -5,7 +5,7 @@ import { ingestInit } from '../../src/core/container'
 import { buildAudioInit, buildFragment, buildVideoInit } from '../../src/core/iso/build'
 import { parseFragment } from '../../src/core/iso/fragment'
 import { topLevelBoxes as topLevelBoxesOf } from '../../src/core/iso/reader'
-import { boxOf, u16, u32, zeroes } from '../../src/core/iso/writer'
+import { boxOf, fullBoxOf, i64, u16, u32, u64, zeroes } from '../../src/core/iso/writer'
 
 const read = (path: string): Uint8Array => new Uint8Array(readFileSync(path))
 
@@ -72,6 +72,39 @@ describe('trackDefaults', () => {
   })
 })
 
+/**
+ * An init holding one track and one edit list, written here byte for byte.
+ *
+ * Every fixture in this repository was made by ffmpeg, and ffmpeg writes one shape of elst:
+ * version 0, one entry, a media_time that fits in 32 bits and is never negative. The other
+ * shapes the format allows arrive from elsewhere — QuickTime writes version 1, a recording long
+ * enough outgrows the 32-bit field, and an empty edit states −1 — and none of them can be read
+ * off material we have. They are built here or they are never read at all.
+ */
+function initWithEditList(trackId: number, elst: Uint8Array): Uint8Array {
+  // tkhd version 0: creation, modification, track_ID, reserved, duration, then the 60 bytes of
+  // layer, volume, matrix and frame size editOffset never looks at.
+  const tkhd = fullBoxOf('tkhd', 0, 3, u32(0, 0, trackId, 0, 0), zeroes(60))
+  return boxOf('moov', boxOf('trak', tkhd, boxOf('edts', elst)))
+}
+
+/** elst version 1: segment_duration and media_time eight bytes each. */
+function elstV1(segmentDuration: number, mediaTime: number): Uint8Array {
+  return fullBoxOf('elst', 1, 0, u32(1), u64(segmentDuration), i64(mediaTime), u16(1, 0))
+}
+
+/** elst version 0: the same two fields four bytes each, media_time still signed. */
+function elstV0(segmentDuration: number, mediaTime: number): Uint8Array {
+  return fullBoxOf('elst', 0, 0, u32(1), u32(segmentDuration), i32(mediaTime), u16(1, 0))
+}
+
+/** A signed 32-bit field. The writer has no i32: no box this program writes needs one. */
+function i32(value: number): Uint8Array {
+  const out = new Uint8Array(4)
+  new DataView(out.buffer).setInt32(0, value)
+  return out
+}
+
 describe('editOffset', () => {
   it('reads the media_time the source elst carries', () => {
     // 1024 ticks of 12288 is 83 ms: the two frames of B-frame delay ffmpeg compensates for.
@@ -86,6 +119,28 @@ describe('editOffset', () => {
     // VP9 and AV1 have no B-frames here, so ffmpeg wrote an elst with media_time 0.
     expect(editOffset(vp9Init, 1)).toBe(0)
     expect(editOffset(av1Init, 1)).toBe(0)
+  })
+
+  it('reads a media_time the version-1 box states in 64 bits', () => {
+    // Read at the version-0 offset, a version-1 box hands back the low half of segment_duration:
+    // a number that has nothing to do with the edit, and one that looks entirely plausible.
+    expect(editOffset(initWithEditList(1, elstV1(600_000, 1_024)), 1)).toBe(1_024)
+
+    // And the field is eight bytes because it has to be: 3.3 billion ticks of 48 kHz is a
+    // recording of nineteen hours, and its media_time does not fit in what version 0 has.
+    expect(editOffset(initWithEditList(1, elstV1(1_000, 3_300_000_000)), 1)).toBe(3_300_000_000)
+  })
+
+  it('takes an empty edit as no offset at all, in either version', () => {
+    // The handcrafted list is read at all: a positive media_time comes back as it was written.
+    expect(editOffset(initWithEditList(1, elstV0(600_000, 512)), 1)).toBe(512)
+
+    // −1 is the one negative media_time the format allows, and it is not an offset into the
+    // material: it is an empty edit, a hole held at the head before the media starts. Added to a
+    // pts the way a real offset is subtracted from one, it would shift every frame of the table
+    // the wrong way by a tick — and the table is what the cut, the readout and the grid read.
+    expect(editOffset(initWithEditList(1, elstV0(600_000, -1)), 1)).toBe(0)
+    expect(editOffset(initWithEditList(1, elstV1(600_000, -1)), 1)).toBe(0)
   })
 
   it('is zero for a track with no edit list, an unknown track and junk', () => {
