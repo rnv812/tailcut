@@ -24,6 +24,18 @@ const AUDIO = [1, 2, 3, 4].map((n) => read(`h264/chunk-stream1-0000${n}.m4s`))
 const MUXED_INIT = read('muxed/init-stream0.m4s')
 const MUXED = [1, 2, 3].map((n) => read(`muxed/chunk-stream0-0000${n}.m4s`))
 
+/**
+ * The same muxed shape, and each trak carrying an edit list of its own.
+ *
+ * The set above states no elst at all — the muxer wrote its moov before it had seen a packet —
+ * so on that material "the edit of this track" and "the edit of the first track" are both zero
+ * and nothing can tell them apart. Here the picture hides 2048 ticks of 10240 and the sound
+ * hides 1024 of 22050: the B-frame reordering delay and the AAC priming, neither one a multiple
+ * of the other, neither zero.
+ */
+const MUXED_EDITS_INIT = read('muxed-edits/init-stream0.m4s')
+const MUXED_EDITS = [1, 2, 3].map((n) => read(`muxed-edits/chunk-stream0-0000${n}.m4s`))
+
 /** Segments laid out one after another in an address space of their own, as Save all lays them. */
 function placed(kind: 'video' | 'audio', initBytes: Uint8Array, segments: Uint8Array[]) {
   const map = new ByteMap()
@@ -163,6 +175,29 @@ describe('sourceTrackOf', () => {
     expect(picture.samples).toHaveLength(60)
     expect(picture.samples.filter((sample) => sample.sync)).toHaveLength(3)
     expect([picture.width, picture.height]).toEqual([256, 144])
+  })
+
+  it('takes the edit offset off the trak its sample entry belongs to', () => {
+    // The sibling of the test above, on the other number an init states per track. The whole
+    // program adds this offset and never recomputes it: `planTrack` moves the request onto the
+    // decode timeline with it, and the frame table subtracts it to get back. Taken off the wrong
+    // trak of a muxed init it is wrong by the difference of the two media_times — and because
+    // both tracks are then moved by a number that is right for one of them, the error shows up
+    // as the picture and the sound drifting apart rather than as anything obviously broken.
+    const picture = sourceTrackOf(placed('video', MUXED_EDITS_INIT, MUXED_EDITS).input)!
+    const sound = sourceTrackOf(placed('audio', MUXED_EDITS_INIT, MUXED_EDITS).input)!
+
+    expect([picture.timescale, picture.editOffset]).toEqual([10_240, 2_048])
+    expect([sound.timescale, sound.editOffset]).toEqual([22_050, 1_024])
+
+    // The two hide almost the same stretch of time and a very different number of ticks, which is
+    // why a reader that borrows one for the other stays plausible: 0.2 s against 0.046 s.
+    expect(picture.editOffset / picture.timescale).toBeCloseTo(0.2, 9)
+    expect(sound.editOffset / sound.timescale).toBeCloseTo(0.046_439_909, 9)
+
+    // Borrowed the other way round the sound would be moved 1024 of its own ticks — 46 ms — from
+    // where the container puts it, which is past every tolerance a viewer has for lip sync.
+    expect((picture.editOffset - sound.editOffset) / sound.timescale).toBeCloseTo(0.046_439_909, 9)
   })
 
   it('keeps the samples in decode order however the segments arrive', () => {

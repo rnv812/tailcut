@@ -66,6 +66,29 @@ describe('trackDefaults', () => {
     })
   })
 
+  it('reads the trex of every track a muxed init declares', () => {
+    // One buffer fed both kinds puts two traks in the moov and two trex in the mvex, and the
+    // second one is the only place the second track's defaults are ever stated. Read past, that
+    // track falls back to zeroes — a sample of no length that every player is free to call a
+    // sync sample — and nothing about the segment looks wrong, because a fragment that states
+    // nothing is exactly the fragment this fallback exists for.
+    const init = boxOf(
+      'moov',
+      boxOf(
+        'mvex',
+        fullBoxOf('trex', 0, 0, u32(1, 1, 512, 0, 0x02000000)),
+        fullBoxOf('trex', 0, 0, u32(2, 1, 1024, 0, 0x01010000)),
+      ),
+    )
+
+    expect(trackDefaults(init)).toEqual(
+      new Map([
+        [1, { duration: 512, size: 0, flags: 0x02000000 }],
+        [2, { duration: 1024, size: 0, flags: 0x01010000 }],
+      ]),
+    )
+  })
+
   it('gives an empty map for an init with no mvex and for bytes that are not one', () => {
     expect(trackDefaults(videoSegments[0]!).size).toBe(0)
     expect(trackDefaults(new Uint8Array(0)).size).toBe(0)
@@ -479,6 +502,78 @@ describe('samplesInSegment', () => {
     expect(track!.samples.map((s) => s.size)).toEqual(plain!.samples.map((s) => s.size))
     // Everything is four bytes further along the segment, the field being four bytes long.
     expect(track!.samples.map((s) => s.at)).toEqual(plain!.samples.map((s) => s.at + 4))
+  })
+
+  it('does not let a default one fragment states leak into the next', () => {
+    // The trex is the movie's word about every fragment of a track; a tfhd overrides it for its
+    // own fragment and for no other. Both are read through one map, built once for a recording
+    // and handed to every segment of it, so a reader that wrote the tfhd's value back into that
+    // map would answer for the rest of the recording with a number one fragment stated. Nothing
+    // would look wrong: every duration it gave would still be a duration this track really uses.
+    const movie = trackDefaults(
+      boxOf('moov', boxOf('mvex', fullBoxOf('trex', 0, 0, u32(1, 1, 512, 0, 0)))),
+    )
+    expect(movie.get(1)!.duration).toBe(512)
+
+    /** A fragment of two samples whose trun states their sizes and nothing else. */
+    const fragment = (tfhd: number[], baseTime: number): Uint8Array =>
+      segmentOf(
+        moofOf([
+          ...raw('traf', [
+            ...tfhd,
+            ...raw('tfdt', [...be32(0x01000000), ...be64(baseTime)]),
+            ...raw('trun', [...be32(0x000200), ...be32(2), ...be32(7, 7)]),
+          ]),
+        ]),
+        16,
+      )
+
+    // The first states 1024 in its own header and is read by it.
+    const stated = fragment([...raw('tfhd', [...be32(0x000008), ...be32(1, 1024)])], 0)
+    expect(samplesInSegment(stated, movie)[0]!.samples.map((s) => s.duration)).toEqual([1024, 1024])
+
+    // The second states nothing, so the movie answers for it: 512, and not the neighbour's 1024.
+    const silent = fragment([...raw('tfhd', [...be32(0x000000), ...be32(1)])], 4096)
+    expect(samplesInSegment(silent, movie)[0]!.samples.map((s) => s.duration)).toEqual([512, 512])
+
+    // And the map is as it was handed over. A reader of segments is a reader.
+    expect(movie.get(1)).toEqual({ duration: 512, size: 0, flags: 0 })
+  })
+
+  it('addresses a second trun from the base of the traf, not from the end of the first', () => {
+    // A traf may carry more than one trun, and each states where its own samples begin — counted
+    // from base_data_offset, which is fixed for the whole traf. Counted from wherever the run in
+    // front of it happened to stop, the two agree only while the runs are laid end to end in the
+    // order they are written; a packager that writes them in any other order has every sample of
+    // the second run read out of the wrong bytes, at sizes that still add up.
+    //
+    // So they are written in the other order here: the first run takes the far half of the mdat
+    // and the second the near half.
+    const trun = (dataOffset: number): number[] =>
+      raw('trun', [...be32(0x000201), ...be32(2, dataOffset), ...be32(4, 4)])
+    const traf = (first: number, second: number): Uint8Array =>
+      moofOf([
+        ...raw('traf', [
+          // default-base-is-moof: the samples are addressed from the first byte of the moof.
+          ...raw('tfhd', [...be32(0x020000), ...be32(1)]),
+          ...raw('tfdt', [...be32(0x01000000), ...be64(0)]),
+          ...trun(first),
+          ...trun(second),
+        ]),
+      ])
+
+    // The offsets cannot be written until the moof is as long as it is going to be; every field
+    // is of fixed width, so the second moof comes out exactly as long as the first.
+    const payload = traf(0, 0).byteLength + 8
+    const segment = segmentOf(traf(payload + 8, payload), 16)
+
+    const [track] = samplesInSegment(segment, NO_DEFAULTS)
+    expect(track!.samples.map((s) => s.at)).toEqual([
+      payload + 8,
+      payload + 12,
+      payload,
+      payload + 4,
+    ])
   })
 
   it('gives an empty list for an init segment and for junk', () => {

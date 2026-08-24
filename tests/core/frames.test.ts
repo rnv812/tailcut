@@ -40,6 +40,22 @@ const OPUS_SEGMENTS = [1, 2, 3, 4].map(
 )
 const OPUS_TIMESCALE = 48_000
 
+/**
+ * A muxed buffer whose two traks each carry an edit list of their own.
+ *
+ * One moov with two traks, one moof with two trafs per segment, and — the point of this set —
+ * a different media_time in each elst: 2048 ticks of 10240 on the picture, the 0.2 s of B-frame
+ * reordering delay, and 1024 of 22050 on the sound, the 46 ms of AAC encoder priming. The
+ * `muxed` set beside it states no edit list at all, so nothing there can say which trak an
+ * offset was read out of.
+ */
+const MUXED_EDITS_INIT = read('muxed-edits/init-stream0.m4s')
+const MUXED_EDITS_SEGMENTS = [1, 2, 3].map((n) =>
+  read(`muxed-edits/chunk-stream0-0000${n}.m4s`),
+)
+const MUXED_VIDEO = { trackId: 1, timescale: 10_240, edit: 2_048 }
+const MUXED_AUDIO = { trackId: 2, timescale: 22_050, edit: 1_024 }
+
 /** Where the bytes of the segments would sit in a snapshot; the table carries the places through. */
 function placed(segments: Uint8Array[]): Array<{ bytes: Uint8Array; source: Located }> {
   let at = 1_000
@@ -185,6 +201,41 @@ describe('framesOf', () => {
       segments: placed(SEGMENTS),
     })
     expect(frames).toEqual([])
+  })
+
+  it('takes the edit list of the track it was asked for, not the first one in the moov', () => {
+    // Both traks of a muxed init are in reach of one call, and each hides a different amount at
+    // its head. Read off the wrong trak the sound moves by the difference of the two media_times
+    // over its own timescale — 1024 ticks of 22050, 46 ms — which is a picture and a sound that
+    // no longer line up, in a file that stays consistent everywhere else.
+    const shown = (track: { trackId: number; timescale: number }): number[] =>
+      framesOf({
+        init: MUXED_EDITS_INIT,
+        trackId: track.trackId,
+        timescale: track.timescale,
+        segments: placed(MUXED_EDITS_SEGMENTS),
+      }).map((frame) => frame.pts)
+
+    const picture = shown(MUXED_VIDEO)
+    const sound = shown(MUXED_AUDIO)
+    expect(picture).toHaveLength(60)
+    expect(sound).toHaveLength(131)
+
+    // The picture starts where its own edit list puts it: the first frame is composed 2048 ticks
+    // in and the elst hides exactly those, so the table opens at zero.
+    expect(picture[0]).toBeCloseTo(0, 9)
+    // The sound starts 1024 of its own ticks before zero — the priming the elst hides — and that
+    // is what the wrong offset would double.
+    expect(sound[0]).toBeCloseTo(-MUXED_AUDIO.edit / MUXED_AUDIO.timescale, 12)
+    expect(sound[0]).toBeCloseTo(-0.046_439_909, 9)
+
+    // The same two facts stated back in ticks, so that a failure names the offset the track was
+    // measured by and not a decimal: the picture's own 2048 and the sound's own 1024, neither
+    // borrowed from the other.
+    const ticksIn = (track: { timescale: number }, seconds: number): number =>
+      Math.round(seconds * track.timescale)
+    expect(ticksIn(MUXED_VIDEO, picture[0]!)).toBe(0)
+    expect(ticksIn(MUXED_AUDIO, sound[0]!)).toBe(-MUXED_AUDIO.edit)
   })
 
   it('answers a zero timescale with an empty table rather than times of NaN', () => {

@@ -161,6 +161,44 @@ node -e '
   }
 ' "$work/muxed.mp4" "$out/muxed"
 
+# The same muxed buffer again, with the edit list each track carries of its own.
+#
+# The set above answers "which trak does this sample entry belong to"; it cannot answer "which
+# trak does this edit list belong to", because with empty_moov the muxer writes the moov before
+# it has seen a packet and so states no elst at all. delay_moov holds the moov back until the
+# first packet of each stream is known, and then ffmpeg writes what every real muxed init has:
+# one elst per trak, with a different media_time in each.
+#
+# The two numbers are the point of the set. The picture hides 2048 ticks of 10240 — the 0.2 s of
+# B-frame reordering delay; the sound hides 1024 of 22050 — the 46 ms of AAC encoder priming.
+# Neither is a rounding of the other, and neither is zero, so a reader that takes the first elst
+# of the moov for every track it is asked about puts the sound 46 ms away from the picture and
+# leaves the file otherwise consistent.
+ffmpeg -y -i "$work/source-muxed.mp4" -c copy \
+       -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof+delay_moov \
+       "$work/muxed-edits.mp4"
+
+rm -rf "$out/muxed-edits" && mkdir -p "$out/muxed-edits"
+node -e '
+  const fs = require("fs")
+  const data = fs.readFileSync(process.argv[1])
+  const boxes = []
+  for (let at = 0; at + 8 <= data.length; ) {
+    const size = data.readUInt32BE(at)
+    if (size < 8) break
+    boxes.push({ type: data.toString("latin1", at + 4, at + 8), at, size })
+    at += size
+  }
+  const starts = boxes.filter((b) => b.type === "moof").map((b) => b.at)
+  const last = boxes.filter((b) => b.type === "mdat").pop()
+  fs.writeFileSync(`${process.argv[2]}/init-stream0.m4s`, data.subarray(0, starts[0]))
+  for (const [i, start] of starts.entries()) {
+    const end = starts[i + 1] ?? last.at + last.size
+    const name = `chunk-stream0-${String(i + 1).padStart(5, "0")}.m4s`
+    fs.writeFileSync(`${process.argv[2]}/${name}`, data.subarray(start, end))
+  }
+' "$work/muxed-edits.mp4" "$out/muxed-edits"
+
 # A Common Encryption init segment: the header of a protected stream, and the one thing the
 # extension has to recognise before it copies anything of such a page.
 #
