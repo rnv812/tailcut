@@ -23,6 +23,12 @@ const vp9Init = new Uint8Array(readFileSync('tests/fixtures/vp9/init-stream0.m4s
 const vp9Seg = new Uint8Array(readFileSync('tests/fixtures/vp9/chunk-stream0-00001.m4s'))
 /** Second segment of the vp9 fixture: 2…4 seconds, the same timescale of 12288. */
 const vp9Seg2 = new Uint8Array(readFileSync('tests/fixtures/vp9/chunk-stream0-00002.m4s'))
+/**
+ * The header of a Common Encryption stream: `encv` in place of `avc1`, with `sinf`, `schm` and
+ * `tenc` inside it. The same picture as the h264 set and from the same source — the difference
+ * between the two is protection and nothing else.
+ */
+const cencInit = new Uint8Array(readFileSync('tests/fixtures/cenc/init-stream0.m4s'))
 
 /**
  * The same clip delivered in the other container: an Opus track in WebM, which is what a real
@@ -105,6 +111,23 @@ function box(type: string, ...parts: number[][]): number[] {
   const body = parts.flat()
   return [...u32(8 + body.length), ...chars(type), ...body]
 }
+
+/**
+ * A media segment of a protected stream: a track fragment with a `senc` beside its `trun`.
+ *
+ * Built here because no fixture holds one — ffmpeg writes the samples of a fragmented file
+ * encrypted and leaves the `senc` out, so a real file would be evidence of nothing. What is under
+ * test is the recognition of the box, and nothing here is decrypted or has to be.
+ */
+const sencFragment = Uint8Array.from([
+  ...box('styp', chars('msdh'), u32(0)),
+  ...box(
+    'moof',
+    box('mfhd', u32(0), u32(1)),
+    box('traf', box('tfhd', u32(0), u32(1)), box('senc', u32(0), u32(0))),
+  ),
+  ...box('mdat', zeros(8)),
+])
 
 /** A trak with its fields at exactly the offsets parseInit reads them from. */
 function trak(
@@ -1043,25 +1066,51 @@ describe('SessionStore: triage verdicts', () => {
   })
 })
 
-describe('SessionStore: a page that asks for a key system', () => {
+describe('SessionStore: a page whose stream is encrypted', () => {
   /**
-   * DRM is the one refusal that is not a verdict of triage.
+   * Protection is read out of the material and not out of the page's intentions.
    *
-   * A verdict is about an element: the watcher measures the <video> and says what its stream is
-   * worth. The request for keys comes from the player and is tied to no element at all, and on a
-   * page whose element the watcher cannot reach — one playing inside a closed shadow root — no
-   * verdict is ever spoken. Measured on tv.apple.com: tc:drm went out four times, tc:verdict not
-   * once, and the registry kept 149.6 MB of a protected page and offered it for saving. So the
+   * The refusal is not a verdict of triage. A verdict is about an element: the watcher measures
+   * the <video> and says what its stream is worth. On a page whose element it cannot reach — one
+   * playing inside a shadow root — no verdict is ever spoken at all: measured on tv.apple.com,
+   * where the registry kept 149.6 MB of a protected page and offered it for saving. So the
    * refusal has its own way in, and what it promises is stronger than a rejection: not "nothing
    * more is collected" but "nothing of this page is kept at all".
+   *
+   * What sets it off is the one thing that cannot be feigned or merely intended — encryption in
+   * the bytes themselves. The page's talk of key systems is not evidence of it: a news article
+   * was measured probing sixteen of them, three granted, over a stream that was in the clear from
+   * the first byte to the last.
    */
-  it('erases everything the page had collected before the keys were asked for', () => {
+  it('refuses an init segment written in Common Encryption', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: cencInit })
+    store.append({ ...page, bytes: seg1 })
+
+    expect(store.list()).toEqual([])
+  })
+
+  it('refuses a fragment carrying per-sample initialisation vectors', () => {
+    const store = new SessionStore()
+    // The init went past before recording started, which is the ordinary way of joining a live
+    // stream. What is left to go on is the senc of every fragment behind it.
+    store.append({ ...page, bytes: sencFragment })
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: seg1 })
+
+    expect(store.list()).toEqual([])
+  })
+
+  it('erases everything the page had collected in the clear before it', () => {
     const store = new SessionStore()
     store.append({ ...page, bytes: init })
     store.append({ ...page, bytes: seg1 })
     expect(store.list(), 'setup: the material has to be in the registry first').toHaveLength(1)
 
-    store.refuseDrm()
+    // The shape of a site that plays a free preview and then the licensed material: the second
+    // player of the page opens a protected stream, and the page as a whole is refused. §2 owes
+    // the user a plain refusal, and a session left in the list is an offer to save it.
+    store.append({ ...page, sourceId: 's2', bytes: cencInit })
 
     expect(store.list()).toEqual([])
   })
@@ -1072,7 +1121,7 @@ describe('SessionStore: a page that asks for a key system', () => {
     store.append({ ...page, bytes: seg1 })
     const key = store.list()[0]!.key
 
-    store.refuseDrm()
+    store.refuseEncrypted()
 
     // The popup holds the key of a session it listed a moment ago, and a save asks the registry
     // by that key alone. A session merely hidden from the list would still be saved by it.
@@ -1081,10 +1130,10 @@ describe('SessionStore: a page that asks for a key system', () => {
 
   it('takes nothing in once the refusal stands', () => {
     const store = new SessionStore()
-    store.refuseDrm()
+    store.refuseEncrypted()
 
-    // The hook goes on copying every appendBuffer — it knows nothing of verdicts — and a protected
-    // page plays for as long as it is open.
+    // The hook goes on copying every appendBuffer — it knows nothing of verdicts — and a
+    // protected page plays for as long as it is open.
     store.append({ ...page, bytes: init })
     store.append({ ...page, bytes: seg1 })
 
@@ -1098,21 +1147,22 @@ describe('SessionStore: a page that asks for a key system', () => {
     store.append({ ...page, sourceId: 's2', bytes: init })
     store.append({ ...page, sourceId: 's2', bytes: seg1 })
 
-    // The keys are asked for by the player, and which of the media sources of the page they are
-    // for is not said anywhere. A refusal for one source alone would keep the material of the
-    // neighbouring one — of the same protected page.
-    store.refuseDrm()
+    // A page mixes the two as a matter of course: edition.cnn.com was measured opening two clear
+    // buffers and two encrypted ones. A refusal for one source alone would keep the material of
+    // the neighbouring one — of the same protected page.
+    store.refuseEncrypted()
 
     expect(store.list()).toEqual([])
   })
 
   it('is not undone by a promotion', () => {
     const store = new SessionStore()
-    store.refuseDrm()
+    store.refuseEncrypted()
 
     // The watcher goes on measuring whatever elements it can reach, and an element it can reach
     // is promoted on its merits. A promotion arriving after the refusal must not open the page up
-    // again: triage decides what is worth keeping, and DRM decides that nothing here may be.
+    // again: triage decides what is worth keeping, and protection decides that nothing here may
+    // be.
     store.promotePending('s1')
     store.append({ ...page, bytes: init })
     store.append({ ...page, bytes: seg1 })
@@ -1122,7 +1172,7 @@ describe('SessionStore: a page that asks for a key system', () => {
 
   it('is not undone by a hold', () => {
     const store = new SessionStore()
-    store.refuseDrm()
+    store.refuseEncrypted()
 
     store.resumePending('s1')
     store.append({ ...page, bytes: init })
@@ -1140,10 +1190,36 @@ describe('SessionStore: a page that asks for a key system', () => {
     // Material of a source under review waits out of sight and comes back whole when the verdict
     // turns (see Probation). The refusal has to reach it there too — a hidden store is still a
     // store, and the turn of a verdict would hand the page's material straight back.
-    store.refuseDrm()
+    store.refuseEncrypted()
     store.promotePending('s1')
 
     expect(store.list()).toEqual([])
+  })
+
+  it('says the page was protected, so that the user can be told which silence this is', () => {
+    const store = new SessionStore()
+    expect(store.encrypted, 'an ordinary page must not be called protected').toBe(false)
+
+    store.append({ ...page, bytes: cencInit })
+
+    // An empty list has two meanings that are opposites, and the popup shows a different sentence
+    // for each: nothing worth recording, or a page that may not be recorded at all.
+    expect(store.encrypted).toBe(true)
+  })
+
+  it('records a clear stream in full and calls it nothing else', () => {
+    const store = new SessionStore()
+    for (const bytes of [init, ...videoSegs]) store.append({ ...page, bytes })
+    for (const bytes of [audioInit, ...audioSegs]) {
+      store.append({ ...page, bufferId: 'b2', bytes })
+    }
+
+    // The other half of the promise, and the regression this set exists for: a page that never
+    // encrypted a byte keeps every one of them. Reading the containers must not turn an ordinary
+    // avc1 stream into a protected one.
+    expect(store.encrypted).toBe(false)
+    expect(store.list()).toHaveLength(1)
+    expect(codecsOf(store.list()[0]!)).toEqual(['avc1', 'mp4a'])
   })
 })
 

@@ -89,6 +89,9 @@ window.addEventListener('message', (event: MessageEvent) => {
     // Through the declared union rather than directly: postMessage accepts anything, and a reply
     // that silently drifted away from BridgeToPage would only show up at the receiver.
     const list: SessionList = { sessions: summaries() }
+    // Why there is nothing here, when there is nothing here. A protected page and a page with no
+    // video on it look the same in an empty list, and the two are owed different sentences.
+    if (store.encrypted) list.encrypted = true
     if (unreachable) list.unreachable = true
 
     const reply: BridgeToPage = list
@@ -141,6 +144,21 @@ window.addEventListener('message', (event: MessageEvent) => {
     return
   }
 
+  // A media element of the page has fired `encrypted`: the material it is being fed carries
+  // protection, and that is the end of this page — §5.4 refuses encrypted media outright, and the
+  // refusal is acted on here rather than left to triage. A verdict speaks about an element the
+  // watcher has found, and on a page whose <video> lives in a shadow root it never finds one:
+  // tv.apple.com reported its DRM four times while no verdict was ever spoken, and the registry
+  // went on offering the material of a protected page for saving.
+  //
+  // The other half of the same refusal needs no message at all — the registry reads protection out
+  // of the boxes it parses anyway. This is for the material it never gets to parse: a stream in a
+  // container it does not read, or a player whose bytes come by a road of their own.
+  if (data?.type === 'tc:encrypted') {
+    store.refuseEncrypted()
+    return
+  }
+
   // The triage verdict is passed by the content script on signals from <video>: the hook in the
   // MAIN world always copies the bytes, and deciding what stays of them is the work of the
   // isolated world. The verdict is addressed, so a rejection acts on exactly its own source.
@@ -153,16 +171,6 @@ window.addEventListener('message', (event: MessageEvent) => {
   }
 
   if (!isPageToBridge(data)) return
-
-  // The player asked the browser for a key system, and that is the end of this page: §5.4 refuses
-  // DRM outright, and the refusal is acted on here rather than left to triage. A verdict speaks
-  // about an element the watcher has found, and on a page whose <video> lives in a shadow root it
-  // never finds one — tv.apple.com sent this message four times while no verdict was ever spoken,
-  // and the registry went on offering the material of a protected page for saving.
-  if (data.type === 'tc:drm') {
-    store.refuseDrm()
-    return
-  }
 
   if (data.type === 'tc:append') {
     store.append({

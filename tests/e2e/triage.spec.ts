@@ -1,7 +1,7 @@
 import { test, expect, type Frame, type Page } from '@playwright/test'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { launchWithExtension, serveLocal } from './helpers'
+import { launchWithExtension, openPopupOn, serveLocal } from './helpers'
 import { sessionKey } from '../../src/core/session-key'
 
 const BANNER_URL = 'https://tailcut.test/banner'
@@ -14,8 +14,10 @@ const SCROLLED_URL = 'https://tailcut.test/scrolled'
 const SHADOW_URL = 'https://tailcut.test/shadow'
 /** The same player behind a closed shadow root: nothing can reach it, ours included. */
 const CLOSED_SHADOW_URL = 'https://tailcut.test/closed-shadow'
-/** A page that asks the browser for a key system, the way a protected player does. */
-const DRM_URL = 'https://tailcut.test/drm'
+/** A page that probes the browser for key systems and then plays in the clear. */
+const PROBE_URL = 'https://tailcut.test/probe'
+/** A page that plays material written in Common Encryption, the way a protected player does. */
+const ENCRYPTED_URL = 'https://tailcut.test/encrypted'
 
 /** A verdict in the form the content script sends it to the bridge in. */
 type SeenVerdict = { sourceId: string; verdict: string }
@@ -27,15 +29,25 @@ type Probe = {
   tcVerdict: SeenVerdict[]
   tcSource: SeenSource[]
   tcAppend: number
-  tcDrm: number
+  tcEncrypted: number
 }
 type PageState = { allAppended?: boolean; headStart?: boolean }
 /** What tests/e2e/page/scrolled.html offers the test: one fragment appended on demand. */
 type StepPage = { appendSegment: (index: number) => Promise<void> }
 /** The address of the stream a page publishes for the test when the element is out of reach. */
 type NamedSource = { playerSrc?: string }
-/** What tests/e2e/page/drm.html offers the test: the moment the player asks for keys. */
-type DrmPage = { askForKeys: () => void; keysAsked?: boolean; keysError: string | null }
+/** What tests/e2e/page/probe.html counts: how the browser answered each capability probe. */
+type ProbePage = {
+  probes: { asked: number; granted: number; refused: number }
+  probesDone: boolean
+}
+/** What tests/e2e/page/encrypted.html offers the test: the moment the protected stream opens. */
+type EncryptedPage = {
+  playProtected: () => Promise<void>
+  protectedAppend: string | null
+  appendMore: () => Promise<void>
+  appendedAfter: number
+}
 
 /** A session summary in the form the bridge answers a tc:list request with. */
 type Summary = {
@@ -80,7 +92,7 @@ async function open(htmlFile: string, url: string) {
     probe.tcVerdict = []
     probe.tcSource = []
     probe.tcAppend = 0
-    probe.tcDrm = 0
+    probe.tcEncrypted = 0
 
     window.addEventListener('message', (event: MessageEvent) => {
       const data = event.data as Record<string, unknown> | null
@@ -92,8 +104,8 @@ async function open(htmlFile: string, url: string) {
         probe.tcSource.push({ sourceId: String(data.sourceId), objectUrl: String(data.objectUrl) })
       } else if (data.type === 'tc:append') {
         probe.tcAppend++
-      } else if (data.type === 'tc:drm') {
-        probe.tcDrm++
+      } else if (data.type === 'tc:encrypted') {
+        probe.tcEncrypted++
       }
     })
   })
@@ -466,15 +478,132 @@ test('a player inside a closed shadow root is refused rather than recorded unjud
   await context.close()
 })
 
-test('a page that asks for a key system is left with nothing at all', async () => {
-  const { context, page, extensionId, log } = await open('drm.html', DRM_URL)
+test('a page that probes for key systems and plays in the clear is recorded in full', async () => {
+  const { context, page, extensionId, log } = await open('probe.html', PROBE_URL)
   const bridge = await bridgeFrame(page, extensionId, log)
   await pageDone(page)
 
-  // The clip plays out its probation first, exactly as the trailer of tv.apple.com does before
-  // that page ever mentions EME. A session that has served it is confirmed, and a rejection of a
-  // confirmed session is the freeze of §5.5: recording stops and everything collected stays. So
-  // this is the state in which a refusal by verdict alone leaves the material of the page behind.
+  // The probing is the point of the page, so it has to have happened: a run where the browser
+  // refused every key system outright would prove nothing about a page that got one.
+  const probes = await page.evaluate(() => (window as unknown as ProbePage).probes)
+  const asked = `setup: the page asked about no key system at all; ${log()}`
+  expect(probes.asked, asked).toBeGreaterThan(0)
+  expect(
+    probes.granted,
+    `setup: the browser granted no key system, so nothing was asked and answered; ${log()}`,
+  ).toBeGreaterThan(0)
+
+  await page.evaluate(() => {
+    const video = document.querySelector('video')!
+    video.loop = true
+    return video.play()
+  })
+
+  const player = await sourceIdOf(page, 'video')
+  const seen = await verdictsWhen(bridge, (list) => latest(list, player) === 'promote')
+
+  expect(latest(seen, player), `the player was never promoted; page console: ${log()}`).toBe(
+    'promote',
+  )
+  expect(
+    seen.filter((item) => item.verdict === 'reject'),
+    'asking the browser about DRM is not a reason to refuse anything',
+  ).toEqual([])
+  expect(
+    await bridge.evaluate(() => (window as unknown as Probe).tcEncrypted),
+    'a probe is not an encrypted stream and must not be reported as one',
+  ).toBe(0)
+
+  // The whole of the recording, and this is the regression the page exists for: the article of
+  // edition.cnn.com made sixteen such probes over a stream without one encryption box in it, and
+  // lost forty seconds of a video the user was watching.
+  expect(
+    await sessionsWhen(page, oneCompleteSession),
+    `a page that only asked about DRM lost its recording; page console: ${log()}`,
+  ).toEqual([await playerSession(PROBE_URL, 'probing player')])
+
+  await context.close()
+})
+
+test('a page that plays encrypted media is left with nothing at all', async () => {
+  const { context, page, extensionId, log } = await open('encrypted.html', ENCRYPTED_URL)
+  const bridge = await bridgeFrame(page, extensionId, log)
+  await pageDone(page)
+
+  // The clear preview plays out its probation first, exactly as the trailer of tv.apple.com does
+  // before that page ever mentions EME. A session that has served it is confirmed, and a
+  // rejection of a confirmed session is the freeze of §5.5: recording stops and everything
+  // collected stays. So this is the state in which a weaker refusal leaves the material behind.
+  await page.evaluate(() => {
+    const video = document.querySelector<HTMLVideoElement>('#clear')!
+    video.loop = true
+    return video.play()
+  })
+
+  const player = await sourceIdOf(page, '#clear')
+  const seen = await verdictsWhen(bridge, (list) => latest(list, player) === 'promote')
+  expect(latest(seen, player), `setup: the player was never promoted; ${log()}`).toBe('promote')
+  expect(
+    await sessionsWhen(page, oneCompleteSession),
+    `setup: the material has to be in the registry first; page console: ${log()}`,
+  ).toEqual([await playerSession(ENCRYPTED_URL, 'clearkey player')])
+
+  // And now the second player of the page opens the licensed stream. There is no circumvention in
+  // this: what the extension reads is the shape of the header — encv with sinf inside it — and
+  // not one encrypted sample is decoded, decrypted or kept.
+  await page.evaluate(() => (window as unknown as EncryptedPage).playProtected())
+  await page.waitForFunction(
+    () => (window as unknown as EncryptedPage).protectedAppend !== null,
+    undefined,
+    { timeout: 15_000 },
+  )
+  expect(
+    await page.evaluate(() => (window as unknown as EncryptedPage).protectedAppend),
+    'the browser refused the protected init, so the page never played what is under test',
+  ).toBe('accepted')
+
+  // Everything goes with it, the six seconds already earned in the clear included. §2 promises
+  // the user that a protected page is refused outright, and a session left in the list is an
+  // offer to save it.
+  expect(
+    await sessionsWhen(page, (sessions) => sessions.length === 0),
+    `the material of a page with encrypted media stayed in the registry; ${log()}`,
+  ).toEqual([])
+  expect(
+    await bridge.evaluate(() => (window as unknown as Probe).tcEncrypted),
+    'nothing announced this page as protected: the refusal has to come out of the bytes alone',
+  ).toBe(0)
+
+  // And nothing more is taken in. The hook in the MAIN world goes on copying every append — it
+  // knows nothing of any of this — and a page plays for as long as it is open.
+  await page.evaluate(() => (window as unknown as EncryptedPage).appendMore())
+  await page.waitForFunction(
+    () => (window as unknown as EncryptedPage).appendedAfter > 0,
+    undefined,
+    { timeout: 15_000 },
+  )
+  expect(
+    await sessionsWhen(page, (sessions) => sessions.length === 0),
+    `the page went on recording after the refusal; page console: ${log()}`,
+  ).toEqual([])
+
+  // The user is told which silence this is. A protected page that shows "Nothing recorded on this
+  // page yet" is a deliberate refusal wearing the face of a defect.
+  const popup = await openPopupOn(context, page, extensionId)
+  await expect(popup.locator('body')).toContainText('protected video')
+  await expect(
+    popup.getByTestId('save'),
+    'a protected page must not be offered for saving',
+  ).toHaveCount(0)
+
+  await context.close()
+})
+
+test('a page whose element reports encrypted material is left with nothing either', async () => {
+  const { context, page, extensionId, log } = await open('player.html', PLAYER_URL)
+  const bridge = await bridgeFrame(page, extensionId, log)
+  await pageDone(page)
+
   await page.evaluate(() => {
     const video = document.querySelector('video')!
     video.loop = true
@@ -487,31 +616,32 @@ test('a page that asks for a key system is left with nothing at all', async () =
   expect(
     await sessionsWhen(page, oneCompleteSession),
     `setup: the material has to be in the registry first; page console: ${log()}`,
-  ).toEqual([await playerSession(DRM_URL, 'clearkey player')])
+  ).toEqual([await playerSession(PLAYER_URL, 'test player')])
 
-  // And now the player asks the browser for a key system — nothing else about the page changes.
-  // There is no circumvention in this: the refusal is on the request itself, before a single key
-  // is handed out, and the material here is the same unencrypted fixture as everywhere else.
-  await page.evaluate(() => (window as unknown as DrmPage).askForKeys())
-  await page.waitForFunction(() => (window as unknown as DrmPage).keysAsked === true, undefined, {
-    timeout: 15_000,
-  })
+  // The other road to the same refusal, and the one that does not depend on the parser: a media
+  // element saying the material it is being fed carries protection. Chrome fires this itself on
+  // finding a protection header in the stream — here the page dispatches it, because a stream
+  // that made the browser fire it would be caught a moment earlier by its boxes and would prove
+  // the wrong half. What is under test is the road from the element to the popup.
+  await page.evaluate(() => document.querySelector('video')!.dispatchEvent(new Event('encrypted')))
 
+  await bridge
+    .waitForFunction(() => (window as unknown as Probe).tcEncrypted > 0, undefined, {
+      timeout: 5_000,
+    })
+    .catch(() => undefined)
   expect(
-    await page.evaluate(() => (window as unknown as DrmPage).keysError),
-    'the page never got its key system, so nothing was refused for the right reason',
-  ).toBeNull()
-  expect(
-    await bridge.evaluate(() => (window as unknown as Probe).tcDrm),
-    `the report of the key request never reached the bridge; page console: ${log()}`,
-  ).toBeGreaterThan(0)
+    await bridge.evaluate(() => (window as unknown as Probe).tcEncrypted),
+    `the report never crossed from the element to the bridge; page console: ${log()}`,
+  ).toBe(1)
 
-  // Everything goes with it, the six seconds already earned included. §2 promises the user that
-  // a protected page is refused outright, and a session left in the list is an offer to save it.
   expect(
     await sessionsWhen(page, (sessions) => sessions.length === 0),
-    `the material of a page with DRM stayed in the registry; page console: ${log()}`,
+    `a page whose element reported protection kept its recording; ${log()}`,
   ).toEqual([])
+
+  const popup = await openPopupOn(context, page, extensionId)
+  await expect(popup.locator('body')).toContainText('protected video')
 
   await context.close()
 })

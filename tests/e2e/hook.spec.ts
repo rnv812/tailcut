@@ -51,7 +51,8 @@ type SeenSource = { sourceId: string; objectUrl: string }
 type Probe = {
   tcAppend: SeenAppend[]
   tcSource: SeenSource[]
-  tcDrm: string[]
+  /** Every message the hook posted into the window, by type: the whole of what it says. */
+  tcTypes: string[]
   tcDigest: (bytes: ArrayBuffer) => string
 }
 
@@ -74,7 +75,7 @@ async function open(url: string, html?: string) {
     const target = window as unknown as Probe
     target.tcAppend = []
     target.tcSource = []
-    target.tcDrm = []
+    target.tcTypes = []
     target.tcDigest = (buffer: ArrayBuffer) => {
       const bytes = new Uint8Array(buffer)
       let hash = 0x811c9dc5
@@ -85,6 +86,10 @@ async function open(url: string, html?: string) {
     window.addEventListener('message', (event: MessageEvent) => {
       const data = event.data as Record<string, unknown> | null
       if (!data || typeof data !== 'object') return
+
+      if (typeof data.type === 'string' && data.type.startsWith('tc:')) {
+        target.tcTypes.push(data.type)
+      }
 
       if (data.type === 'tc:append') {
         target.tcAppend.push({
@@ -98,8 +103,6 @@ async function open(url: string, html?: string) {
           sourceId: String(data.sourceId),
           objectUrl: String(data.objectUrl),
         })
-      } else if (data.type === 'tc:drm') {
-        target.tcDrm.push(String(data.sourceId))
       }
     })
   })
@@ -361,8 +364,12 @@ test('createObjectURL остаётся рабочим для обычных Blob
   await close(context)
 })
 
-test('обращение к DRM видно, а сам вызов работает', async () => {
+test('обращение к DRM хук не трогает вовсе', async () => {
   const { context, page, log } = await openPlayer()
+
+  const original = await page.evaluate(
+    () => navigator.requestMediaKeySystemAccess.toString().includes('[native code]'),
+  )
 
   const access = await page.evaluate(async (mime) => {
     try {
@@ -375,17 +382,18 @@ test('обращение к DRM видно, а сам вызов работае�
     }
   }, MIME)
 
-  await page
-    .waitForFunction(() => (window as unknown as Probe).tcDrm.length > 0, undefined, {
-      timeout: 3_000,
-    })
-    .catch(() => undefined)
+  // Пусть все отложенные сообщения хука дойдут: сегменты он отправляет микрозадачей.
+  await page.waitForTimeout(300)
 
+  // Метод страницы остался родным. Раньше он подменялся, и любое обращение — включая
+  // отклонённый зонд возможностей — снимало запись со всей страницы: на статье edition.cnn.com
+  // шестнадцать зондов отняли настоящее видео, шедшее без единого бокса шифрования.
+  expect(original, `хук всё ещё подменяет requestMediaKeySystemAccess; ${log()}`).toBe(true)
   expect(
-    await page.evaluate(() => (window as unknown as Probe).tcDrm),
-    `хук должен сообщить об обращении к DRM; консоль страницы: ${log()}`,
-  ).toEqual(['page'])
-  expect(access, 'обёртка не должна ломать выдачу ключей').toEqual({
+    await page.evaluate(() => (window as unknown as Probe).tcTypes),
+    'хуку нечего сказать о запросе ключевой системы',
+  ).not.toContain('tc:drm')
+  expect(access, 'выдача ключей не должна страдать от расширения').toEqual({
     keySystem: 'org.w3.clearkey',
     failed: '',
   })

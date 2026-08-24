@@ -13,7 +13,14 @@ const CONTAINERS = new Set([
   'moov', 'trak', 'mdia', 'minf', 'stbl', 'moof', 'traf', 'mvex', 'edts', 'dinf',
 ])
 
-function readBoxesIn(data: Uint8Array, from: number, to: number): Box[] {
+/**
+ * The boxes lying between two offsets of the buffer.
+ *
+ * Exported for the one reader that cannot get at its boxes through a parent: a sample entry keeps
+ * a fixed run of fields in front of its children, so where they begin is worked out by whoever
+ * knows what kind of entry it is — see src/core/iso/encryption.ts.
+ */
+export function boxesIn(data: Uint8Array, from: number, to: number): Box[] {
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
   const boxes: Box[] = []
   let offset = from
@@ -49,12 +56,12 @@ function readBoxesIn(data: Uint8Array, from: number, to: number): Box[] {
 }
 
 export function topLevelBoxes(data: Uint8Array): Box[] {
-  return readBoxesIn(data, 0, data.byteLength)
+  return boxesIn(data, 0, data.byteLength)
 }
 
 export function childBoxes(data: Uint8Array, parent: Box): Box[] {
   if (!CONTAINERS.has(parent.type)) return []
-  return readBoxesIn(data, parent.start + parent.headerSize, parent.start + parent.size)
+  return boxesIn(data, parent.start + parent.headerSize, parent.start + parent.size)
 }
 
 export function findBox(data: Uint8Array, path: string[]): Box | null {

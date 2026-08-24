@@ -45,11 +45,6 @@ const UNNAMED_POLLS = 2
  * which is a verdict of its own (see startWatching).
  */
 const told = new Map<string, TriageVerdict>()
-let drmSeen = false
-
-export function markDrmSeen(): void {
-  drmSeen = true
-}
 
 /**
  * The hook has opened a MediaSource and named the address it handed the page for it.
@@ -133,9 +128,11 @@ function signalsOf(state: Watched): VideoSignals {
     visible: onScreen && document.visibilityState === 'visible',
     playing: !element.paused && !element.ended && element.readyState >= 2,
     playedSeconds: state.playedSeconds,
-    // Запрос ключей приходит от плеера, а не от элемента, и связать его с конкретным
-    // <video> нечем: DRM на странице означает отказ по всему, что на ней есть.
-    hasDrm: drmSeen || element.mediaKeys != null,
+    // Ключи, выданные самому элементу: страница присоединила к нему CDM, и что бы он ни играл
+    // дальше, писать это не нужно. Отказ здесь адресный — по элементу, а не по странице; отказ
+    // по всей странице выносится по самому материалу, когда в нём находится шифрование
+    // (см. onEncrypted ниже и src/core/container.ts).
+    hasDrm: element.mediaKeys != null,
   }
 }
 
@@ -170,9 +167,25 @@ export function startWatching(
   onVerdict: (sourceId: string, verdict: TriageVerdict) => void,
   /** Said once, when this page holds a stream no verdict can ever be spoken about. */
   onUnreachable: () => void = () => {},
+  /**
+   * Said once, when a media element of this page reports that what it is being fed is encrypted.
+   *
+   * The `encrypted` event is the stream speaking for itself: the browser fires it on finding
+   * protection headers in the material, and no probing of key systems, refused or granted, can
+   * bring it about. That is the whole difference from what this used to watch for — a page was
+   * measured asking about sixteen key systems over a video that was in the clear, and lost its
+   * entire recording for asking.
+   *
+   * It is a second line and not the first: the registry reads the same protection out of the
+   * boxes it parses anyway (src/core/container.ts). This catches what never reaches the parser —
+   * a stream in a container it does not read, or one whose bytes travel a road of their own.
+   */
+  onEncrypted: () => void = () => {},
 ): void {
   /** Whether the page has already been declared unrecordable. */
   let saidUnreachable = false
+  /** Whether the page has already been declared protected: the refusal never turns. */
+  let saidEncrypted = false
 
   /** Shadow roots already under observation: a weak set, so a detached tree can still be freed. */
   const observed = new WeakSet<ShadowRoot>()
@@ -181,6 +194,16 @@ export function startWatching(
   const take = (video: HTMLVideoElement) => {
     if (watched.has(video)) return
     watched.set(video, { element: video, playedSeconds: 0, lastTick: performance.now() })
+
+    // Hung on the element rather than on the document, because the event does not cross the wall
+    // of a shadow tree: it is not composed, and a listener at the document would never hear the
+    // player of tv.apple.com. Every element this watcher can reach is reached here, and one it
+    // cannot reach is one whose stream is refused anyway (see the unclaimed streams below).
+    video.addEventListener('encrypted', () => {
+      if (saidEncrypted) return
+      saidEncrypted = true
+      onEncrypted()
+    })
   }
 
   const takeTree = (root: ParentNode) => {

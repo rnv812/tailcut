@@ -105,17 +105,16 @@ SourceBuffer.prototype.appendBuffer = function (data: BufferSource): void {
 // of its material with them; the worker is reached from src/page/worker-hook.ts.
 installWorkerHook(send)
 
-const originalRequestMediaKeySystemAccess = navigator.requestMediaKeySystemAccess
-// Охрана обязательна: расширение объявлено на <all_urls>, а на http-страницах Chrome не отдаёт
-// navigator.requestMediaKeySystemAccess вовсе. Обёртка без проверки выдумала бы возможность,
-// которой у браузера нет: плееры сперва проверяют наличие метода, а потом зовут его — и вызов
-// упал бы внутри обёртки, на пустом оригинале.
-if (originalRequestMediaKeySystemAccess) {
-  navigator.requestMediaKeySystemAccess = function (
-    keySystem: string,
-    configs: MediaKeySystemConfiguration[],
-  ) {
-    send({ type: 'tc:drm', sourceId: 'page' })
-    return originalRequestMediaKeySystemAccess.call(navigator, keySystem, configs)
-  }
-}
+// navigator.requestMediaKeySystemAccess is deliberately left alone.
+//
+// It used to be wrapped, and every call to it — a refused capability probe included — took the
+// recording of the whole page with it. Measured on an article of edition.cnn.com: sixteen probes
+// inside the first two seconds, three of them granted, setMediaKeys called with null alone, and
+// not one encryption box anywhere in the stream. The page was playing an ordinary video, 367x648
+// with sound, watched for forty seconds — and it was thrown away for asking a question.
+//
+// Asking is intent; protection is a property of the material. The extension reads it out of the
+// boxes it parses anyway (src/core/container.ts) and hears it from the element itself through the
+// `encrypted` event (src/page/watcher.ts). Neither can be brought about by a probe, and both are
+// true of a protected stream whose negotiation we never saw. So there is nothing for a hook to do
+// here, and one monkey patch fewer is laid on the page.

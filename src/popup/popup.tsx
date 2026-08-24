@@ -17,6 +17,19 @@ const UNTITLED = 'Untitled'
 const NOTHING = 'Nothing recorded on this page yet.'
 
 /**
+ * A page playing protected video.
+ *
+ * Said in as many words, and not left as the same emptiness a page with no video shows. The
+ * refusal is deliberate and final — encryption was found in the material itself, everything
+ * gathered before it was dropped, and nothing more will be taken in (§5.4) — so "nothing recorded
+ * yet" would promise a wait that never ends and make a decision look like a defect. The survey
+ * found exactly that on every protected page it opened: a refusal indistinguishable from a
+ * failure.
+ */
+const PROTECTED =
+  'This page plays protected video, which tailcut does not record. Nothing of it was kept.'
+
+/**
  * What the file will be missing, in the words the user is shown.
  *
  * The length above this line is already the length of the file and not of the recording, so the
@@ -60,9 +73,12 @@ function Popup() {
 
   const sessions = answer.sessions
   if (!sessions.length) {
-    // Two different silences, and the difference is the whole point: a page with nothing worth
-    // recording on it, and a page whose player never reached the extension at all.
-    return <div class="pad muted">{answer.unreachable ? UNREACHABLE : NOTHING}</div>
+    // Three different silences, and the difference is the whole point: a page with nothing worth
+    // recording on it, a page whose player never reached the extension at all, and a page that
+    // may not be recorded. Protection comes first of the three because it is the reason for the
+    // other two wherever it holds: a protected page keeps nothing, whatever else is true of it.
+    const nothing = answer.encrypted ? PROTECTED : answer.unreachable ? UNREACHABLE : NOTHING
+    return <div class="pad muted">{nothing}</div>
   }
 
   // The list comes newest first: at the top is what is being watched right now, and that is what

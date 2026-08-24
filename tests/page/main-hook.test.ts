@@ -320,17 +320,28 @@ describe('чужой SourceBuffer', () => {
 describe('EME', () => {
   const config = { initDataTypes: ['keyids'], videoCapabilities: [{ contentType: MIME }] }
 
-  it('обращение видно, а вызов уходит настоящему методу', async () => {
+  it('не трогает запрос ключевой системы вовсе', async () => {
     const page = installPage()
+    const original = navigator.requestMediaKeySystemAccess
     await importHook()
 
     const access = await navigator.requestMediaKeySystemAccess('org.w3.clearkey', [
       config as MediaKeySystemConfiguration,
     ])
 
-    expect(page.of('tc:drm').map((item) => item.message)).toEqual([
-      { type: 'tc:drm', sourceId: 'page' },
-    ])
+    // Раньше хук оборачивал этот метод, и любое обращение к нему — включая отклонённый зонд
+    // возможностей — снимало запись со всей страницы. На статье edition.cnn.com таких зондов
+    // было шестнадцать на полутора секундах, поток при этом шёл без единого бокса шифрования, и
+    // настоящее видео 367x648, которое смотрели сорок секунд, терялось целиком.
+    //
+    // Обращение к EME — это намерение, а не материал. Защиту расширение читает в самих байтах
+    // (src/core/container.ts) и слышит от элемента событием `encrypted`; спрашивать браузера
+    // страница вольна сколько угодно.
+    expect(
+      navigator.requestMediaKeySystemAccess,
+      'хук всё ещё подменяет метод страницы',
+    ).toBe(original)
+    expect(page.posted, 'о запросе ключевой системы отправлять нечего').toEqual([])
     expect(page.emeCalls).toEqual([
       { keySystem: 'org.w3.clearkey', configs: [config], thisArg: navigator },
     ])

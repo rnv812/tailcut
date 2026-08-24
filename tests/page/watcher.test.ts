@@ -37,11 +37,22 @@ function fakeVideo(overrides: Record<string, unknown> = {}) {
     getBoundingClientRect(): Box {
       return (this as { box: Box }).box
     },
+    /** Listeners the watcher hangs on the element; the test fires them itself. */
+    listeners: new Map<string, Array<() => void>>(),
+    addEventListener(type: string, handler: () => void): void {
+      const map = (this as FakeVideo).listeners
+      map.set(type, [...(map.get(type) ?? []), handler])
+    },
     ...overrides,
   }
 }
 
 type FakeVideo = ReturnType<typeof fakeVideo>
+
+/** The element fires an event of its own — `encrypted` is the one the watcher listens for. */
+function fire(video: FakeVideo, type: string): void {
+  for (const handler of video.listeners.get(type) ?? []) handler()
+}
 
 /** Беззвучное зациклённое превью без панели управления — типичный баннер. */
 const bannerVideo = () =>
@@ -142,13 +153,16 @@ async function startWatcher() {
   const seen: Reported[] = []
   /** How many times the watcher has said that this page holds a stream it cannot reach. */
   const unreachable = { times: 0 }
+  /** How many times it has said that this page plays media that is encrypted. */
+  const encrypted = { times: 0 }
   const watcher = await import('../../src/page/watcher')
   watcher.startWatching(
     (sourceId, verdict) => seen.push({ sourceId, verdict }),
     () => unreachable.times++,
+    () => encrypted.times++,
   )
 
-  return { ...watcher, seen, unreachable }
+  return { ...watcher, seen, unreachable, encrypted }
 }
 
 /**
@@ -344,19 +358,6 @@ describe('наблюдатель: что уходит мосту', () => {
     video.loop = false
     tick(40)
 
-    expect(watcher.seen).toEqual([{ sourceId: 's1', verdict: 'reject' }])
-  })
-
-  it('DRM отменяет запись на всей странице', async () => {
-    const watcher = await startWatcher()
-    place(watcher, fakeVideo(), 's1')
-
-    tick(2)
-    watcher.markDrmSeen()
-    tick()
-
-    // Запрос ключей приходит от плеера, а не от элемента: связать его с конкретным <video>
-    // нечем, поэтому отказ получает всё, что на странице есть.
     expect(watcher.seen).toEqual([{ sourceId: 's1', verdict: 'reject' }])
   })
 
@@ -594,5 +595,59 @@ describe('the watcher and a MediaSource in a worker', () => {
 
     expect(watcher.unreachable.times).toBe(0)
     expect(watcher.seen).toEqual([{ sourceId: 'w1s1', verdict: 'promote' }])
+  })
+})
+
+describe('the watcher and a stream that carries protection', () => {
+  it('says so for the page when an element fires `encrypted`', async () => {
+    const watcher = await startWatcher()
+    const video = place(watcher, fakeVideo(), 's1')
+
+    tick(2)
+    expect(watcher.encrypted.times, 'nothing has said this page is protected yet').toBe(0)
+
+    // The element is being fed material that carries protection, and it is the element that says
+    // so — not the page announcing an intention. A request for a key system means nothing here:
+    // a news article was measured making sixteen of them over a video that was in the clear.
+    fire(video, 'encrypted')
+
+    expect(watcher.encrypted.times).toBe(1)
+  })
+
+  it('says it once, however many elements of the page fire it', async () => {
+    const watcher = await startWatcher()
+    const first = place(watcher, fakeVideo(), 's1')
+    const second = place(watcher, fakeVideo({ src: 'blob:two', currentSrc: 'blob:two' }), 's2')
+
+    tick()
+    fire(first, 'encrypted')
+    fire(second, 'encrypted')
+    fire(first, 'encrypted')
+
+    // The refusal covers the whole page and never turns, so the second telling changes nothing.
+    // A protected player fires this for every initialisation header of its stream.
+    expect(watcher.encrypted.times).toBe(1)
+  })
+
+  it('hears it from a player inside an open shadow root', async () => {
+    const watcher = await startWatcher()
+    const video = place(watcher, fakeVideo(), 's1', attachShadow())
+
+    // The layout of tv.apple.com, where no verdict is ever spoken about the element and the
+    // material of a protected page was left in the registry to be offered for saving.
+    tick()
+    fire(video, 'encrypted')
+
+    expect(watcher.encrypted.times).toBe(1)
+  })
+
+  it('says nothing of the sort about a page that plays in the clear', async () => {
+    const watcher = await startWatcher()
+    place(watcher, fakeVideo(), 's1')
+
+    tick(13)
+
+    expect(watcher.encrypted.times).toBe(0)
+    expect(watcher.seen).toEqual([{ sourceId: 's1', verdict: 'promote' }])
   })
 })

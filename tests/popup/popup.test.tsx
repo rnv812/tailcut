@@ -34,6 +34,8 @@ type Reply = {
   sessions: SessionSummary[]
   /** The tab says this page holds a player the extension could not reach. */
   unreachable?: boolean
+  /** The tab says this page plays media that is encrypted. */
+  encrypted?: boolean
   save?: SaveResult
 } | 'silent'
 
@@ -56,7 +58,11 @@ function installChrome(reply: Reply) {
         // Silence from the tab is not a refusal: the promise simply never settles, and the popup
         // waits.
         if (reply === 'silent') return new Promise(() => {})
-        return Promise.resolve({ sessions: reply.sessions, unreachable: reply.unreachable })
+        return Promise.resolve({
+          sessions: reply.sessions,
+          unreachable: reply.unreachable,
+          encrypted: reply.encrypted,
+        })
       },
     },
   })
@@ -123,6 +129,33 @@ describe('the popup', () => {
     // a summary that does not exist, the render throws, and it stays in "Loading…" for good.
     expect(bodyText()).toBe('Nothing recorded on this page yet.')
     expect(at('title'), 'the popup shows a summary where there are none').toBeNull()
+  })
+
+  it('says a protected page cannot be recorded, rather than showing the same emptiness', async () => {
+    await mount({ sessions: [], encrypted: true })
+
+    // The page plays encrypted media, so nothing of it was kept and nothing ever will be. Told
+    // "nothing recorded yet", the user waits for a recording that is never coming and takes a
+    // deliberate refusal for a defect — which is exactly what the survey found on every protected
+    // page it opened.
+    expect(bodyText()).toBe(
+      'This page plays protected video, which tailcut does not record. Nothing of it was kept.',
+    )
+    expect(at('save'), 'a protected page must not be offered for saving').toBeNull()
+  })
+
+  it('says that before it says a page is empty or out of reach', async () => {
+    // A protected page can be both: a player out of reach, and nothing recorded. Protection is
+    // the reason there is nothing, and the reason is what the user is owed.
+    await mount({ sessions: [], encrypted: true, unreachable: true })
+
+    expect(bodyText()).toContain('protected video')
+  })
+
+  it('says nothing of the sort on an ordinary page', async () => {
+    await mount({ sessions: [fresh] })
+
+    expect(bodyText()).not.toContain('protected')
   })
 
   it('says a page it could not reach cannot be recorded, rather than showing nothing', async () => {

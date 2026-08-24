@@ -1,0 +1,85 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>probing player</title>
+<!--
+  Страница, которая спрашивает браузер про системы ключей и играет в открытую. Форма статьи
+  edition.cnn.com: шестнадцать вызовов requestMediaKeySystemAccess на полутора секундах — часть
+  отклонена, часть выдана, — setMediaKeys только с null, и ни одного бокса шифрования в потоке.
+
+  Раньше расширение снимало запись со всей страницы по самому обращению к EME, и настоящее видео
+  367x648 со звуком, которое смотрели сорок секунд, терялось целиком. Спрашивать — это намерение,
+  а не материал: страница обязана быть записана полностью.
+-->
+<video id="v" controls width="640" style="background:#000"></video>
+<script>
+  /** Системы ключей, которые перебирает обычный плеер. Часть браузер не даст, часть даст. */
+  const KEY_SYSTEMS = [
+    'com.widevine.alpha',
+    'com.microsoft.playready',
+    'com.apple.fps.1_0',
+    'org.w3.clearkey',
+  ]
+
+  const CONFIG = [
+    {
+      initDataTypes: ['cenc'],
+      videoCapabilities: [{ contentType: 'video/mp4; codecs="avc1.4d401e"' }],
+    },
+  ]
+
+  const INIT = '/fixtures/h264/init-stream0.m4s'
+  const SEGMENTS = [
+    '/fixtures/h264/chunk-stream0-00001.m4s',
+    '/fixtures/h264/chunk-stream0-00002.m4s',
+    '/fixtures/h264/chunk-stream0-00003.m4s',
+  ]
+
+  const video = document.getElementById('v')
+  const mediaSource = new MediaSource()
+  video.src = URL.createObjectURL(mediaSource)
+
+  window.appended = 0
+  /** Сколько зондов ушло и сколько из них браузер удовлетворил. */
+  window.probes = { asked: 0, granted: 0, refused: 0 }
+  window.probesDone = false
+
+  /** Перебор возможностей — ровно то, что делает плеер новостного сайта перед стартом. */
+  async function probe() {
+    for (const keySystem of KEY_SYSTEMS) {
+      window.probes.asked++
+      try {
+        await navigator.requestMediaKeySystemAccess(keySystem, CONFIG)
+        window.probes.granted++
+      } catch {
+        window.probes.refused++
+      }
+    }
+
+    // Ключи элементу так и не присоединяются: страница только спрашивала. Именно так вёл себя
+    // измеренный плеер — setMediaKeys вызывался единственный раз и с null.
+    await video.setMediaKeys(null)
+    window.probesDone = true
+  }
+
+  mediaSource.addEventListener('sourceopen', async () => {
+    const sb = mediaSource.addSourceBuffer('video/mp4; codecs="avc1.4d401e"')
+    const append = (buffer) =>
+      new Promise((resolve) => {
+        sb.addEventListener('updateend', resolve, { once: true })
+        sb.appendBuffer(buffer)
+      })
+    const bytes = async (url) => (await fetch(url)).arrayBuffer()
+
+    await probe()
+
+    await append(await bytes(INIT))
+    window.appended++
+
+    for (const url of SEGMENTS) {
+      await append(await bytes(url))
+      window.appended++
+    }
+
+    window.allAppended = true
+  })
+</script>

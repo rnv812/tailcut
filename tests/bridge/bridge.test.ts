@@ -16,6 +16,8 @@ const seg3Bytes = new Uint8Array(readFileSync('tests/fixtures/h264/chunk-stream0
  * different lengths: video fragments all last the same, and a run made of one of them is
  * indistinguishable from a run made of another.
  */
+/** The header of a protected stream: `encv` with `sinf` inside it, in place of `avc1`. */
+const cencInitBytes = new Uint8Array(readFileSync('tests/fixtures/cenc/init-stream0.m4s'))
 const audioInitBytes = new Uint8Array(readFileSync('tests/fixtures/h264/init-stream1.m4s'))
 /** Pieces of sound: 0…1.95, 1.95…3.95, 3.95…5.97, 5.97…6.02 seconds. */
 const audioBytes = [1, 2, 3, 4].map(
@@ -630,31 +632,49 @@ describe('the bridge takes triage verdicts', () => {
   })
 })
 
-describe('the bridge refuses a page with DRM', () => {
-  /** The hook reports the request for a key system the moment the player makes it. */
-  const drm = (win: ReturnType<typeof installWindow>) =>
-    win.deliver({ type: 'tc:drm', sourceId: 'page' })
+describe('the bridge refuses a page that plays encrypted media', () => {
+  /**
+   * The isolated world has heard a media element fire `encrypted` over what it was being fed.
+   *
+   * The stream saying so itself, and not the page saying it means to: what the page asks the
+   * browser about key systems is no longer part of this protocol at all, because a news article
+   * was measured asking about sixteen of them over a video that was in the clear.
+   */
+  const encrypted = (win: ReturnType<typeof installWindow>) => win.deliver({ type: 'tc:encrypted' })
 
-  it('erases what the page had collected before the keys were asked for', async () => {
+  it('erases what the page had collected in the clear before it', async () => {
     const win = await loadBridge()
     win.context()
     win.append(initBytes, 's1')
     win.append(seg1Bytes, 's1')
     expect(win.list(), 'setup: the material has to be in the registry first').toHaveLength(1)
 
-    drm(win)
+    encrypted(win)
 
     // The refusal comes in on its own and not through a verdict. On a page whose element the
     // watcher cannot reach — tv.apple.com plays inside a shadow root — no verdict is ever spoken,
-    // and the whole of the promise "we do not record DRM" rests on this message alone.
+    // and the promise "we do not record protected media" would rest on nothing.
     expect(win.list()).toEqual([])
+  })
+
+  it('refuses a page whose segments arrive encrypted, told by nobody', async () => {
+    const win = await loadBridge()
+    win.context()
+
+    // Nothing announced this page as protected: the boxes of the init segment say it, and the
+    // bridge is the one that reads them.
+    win.append(cencInitBytes, 's1')
+    win.append(seg1Bytes, 's1')
+
+    expect(win.list()).toEqual([])
+    expect(win.answer().encrypted).toBe(true)
   })
 
   it('keeps nothing the page appends after it', async () => {
     const win = await loadBridge()
     win.context()
 
-    drm(win)
+    encrypted(win)
     win.append(initBytes, 's1')
     win.append(seg1Bytes, 's1')
 
@@ -668,7 +688,7 @@ describe('the bridge refuses a page with DRM', () => {
     win.append(seg1Bytes, 's1')
     const key = win.list()[0]!.key
 
-    drm(win)
+    encrypted(win)
     const reply = win.save(key)
 
     // The popup keeps the key of a session it listed a moment ago: a save by that key must find
@@ -677,13 +697,38 @@ describe('the bridge refuses a page with DRM', () => {
     expect(win.downloads, 'a file of a protected page was written').toEqual([])
   })
 
-  it('does not answer the sender of tc:drm', async () => {
+  it('says so in the answer, and says nothing of the sort before it is told', async () => {
     const win = await loadBridge()
     win.context()
 
-    const sender = win.deliver({ type: 'tc:drm', sourceId: 'page' })
+    expect(win.answer().encrypted, 'setup: nothing has been said about this page yet').toBe(
+      undefined,
+    )
 
-    expect(sender.posts, 'the bridge answered a DRM report').toEqual([])
+    encrypted(win)
+
+    // An empty list is the same emptiness on a page with no video and on a page that may not be
+    // recorded, and the user is owed the difference in words.
+    expect(win.answer().encrypted).toBe(true)
+  })
+
+  it('leaves an ordinary page unprotected in the answer', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes, 's1')
+    win.append(seg1Bytes, 's1')
+
+    expect(win.answer().encrypted).toBe(undefined)
+    expect(win.answer().sessions).toHaveLength(1)
+  })
+
+  it('does not answer the sender of tc:encrypted', async () => {
+    const win = await loadBridge()
+    win.context()
+
+    const sender = win.deliver({ type: 'tc:encrypted' })
+
+    expect(sender.posts, 'the bridge answered a report of encryption').toEqual([])
   })
 })
 

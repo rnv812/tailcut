@@ -1,0 +1,98 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>clearkey player</title>
+<!--
+  Страница, на которой играет защищённый поток — форма dash.js ClearKey sample и tv.apple.com:
+  сперва бесплатное превью в открытую, потом лицензионный материал, зашифрованный по Common
+  Encryption. Обхода защиты здесь нет и быть не может: расширение отказывается по самому виду
+  материала — по боксам encv/sinf/tenc в ините, — и ни один зашифрованный байт оно не читает и
+  прочесть не может.
+
+  Защищённый инит появляется по сигналу из теста. К этому моменту первый ролик успевает отыграть
+  испытательный срок, и сессия подтверждена: отказ сортировки такую сессию только замораживает и
+  сохраняет накопленное (§5.5). Отказ по шифрованию обязан быть сильнее — не оставить ничего.
+-->
+<video id="clear" controls width="640" style="background:#000"></video>
+<video id="licensed" controls width="640" style="background:#000"></video>
+<script>
+  const INIT = '/fixtures/h264/init-stream0.m4s'
+  const SEGMENTS = [
+    '/fixtures/h264/chunk-stream0-00001.m4s',
+    '/fixtures/h264/chunk-stream0-00002.m4s',
+    '/fixtures/h264/chunk-stream0-00003.m4s',
+  ]
+  /** Инит защищённого потока: encv вместо avc1, внутри sinf с frma, schm и tenc. */
+  const CENC_INIT = '/fixtures/cenc/init-stream0.m4s'
+
+  const MIME = 'video/mp4; codecs="avc1.4d401e"'
+
+  const bytes = async (url) => (await fetch(url)).arrayBuffer()
+
+  /** Дописка с ожиданием updateend: тест должен знать, что байты действительно ушли. */
+  const appendTo = (sb, buffer) =>
+    new Promise((resolve, reject) => {
+      sb.addEventListener('updateend', resolve, { once: true })
+      sb.addEventListener('error', () => reject(new Error('appendBuffer failed')), { once: true })
+      sb.appendBuffer(buffer)
+    })
+
+  const opened = (mediaSource) =>
+    new Promise((resolve) => mediaSource.addEventListener('sourceopen', resolve, { once: true }))
+
+  window.appended = 0
+  window.allAppended = false
+  /** Что случилось с защищённым инитом: null — ещё не дописывали. */
+  window.protectedAppend = null
+  /** Сколько чистых сегментов дописано уже после того, как защита появилась. */
+  window.appendedAfter = 0
+
+  const clear = document.getElementById('clear')
+  const clearSource = new MediaSource()
+  clear.src = URL.createObjectURL(clearSource)
+
+  let clearBuffer = null
+
+  async function playClear() {
+    await opened(clearSource)
+    clearBuffer = clearSource.addSourceBuffer(MIME)
+
+    await appendTo(clearBuffer, await bytes(INIT))
+    window.appended++
+
+    for (const url of SEGMENTS) {
+      await appendTo(clearBuffer, await bytes(url))
+      window.appended++
+    }
+
+    window.allAppended = true
+  }
+
+  /**
+   * Второй плеер страницы открывает защищённый поток. Тест решает, когда: к этому моменту первый
+   * уже заработал подтверждённую сессию, и видно, что отказ забирает и её.
+   */
+  window.playProtected = async () => {
+    const licensed = document.getElementById('licensed')
+    const source = new MediaSource()
+    licensed.src = URL.createObjectURL(source)
+    await opened(source)
+
+    // Тип буфера — обычный avc1: именно так объявляет его DASH-плеер, а то, что материал
+    // защищён, стоит в самомините (frma называет исходный кодек).
+    const sb = source.addSourceBuffer(MIME)
+    try {
+      await appendTo(sb, await bytes(CENC_INIT))
+      window.protectedAppend = 'accepted'
+    } catch (error) {
+      window.protectedAppend = String(error)
+    }
+  }
+
+  /** Первый плеер продолжает играть как ни в чём не бывало: отказ расширения его не касается. */
+  window.appendMore = async () => {
+    await appendTo(clearBuffer, await bytes(SEGMENTS[0]))
+    window.appendedAfter++
+  }
+
+  playClear()
+</script>

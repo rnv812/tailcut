@@ -69,6 +69,10 @@ export const ID = {
 
   contentEncodings: 0x6d80,
   contentEncoding: 0x6240,
+  /** 0 is compression, 1 is encryption; absent means compression. */
+  contentEncodingType: 0x5033,
+  /** Present on an encrypted track and on nothing else: see src/core/webm/encryption.ts. */
+  contentEncryption: 0x5035,
 
   cluster: 0x1f43b675,
   timestamp: 0xe7,
@@ -96,7 +100,7 @@ export const ID = {
 /** Master elements: the ones whose body is a run of further elements rather than a value. */
 const MASTERS = new Set<number>([
   ID.ebml, ID.segment, ID.seekHead, ID.seek, ID.info, ID.tracks, ID.trackEntry,
-  ID.video, ID.audio, ID.contentEncodings, ID.contentEncoding,
+  ID.video, ID.audio, ID.contentEncodings, ID.contentEncoding, ID.contentEncryption,
   ID.cluster, ID.blockGroup, ID.cues, ID.cuePoint, ID.cueTrackPositions,
   ID.chapters, ID.tags, ID.tag, ID.targets, ID.simpleTag, ID.attachments,
 ])
@@ -293,6 +297,17 @@ export function topLevelElements(data: Uint8Array): Element[] {
 export function childElements(data: Uint8Array, parent: Element): Element[] {
   if (!MASTERS.has(parent.id)) return []
   return readElementsIn(data, parent.start + parent.headerSize, parent.start + parent.size)
+}
+
+/**
+ * Level-one elements of the stream: the children of the Segment, or the top level itself when the
+ * bytes arrive without a Segment wrapper around them. Everything a reader of an init segment
+ * looks for — the Info and the Tracks — is at this level.
+ */
+export function segmentLevel(data: Uint8Array): Element[] {
+  const top = topLevelElements(data)
+  const segment = top.find((e) => e.id === ID.segment)
+  return segment ? childElements(data, segment) : top
 }
 
 /** Follows a path of ids from the top level down, returning the leaf. */

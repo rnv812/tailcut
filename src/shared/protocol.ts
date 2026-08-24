@@ -12,7 +12,6 @@ export type PageToBridge =
    * would leave it recording with no verdict ever spoken about it.
    */
   | { type: 'tc:worker'; sourceId: string }
-  | { type: 'tc:drm'; sourceId: string }
 
 /**
  * How the main world tells the isolated one which stream an element is playing.
@@ -68,13 +67,24 @@ export interface SessionSummary {
 /**
  * What the bridge answers a list request with: everything the popup draws its page from.
  *
- * The sessions alone are not the whole answer, because "no sessions" has two meanings and they
- * are opposites. Usually it means the page has nothing worth recording on it. On a page whose
- * player lives in a worker the extension was not allowed to reach, it means the recording never
- * started at all — and the popup must say which of the two it is looking at.
+ * The sessions alone are not the whole answer, because "no sessions" has three meanings and they
+ * are not the same news. Usually it means the page has nothing worth recording on it. On a page
+ * whose player lives in a worker the extension was not allowed to reach, it means the recording
+ * never started at all. On a page playing protected media it means the recording is refused and
+ * always will be — and the popup must say which of the three it is looking at.
  */
 export interface SessionList {
   sessions: SessionSummary[]
+  /**
+   * This page plays media that is encrypted, and nothing of it may be recorded.
+   *
+   * Set when protection was found in the material itself — in the boxes of a segment, or by a
+   * media element firing `encrypted` over what it was being fed. Everything gathered before that
+   * moment is dropped and nothing more is taken in (see SessionStore.refuseEncrypted), so this
+   * never arrives beside a session; it is the reason there is none, and the popup says so in
+   * words instead of showing the emptiness of a page with no video on it.
+   */
+  encrypted?: boolean
   /**
    * This page holds a player tailcut cannot reach.
    *
@@ -120,7 +130,7 @@ export const TOP_FRAME = { frameId: 0 } as const
 export function isPageToBridge(value: unknown): value is PageToBridge {
   if (typeof value !== 'object' || value === null) return false
   const type = (value as { type?: unknown }).type
-  return type === 'tc:append' || type === 'tc:source' || type === 'tc:worker' || type === 'tc:drm'
+  return type === 'tc:append' || type === 'tc:source' || type === 'tc:worker'
 }
 
 export function isExtensionToTab(value: unknown): value is ExtensionToTab {

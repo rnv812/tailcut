@@ -1,11 +1,13 @@
 import { parseInit as parseIsoInit } from './iso/init'
 import { parseFragment as parseIsoFragment } from './iso/fragment'
+import { isoEncrypted } from './iso/encryption'
 import { parseInit as parseWebmInit } from './webm/init'
 import { parseFragment as parseWebmFragment } from './webm/fragment'
+import { webmEncrypted } from './webm/encryption'
 import { webmToIso, type ConvertedSegment } from './webm/to-iso'
 import { isoResync, isoUnitStartsAt, splitIso } from './iso/split'
 import { webmResync, webmUnitStartsAt, splitWebm } from './webm/split'
-import type { FragmentInfo, InitInfo, Split } from '../shared/types'
+import type { FragmentInfo, InitInfo, Split, StreamUnit } from '../shared/types'
 
 /**
  * The two containers a page delivers media in, behind one interface.
@@ -65,6 +67,27 @@ export const parsers: readonly ContainerParser[] = [isoParser, webmParser]
 
 export function parserFor(container: Container): ContainerParser {
   return container === 'webm' ? webmParser : isoParser
+}
+
+/**
+ * Whether this piece of a stream carries protected media, in whichever container it is written.
+ *
+ * The one question about DRM the extension answers for itself, out of the bytes it is parsing
+ * anyway. It is asked of every unit before anything is read out of it, because a page that plays
+ * encrypted media keeps nothing at all (§5.4) — and because the alternative, the page's own talk
+ * of key systems, proved to be about intent rather than about the stream: a news article was
+ * measured probing sixteen key systems, three of them granted, over a video that was in the clear
+ * from the first byte to the last.
+ *
+ * An init segment is asked of both containers, since which one it is written in is exactly what
+ * is being worked out at that moment. A media segment is asked of ISO BMFF alone: Matroska hides
+ * the encryption of a frame in a signal byte that only the track's own declaration explains, so
+ * for WebM the init is the whole of the evidence — and a WebM stream whose init went past unseen
+ * opens no track and is never collected in the first place.
+ */
+export function encryptedMedia(unit: StreamUnit): boolean {
+  if (isoEncrypted(unit.bytes)) return true
+  return unit.kind === 'init' ? webmEncrypted(unit.bytes) : false
 }
 
 /** An init segment recognised, together with the container it turned out to be written in. */

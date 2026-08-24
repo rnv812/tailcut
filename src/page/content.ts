@@ -1,11 +1,5 @@
 import { BRIDGE_PATH, SOURCE_EVENT, isExtensionToTab, isPageToBridge } from '../shared/protocol'
-import {
-  bindSource,
-  markDrmSeen,
-  registerSource,
-  registerWorkerSource,
-  startWatching,
-} from './watcher'
+import { bindSource, registerSource, registerWorkerSource, startWatching } from './watcher'
 
 let bridgePromise: Promise<HTMLIFrameElement> | null = null
 
@@ -112,7 +106,6 @@ window.addEventListener('message', async (event: MessageEvent) => {
   // A MediaSource built inside a worker: it has no address, so the watcher is told of it by name
   // alone and learns which element plays it from SOURCE_EVENT below.
   if (message.type === 'tc:worker') registerWorkerSource(message.sourceId)
-  if (message.type === 'tc:drm') markDrmSeen()
 
   const iframe = await ensureBridge()
 
@@ -156,6 +149,15 @@ startWatching(
   async () => {
     const iframe = await ensureBridge()
     iframe.contentWindow?.postMessage({ type: 'tc:unreachable' }, '*')
+  },
+  // A media element of the page says the material it is being fed is encrypted. That is the
+  // stream speaking for itself and the one thing a page cannot feign: asking the browser about
+  // key systems fires nothing here, and a page that asks and then plays in the clear is recorded
+  // like any other. The registry reads the same protection out of the boxes it parses; this is
+  // for the material that never reaches the parser.
+  async () => {
+    const iframe = await ensureBridge()
+    iframe.contentWindow?.postMessage({ type: 'tc:encrypted' }, '*')
   },
 )
 

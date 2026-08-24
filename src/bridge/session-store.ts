@@ -1,5 +1,10 @@
 import { parseFragment } from '../core/iso/fragment'
-import { ingestInit, type IngestedInit, type SegmentConverter } from '../core/container'
+import {
+  encryptedMedia,
+  ingestInit,
+  type IngestedInit,
+  type SegmentConverter,
+} from '../core/container'
 import { SegmentStream } from '../core/stream'
 import { PtsMap } from '../core/timeline/map'
 import { normalizeUrl, sessionKey } from '../core/session-key'
@@ -519,8 +524,17 @@ export class SessionStore {
   private probation = new Map<string, Probation>()
   /** Sources whose rejection outlasted the review: nothing of them is kept any more. */
   private screenedOut = new Set<string>()
-  /** The page asked for a key system: see refuseDrm. Once set, it is never cleared. */
-  private drmRefused = false
+  /** Encrypted media was seen on this page: see refuseEncrypted. Once set, it is never cleared. */
+  private encryptedSeen = false
+
+  /**
+   * Whether this page played protected media. Read by the bridge, which owes the popup the
+   * difference between the two silences: a page with nothing worth recording on it, and a page
+   * that may not be recorded at all.
+   */
+  get encrypted(): boolean {
+    return this.encryptedSeen
+  }
 
   /**
    * Takes what a page appended to one of its SourceBuffers and works out for itself what it is.
@@ -532,9 +546,9 @@ export class SessionStore {
    */
   append(input: AppendInput): void {
     // Nothing of a protected page is read at all — not even to keep a reader in its place. This
-    // is the one refusal that never turns (see refuseDrm), so there is no later verdict for a
-    // reader to be ready for, and parsing on would only be a way of holding on to the material.
-    if (this.drmRefused) return
+    // is the one refusal that never turns (see refuseEncrypted), so there is no later verdict for
+    // a reader to be ready for, and parsing on would only be a way of holding on to the material.
+    if (this.encryptedSeen) return
 
     // Every append is read, whatever verdict stands over its source: a verdict decides whether
     // material is kept, not whether it is parsed. MSE gives a SourceBuffer a byte stream and not
@@ -543,6 +557,14 @@ export class SessionStore {
     // init segment of that buffer is long past. Where the material goes is settled below, once
     // there is a whole segment to place.
     for (const unit of this.streamOf(input).push(input.bytes)) {
+      // Protection, read out of the segment itself. It is asked before anything else is, because
+      // the answer is about the page and not about this stream: what has already been collected
+      // in the clear goes too, and nothing more is taken in.
+      if (encryptedMedia(unit)) {
+        this.refuseEncrypted()
+        return
+      }
+
       if (unit.kind === 'init') {
         // An init in a container or a codec the ingest boundary will not take opens no track, and
         // the segments behind it then land nowhere. Better that than a track that cannot be saved
@@ -716,26 +738,28 @@ export class SessionStore {
   }
 
   /**
-   * The page has asked the browser for a key system: nothing of it is kept, and nothing more is
-   * taken in. §5.4 of the design refuses DRM before a single byte is copied, and §2 promises the
-   * user that a protected page is answered plainly instead of half-recorded.
+   * This page plays encrypted media: nothing of it is kept, and nothing more is taken in. §5.4 of
+   * the design refuses DRM before a single byte is copied, and §2 promises the user that a
+   * protected page is answered plainly instead of half-recorded.
    *
    * It is not a verdict and does not travel with one. A verdict is about an element — the watcher
-   * measures a <video> and speaks about the stream that element is playing — while the request
-   * for keys comes from the player and names no element and no media source at all. Measured on
-   * tv.apple.com, where the player sits inside a shadow root: tc:drm went out four times, a
-   * verdict not once, and the registry offered 149.6 MB of a protected page for saving. So the
-   * refusal comes in by itself and covers the whole page, sessions, sources, probation and all;
-   * the watcher rejecting the elements it can reach is a second line and not the first.
+   * measures a <video> and speaks about the stream that element is playing — while protection is
+   * a property of the material, and on a page whose player sits inside a shadow root no verdict
+   * is ever spoken at all. Measured on tv.apple.com: the DRM of that page was reported four
+   * times, a verdict not once, and the registry offered 149.6 MB of it for saving. So the refusal
+   * comes in by itself and covers the whole page, sessions, sources, probation and all; the
+   * watcher rejecting the elements it can reach is a second line and not the first.
    *
-   * It is also final. A page that has asked once may go on to play something unprotected — the
-   * survey saw sixteen capability probes on a news page whose video was in the clear — and this
-   * takes that page's recording with it. Telling a probe from real protection needs a signal we
-   * do not have here (the `encrypted` event, or the boxes of the stream itself), and until there
-   * is one the safe way round is this one: on a page that may be protected we keep nothing.
+   * It is final, and it is deliberately hard to set off. Two things reach it, and both are the
+   * stream speaking rather than the page: encryption in the boxes we parse anyway (see
+   * encryptedMedia), and the `encrypted` event a media element fires when the material it is
+   * being fed carries protection. What does not reach it is the page asking the browser about key
+   * systems — measured on a news article as sixteen probes, three of them granted, over a video
+   * that was in the clear throughout. Asking is not playing, and a page that asks and then plays
+   * in the clear is recorded like any other.
    */
-  refuseDrm(): void {
-    this.drmRefused = true
+  refuseEncrypted(): void {
+    this.encryptedSeen = true
 
     // Everything, and not only what is listed: material under review is out of the list already
     // (see Probation), and a verdict turning would hand it straight back.
@@ -762,7 +786,7 @@ export class SessionStore {
    * either would mean losing every segment of the video that follows, verdict or no verdict.
    */
   dropPending(sourceId: string): void {
-    if (this.drmRefused) return
+    if (this.encryptedSeen) return
     this.rejected.add(sourceId)
 
     const source = this.sources.get(sourceId)
@@ -784,8 +808,8 @@ export class SessionStore {
   /** Probation served: a rejection of this source no longer takes its session away. */
   promotePending(sourceId: string): void {
     // The watcher goes on measuring the elements it can reach, and one of them may well deserve
-    // its life. On a page that asked for keys none of them gets it: see refuseDrm.
-    if (this.drmRefused) return
+    // its life. On a page that played encrypted media none of them gets it: see refuseEncrypted.
+    if (this.encryptedSeen) return
 
     this.promoted.add(sourceId)
     this.rejected.delete(sourceId)
@@ -799,7 +823,7 @@ export class SessionStore {
 
   /** A hold after a rejection: the source is recorded again but has not earned its life yet. */
   resumePending(sourceId: string): void {
-    if (this.drmRefused) return
+    if (this.encryptedSeen) return
 
     this.rejected.delete(sourceId)
     this.screenedOut.delete(sourceId)

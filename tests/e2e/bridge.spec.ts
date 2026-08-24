@@ -396,8 +396,8 @@ test('foreign messages open no sessions and do not bring the bridge down', async
     // and the bytes in a tc:append arrive from an arbitrary site and need not be a segment at
     // all. An exception on any of them would stop everything that follows from being taken in:
     // the bridge has one listener.
-    // tc:drm is not in this list: the bridge acts on it, and what it does with it is checked in
-    // triage.spec.ts. Everything here is a message it is meant to make nothing of.
+    // tc:encrypted is not in this list: the bridge acts on it, and what it does with it is
+    // checked in triage.spec.ts. Everything here is a message it is meant to make nothing of.
     target.postMessage(null, '*')
     target.postMessage({ type: 'tc:source', sourceId: 's', objectUrl: 'blob:x' }, '*')
     target.postMessage({ type: 'webpackHotUpdate' }, '*')

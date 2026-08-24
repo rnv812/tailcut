@@ -17,13 +17,10 @@ const append: PageToBridge = {
 const source: PageToBridge = { type: 'tc:source', sourceId: 's', objectUrl: 'blob:https://a.test/1' }
 /** A MediaSource inside a worker: announced by name, because it has no address of its own. */
 const worker: PageToBridge = { type: 'tc:worker', sourceId: 'w1s1' }
-const drm: PageToBridge = { type: 'tc:drm', sourceId: 's' }
-
 const accepted: [string, PageToBridge][] = [
   ['tc:append', append],
   ['tc:source', source],
   ['tc:worker', worker],
-  ['tc:drm', drm],
 ]
 
 /** Both variants of the other side of the protocol: the bridge sends these, it does not take them. */
@@ -45,6 +42,7 @@ const bridgeToPage: [string, BridgeToPage][] = [
     },
   ],
   ['an answer about a page that cannot be recorded', { sessions: [], unreachable: true }],
+  ['an answer about a page that plays protected media', { sessions: [], encrypted: true }],
 ]
 
 /** The bridge listens to the page's window: everything the page and its scripts send lands there. */
@@ -57,6 +55,11 @@ const rejected: [string, unknown][] = [
   ['an object without a type', { sourceId: 's' }],
   ['a non-string type', { type: 1 }],
   ["somebody else's type", { type: 'webpackHotUpdate' }],
+  // The page's own talk of key systems used to be a message of this protocol, and the whole of a
+  // page's recording hung on it. It says nothing about the material — a news article was measured
+  // asking about sixteen of them over a video that was in the clear — and a page that could still
+  // send it would be able to erase its own recording by asking.
+  ['a report of a key system request: the protocol no longer has one', { type: 'tc:drm', sourceId: 's' }],
   // Messages of the extension itself. The content script passes on to the bridge whatever it
   // recognised here as its own, and they arrive from the page's window — that is, from the page's
   // own scripts too. Recognise the context and any page could rewrite the address and the title

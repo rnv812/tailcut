@@ -108,4 +108,43 @@ ffmpeg -y -i "$work/source-webm.webm" -c copy -f dash -seg_duration 2 \
 rm -rf "$out/webm" && mkdir -p "$out/webm"
 cp "$work"/webm/*.webm "$out/webm/"
 
-ls -la "$out/h264" "$out/minute" "$out/vp9" "$out/av1" "$out/webm"
+# A Common Encryption init segment: the header of a protected stream, and the one thing the
+# extension has to recognise before it copies anything of such a page.
+#
+# The same picture as the h264 set, from the same source, so that a page can open one SourceBuffer
+# with video/mp4; codecs="avc1.4d401e" and feed it the clear init of that set or this protected one
+# — which is what a site does when it switches from a free preview to the licensed material.
+# What makes it protected is the shape of the moov: the sample entry is `encv` instead of `avc1`,
+# and inside it sits `sinf` with `frma`, `schm` and `tenc`, exactly as measured on the dash.js
+# ClearKey sample and on the protected buffers of edition.cnn.com.
+#
+# Only the header is kept. The fragments ffmpeg 4.4 writes beside it hold encrypted samples but no
+# `senc`, so as evidence of encryption they would be a fake; the fragment side of the recognition
+# is covered by a `senc` built in the test itself (tests/core/encryption.test.ts).
+#
+# The key is written here in plain sight on purpose: it protects nothing and it is nobody's. Both
+# it and the identifier are made up for this fixture.
+ffmpeg -y -i "$work/source-h264.mp4" -map 0:v -c copy \
+       -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof \
+       -encryption_scheme cenc-aes-ctr \
+       -encryption_key 00112233445566778899aabbccddeeff \
+       -encryption_kid 11223344556677889900aabbccddeeff \
+       "$work/cenc.mp4"
+
+rm -rf "$out/cenc" && mkdir -p "$out/cenc"
+# ftyp and moov, and not a byte of the fragments behind them: the head of the file ends where the
+# first `moof` begins.
+node -e '
+  const fs = require("fs")
+  const data = fs.readFileSync(process.argv[1])
+  let at = 0
+  while (at + 8 <= data.length) {
+    const size = data.readUInt32BE(at)
+    const type = data.toString("latin1", at + 4, at + 8)
+    if (type === "moof") break
+    at += size
+  }
+  fs.writeFileSync(process.argv[2], data.subarray(0, at))
+' "$work/cenc.mp4" "$out/cenc/init-stream0.m4s"
+
+ls -la "$out/h264" "$out/minute" "$out/vp9" "$out/av1" "$out/webm" "$out/cenc"

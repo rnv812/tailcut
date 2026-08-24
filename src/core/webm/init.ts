@@ -6,7 +6,7 @@ import {
   readFloat,
   readString,
   readUint,
-  topLevelElements,
+  segmentLevel,
   type Element,
 } from './reader'
 import type { InitInfo, TrackInfo, TrackKind } from '../../shared/types'
@@ -83,16 +83,6 @@ function audioOf(data: Uint8Array, entry: Element): { channels: number; sampleRa
     // caller can at least divide by.
     sampleRate: rate > 0 ? Math.round(rate) : DEFAULT_SAMPLING_FREQUENCY,
   }
-}
-
-/**
- * Level-one elements of the stream: the children of the Segment, or the top level itself when the
- * bytes arrive without a Segment wrapper around them.
- */
-function segmentLevel(data: Uint8Array): Element[] {
-  const top = topLevelElements(data)
-  const segment = top.find((e) => e.id === ID.segment)
-  return segment ? childElements(data, segment) : top
 }
 
 export function parseInit(data: Uint8Array): InitInfo | null {

@@ -75,6 +75,7 @@ type FakeElement = ReturnType<typeof fakeElement>
  */
 function fakeVideo(overrides: Record<string, unknown> = {}) {
   const rect = { width: 160, height: 90, top: 0, left: 0, bottom: 90, right: 160 }
+  const listeners: Record<string, Array<() => void>> = {}
   return {
     src: 'blob:banner',
     currentSrc: 'blob:banner',
@@ -88,6 +89,13 @@ function fakeVideo(overrides: Record<string, unknown> = {}) {
     isConnected: true,
     mediaKeys: null,
     getBoundingClientRect: () => rect,
+    addEventListener: (type: string, listener: () => void) => {
+      ;(listeners[type] ??= []).push(listener)
+    },
+    /** The element fires an event of its own: `encrypted` is the one the watcher listens for. */
+    fire: (type: string) => {
+      for (const listener of listeners[type] ?? []) listener()
+    },
     ...overrides,
   }
 }
@@ -595,7 +603,7 @@ describe('the triage verdict', () => {
     ])
   })
 
-  it('cancels the recording of a real player too when keys are requested', async () => {
+  it('tells the bridge when an element reports that its material is encrypted', async () => {
     const dom = await withBridge()
     const player = fakeVideo({
       src: 'blob:player',
@@ -618,16 +626,28 @@ describe('the triage verdict', () => {
     await dom.tick()
     expect(
       dom.forwarded().map((post) => (post.message as { type: string }).type),
-      'setup: before the keys are requested there is nothing to refuse the player for',
+      'setup: an ordinary player has nothing said about it but its own address',
     ).toEqual(['tc:source'])
 
-    await dom.deliverMessage({ type: 'tc:drm', sourceId: 'page' })
+    // The browser has found protection headers in what this element is being fed. It is the
+    // stream speaking, not the page: probing for key systems fires nothing, and a page that
+    // probes and then plays in the clear goes on being recorded.
+    player.fire('encrypted')
     await dom.tick()
 
-    expect(dom.forwarded().at(-1)).toEqual({
-      message: { type: 'tc:verdict', sourceId: 's1', verdict: 'reject' },
-      transfer: undefined,
-    })
+    expect(dom.forwarded().map((post) => post.message)).toContainEqual({ type: 'tc:encrypted' })
+  })
+
+  it('says nothing of the sort about a page that plays in the clear', async () => {
+    const dom = await withBridge()
+    dom.videos.push(fakeVideo())
+
+    await dom.deliverMessage({ type: 'tc:source', sourceId: 's1', objectUrl: 'blob:banner' })
+    for (let poll = 0; poll < 13; poll++) await dom.tick()
+
+    expect(dom.forwarded().map((post) => (post.message as { type: string }).type)).not.toContain(
+      'tc:encrypted',
+    )
   })
 })
 
