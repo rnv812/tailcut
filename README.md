@@ -19,7 +19,7 @@ npm run dev          # rebuild on change
 npm test             # unit tests (Vitest)
 npm run e2e          # integration tests (Playwright, real Chromium)
 npm run typecheck
-npm run plan:check   # plan code blocks still match the repository
+npm run plan:check   # every plan's code blocks still match the repository
 ```
 
 Load `dist/` through `chrome://extensions` with developer mode on.
