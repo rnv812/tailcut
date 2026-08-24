@@ -8,6 +8,7 @@ import {
   seamsOf,
   type ClipSource,
   type PlannedTrack,
+  type SourceSample,
   type SourceTrack,
 } from '../../src/core/export/plan'
 import { editOffset, samplesInSegment, trackDefaults } from '../../src/core/iso/samples'
@@ -83,10 +84,78 @@ function sourceOf(videoSegments: number[], audioSegments: number[]): ClipSource 
   }
 }
 
+/**
+ * Material stated in ticks instead of read out of a fixture: runs of samples of one length, with
+ * whatever lies between two runs left as a hole. Nothing in it is reordered — every sample is a
+ * sync sample composed at its own decode time — so a test built on this measures arithmetic and
+ * not the shape of one recording. The fixtures answer everything they can; the numbers that only
+ * appear on other timescales, and the runs a packager only writes at the end of a recording, have
+ * nowhere else to come from.
+ */
+function madeTrack(
+  kind: TrackKind,
+  timescale: number,
+  duration: number,
+  runs: Array<{ at: number; count: number }>,
+): SourceTrack {
+  const samples: SourceSample[] = []
+  let at = 0
+
+  for (const run of runs) {
+    for (let i = 0; i < run.count; i++) {
+      const dts = run.at + i * duration
+      samples.push({ dts, pts: dts, duration, sync: true, source: { at, length: 64 } })
+      at += 64
+    }
+  }
+
+  const shape = kind === 'video' ? { width: 320, height: 240 } : { width: 0, height: 0 }
+  return { kind, timescale, sampleEntry: new Uint8Array(0), ...shape, editOffset: 0, samples }
+}
+
+/** The longest stretch of a track with no material in it, in seconds. */
+function widestHole(track: SourceTrack): number {
+  let widest = 0
+  for (const [i, sample] of track.samples.entries()) {
+    const previous = track.samples[i - 1]
+    if (previous) {
+      widest = Math.max(widest, (sample.dts - previous.dts - previous.duration) / track.timescale)
+    }
+  }
+  return widest
+}
+
+/**
+ * How far each track moved across the seam, in seconds: where the first sample behind the hole
+ * sat in the recording, less where the plan puts it. One number per track, and the whole scheme
+ * stands on the two being equal.
+ */
+function pullsAcrossSeam(source: ClipSource, tracks: PlannedTrack[]): number[] {
+  return tracks.map((track) => {
+    const samples = track.kind === 'video' ? source.video.samples : source.audio!.samples
+    let decode = 0
+    for (const [i, planned] of track.samples.entries()) {
+      const sample = samples[i]!
+      const previous = samples[i - 1]
+      if (previous && sample.dts > previous.dts + previous.duration) {
+        return (sample.dts - decode) / track.timescale
+      }
+      decode += planned.duration
+    }
+    return NaN
+  })
+}
+
 /** Everything the fixture has. */
 const whole = sourceOf([1, 2, 3], [1, 2, 3, 4])
 /** The same with the second segment of each track thrown away: a hole in the middle. */
 const holed = sourceOf([1, 3], [1, 3, 4])
+/**
+ * Two segments of sound thrown away against one of picture: the same seam with the larger hole on
+ * the other track. Which of the two is the larger is a property of the recording — segments are
+ * lost per track — and it is not the picture's in any material the fixtures hold.
+ */
+const wider = sourceOf([1, 3], [1, 4])
 
 const trackByKind = (tracks: PlannedTrack[], kind: TrackKind): PlannedTrack =>
   tracks.find((t) => t.kind === kind)!
@@ -120,6 +189,55 @@ describe('seamsOf', () => {
     // 88064 ticks of 44100 — the sound's own hole, and the smaller of the two.
     expect(seam!.pull).toBeCloseTo(1.996916, 6)
     expect(seam!.pull).toBeLessThan(seam!.to - seam!.from)
+  })
+
+  it('pulls to the smaller hole when the smaller one is the picture', () => {
+    // The mirror of the case above, and the one no fixture produces on its own: four seconds of
+    // sound are missing where two seconds of picture are. Both tracks still move by the two.
+    // Pulling by the larger would start the sound behind the seam before the sound in front of
+    // it had finished, which a decode timeline cannot say — and the error is per seam, so a
+    // recording the user skipped through twice comes apart twice as far.
+    const seams = seamsOf(wider)
+    expect(seams).toHaveLength(1)
+    const [seam] = seams
+
+    expect(seam!.from).toBeCloseTo(2, 6)
+    expect(seam!.to).toBeCloseTo(4, 6)
+    expect(seam!.pull).toBeCloseTo(seam!.to - seam!.from, 9)
+    // The sound's own hole is twice that, and it is not what the seam pulls by.
+    expect(widestHole(wider.audio!)).toBeGreaterThan(seam!.pull + 1)
+  })
+
+  it('finds a hole that lies between the last two samples', () => {
+    // A closing run of exactly one sample — the tail a packager leaves at the end of a recording,
+    // or a single frame that arrived after a long stall. A loop stopping one index short of the
+    // end reports no seam here at all, and the two seconds stay in the clip.
+    const video = madeTrack('video', 12_288, 512, [
+      { at: 0, count: 24 },
+      { at: 36_864, count: 1 },
+    ])
+
+    expect(seamsOf({ video })).toEqual([{ from: 1, to: 3, pull: 2 }])
+  })
+
+  it('leaves a hole in the sound that merely touches the picture out of the seam', () => {
+    // Two holes that meet at an instant are two holes: there is no moment at which both tracks
+    // are missing, so there is nothing to pull. Counted as overlapping, the seam would take its
+    // pull from a hole lying wholly outside it and the tracks would part by that much.
+    const video = madeTrack('video', 12_288, 512, [
+      { at: 0, count: 24 },
+      { at: 36_864, count: 24 },
+    ])
+    // Packets of 20 ms at 48000, the shape Opus arrives in: the run before the seam ends exactly
+    // where the picture's hole begins, and the run after it begins exactly where that hole ends.
+    const audio = madeTrack('audio', 48_000, 960, [
+      { at: 0, count: 25 },
+      { at: 48_000, count: 100 },
+      { at: 192_000, count: 50 },
+    ])
+
+    expect(widestHole(audio)).toBeCloseTo(1, 9)
+    expect(seamsOf({ video, audio })).toEqual([{ from: 1, to: 3, pull: 0 }])
   })
 
   it('pulls nothing where only one of the two tracks has a hole', () => {
@@ -255,23 +373,63 @@ describe('planClip', () => {
   it('moves both tracks by the same amount across the seam', () => {
     // The invariant the whole scheme stands on: an instant of the recording lands at one instant
     // of the clip, whichever track is asked. Everything else about a collapsed hole is cosmetic.
-    const plan = planClip(holed, { in: 0, out: 6, sound: true })
-    const pulls = plan.tracks.map((track, index) => {
-      const source = index === 0 ? holed.video.samples : holed.audio!.samples
-      let decode = 0
-      for (const [i, planned] of track.samples.entries()) {
-        const sample = source[i]!
-        const previous = source[i - 1]
-        if (previous && sample.dts > previous.dts + previous.duration) {
-          return (sample.dts - decode) / track.timescale
-        }
-        decode += planned.duration
-      }
-      return NaN
-    })
+    const pulls = pullsAcrossSeam(holed, planClip(holed, { in: 0, out: 6, sound: true }).tracks)
 
     expect(pulls[0]).toBeCloseTo(1.9969, 4)
     expect(Math.abs(pulls[0]! - pulls[1]!)).toBeLessThan(0.001)
+  })
+
+  it('moves both tracks by the same amount when the sound is the one missing more', () => {
+    // The same invariant on the material where the larger hole is the sound's. A track pulled by
+    // its own hole moves the sound two seconds ahead of the picture at this seam, and it stays
+    // ahead for the rest of the clip: there is nothing later on that brings the two back.
+    const pulls = pullsAcrossSeam(wider, planClip(wider, { in: 0, out: 8, sound: true }).tracks)
+
+    expect(pulls[0]).toBeCloseTo(2, 6)
+    expect(Math.abs(pulls[0]! - pulls[1]!)).toBeLessThan(0.001)
+  })
+
+  it('rounds the entry point to the nearest tick of the track', () => {
+    // The one place in the program where seconds go back into ticks, and the one fixture family
+    // cannot exercise it: 512 ticks of 12288 and 1024 of 44100 divide and multiply back exactly
+    // for every sample the h264 material has, so rounding and truncating agree on all of it.
+    // 29.97 does not: the fifteenth frame of 3003 ticks at 90000 stands at 0.5005 s, which
+    // measures back as 45044.999999999993 in a double. Truncated, that is one tick before the
+    // frame, `shownAt` answers the frame before it, and the clip starts a whole frame early —
+    // the single promise of §8.2 this stage exists for, broken on a few frames in a hundred.
+    const video = madeTrack('video', 90_000, 3003, [{ at: 0, count: 60 }])
+    const plan = planClip(
+      { video },
+      { in: (15 * 3003) / 90_000, out: (60 * 3003) / 90_000, sound: false },
+    )
+    const track = plan.tracks[0]!
+
+    // Frame fifteen and the forty-four behind it, entered on the frame itself: every sample here
+    // is a sync sample, so there is no run-up to hide and nothing for the edit list to do.
+    expect(track.samples).toHaveLength(45)
+    expect(track.samples[0]!.source).toEqual(video.samples[15]!.source)
+    expect(track.skipTicks).toBe(0)
+  })
+
+  it('rounds what is left of a collapsed hole to the nearest tick as well', () => {
+    // The same rounding one layer down. The picture is missing 2048 of its ticks and the sound
+    // 2048 of its own — 167 ms against 46, because the two count in different scales — so the
+    // pair is pulled by the sound's 46 ms, and in ticks of the picture that is 570.65 of them.
+    // Truncated, a tick of the hole stays behind on every seam of the clip.
+    const video = madeTrack('video', 12_288, 512, [
+      { at: 0, count: 24 },
+      { at: 14_336, count: 24 },
+    ])
+    const audio = madeTrack('audio', 44_100, 1024, [
+      { at: 0, count: 43 },
+      { at: 46_080, count: 43 },
+    ])
+    const plan = planClip({ video, audio }, { in: 0, out: 4, sound: true })
+
+    const stretched = trackByKind(plan.tracks, 'video').samples.filter((s) => s.duration !== 512)
+    expect(stretched.map((s) => s.duration)).toEqual([512 + (2048 - 571)])
+    // The sound had the smaller hole, so nothing of it is left over to carry at all.
+    expect(trackByKind(plan.tracks, 'audio').samples.filter((s) => s.duration !== 1024)).toEqual([])
   })
 
   it('leaves a one-sided hole alone', () => {

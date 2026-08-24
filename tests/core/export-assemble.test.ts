@@ -11,7 +11,7 @@ import {
 import { editOffset, samplesInSegment, trackDefaults } from '../../src/core/iso/samples'
 import { audioSampleEntry, sampleEntryBytes, videoSampleEntry } from '../../src/core/iso/entry'
 import { parseInit } from '../../src/core/iso/init'
-import { findBox, topLevelBoxes } from '../../src/core/iso/reader'
+import { boxBody, childBoxes, findBox, topLevelBoxes } from '../../src/core/iso/reader'
 import { decodeWarnings, frameAt, frameTimes, probeFile, writeTemp } from '../support/media'
 import type { Located, TrackKind } from '../../src/shared/types'
 
@@ -124,6 +124,34 @@ describe('assembleMp4', () => {
     const moov = findBox(bytes, ['moov'])!
     expect(topLevelBoxes(bytes).map((b) => b.type)).toEqual(['ftyp', 'moov', 'mdat'])
     expect(moov.size).toBeGreaterThan(0)
+  })
+
+  it('numbers the tracks apart and states the shape of the picture the right way up', () => {
+    // Read out of the boxes and not out of ffprobe, because ffprobe answers neither question
+    // from them: it takes the frame size out of the SPS and counts streams, so a file that
+    // declares 240×320 for a 320×240 picture and calls both its tracks 1 probes clean and plays
+    // wrong. Measured: with the two sizes handed over the other way round every player that lays
+    // out from the tkhd shows the clip squeezed, and ffprobe reports nothing at all.
+    const bytes = read(reference)
+    const traks = childBoxes(bytes, findBox(bytes, ['moov'])!).filter((b) => b.type === 'trak')
+
+    /** tkhd version 0: the number of the track, and the display size as two 16.16 numbers. */
+    const header = (index: number): Record<string, number> => {
+      const box = childBoxes(bytes, traks[index]!).find((b) => b.type === 'tkhd')!
+      const body = boxBody(bytes, box)
+      const view = new DataView(body.buffer, body.byteOffset, body.byteLength)
+      return {
+        trackId: view.getUint32(12),
+        width: view.getUint32(76) / 0x10000,
+        height: view.getUint32(80) / 0x10000,
+      }
+    }
+
+    expect(traks).toHaveLength(2)
+    // Both source inits call their track 1, so the numbers here are this stage's own: distinct,
+    // and none of them zero, which the specification forbids outright.
+    expect(header(0)).toEqual({ trackId: 1, width: 320, height: 240 })
+    expect(header(1)).toEqual({ trackId: 2, width: 0, height: 0 })
   })
 
   it('starts on the frame that was asked for', () => {

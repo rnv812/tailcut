@@ -7,6 +7,7 @@ import {
   sourceTrackOf,
   type SourceTrackInput,
 } from '../../src/core/export/source'
+import { findBox } from '../../src/core/iso/reader'
 import type { Located } from '../../src/shared/types'
 
 const read = (path: string): Uint8Array => new Uint8Array(readFileSync(`tests/fixtures/${path}`))
@@ -25,6 +26,18 @@ function placed(kind: 'video' | 'audio', initBytes: Uint8Array, segments: Uint8A
     segments: segments.map((bytes) => ({ bytes, at: map.place(bytes) })),
   }
   return { map, input }
+}
+
+/** The same segment with its traf calling the track something else, byte for byte otherwise. */
+function renumberedTraf(segment: Uint8Array, trackId: number): Uint8Array {
+  const copy = new Uint8Array(segment)
+  const tfhd = findBox(copy, ['moof', 'traf', 'tfhd'])!
+  // The header of the box, then its version and flags, then the number of the track.
+  new DataView(copy.buffer, copy.byteOffset, copy.byteLength).setUint32(
+    tfhd.start + tfhd.headerSize + 4,
+    trackId,
+  )
+  return copy
 }
 
 describe('sourceTrackOf', () => {
@@ -80,6 +93,31 @@ describe('sourceTrackOf', () => {
     expect(times).toEqual([...times].sort((a, b) => a - b))
   })
 
+  it('reads a single-track segment whose traf numbers the track its own way', () => {
+    // A segment carrying one track is free to number its traf anything: there is only one track
+    // it could be about, and packagers do differ from their own init here. Every fixture family
+    // in this repository says 1 in both places, and so does the WebM rewriter, so this is the
+    // one branch of the index no material exercises — and without it the segment is skipped
+    // silently and a whole track of the recording comes out empty.
+    const renumbered = renumberedTraf(VIDEO[0]!, 7)
+    const tfhd = findBox(renumbered, ['moof', 'traf', 'tfhd'])!
+    const view = new DataView(renumbered.buffer, renumbered.byteOffset, renumbered.byteLength)
+    const stated = view.getUint32(tfhd.start + tfhd.headerSize + 4)
+    expect(stated, 'the segment kept the number of the init after all').toBe(7)
+
+    const map = new ByteMap()
+    const track = sourceTrackOf({
+      kind: 'video',
+      initBytes: VIDEO_INIT,
+      segments: [{ bytes: renumbered, at: map.place(renumbered) }],
+    })!
+    const untouched = sourceTrackOf(placed('video', VIDEO_INIT, [VIDEO[0]!]).input)!
+
+    // Read exactly as the untouched segment is: the number in the traf changes nothing else.
+    expect(track.samples).toEqual(untouched.samples)
+    expect(track.samples).toHaveLength(48)
+  })
+
   it('skips a segment it cannot read instead of throwing', () => {
     const map = new ByteMap()
     const rubbish = new Uint8Array(64).fill(0x7f)
@@ -112,6 +150,20 @@ describe('clipSourceOf', () => {
     expect(source.audio?.kind).toBe('audio')
   })
 
+  it('leads with the picture whichever way round the tracks are handed over', () => {
+    // An adaptation set is free to list its sound first, and plenty do. Taking whatever was read
+    // first instead of looking for the picture does not reorder the clip — it loses the picture:
+    // the sound takes the leading slot, nothing is left beside it, and the export writes a file
+    // with no picture in it at all.
+    const source = clipSourceOf([
+      placed('audio', AUDIO_INIT, AUDIO).input,
+      placed('video', VIDEO_INIT, VIDEO).input,
+    ])!
+
+    expect(source.video.kind).toBe('video')
+    expect(source.audio?.kind).toBe('audio')
+  })
+
   it('leads with the sound when there is no picture', () => {
     // planClip measures a clip by whatever stands in the leading slot, and a recording of sound
     // alone has to be exportable too — the popup has offered to save one since the first stage.
@@ -137,6 +189,9 @@ describe('ByteMap', () => {
     expect(second.at).toBe(VIDEO[0]!.byteLength)
     expect(map.size).toBe(VIDEO[0]!.byteLength + VIDEO[1]!.byteLength)
     expect(map.bytesOf({ at: second.at + 10, length: 4 })).toEqual(VIDEO[1]!.subarray(10, 14))
+    // The first byte of a segment belongs to that segment and not to the one in front of it: the
+    // search has to step past a part it has run off the end of instead of stopping on it.
+    expect(map.bytesOf({ at: second.at, length: 4 })).toEqual(VIDEO[1]!.subarray(0, 4))
   })
 
   it('refuses a range that belongs to nobody, loudly', () => {
