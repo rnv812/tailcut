@@ -115,6 +115,16 @@ export function needsWideOffsets(before: number, payload: number): boolean {
   return before + MDAT_HEADER_BYTES + payload > MAX_UINT32
 }
 
+/**
+ * The tracks come out in the order they were given, less the ones holding nothing, and any order
+ * is allowed: the picture first is what the export plan happens to build, not something this
+ * writer leans on.
+ *
+ * What it does lean on is that everything counted per track is counted against the list that
+ * survives the filter, and never against the list handed in. The two agree only while the empty
+ * tracks come last; one standing in front of a written track would otherwise hand that track its
+ * neighbour's numbers, and a length taken from an empty track is zero.
+ */
 export function buildProgressiveMp4(
   tracks: ProgressiveTrack[],
   options: ProgressiveOptions = {},

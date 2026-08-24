@@ -182,6 +182,35 @@ describe('buildProgressiveMp4', () => {
     expect(header(1)).toEqual({ trackId: 2, volume: 0x0100, width: 0, height: 0 })
   })
 
+  it('heads each track with the media information box its kind calls for', () => {
+    // Nothing else in this suite reads this box. ffmpeg and Chromium take the kind of a track
+    // from its handler, so a sound track carrying a vmhd probes clean and decodes to the last
+    // packet — measured, the whole suite stays green with every track written as a picture. It
+    // is a malformed sound track all the same, and the readers that would refuse it are the same
+    // ones the volume field above is written for, so it is pinned the same way.
+    const bytes = buildProgressiveMp4([video, audio])
+    const traks = childBoxes(bytes, findBox(bytes, ['moov'])!).filter((b) => b.type === 'trak')
+
+    const minfOf = (index: number): Box => {
+      const mdia = childBoxes(bytes, traks[index]!).find((b) => b.type === 'mdia')!
+      return childBoxes(bytes, mdia).find((b) => b.type === 'minf')!
+    }
+
+    // First child of the minf, ahead of the data reference and the tables.
+    expect(childBoxes(bytes, minfOf(0)).map((b) => b.type)).toEqual(['vmhd', 'dinf', 'stbl'])
+    expect(childBoxes(bytes, minfOf(1)).map((b) => b.type)).toEqual(['smhd', 'dinf', 'stbl'])
+
+    const bodyOf = (index: number): number[] =>
+      [...boxBody(bytes, childBoxes(bytes, minfOf(index))[0]!)]
+
+    // Version and flags, then the fields. A vmhd states flags of one — the specification fixes
+    // them there, alone among the full boxes this writer emits — and behind them graphicsmode
+    // copy and an opcolor of three zeroes.
+    expect(bodyOf(0)).toEqual([0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0])
+    // A smhd is the plainer of the two: no flags, a centred balance, and its reserved pair.
+    expect(bodyOf(1)).toEqual([0, 0, 0, 0, 0, 0, 0, 0])
+  })
+
   it('carries the shape of the picture when the sample entry does not', () => {
     // The fixture's own entry states a pasp, which is what ffprobe answers out of above; strip it
     // and the tkhd is the only thing left saying how wide the picture is shown. This is the file
@@ -631,6 +660,50 @@ describe('buildProgressiveMp4', () => {
 
     expect(buildProgressiveMp4([]).byteLength).toBe(0)
     expect(buildProgressiveMp4([{ ...video, samples: [] }]).byteLength).toBe(0)
+  })
+
+  it('measures the spans against the tracks it writes, not the tracks it was given', () => {
+    // Dropping the empty track renumbers everything counted per track, and the count has to
+    // follow. Counting against the list handed in lines the two up only while the empty tracks
+    // come last — the case above; put one in front and the sound is handed the picture's span,
+    // which for a track with no samples is nothing at all. Measured on a writer that indexes the
+    // list it was given: the mdhd still states 265624 ticks of material and every table still
+    // describes the 260 packets, while the mvhd, the tkhd and the edit list all state a clip of
+    // no length. ffprobe exits zero and says nothing — it reports the six second file as
+    // 0.000000 and, told to count frames, decodes not one of them.
+    const bytes = buildProgressiveMp4([{ ...video, samples: [] }, audio])
+
+    const moov = findBox(bytes, ['moov'])!
+    const traks = childBoxes(bytes, moov).filter((b) => b.type === 'trak')
+    expect(traks).toHaveLength(1)
+
+    const viewOf = (box: Box): DataView => {
+      const body = boxBody(bytes, box)
+      return new DataView(body.buffer, body.byteOffset, body.byteLength)
+    }
+    const child = (parent: Box, type: string): Box =>
+      childBoxes(bytes, parent).find((b) => b.type === type)!
+
+    const trak = traks[0]!
+    const mdhd = viewOf(child(child(trak, 'mdia'), 'mdhd'))
+    const elst = viewOf(child(child(trak, 'edts'), 'elst'))
+
+    // 265624 ticks of the track's 44100 less the 1024 the source hides is six seconds exactly,
+    // which is 540000 of the movie's 90000. The mdhd is the other number, the sum of the
+    // durations, because it states how much material there is to decode rather than how much of
+    // it is shown.
+    expect(viewOf(child(moov, 'mvhd')).getUint32(16)).toBe(540000)
+    expect(viewOf(child(trak, 'tkhd')).getUint32(20)).toBe(540000)
+    expect([mdhd.getUint32(12), mdhd.getUint32(16)]).toEqual([44100, 265624])
+    expect([Number(elst.getBigUint64(8)), Number(elst.getBigInt64(16))]).toEqual([540000, 1024])
+
+    // And a reader agrees the clip has a length: the last count is the one the boxes above cannot
+    // make on their own, because a segment_duration of zero costs ffmpeg every packet in the file.
+    const file = writeTemp('progressive-empty-first.mp4', bytes)
+    const probe = probeFile(file)
+    expect(probe.stderr).toBe('')
+    expect(Number(probe.probed!.format.duration)).toBe(6)
+    expect(Number(probe.probed!.streams[0]!.nb_read_frames)).toBe(259)
   })
 
   it('measures what the edit list leaves of a track', () => {
