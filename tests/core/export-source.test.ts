@@ -20,6 +20,10 @@ const VIDEO = [1, 2, 3].map((n) => read(`h264/chunk-stream0-0000${n}.m4s`))
 const AUDIO_INIT = read('h264/init-stream1.m4s')
 const AUDIO = [1, 2, 3, 4].map((n) => read(`h264/chunk-stream1-0000${n}.m4s`))
 
+/** One buffer fed both kinds: two traks in the moov, two trafs in every segment. */
+const MUXED_INIT = read('muxed/init-stream0.m4s')
+const MUXED = [1, 2, 3].map((n) => read(`muxed/chunk-stream0-0000${n}.m4s`))
+
 /** Segments laid out one after another in an address space of their own, as Save all lays them. */
 function placed(kind: 'video' | 'audio', initBytes: Uint8Array, segments: Uint8Array[]) {
   const map = new ByteMap()
@@ -118,6 +122,47 @@ describe('sourceTrackOf', () => {
     expect(track.samples.every((sample) => sample.sync)).toBe(true)
     expect(track.timescale).toBe(44_100)
     expect(track.kind).toBe('audio')
+  })
+
+  it('measures a muxed track by the trak its sample entry belongs to', () => {
+    // A page is free to hand one SourceBuffer both kinds at once, and then one moov describes two
+    // ISO tracks and one moof carries a traf for each — the shape the session registry names in
+    // as many words. Every other init in the fixtures holds a single track, and there "the track
+    // this sample entry belongs to" and "the first track there is" are the same trak: nothing
+    // separates them, and code that confuses the two cannot be caught on that material.
+    //
+    // Here they differ. Read off the leading trak, the sound of this recording is counted in the
+    // ticks of the picture: 136710 ticks come out as 13.35 seconds instead of 6.2, every packet
+    // is planned two and a bit times longer than it is, and the mdhd the writer states says so.
+    // The file stays internally consistent — ffprobe reports it without a complaint — and plays
+    // at the wrong speed against a picture that is still right.
+    const declared = parseInit(MUXED_INIT)!.tracks
+    expect(
+      declared.map((track) => [track.kind, track.trackId, track.timescale]),
+      'the muxed fixture no longer declares the picture first',
+    ).toEqual([
+      ['video', 1, 10_240],
+      ['audio', 2, 22_050],
+    ])
+
+    const sound = sourceTrackOf(placed('audio', MUXED_INIT, MUXED).input)!
+    expect(sound.timescale).toBe(22_050)
+    expect(sound.samples).toHaveLength(131)
+    const ticks = sound.samples.reduce((total, sample) => total + sample.duration, 0)
+    expect(ticks).toBe(136_710)
+    expect(ticks / sound.timescale).toBeCloseTo(6.2, 6)
+
+    // And the sample entry is the sound's own, which is what makes the wrong scale so quiet: the
+    // clip would state AAC in a media header counted in the ticks of the picture.
+    expect(String.fromCharCode(...sound.sampleEntry.subarray(4, 8))).toBe('mp4a')
+
+    // The picture of the same init comes out as it always did: 60 frames, a key frame every two
+    // seconds, and the samples of the other traf left where they belong.
+    const picture = sourceTrackOf(placed('video', MUXED_INIT, MUXED).input)!
+    expect(picture.timescale).toBe(10_240)
+    expect(picture.samples).toHaveLength(60)
+    expect(picture.samples.filter((sample) => sample.sync)).toHaveLength(3)
+    expect([picture.width, picture.height]).toEqual([256, 144])
   })
 
   it('keeps the samples in decode order however the segments arrive', () => {

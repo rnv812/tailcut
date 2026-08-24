@@ -108,6 +108,59 @@ ffmpeg -y -i "$work/source-webm.webm" -c copy -f dash -seg_duration 2 \
 rm -rf "$out/webm" && mkdir -p "$out/webm"
 cp "$work"/webm/*.webm "$out/webm/"
 
+# A muxed buffer: one init describing both tracks, and media segments carrying a traf for each.
+#
+# Every other set here is split the way DASH delivers it — a SourceBuffer per kind, one ISO track
+# per init segment. A page is free to hand one buffer both kinds at once
+# (video/mp4; codecs="avc1.4d401e,mp4a.40.2"), and then a single moov holds two traks and a single
+# moof holds two trafs; the session registry names that case in as many words. Nothing else in the
+# fixtures has that shape, and with one trak in the moov the question a reader of an init answers
+# never comes up: "the track this sample entry belongs to" and "the first track there is" are the
+# same track, and code that confuses them cannot be caught.
+#
+# The same cheap material as the WebM and AV1 sets, in h264 and AAC so that the two tracks count
+# their time differently — 10240 ticks a second for the picture, 22050 for the sound. That
+# difference is the point of the fixture: measured off the wrong trak, six seconds of sound comes
+# out as thirteen, and the file stays consistent enough that ffprobe reports it without a word.
+ffmpeg -y -f lavfi -i "color=c=#202040:s=256x144:r=10:d=6" \
+       -f lavfi -i "sine=frequency=440:duration=6" \
+       -vf "drawbox=x='mod(t*60\,220)':y='60+40*sin(t)':w=30:h=30:color=orange:t=fill" \
+       -c:v libx264 -profile:v main -crf 30 -g 20 -keyint_min 20 -sc_threshold 0 \
+       -pix_fmt yuv420p -c:a aac -b:a 16k -ar 22050 -ac 1 \
+       -shortest "$work/source-muxed.mp4"
+
+# The mov muxer and not the dash one: dash splits the tracks apart, which is the very thing this
+# set is here not to do. -frag_keyframe cuts a fragment at every key frame, so the fragments come
+# out two seconds long like the segments of the other sets.
+ffmpeg -y -i "$work/source-muxed.mp4" -c copy \
+       -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof \
+       "$work/muxed.mp4"
+
+rm -rf "$out/muxed" && mkdir -p "$out/muxed"
+# Cut into what MSE is fed: ftyp and moov as the init segment, then every moof with the mdat
+# behind it as a media segment. The mfra the muxer leaves at the end of the file is an index of
+# the whole file and belongs to no segment, so it is dropped with everything else past the last
+# mdat.
+node -e '
+  const fs = require("fs")
+  const data = fs.readFileSync(process.argv[1])
+  const boxes = []
+  for (let at = 0; at + 8 <= data.length; ) {
+    const size = data.readUInt32BE(at)
+    if (size < 8) break
+    boxes.push({ type: data.toString("latin1", at + 4, at + 8), at, size })
+    at += size
+  }
+  const starts = boxes.filter((b) => b.type === "moof").map((b) => b.at)
+  const last = boxes.filter((b) => b.type === "mdat").pop()
+  fs.writeFileSync(`${process.argv[2]}/init-stream0.m4s`, data.subarray(0, starts[0]))
+  for (const [i, start] of starts.entries()) {
+    const end = starts[i + 1] ?? last.at + last.size
+    const name = `chunk-stream0-${String(i + 1).padStart(5, "0")}.m4s`
+    fs.writeFileSync(`${process.argv[2]}/${name}`, data.subarray(start, end))
+  }
+' "$work/muxed.mp4" "$out/muxed"
+
 # A Common Encryption init segment: the header of a protected stream, and the one thing the
 # extension has to recognise before it copies anything of such a page.
 #
@@ -147,4 +200,4 @@ node -e '
   fs.writeFileSync(process.argv[2], data.subarray(0, at))
 ' "$work/cenc.mp4" "$out/cenc/init-stream0.m4s"
 
-ls -la "$out/h264" "$out/minute" "$out/vp9" "$out/av1" "$out/webm" "$out/cenc"
+ls -la "$out/h264" "$out/minute" "$out/vp9" "$out/av1" "$out/webm" "$out/muxed" "$out/cenc"

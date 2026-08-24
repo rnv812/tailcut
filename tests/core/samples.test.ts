@@ -4,7 +4,7 @@ import { editOffset, samplesInSegment, trackDefaults } from '../../src/core/iso/
 import { ingestInit } from '../../src/core/container'
 import { buildAudioInit, buildFragment, buildVideoInit } from '../../src/core/iso/build'
 import { parseFragment } from '../../src/core/iso/fragment'
-import { topLevelBoxes as topLevelBoxesOf } from '../../src/core/iso/reader'
+import { childBoxes, findBox, topLevelBoxes as topLevelBoxesOf } from '../../src/core/iso/reader'
 import { boxOf, fullBoxOf, i64, u16, u32, u64, zeroes } from '../../src/core/iso/writer'
 
 const read = (path: string): Uint8Array => new Uint8Array(readFileSync(path))
@@ -189,6 +189,61 @@ function segmentOf(moof: Uint8Array, payload: number): Uint8Array {
   const out = new Uint8Array(moof.byteLength + mdat.byteLength)
   out.set(moof, 0)
   out.set(mdat, moof.byteLength)
+  return out
+}
+
+/** tfhd: sample-description-index-present, the field this repository has no material for. */
+const TFHD_SAMPLE_DESCRIPTION_INDEX = 0x000002
+
+/**
+ * The same media segment with a sample_description_index written into its tfhd.
+ *
+ * It is the one optional field of a fragment header nothing here produces: ffmpeg states it in
+ * no fixture and our own writer states it in nothing it builds. A packager whose stsd holds more
+ * than one entry — a stream that changes its codec configuration part way through — names in
+ * every fragment which of them the fragment is coded against, and that is the only way the field
+ * is ever seen.
+ *
+ * Four bytes, sitting between track_ID and the defaults: the tfhd, the traf and the moof each
+ * grow by four, and the trun's offset to its samples grows with them, since it is counted from
+ * the first byte of the moof and the moof is now four bytes longer. The sidx in front of the
+ * moof goes on stating the size of a segment four bytes shorter, as it does after the same
+ * surgery in tests/core/trex-defaults.ts: nothing that reads samples looks at it.
+ */
+function withTfhdDescriptionIndex(segment: Uint8Array, index: number): Uint8Array {
+  const moof = topLevelBoxesOf(segment).find((b) => b.type === 'moof')!
+  const traf = childBoxes(segment, moof).find((b) => b.type === 'traf')!
+  const parts = childBoxes(segment, traf)
+  const tfhd = parts.find((b) => b.type === 'tfhd')!
+
+  const source = new DataView(segment.buffer, segment.byteOffset, segment.byteLength)
+  const word = tfhd.start + tfhd.headerSize
+  const flags = source.getUint32(word) & 0x00ffffff
+  if (flags & TFHD_SAMPLE_DESCRIPTION_INDEX) throw new Error('the tfhd states an index already')
+  // base_data_offset would stand between track_ID and the field and move it eight bytes along.
+  if (flags & 0x000001) throw new Error('the tfhd addresses its samples absolutely')
+
+  // version and flags, track_ID, then the field.
+  const at = word + 8
+  const out = new Uint8Array(segment.byteLength + 4)
+  out.set(segment.subarray(0, at), 0)
+  out.set(segment.subarray(at), at + 4)
+
+  const data = new DataView(out.buffer)
+  data.setUint32(at, index)
+  data.setUint32(word, (source.getUint32(word) & 0xff000000) | flags | TFHD_SAMPLE_DESCRIPTION_INDEX)
+  // Three boxes gained four bytes each, and each states its own size. All three begin in front
+  // of the field, so none of them moved.
+  for (const box of [moof, traf, tfhd]) data.setUint32(box.start, box.size + 4)
+
+  for (const child of parts) {
+    if (child.type !== 'trun') continue
+    // The trun stands behind the field and moved with it.
+    const body = child.start + 4 + child.headerSize
+    if (!(data.getUint32(body) & 0x000001)) continue
+    data.setInt32(body + 8, data.getInt32(body + 8) + 4)
+  }
+
   return out
 }
 
@@ -393,6 +448,37 @@ describe('samplesInSegment', () => {
     expect(tracks[0]!.samples.map((s) => s.dts)).toEqual([0, 512])
     expect(tracks[1]!.samples.map((s) => s.dts)).toEqual([0, 1024])
     expect(tracks[1]!.samples[0]!.at).toBe(306)
+  })
+
+  it('steps over a sample_description_index the tfhd states', () => {
+    // No fixture sets the flag, so the four bytes behind it have never been stepped over by a
+    // test — while the field beside it, base_data_offset, is covered twice over. Left in place,
+    // every field of the header behind it is read one word early: default_sample_duration comes
+    // out of the description index itself, which is 1, and every sample of the fragment lasts a
+    // single tick. The last sample of this segment then decodes at 47 instead of 24064 — two
+    // thousandths of a second for a fragment of two seconds.
+    //
+    // Nothing else about the file goes wrong, which is what makes it quiet: the sizes and the
+    // offsets come out of the trun and stay right, so every frame is present, every byte is
+    // where the writer will look for it, and the clip opens.
+    const stated = withTfhdDescriptionIndex(videoSegments[0]!, 1)
+    const [track] = samplesInSegment(stated, defaults)
+    const [plain] = samplesInSegment(videoSegments[0]!, defaults)
+
+    const tfhd = findBox(stated, ['moof', 'traf', 'tfhd'])!
+    const view = new DataView(stated.buffer, stated.byteOffset, stated.byteLength)
+    const flags = view.getUint32(tfhd.start + tfhd.headerSize) & 0x00ffffff
+    expect(
+      flags & TFHD_SAMPLE_DESCRIPTION_INDEX,
+      'the segment carries no description index after all',
+    ).toBe(TFHD_SAMPLE_DESCRIPTION_INDEX)
+
+    expect(track!.samples.at(-1)!.dts).toBe(24_064)
+    expect(new Set(track!.samples.map((s) => s.duration))).toEqual(new Set([512]))
+    expect(track!.samples.map((s) => s.dts)).toEqual(plain!.samples.map((s) => s.dts))
+    expect(track!.samples.map((s) => s.size)).toEqual(plain!.samples.map((s) => s.size))
+    // Everything is four bytes further along the segment, the field being four bytes long.
+    expect(track!.samples.map((s) => s.at)).toEqual(plain!.samples.map((s) => s.at + 4))
   })
 
   it('gives an empty list for an init segment and for junk', () => {
