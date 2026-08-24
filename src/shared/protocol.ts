@@ -12,6 +12,18 @@ export type PageToBridge =
    * would leave it recording with no verdict ever spoken about it.
    */
   | { type: 'tc:worker'; sourceId: string }
+  /**
+   * How long the whole video is, in seconds, as the page itself stated it on its MediaSource.
+   *
+   * The third component of the merge key (§6.1). What the page states out of its manifest, and
+   * never what the browser works out for itself: with the duration left unset MSE grows it to the
+   * end of whatever has been buffered, and a number that climbs with every segment would move a
+   * session to a new key on every poll.
+   *
+   * It is what tells two videos of a feed apart where the address cannot — measured on
+   * tiktok.com/foryou, whose address does not change through a whole scroll.
+   */
+  | { type: 'tc:duration'; sourceId: string; seconds: number }
 
 /**
  * How the main world tells the isolated one which stream an element is playing.
@@ -130,7 +142,12 @@ export const TOP_FRAME = { frameId: 0 } as const
 export function isPageToBridge(value: unknown): value is PageToBridge {
   if (typeof value !== 'object' || value === null) return false
   const type = (value as { type?: unknown }).type
-  return type === 'tc:append' || type === 'tc:source' || type === 'tc:worker'
+  return (
+    type === 'tc:append' ||
+    type === 'tc:source' ||
+    type === 'tc:worker' ||
+    type === 'tc:duration'
+  )
 }
 
 export function isExtensionToTab(value: unknown): value is ExtensionToTab {

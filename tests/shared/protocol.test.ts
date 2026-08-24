@@ -17,10 +17,13 @@ const append: PageToBridge = {
 const source: PageToBridge = { type: 'tc:source', sourceId: 's', objectUrl: 'blob:https://a.test/1' }
 /** A MediaSource inside a worker: announced by name, because it has no address of its own. */
 const worker: PageToBridge = { type: 'tc:worker', sourceId: 'w1s1' }
+/** The length the page stated for a stream: the third component of the merge key. */
+const duration: PageToBridge = { type: 'tc:duration', sourceId: 's', seconds: 23.581 }
 const accepted: [string, PageToBridge][] = [
   ['tc:append', append],
   ['tc:source', source],
   ['tc:worker', worker],
+  ['tc:duration', duration],
 ]
 
 /** Both variants of the other side of the protocol: the bridge sends these, it does not take them. */

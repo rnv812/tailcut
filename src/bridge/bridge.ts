@@ -172,6 +172,14 @@ window.addEventListener('message', (event: MessageEvent) => {
 
   if (!isPageToBridge(data)) return
 
+  // The page has stated how long the whole video is. It is the third component of the merge key
+  // (§6.1) and the only one that tells two videos of a feed apart where the address does not
+  // change from one to the next; the registry decides for itself whether it is news.
+  if (data.type === 'tc:duration') {
+    store.setDuration(data.sourceId, data.seconds)
+    return
+  }
+
   if (data.type === 'tc:append') {
     store.append({
       sourceId: data.sourceId,

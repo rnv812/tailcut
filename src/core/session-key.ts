@@ -70,13 +70,22 @@ export function normalizeUrl(url: string): string {
   return parsed.toString()
 }
 
+/**
+ * Длительность в том виде, в каком её пишет ключ: целые секунды либо `live`.
+ *
+ * Отдельной функцией, потому что по ней сверяется не только сам ключ: реестр сессий решает,
+ * новость ли объявленная страницей длительность, и решать это он обязан ровно с той же
+ * точностью — иначе перекладывал бы сессию на каждое уточнение манифеста в миллисекундах.
+ */
+export function durationToken(seconds: number): string {
+  return Number.isFinite(seconds) ? Math.round(seconds).toString() : 'live'
+}
+
 export function sessionKey(input: KeyInput): string {
   // Копия перед сортировкой: массив приходит от вызывающей стороны, порядок кодеков в нём
   // может быть значим для неё самой.
   const codecs = [...input.codecs].sort().join(',')
-  const duration = Number.isFinite(input.durationSeconds)
-    ? Math.round(input.durationSeconds).toString()
-    : 'live'
+  const duration = durationToken(input.durationSeconds)
 
   // Разделители обязательны: без них компоненты перетекают друг в друга и разные сессии
   // получают один ключ («…/v/1» + «avc1» и «…/v/1a» + «vc1» дают одну строку).

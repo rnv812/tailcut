@@ -450,6 +450,185 @@ describe('SessionStore: what ends up in a session', () => {
   })
 })
 
+/**
+ * The third component of the merge key (§6.1), and the one the registry used to leave unsaid.
+ *
+ * The address and the codecs alone tell two videos apart only where the address changes from one
+ * to the next. On a feed it does not: measured on tiktok.com/foryou, where location.href stays
+ * «https://www.tiktok.com/foryou» through the whole scroll, seven clips — a MediaSource each —
+ * came out as ONE session under the key «…/foryou|avc1,mp4a|live», their fragments piled onto one
+ * map, and the saved file held 2441 packets with 18 backward jumps of DTS; Chromium stopped on it
+ * at 2.28 seconds without drawing a frame. The same collision, half hidden behind a stale address,
+ * turned four YouTube shorts into three sessions.
+ *
+ * What the page states about the length is the thing that differs between two clips of one feed
+ * and stays put across a reload of one clip, so that is what goes into the key.
+ */
+describe('SessionStore: the length of the video in the merge key', () => {
+  const feed = 'https://feed.example/foryou'
+  const clip = { ...page, url: feed }
+
+  it('does not merge two clips of a feed that the address cannot tell apart', () => {
+    const store = new SessionStore()
+
+    store.append({ ...clip, bytes: init })
+    store.setDuration('s1', 6.845)
+    store.append({ ...clip, bytes: seg1 })
+
+    store.append({ ...clip, sourceId: 's2', bytes: init })
+    store.setDuration('s2', 60.0)
+    store.append({ ...clip, sourceId: 's2', bytes: seg1 })
+
+    expect(store.list(), 'two clips of the feed collapsed into one session').toHaveLength(2)
+  })
+
+  it('keeps the fragments of the two clips on maps of their own', () => {
+    const store = new SessionStore()
+
+    store.append({ ...clip, bytes: init })
+    store.setDuration('s1', 6.845)
+    store.append({ ...clip, bytes: seg1 })
+
+    store.append({ ...clip, sourceId: 's2', bytes: init })
+    store.setDuration('s2', 60.0)
+    // The second clip starts from zero as every clip does. On one map its first fragment lands
+    // beside the first fragment of the other and the muxer writes them one after another — that
+    // is the backward jump of DTS the file was measured to hold.
+    store.append({ ...clip, sourceId: 's2', bytes: seg1 })
+
+    expect(store.list().map((s) => only(s).map.runs().flatMap((r) => r.chunks.map(shapeOf)))).toEqual(
+      [
+        [[0, 2, seg1.byteLength]],
+        [[0, 2, seg1.byteLength]],
+      ],
+    )
+  })
+
+  it('takes the length into the key exactly as sessionKey spells it', () => {
+    const store = new SessionStore()
+    store.append({ ...clip, bytes: init })
+    store.setDuration('s1', 6.845)
+
+    expect(store.list()[0]!.key).toBe(
+      sessionKey({ url: feed, codecs: ['avc1'], durationSeconds: 6.845 }),
+    )
+    expect(store.get(store.list()[0]!.key)).toBe(store.list()[0])
+  })
+
+  it('re-keys a session opened before the page stated the length', () => {
+    const store = new SessionStore()
+    store.append({ ...clip, bytes: init })
+    store.append({ ...clip, bytes: seg1 })
+
+    // A player states the duration when it has read its manifest, which may be after the first
+    // init segment has already opened the session. The material stays where it is; only the key
+    // it will be asked for from now on changes.
+    store.setDuration('s1', 6.845)
+
+    expect(store.list()).toHaveLength(1)
+    expect(store.list()[0]!.key).toBe(
+      sessionKey({ url: feed, codecs: ['avc1'], durationSeconds: 6.845 }),
+    )
+    expect(only(store.list()[0]!).map.runs()[0]!.chunks.map(shapeOf)).toEqual([
+      [0, 2, seg1.byteLength],
+    ])
+  })
+
+  it('keeps a length stated before the first init segment', () => {
+    const store = new SessionStore()
+    // The player sets the duration inside `sourceopen`, which on the sites this was measured on
+    // comes before it appends anything at all.
+    store.setDuration('s1', 6.845)
+    store.append({ ...clip, bytes: init })
+
+    expect(store.list()[0]!.key).toBe(
+      sessionKey({ url: feed, codecs: ['avc1'], durationSeconds: 6.845 }),
+    )
+  })
+
+  it('merges a reload of the same clip, which is what the key exists for', () => {
+    const store = new SessionStore()
+    store.append({ ...clip, bytes: init })
+    store.setDuration('s1', 6.845)
+    store.append({ ...clip, bytes: seg1 })
+
+    // The same video seen again: a new MediaSource, a rewind mark in the address, the same length.
+    store.append({ ...clip, sourceId: 's2', url: `${feed}?t=3`, bytes: init, now: 2000 })
+    store.setDuration('s2', 6.845)
+    store.append({ ...clip, sourceId: 's2', url: `${feed}?t=3`, bytes: seg2, now: 2000 })
+
+    expect(store.list()).toHaveLength(1)
+    expect(only(store.list()[0]!).map.runs()[0]!.chunks).toHaveLength(2)
+  })
+
+  it('does not split a session over a length restated within the same second', () => {
+    const store = new SessionStore()
+    store.append({ ...clip, bytes: init })
+    store.setDuration('s1', 6.845)
+    store.append({ ...clip, bytes: seg1 })
+
+    // dash.js restates the duration on every manifest update, and a live-edge refinement moves it
+    // by milliseconds. The key rounds to whole seconds, so nothing here is news.
+    const key = store.list()[0]!.key
+    store.setDuration('s1', 6.851)
+    store.append({ ...clip, bytes: seg2 })
+
+    expect(store.list()).toHaveLength(1)
+    expect(store.list()[0]!.key).toBe(key)
+    expect(only(store.list()[0]!).map.runs()[0]!.chunks).toHaveLength(2)
+  })
+
+  it('says nothing of a length that says nothing: a live stream and an unread manifest', () => {
+    const store = new SessionStore()
+    store.append({ ...clip, bytes: init })
+    const live = store.list()[0]!.key
+
+    store.setDuration('s1', Infinity)
+    store.setDuration('s1', NaN)
+    store.setDuration('s1', 0)
+
+    expect(store.list()[0]!.key).toBe(live)
+    expect(live).toBe(sessionKey({ url: feed, codecs: ['avc1'], durationSeconds: Infinity }))
+  })
+
+  it('keys the session by a length stated while the source was under a rejection', () => {
+    const store = new SessionStore()
+    store.append({ ...clip, bytes: init })
+    store.dropPending('s1')
+    store.append({ ...clip, bytes: seg1 })
+
+    // The verdict took the session out of the registry, so there was none to re-key at the time.
+    // The length stays on the source, and the session it is given back gets it.
+    store.setDuration('s1', 6.845)
+    store.promotePending('s1')
+
+    expect(store.list()).toHaveLength(1)
+    expect(store.list()[0]!.key).toBe(
+      sessionKey({ url: feed, codecs: ['avc1'], durationSeconds: 6.845 }),
+    )
+    expect(only(store.list()[0]!).map.runs()[0]!.chunks.map(shapeOf)).toEqual([
+      [0, 2, seg1.byteLength],
+    ])
+  })
+
+  it('breaks nothing on a length stated about a source nobody has heard of', () => {
+    const store = new SessionStore()
+    expect(() => store.setDuration('nobody', 12)).not.toThrow()
+    expect(store.list()).toEqual([])
+  })
+
+  it('takes no length from a page that played protected media', () => {
+    const store = new SessionStore()
+    store.append({ ...clip, bytes: init })
+    store.refuseEncrypted()
+
+    store.setDuration('s1', 6.845)
+    store.append({ ...clip, bytes: seg1 })
+
+    expect(store.list()).toEqual([])
+  })
+})
+
 describe('SessionStore: a stream appended in slices', () => {
   /**
    * What YouTube does: a SourceBuffer is handed the download as it arrives rather than a segment

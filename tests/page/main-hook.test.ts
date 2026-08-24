@@ -72,6 +72,24 @@ function installPage(options: { eme?: boolean } = {}) {
 
   class FakeMediaSource {
     readonly buffers: FakeSourceBuffer[] = []
+    /**
+     * Длительность в том виде, в каком её держит браузер: аксессор на прототипе, до присваивания
+     * — NaN. Плеер ставит её, прочитав манифест; MSE с этого момента отдаёт её элементу.
+     */
+    stored = NaN
+    /**
+     * Чем браузер ответит на присваивание вместо него самого. Настоящий сеттер бросает
+     * InvalidStateError на неоткрытом источнике и на буфере в процессе обновления — и бросает
+     * до того, как что-либо изменит.
+     */
+    failDurationWith: unknown = null
+    get duration(): number {
+      return this.stored
+    }
+    set duration(value: number) {
+      if (this.failDurationWith !== null) throw this.failDurationWith
+      this.stored = Number(value)
+    }
     addSourceBuffer(mime: string): FakeSourceBuffer {
       const sourceBuffer = new FakeSourceBuffer(mime)
       this.buffers.push(sourceBuffer)
@@ -474,5 +492,109 @@ describe('синхронный путь плеера', () => {
     await Promise.resolve()
 
     expect(page.of('tc:append'), 'отправка отложена дальше микрозадачи').toHaveLength(1)
+  })
+})
+
+/**
+ * Длительность, объявленная страницей на MediaSource: третья составляющая ключа слияния (§6.1).
+ *
+ * Берётся именно объявление страницы, а не то, что выводит браузер. Оставь плеер длительность
+ * несказанной — MSE наращивает её до конца забуференного, и число, растущее с каждым сегментом,
+ * перекладывало бы сессию на новый ключ на каждом опросе.
+ */
+describe('объявленная длительность', () => {
+  it('уходит мосту с идентификатором потока', async () => {
+    const page = installPage()
+    await importHook()
+    const { mediaSource } = openSource(page)
+
+    mediaSource.duration = 23.581
+
+    expect(page.of('tc:duration').map((item) => item.message)).toEqual([
+      { type: 'tc:duration', sourceId: 's1', seconds: 23.581 },
+    ])
+  })
+
+  it('не мешает странице поставить её: значение доходит до браузера', async () => {
+    const page = installPage()
+    await importHook()
+    const { mediaSource } = openSource(page)
+
+    mediaSource.duration = 42
+
+    // Обёртка стоит на пути присваивания, которым плеер объявляет длину ролика элементу: съешь
+    // она его, видео перестало бы перематываться дальше забуференного.
+    expect(mediaSource.duration).toBe(42)
+    expect(mediaSource.stored).toBe(42)
+  })
+
+  it('молчит о прямом эфире и о длительности, которую плеер сбросил', async () => {
+    const page = installPage()
+    await importHook()
+    const { mediaSource } = openSource(page)
+
+    mediaSource.duration = Infinity
+    mediaSource.duration = NaN
+    mediaSource.duration = 0
+
+    // Ни одно из трёх не описывает ролик: эфир, сброс и ролик нулевой длины говорят реестру
+    // ровно то же, что молчание.
+    expect(page.of('tc:duration')).toEqual([])
+  })
+
+  it('пропускает исключение браузера наружу и ничего о нём не рассказывает', async () => {
+    const page = installPage()
+    await importHook()
+    const { mediaSource } = openSource(page)
+
+    const invalid = new Error('InvalidStateError')
+    mediaSource.failDurationWith = invalid
+
+    // Настоящий сеттер бросает на неоткрытом источнике и на буфере в процессе обновления.
+    // Страница обязана почувствовать это ровно так, как без расширения.
+    expect(() => {
+      mediaSource.duration = 12
+    }).toThrow(invalid)
+    expect(page.of('tc:duration'), 'мосту объявили длительность, которой страница не поставила').toEqual([])
+  })
+
+  it('говорит о каждом уточнении: сверять их — дело реестра', async () => {
+    const page = installPage()
+    await importHook()
+    const { mediaSource } = openSource(page)
+
+    // dash.js переобъявляет длительность на каждом обновлении манифеста. Точность сверки — в
+    // ключе (целые секунды), и держать её копию здесь значило бы держать две.
+    mediaSource.duration = 600
+    mediaSource.duration = 600.4
+
+    expect(page.of('tc:duration').map((item) => item.message.seconds)).toEqual([600, 600.4])
+  })
+
+  it('различает два MediaSource одной страницы', async () => {
+    const page = installPage()
+    await importHook()
+    const first = openSource(page)
+    const second = openSource(page)
+
+    first.mediaSource.duration = 10
+    second.mediaSource.duration = 20
+
+    // Лента коротких роликов открывает свой MediaSource на каждый ролик, и длина принадлежит
+    // тому потоку, о котором сказана: перепутай их — и обе сессии получат один ключ.
+    expect(page.of('tc:duration').map((item) => [item.message.sourceId, item.message.seconds])).toEqual([
+      ['s1', 10],
+      ['s3', 20],
+    ])
+  })
+
+  it('уходит без списка передачи', async () => {
+    const page = installPage()
+    await importHook()
+    const { mediaSource } = openSource(page)
+
+    mediaSource.duration = 7
+
+    expect(page.of('tc:duration').map((item) => item.transferred)).toEqual([0])
   })
 })

@@ -7,7 +7,7 @@ import {
 } from '../core/container'
 import { SegmentStream } from '../core/stream'
 import { PtsMap } from '../core/timeline/map'
-import { normalizeUrl, sessionKey } from '../core/session-key'
+import { durationToken, normalizeUrl, sessionKey } from '../core/session-key'
 import type { MuxTrack } from '../core/mux'
 import type { Omission } from '../shared/protocol'
 import type { Chunk, InitInfo, TrackKind } from '../shared/types'
@@ -98,6 +98,12 @@ interface SourceState {
    * of all of them, so it describes the video as a whole and not the init that came last.
    */
   codecs: string[]
+  /**
+   * Full length of what this source is playing, in seconds, as the page itself stated it;
+   * `Infinity` while nothing has been stated — a live stream and an unread manifest say the same
+   * thing here. The third component of the merge key: see setDuration.
+   */
+  durationSeconds: number
   /**
    * One of this source's buffers declared a track that could not be taken in. Remembered on the
    * source because the refusal usually comes before there is a session to remember it on: the
@@ -524,6 +530,14 @@ export class SessionStore {
   private probation = new Map<string, Probation>()
   /** Sources whose rejection outlasted the review: nothing of them is kept any more. */
   private screenedOut = new Set<string>()
+  /**
+   * sourceId → the length its page stated for it, kept apart from the source itself.
+   *
+   * A player states the duration inside `sourceopen`, which on the measured sites comes before it
+   * appends a single byte — so the word about it regularly arrives before there is a source to
+   * write it on.
+   */
+  private declaredDurations = new Map<string, number>()
   /** Encrypted media was seen on this page: see refuseEncrypted. Once set, it is never cleared. */
   private encryptedSeen = false
 
@@ -770,6 +784,57 @@ export class SessionStore {
     this.rejected.clear()
     this.promoted.clear()
     this.screenedOut.clear()
+    this.declaredDurations.clear()
+  }
+
+  /**
+   * The page has stated how long what this source plays actually is.
+   *
+   * This is the third component of the merge key (§6.1), and the registry used to leave it unsaid:
+   * every session was keyed as if the length were unknown, so two videos were told apart by their
+   * address and their codecs alone. On a feed the address does not change from one video to the
+   * next and the codecs are the codecs of the feed — measured on tiktok.com/foryou, where seven
+   * clips, a MediaSource each, came out as one session and one file with eighteen backward jumps
+   * of DTS in it, which Chromium stopped playing at 2.28 seconds. The same collision, half hidden
+   * behind an address that lagged a video behind, turned four YouTube shorts into three sessions.
+   *
+   * What is taken is what the page states and never what the browser infers. Left unset, MSE grows
+   * the duration to the end of whatever has been buffered, so a length read off the media element
+   * would climb with every segment and move the session to a new key on every poll; a length out
+   * of a manifest is stated once and describes the whole video, which is what a key needs.
+   *
+   * It may arrive before the first init segment or long after the session opened, so the session
+   * is re-keyed on the spot — bind() moves it and everything it has collected to the key it will
+   * be looked up by from now on, exactly as it does when a second buffer widens the codec list.
+   */
+  setDuration(sourceId: string, seconds: number): void {
+    // A page that played protected media keeps nothing and takes nothing in; a length about it is
+    // as much a part of that nothing as a segment would be.
+    if (this.encryptedSeen) return
+    // Infinity is a live stream, NaN is a duration the player has cleared, and zero is a video of
+    // no length: none of the three says anything a key could be built on, and all three mean the
+    // same as never having been told.
+    if (!Number.isFinite(seconds) || seconds <= 0) return
+
+    this.declaredDurations.set(sourceId, seconds)
+
+    const source = this.sources.get(sourceId)
+    // Nothing of this source has been parsed yet. The length waits above for the init segment
+    // that opens it, and the source is born knowing it.
+    if (!source) return
+
+    // Compared the way the key spells it: a manifest restated on every update, and a live edge
+    // refined by milliseconds, are not news, and answering them would move the session about for
+    // nothing.
+    if (durationToken(source.durationSeconds) === durationToken(seconds)) return
+    source.durationSeconds = seconds
+
+    const session = this.sessions.get(source.key)
+    // No session under the old key: the source is under a rejection, or its init has not arrived.
+    // The length sits on the source, and whatever session it opens next is keyed with it.
+    if (!session) return
+
+    this.bind(source, sourceId, { url: session.url, title: session.title, now: session.createdAt })
   }
 
   /**
@@ -933,6 +998,7 @@ export class SessionStore {
         buffers: new Map(),
         headers: new Map(),
         codecs: [],
+        durationSeconds: this.declaredDurations.get(input.sourceId) ?? Infinity,
         refused: false,
       }
       this.sources.set(input.sourceId, source)
@@ -952,6 +1018,11 @@ export class SessionStore {
       this.promoted.delete(input.sourceId)
       this.screenedOut.delete(input.sourceId)
       this.probation.delete(input.sourceId)
+
+      // The stated length stays, alone of everything here. A page that reuses one MediaSource for
+      // its next video states the length of that one too, and it arrives when it arrives;
+      // clearing would open a window in which the key calls a video of known length a live
+      // stream. The address has moved anyway, and that already tells the two apart.
     }
 
     return source
@@ -967,7 +1038,7 @@ export class SessionStore {
     const key = sessionKey({
       url: context.url,
       codecs: source.codecs,
-      durationSeconds: Infinity,
+      durationSeconds: source.durationSeconds,
     })
 
     const previous = this.sessions.get(source.key)

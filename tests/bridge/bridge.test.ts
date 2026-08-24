@@ -501,6 +501,46 @@ describe('the bridge puts segments into the session registry', () => {
     // The session time is the bridge clock: without it the popup order is the insertion order.
     expect(win.list().map((s) => s.title)).toEqual(['Second', 'First'])
   })
+
+  it('keys a session by the length the page stated for its media source', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.deliver({ type: 'tc:duration', sourceId: 's1', seconds: 23.581 })
+    win.append(initBytes)
+
+    // The length is the third component of the merge key (§6.1). Without it two videos of a feed
+    // whose address does not change are one session and one unplayable file.
+    expect(win.list().map((s) => s.key)).toEqual([
+      sessionKey({ url: PAGE_URL, codecs: ['avc1'], durationSeconds: 23.581 }),
+    ])
+  })
+
+  it('keeps two clips of a feed apart when the address stays the same', async () => {
+    const win = await loadBridge()
+    const feed = 'https://feed.example/foryou'
+    win.context(feed, 'Watch trending videos for you')
+
+    win.deliver({ type: 'tc:duration', sourceId: 's1', seconds: 6.845 })
+    win.append(initBytes, 's1')
+    win.append(seg1Bytes, 's1')
+
+    // The next clip of the scroll: its own MediaSource, the same address, the same codecs.
+    win.deliver({ type: 'tc:duration', sourceId: 's2', seconds: 64.943 })
+    win.append(initBytes, 's2')
+    win.append(seg1Bytes, 's2')
+
+    expect(win.list(), 'two clips of the feed came out as one session').toHaveLength(2)
+  })
+
+  it('does not answer the sender of a stated length', async () => {
+    const win = await loadBridge()
+    win.context()
+
+    const sender = win.deliver({ type: 'tc:duration', sourceId: 's1', seconds: 12 })
+
+    // An answer into the page window would tell any script that the extension is here.
+    expect(sender.posts).toEqual([])
+  })
 })
 
 describe('the bridge and foreign messages', () => {

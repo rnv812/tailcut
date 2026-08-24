@@ -71,6 +71,49 @@ MediaSource.prototype.addSourceBuffer = function (mime: string): SourceBuffer {
   return sourceBuffer
 }
 
+// The length of the whole video, as the page states it on its MediaSource once it has read its
+// manifest. It is the third component of the merge key (§6.1) and the one thing that tells two
+// videos of a feed apart where the address cannot: measured on tiktok.com/foryou, whose address
+// stays «https://www.tiktok.com/foryou» through a whole scroll — seven clips, a MediaSource each,
+// came out as one session and one file that Chromium stopped playing at 2.28 seconds.
+//
+// What the page states, and never what the browser works out. Left unset, MSE grows the duration
+// to the end of whatever has been buffered, so a value read off the media element would climb with
+// every segment and move the session to a new key on every poll of the watcher.
+//
+// A MediaSource built inside a worker is not covered here and is left keyed by its address and its
+// codecs: the shim in worker-hook.ts crosses realms as text and every line of it is a line that
+// can take a page's player down, and the one site measured to use one plays live, where there is
+// no length to state.
+const durationProperty = Object.getOwnPropertyDescriptor(MediaSource.prototype, 'duration')
+if (durationProperty?.set && durationProperty.get) {
+  const declare = durationProperty.set
+  const read = durationProperty.get
+
+  Object.defineProperty(MediaSource.prototype, 'duration', {
+    configurable: true,
+    enumerable: durationProperty.enumerable,
+    get: read,
+    set(this: MediaSource, value: number) {
+      // The browser first, and nothing before it: the setter throws on a source that is not open
+      // and on a buffer still updating, and the page has to feel that exactly as it would without
+      // us. Told about a length the page never managed to set, the registry would key a session
+      // by a number that is not true of it.
+      declare.call(this, value)
+
+      const sourceId = sourceIds.get(this)
+      if (!sourceId) return
+
+      // Read back rather than passed on: what the source now holds is what the element will
+      // report, and the setter coerces what it was given.
+      const seconds = read.call(this) as number
+      // Infinity is a live stream, NaN is a length the player has cleared: neither says anything
+      // a key could be built on, and both mean the same as never having been told.
+      if (Number.isFinite(seconds) && seconds > 0) send({ type: 'tc:duration', sourceId, seconds })
+    },
+  })
+}
+
 const originalAppendBuffer = SourceBuffer.prototype.appendBuffer
 SourceBuffer.prototype.appendBuffer = function (data: BufferSource): void {
   const tracked = buffers.get(this)

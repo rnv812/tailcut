@@ -409,6 +409,17 @@ describe('forwarding the hook messages into the bridge', () => {
     expect(dom.forwarded()).toEqual([{ message, transfer: undefined }])
   })
 
+  it('carries the length the page stated for a stream through to the bridge', async () => {
+    const dom = await withBridge()
+    const message = { type: 'tc:duration', sourceId: 's1', seconds: 23.581 }
+
+    // The registry keys a session by it (§6.1), and the registry lives in the bridge frame: lost
+    // here, two videos of a feed under one address would be one session again.
+    await dom.deliverMessage(message)
+
+    expect(dom.forwarded()).toEqual([{ message, transfer: undefined }])
+  })
+
   it('does not let foreign messages into the bridge', async () => {
     const dom = await withBridge()
 
