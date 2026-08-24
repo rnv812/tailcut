@@ -152,7 +152,7 @@ describe('the popup', () => {
     expect(bodyText()).toContain('protected video')
   })
 
-  it('says nothing of the sort on an ordinary page', async () => {
+  it('calls no ordinary page protected', async () => {
     await mount({ sessions: [fresh] })
 
     expect(bodyText()).not.toContain('protected')
