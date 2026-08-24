@@ -101,6 +101,20 @@ export function presentationTicks(track: {
   return Math.max(0, end - track.skipTicks)
 }
 
+/**
+ * Whether the file has to be written in the wide forms: 64-bit chunk offsets and the 64-bit mdat
+ * header that goes with them.
+ *
+ * `before` is everything standing in front of the material — the ftyp and the moov — because a
+ * chunk offset is counted from the start of the file and not from the mdat. Weighing the payload
+ * alone would give 32-bit offsets to a clip whose last chunk lies past what they can state, and
+ * the only capture that shows it is four gigabytes long, which is why this is a function of its
+ * own rather than a comparison inside the writer.
+ */
+export function needsWideOffsets(before: number, payload: number): boolean {
+  return before + MDAT_HEADER_BYTES + payload > MAX_UINT32
+}
+
 export function buildProgressiveMp4(
   tracks: ProgressiveTrack[],
   options: ProgressiveOptions = {},
@@ -127,8 +141,7 @@ export function buildProgressiveMp4(
   const zeroOffsets = written.map(() => 0)
   const narrow = movieBox(written, spans, movieDuration, zeroOffsets, false)
   const large =
-    options.largeOffsets ??
-    ftyp.byteLength + narrow.byteLength + MDAT_HEADER_BYTES + payload > MAX_UINT32
+    options.largeOffsets ?? needsWideOffsets(ftyp.byteLength + narrow.byteLength, payload)
 
   const mdatHeaderBytes = large ? MDAT_LARGE_HEADER_BYTES : MDAT_HEADER_BYTES
   const measured = large ? movieBox(written, spans, movieDuration, zeroOffsets, true) : narrow

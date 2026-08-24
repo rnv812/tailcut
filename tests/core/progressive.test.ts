@@ -2,14 +2,16 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
   buildProgressiveMp4,
+  needsWideOffsets,
   presentationTicks,
+  MOVIE_TIMESCALE,
   type OutSample,
   type ProgressiveTrack,
 } from '../../src/core/iso/progressive'
 import { editOffset, samplesInSegment, trackDefaults } from '../../src/core/iso/samples'
 import { sampleEntryBytes, videoSampleEntry } from '../../src/core/iso/entry'
 import { parseInit } from '../../src/core/iso/init'
-import { boxBody, childBoxes, findBox, topLevelBoxes } from '../../src/core/iso/reader'
+import { boxBody, childBoxes, findBox, topLevelBoxes, type Box } from '../../src/core/iso/reader'
 import { concatBytes } from '../../src/core/iso/writer'
 import { decodeWarnings, frameBySeeking, frameByPlaying, frameTimes, probeFile, writeTemp }
   from '../support/media'
@@ -71,6 +73,12 @@ const sourceVideo = writeTemp(
 
 const rebuilt = writeTemp('progressive-h264.mp4', buildProgressiveMp4([video, audio]))
 
+/** Every coded byte of the two tracks: what an mdat holding them has to say it is long. */
+const payloadBytes = [...video.samples, ...audio.samples].reduce(
+  (total, sample) => total + sample.bytes.byteLength,
+  0,
+)
+
 const boxesOf = (file: Uint8Array, path: string[]): string[] => {
   const box = findBox(file, path)!
   return childBoxes(file, box).map((b) => b.type)
@@ -87,6 +95,26 @@ describe('buildProgressiveMp4', () => {
     // A progressive movie states its samples in the moov; an mvex would tell a player to expect
     // fragments and to disbelieve the tables it just read.
     expect(kinds).not.toContain('mvex')
+  })
+
+  it('brands the file, and leaves a number for a track added after the last one', () => {
+    const bytes = buildProgressiveMp4([video, audio])
+    const ftyp = boxBody(bytes, topLevelBoxes(bytes).find((b) => b.type === 'ftyp')!)
+    const brand = (at: number): string => String.fromCharCode(...ftyp.subarray(at, at + 4))
+
+    // A compatibility hint and no more: nothing this writer was measured against refuses a file
+    // over a missing brand. Pinned anyway, because it is the file's own statement of what it is,
+    // and a list that quietly loses an entry is the kind of change nothing else here would show.
+    expect(brand(0)).toBe('isom')
+    expect(new DataView(ftyp.buffer, ftyp.byteOffset, ftyp.byteLength).getUint32(4)).toBe(0x200)
+    expect([8, 12, 16, 20].map(brand)).toEqual(['isom', 'iso2', 'avc1', 'mp41'])
+    expect(ftyp.byteLength).toBe(24) // major, minor and four brands, with nothing behind them
+
+    // next_track_ID is what a tool appending a track to this clip has to give it, so it is one
+    // past the last id used. Writing the count instead hands it the id the sound already holds.
+    const mvhd = boxBody(bytes, findBox(bytes, ['moov', 'mvhd'])!)
+    const view = new DataView(mvhd.buffer, mvhd.byteOffset, mvhd.byteLength)
+    expect(view.getUint32(mvhd.byteLength - 4)).toBe(3)
   })
 
   it('gives back the frames of the fixture, at the times the fixture gives them', () => {
@@ -196,6 +224,23 @@ describe('buildProgressiveMp4', () => {
     expect(at).toBe(mdat.start + mdat.headerSize)
   })
 
+  it('states an mdat size that reaches the end of the file, in either header', () => {
+    // A size that stops short is the quietest mistake this writer can make: ffmpeg and Chromium
+    // find the samples by the absolute offsets in the stco and never consult it, and the box list
+    // still reads ftyp, moov, mdat — the reader drops a trailing run it cannot parse rather than
+    // complaining about it. A reader that clamps a sample to the extent of the box it lies in
+    // loses the last frame of every clip, and nothing before this line would have said so.
+    for (const largeOffsets of [false, true]) {
+      const bytes = buildProgressiveMp4([video, audio], { largeOffsets })
+      const mdat = topLevelBoxes(bytes).find((b) => b.type === 'mdat')!
+
+      expect(mdat.headerSize).toBe(largeOffsets ? 16 : 8)
+      // Header and payload both: the size a box states counts itself in.
+      expect(mdat.size).toBe(mdat.headerSize + payloadBytes)
+      expect(mdat.start + mdat.size).toBe(bytes.byteLength)
+    }
+  })
+
   it('states a negative composition offset as a negative number', () => {
     // Nothing in the fixtures composes a frame before it decodes, and material cut at an
     // arbitrary point will: the first sample of a clip can carry a pts below its dts. Version 0
@@ -239,6 +284,21 @@ describe('buildProgressiveMp4', () => {
     expect(decodeWarnings(wide)).toBe('')
   })
 
+  it('counts what stands in front of the material when it picks the wide forms', () => {
+    // A chunk offset is counted from the start of the file, so the ftyp and the moov in front of
+    // the samples spend the same 32 bits the samples do: material that clears four gigabytes on
+    // its own can still have its last chunk lie past what an stco can state. The file that would
+    // show this is a four-gigabyte capture, so the question is put to the writer directly.
+    const limit = 0xffffffff
+
+    // Four gigabytes exactly, the eight-byte header counted in: the last byte is still
+    // addressable, and the narrow forms hold.
+    expect(needsWideOffsets(0, limit - 8)).toBe(false)
+    expect(needsWideOffsets(0, limit - 7)).toBe(true)
+    // The same material with tables in front of it does not fit any more.
+    expect(needsWideOffsets(4096, limit - 8)).toBe(true)
+  })
+
   it('hides the head, and states exactly what is left behind it', () => {
     // The same material entered three frames later than the source itself entered it. The tail is
     // not touched here at all — an edit list that shortens the presentation is a trap: ffmpeg and
@@ -269,6 +329,90 @@ describe('buildProgressiveMp4', () => {
     // Nothing hidden, no edit list at all: the box exists to state an offset, and there is none.
     const whole = buildProgressiveMp4([{ ...video, skipTicks: 0 }])
     expect(findBox(whole, ['moov', 'trak', 'edts'])).toBeNull()
+  })
+
+  it('states the length of a real cut in every box that carries one', () => {
+    // The fixture rebuilt into itself is the one clip where all these numbers agree by accident:
+    // both its tracks come out at exactly 540000 ticks of the movie, and its picture hides the
+    // same 1024 at the head that its presentation runs past the decode timeline at the tail,
+    // which makes the decode sum and the presentation span one number. A cut does none of that:
+    // its two tracks end 828 ms apart, and neither span is its sum. Fifty-one frames of picture
+    // from the twenty-fifth on, and the first hundred and thirty packets of sound: 2.167 s of
+    // the one against 2.995 s of the other.
+    const cutVideo: ProgressiveTrack = {
+      ...video,
+      samples: video.samples.slice(24, 75),
+      skipTicks: 1024,
+    }
+    const cutAudio: ProgressiveTrack = { ...audio, samples: audio.samples.slice(0, 130) }
+    const file = writeTemp('progressive-cut.mp4', buildProgressiveMp4([cutVideo, cutAudio]))
+    const bytes = read(file)
+
+    const viewOf = (box: Box): DataView => {
+      const body = boxBody(bytes, box)
+      return new DataView(body.buffer, body.byteOffset, body.byteLength)
+    }
+    const child = (parent: Box, type: string): Box =>
+      childBoxes(bytes, parent).find((b) => b.type === type)!
+
+    // The movie lasts as long as its longest track. The shorter one would have this file state
+    // 2.167 s of itself, and everything reading the mvhd would stop the sound 828 ms early.
+    const moov = findBox(bytes, ['moov'])!
+    const mvhd = viewOf(child(moov, 'mvhd'))
+    expect(mvhd.getUint32(12)).toBe(MOVIE_TIMESCALE)
+    expect(mvhd.getUint32(16)).toBe(269583)
+
+    const lengths = childBoxes(bytes, moov)
+      .filter((b) => b.type === 'trak')
+      .map((trak) => {
+        const mdhd = viewOf(child(child(trak, 'mdia'), 'mdhd'))
+        const elst = viewOf(child(child(trak, 'edts'), 'elst'))
+        return {
+          // The tkhd duration, which the box states in ticks of the movie and after the edit
+          // list has had its say. Nothing else in this suite reads it: ffprobe answers out of
+          // the mvhd and the mdhd, so a tkhd of zero — or of track ticks — probes as a six
+          // second file all the same.
+          tkhd: viewOf(child(trak, 'tkhd')).getUint32(20),
+          timescale: mdhd.getUint32(12),
+          mdhd: mdhd.getUint32(16),
+          segment: Number(elst.getBigUint64(8)),
+          mediaTime: Number(elst.getBigInt64(16)),
+        }
+      })
+
+    // The picture: 27648 ticks of presentation less the 1024 hidden is 26624 of the track's
+    // 12288, which is 195000 of the movie's 90000. The mdhd is the other number — 26112, the sum
+    // of the durations — because it states how much material there is to decode, and the last
+    // frame is composed 512 ticks past the end of the decode timeline. Writing the span there
+    // instead would let media_time + segment_duration reach past the material the mdhd declares.
+    expect(lengths[0]!).toEqual({
+      tkhd: 195000,
+      timescale: 12288,
+      mdhd: 26112,
+      segment: 195000,
+      mediaTime: 1024,
+    })
+
+    // The sound: 132096 ticks of 44100 are 269583.67 of the movie, and the number written is the
+    // one below and never the one above — a duration claiming more presentation than the file
+    // holds is a claim a player acts on. In ticks of the track it would read 132096, which is
+    // three seconds of sound calling itself one and a half.
+    expect(lengths[1]!).toEqual({
+      tkhd: 269583,
+      timescale: 44100,
+      mdhd: 133120,
+      segment: 269583,
+      mediaTime: 1024,
+    })
+
+    // And the cut is that long to a reader as well. Fifty-one frames: the last one is inside the
+    // clip, which it is not when the presentation is measured to the frame decoded last. The
+    // sound comes back one packet short of the hundred and thirty written, because the edit list
+    // hides its priming packet — which is what the priming is there for.
+    const probe = probeFile(file)
+    expect(probe.stderr).toBe('')
+    expect(probe.probed!.streams.map((s) => Number(s.nb_read_frames))).toEqual([51, 129])
+    expect(decodeWarnings(file)).toBe('')
   })
 
   it('writes a single track of vp9 and of av1', () => {
@@ -317,5 +461,23 @@ describe('buildProgressiveMp4', () => {
     expect(presentationTicks({ ...video, skipTicks: 1024 + 3 * 512 })).toBe(72192)
     // A skip past the end of the material leaves nothing, not a negative length.
     expect(presentationTicks({ ...video, skipTicks: 10 ** 9 })).toBe(0)
+  })
+
+  it('measures to the frame that finishes last, not to the frame decoded last', () => {
+    // Two samples say the whole of it: the one decoded second is shown first, so the presentation
+    // ends where the first one ends and not where the last one does.
+    const pair = [
+      { duration: 512, cts: 1024 },
+      { duration: 512, cts: 0 },
+    ]
+    expect(presentationTicks({ samples: pair, skipTicks: 0 })).toBe(1536)
+
+    // And it is the ordinary case, not a corner: on this fixture 93 of the 144 places a cut can
+    // end have a last decoded sample that finishes before the running maximum. Fifty-one frames
+    // out of the middle — the cts of the last of them run 2048, 512, 512, 1024, 2048, 512, and
+    // the B-frame decoded last is shown before the P-frame ahead of it. Its finish is 26624 and
+    // the largest is 27648: a whole frame apart, and the frame at stake is the out point itself.
+    const cut = { samples: video.samples.slice(24, 75), skipTicks: 1024 }
+    expect(presentationTicks(cut)).toBe(27648 - 1024)
   })
 })
