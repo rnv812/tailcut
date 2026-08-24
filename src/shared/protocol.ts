@@ -5,7 +5,29 @@ export type PageToBridge =
   | { type: 'tc:append'; sourceId: string; bufferId: string; mime: string; bytes: ArrayBuffer }
   /** objectUrl ties a MediaSource to a particular <video> on the page */
   | { type: 'tc:source'; sourceId: string; objectUrl: string }
+  /**
+   * A MediaSource built inside a worker — twitch, live and VOD. It has no address at all: what
+   * reaches the page is a handle, and the element playing it is named by SOURCE_EVENT instead.
+   * The announcement still has to be made, or the watcher would never hear of the stream and
+   * would leave it recording with no verdict ever spoken about it.
+   */
+  | { type: 'tc:worker'; sourceId: string }
   | { type: 'tc:drm'; sourceId: string }
+
+/**
+ * How the main world tells the isolated one which stream an element is playing.
+ *
+ * Only for streams that come out of a worker: those have no address for the watcher to find them
+ * by, and `video.srcObject` holds a handle rather than a blob address. The two worlds share the
+ * DOM and nothing else — a property set on the element in one is invisible in the other — so the
+ * word is passed as an event, with the identifier of the stream in `detail` and the element in
+ * `composedPath()[0]`, which is the element itself even inside an open shadow tree.
+ *
+ * An empty `detail` is the other half of the message: an element is playing a stream out of a
+ * worker and the hook cannot name it, which is what a worker it was not allowed to wrap looks
+ * like from the outside.
+ */
+export const SOURCE_EVENT = 'tailcut:source'
 
 /**
  * Why a saved file will hold less than the session does.
@@ -44,13 +66,34 @@ export interface SessionSummary {
 }
 
 /**
- * Everything the bridge sends outwards and nothing besides. There are two channels and the union
- * describes both: the handshake goes to the window that inserted the bridge, and the list of
- * sessions only into the MessageChannel port that came with the request. A message not described
- * here is an undeclared part of the protocol: the receiver does not know of it, and the next
- * reader of the code learns of it from the bridge implementation rather than from the type.
+ * What the bridge answers a list request with: everything the popup draws its page from.
+ *
+ * The sessions alone are not the whole answer, because "no sessions" has two meanings and they
+ * are opposites. Usually it means the page has nothing worth recording on it. On a page whose
+ * player lives in a worker the extension was not allowed to reach, it means the recording never
+ * started at all — and the popup must say which of the two it is looking at.
  */
-export type BridgeToPage = { type: 'tc:ready' } | SessionSummary[]
+export interface SessionList {
+  sessions: SessionSummary[]
+  /**
+   * This page holds a player tailcut cannot reach.
+   *
+   * Set when an element is playing a MediaSourceHandle whose worker was never wrapped (see
+   * src/page/worker-hook.ts): the material of such a player never passes through the extension,
+   * and no later moment will change that. It says nothing about the sessions beside it — a page
+   * can have both, and then the popup shows what was recorded and says what was not.
+   */
+  unreachable?: boolean
+}
+
+/**
+ * Everything the bridge sends outwards and nothing besides. There are two channels and the union
+ * describes both: the handshake goes to the window that inserted the bridge, and the answer to a
+ * list request only into the MessageChannel port that came with it. A message not described here
+ * is an undeclared part of the protocol: the receiver does not know of it, and the next reader of
+ * the code learns of it from the bridge implementation rather than from the type.
+ */
+export type BridgeToPage = { type: 'tc:ready' } | SessionList
 
 /**
  * Requests to the content script of a tab: sent by the popup and by the service worker through
@@ -77,7 +120,7 @@ export const TOP_FRAME = { frameId: 0 } as const
 export function isPageToBridge(value: unknown): value is PageToBridge {
   if (typeof value !== 'object' || value === null) return false
   const type = (value as { type?: unknown }).type
-  return type === 'tc:append' || type === 'tc:source' || type === 'tc:drm'
+  return type === 'tc:append' || type === 'tc:source' || type === 'tc:worker' || type === 'tc:drm'
 }
 
 export function isExtensionToTab(value: unknown): value is ExtensionToTab {

@@ -30,7 +30,12 @@ const older: SessionSummary = {
 type Sent = { tabId: number; message: unknown }
 
 /** The answer of the tab: a list of summaries, or silence — the tab has not answered yet. */
-type Reply = { sessions: SessionSummary[]; save?: SaveResult } | 'silent'
+type Reply = {
+  sessions: SessionSummary[]
+  /** The tab says this page holds a player the extension could not reach. */
+  unreachable?: boolean
+  save?: SaveResult
+} | 'silent'
 
 /**
  * Replaces chrome for the popup: there is one tab, and it answers with what the test set. The api
@@ -51,7 +56,7 @@ function installChrome(reply: Reply) {
         // Silence from the tab is not a refusal: the promise simply never settles, and the popup
         // waits.
         if (reply === 'silent') return new Promise(() => {})
-        return Promise.resolve(reply.sessions)
+        return Promise.resolve({ sessions: reply.sessions, unreachable: reply.unreachable })
       },
     },
   })
@@ -118,6 +123,32 @@ describe('the popup', () => {
     // a summary that does not exist, the render throws, and it stays in "Loading…" for good.
     expect(bodyText()).toBe('Nothing recorded on this page yet.')
     expect(at('title'), 'the popup shows a summary where there are none').toBeNull()
+  })
+
+  it('says a page it could not reach cannot be recorded, rather than showing nothing', async () => {
+    await mount({ sessions: [], unreachable: true })
+
+    // The page plays its video out of a worker the extension was not allowed to wrap: nothing of
+    // it was recorded and nothing ever will be. "Nothing recorded yet" would promise a wait that
+    // will never end.
+    expect(bodyText()).toBe('tailcut cannot reach the player on this page, so nothing of it was recorded.')
+  })
+
+  it('says it beside the session it did record', async () => {
+    await mount({ sessions: [fresh], unreachable: true })
+
+    // Both at once: one player in the main world, recorded, and another out of reach. The saved
+    // file is not the whole of the page, and the popup must not let that pass unsaid.
+    expect(textAt('title')).toBe(fresh.title)
+    expect(textAt('unreachable')).toBe(
+      'Another player on this page is out of reach and was not recorded.',
+    )
+  })
+
+  it('says nothing of the sort on an ordinary page', async () => {
+    await mount({ sessions: [fresh] })
+
+    expect(at('unreachable')).toBeNull()
   })
 
   it('shows the freshest session of the tab', async () => {

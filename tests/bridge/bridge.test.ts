@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { sessionKey } from '../../src/core/session-key'
 import { boxBody, childBoxes, topLevelBoxes } from '../../src/core/iso/reader'
-import type { BridgeToPage, SessionSummary } from '../../src/shared/protocol'
+import type { BridgeToPage, SessionList, SessionSummary } from '../../src/shared/protocol'
 
 const initBytes = new Uint8Array(readFileSync('tests/fixtures/h264/init-stream0.m4s'))
 const seg1Bytes = new Uint8Array(readFileSync('tests/fixtures/h264/chunk-stream0-00001.m4s'))
@@ -118,13 +118,19 @@ function isSummary(value: unknown): value is SessionSummary {
 }
 
 /** The variant of the BridgeToPage union a value fits; null — it fits none of them. */
-function variantOf(value: unknown): 'tc:ready' | 'session summaries' | null {
-  if (Array.isArray(value)) return value.every(isSummary) ? 'session summaries' : null
-  if (typeof value === 'object' && value !== null) {
-    const fields = value as Record<string, unknown>
-    if (fields.type === 'tc:ready' && Object.keys(fields).length === 1) return 'tc:ready'
-  }
-  return null
+function variantOf(value: unknown): 'tc:ready' | 'session list' | null {
+  if (typeof value !== 'object' || value === null) return null
+  const fields = value as Record<string, unknown>
+
+  if (fields.type === 'tc:ready' && Object.keys(fields).length === 1) return 'tc:ready'
+
+  const known = ['sessions', 'unreachable']
+  const fits =
+    Array.isArray(fields.sessions) &&
+    fields.sessions.every(isSummary) &&
+    Object.keys(fields).every((field) => known.includes(field)) &&
+    (fields.unreachable === undefined || typeof fields.unreachable === 'boolean')
+  return fits ? 'session list' : null
 }
 
 /**
@@ -229,12 +235,16 @@ function installWindow(referrer = REFERRER) {
     parent,
     top,
     deliver,
-    /** Asks the bridge for the session list the way the popup does: through a message channel. */
-    list(): Summary[] {
+    /** Asks the bridge the way the popup does: through a message channel. */
+    answer(): SessionList {
       const reply = port()
       deliver({ type: 'tc:list' }, { ports: [reply] })
       expect(reply.received, 'the bridge did not answer the session list request').toHaveLength(1)
-      return reply.received[0] as Summary[]
+      return reply.received[0] as SessionList
+    },
+    /** The sessions out of that answer, which is what most of this set is about. */
+    list(): Summary[] {
+      return this.answer().sessions
     },
     /** Hands the bridge a segment the way the content script sends it. */
     append(bytes: Uint8Array, sourceId = 's1', bufferId = 'b1'): void {
@@ -677,6 +687,39 @@ describe('the bridge refuses a page with DRM', () => {
   })
 })
 
+describe('a page holding a player the extension could not reach', () => {
+  it('says so in the answer, and says nothing of the sort before it is told', async () => {
+    const win = await loadBridge()
+    win.context()
+
+    expect(win.answer().unreachable, 'setup: nothing has been said about this page yet').toBe(
+      undefined,
+    )
+
+    // The isolated world has found an element playing a MediaSourceHandle whose worker was never
+    // wrapped. Nothing of that player was ever copied and nothing ever will be: the popup has to
+    // be able to tell that apart from a page with nothing worth recording on it.
+    win.deliver({ type: 'tc:unreachable' })
+
+    expect(win.answer().unreachable).toBe(true)
+  })
+
+  it('goes on offering what it did record beside it', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+
+    win.deliver({ type: 'tc:unreachable' })
+
+    // A page can hold both: one player in the main world and another in a worker out of reach.
+    // The recording of the first is not taken away by the refusal of the second.
+    const answer = win.answer()
+    expect(answer.sessions).toHaveLength(1)
+    expect(answer.unreachable).toBe(true)
+  })
+})
+
 describe('BridgeToPage describes everything the bridge sends', () => {
   it('fits both the handshake and the tc:list answer into the declared union', async () => {
     const win = await loadBridge()
@@ -693,7 +736,7 @@ describe('BridgeToPage describes everything the bridge sends', () => {
     const sent: unknown[] = [...win.parent.posts.map((post) => post.message), ...reply.received]
     expect(sent.map(variantOf), 'the bridge sent a message not described in BridgeToPage').toEqual([
       'tc:ready',
-      'session summaries',
+      'session list',
     ])
   })
 
@@ -706,9 +749,9 @@ describe('BridgeToPage describes everything the bridge sends', () => {
     // variant (`BridgeToPage = { type: 'tc:ready' }`, as it was before this change) or drifts
     // away from the summary the bridge actually returns.
     const handshake: BridgeToPage = { type: 'tc:ready' }
-    const list: BridgeToPage = win.list()
+    const list: BridgeToPage = win.answer()
 
-    expect([variantOf(handshake), variantOf(list)]).toEqual(['tc:ready', 'session summaries'])
+    expect([variantOf(handshake), variantOf(list)]).toEqual(['tc:ready', 'session list'])
   })
 })
 

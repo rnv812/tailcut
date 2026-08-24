@@ -45,7 +45,7 @@ function installChrome(options: { tabs?: Array<{ id?: number }>; reply?: unknown
   const alarmFired: Array<(alarm: { name: string }) => Promise<void> | void> = []
 
   const tabs = options.tabs ?? [{ id: 7 }]
-  const reply: unknown = 'reply' in options ? options.reply : [summary(6)]
+  const reply: unknown = 'reply' in options ? options.reply : { sessions: [summary(6)] }
   let failure: Error | null = null
   let badgeFailure: Error | null = null
 
@@ -175,7 +175,7 @@ describe('recounting the badge', () => {
   })
 
   it('shows an empty badge on a tab with no recording', async () => {
-    const chrome = installChrome({ reply: [] })
+    const chrome = installChrome({ reply: { sessions: [] } })
     await importWorker()
 
     await chrome.fire()
@@ -187,7 +187,7 @@ describe('recounting the badge', () => {
     // The badge reads the very summary the popup shows, and `duration` in it is the length of the
     // file "Save all" would write — see summarize(). A session whose material cannot be cut into
     // a clip at all badges nothing, however many megabytes stand behind it.
-    const chrome = installChrome({ reply: [{ ...summary(0), omits: 'track' as const }] })
+    const chrome = installChrome({ reply: { sessions: [{ ...summary(0), omits: 'track' as const }] } })
     await importWorker()
 
     await chrome.fire()
@@ -228,7 +228,7 @@ describe('recounting the badge', () => {
   })
 
   it('takes the freshest session of the tab', async () => {
-    const chrome = installChrome({ reply: [summary(12), summary(300)] })
+    const chrome = installChrome({ reply: { sessions: [summary(12), summary(300)] } })
     await importWorker()
 
     await chrome.fire()

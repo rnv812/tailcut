@@ -1,4 +1,4 @@
-import { TOP_FRAME, type ExtensionToTab, type SessionSummary } from '../shared/protocol'
+import { TOP_FRAME, type ExtensionToTab, type SessionList } from '../shared/protocol'
 
 /**
  * Как часто пересчитывается бейдж активной вкладки. Через будильник, а не через setInterval:
@@ -30,12 +30,8 @@ async function badgeTextFor(tabId: number): Promise<string> {
   const request: ExtensionToTab = { type: 'tc:list' }
 
   try {
-    const sessions: SessionSummary[] | undefined = await chrome.tabs.sendMessage(
-      tabId,
-      request,
-      TOP_FRAME,
-    )
-    return formatBadge(sessions?.[0]?.duration ?? 0)
+    const answer: SessionList | undefined = await chrome.tabs.sendMessage(tabId, request, TOP_FRAME)
+    return formatBadge(answer?.sessions[0]?.duration ?? 0)
   } catch {
     // Страница без content script: chrome://, магазин расширений, вкладка старше установки.
     return ''

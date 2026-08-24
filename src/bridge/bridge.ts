@@ -2,6 +2,7 @@ import {
   isPageToBridge,
   type BridgeToPage,
   type SaveResult,
+  type SessionList,
   type SessionSummary,
 } from '../shared/protocol'
 import { muxFragmentedMp4 } from '../core/mux'
@@ -29,6 +30,16 @@ interface PageContext {
  * beats an empty string.
  */
 let pageContext: PageContext = { url: document.referrer, title: '' }
+
+/**
+ * The page holds a player this extension could not reach; see tc:unreachable below.
+ *
+ * Kept in the frame and not in the registry, because it is a fact about the page rather than
+ * about any material: nothing of such a player was ever collected, so there is no session for it
+ * to be a property of. Once set it is never cleared — a worker that was not wrapped is not going
+ * to be wrapped later on.
+ */
+let unreachable = false
 
 function summaries(): SessionSummary[] {
   return store.list().map((session) => ({
@@ -77,7 +88,10 @@ window.addEventListener('message', (event: MessageEvent) => {
   if (data?.type === 'tc:list') {
     // Through the declared union rather than directly: postMessage accepts anything, and a reply
     // that silently drifted away from BridgeToPage would only show up at the receiver.
-    const reply: BridgeToPage = summaries()
+    const list: SessionList = { sessions: summaries() }
+    if (unreachable) list.unreachable = true
+
+    const reply: BridgeToPage = list
     event.ports[0]?.postMessage(reply)
     return
   }
@@ -115,6 +129,15 @@ window.addEventListener('message', (event: MessageEvent) => {
       const result: SaveResult = { ok: !failed }
       port?.postMessage(result)
     })
+    return
+  }
+
+  // An element of the page is playing a stream out of a worker that the hook was not allowed to
+  // wrap: measured on a page whose policy forbids blob workers, where the material of such a
+  // player passes the extension by entirely. There is nothing to record and nothing to fix, and
+  // the one thing owed to the user is to be told — a popup that shows nothing looks broken.
+  if (data?.type === 'tc:unreachable') {
+    unreachable = true
     return
   }
 

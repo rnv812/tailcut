@@ -42,7 +42,7 @@ function installChrome(
 ) {
   const sent: Sent[] = []
   let tabs = options.tabs ?? [{ id: 7 }]
-  let listReply: unknown = 'listReply' in options ? options.listReply : [summary]
+  let listReply: unknown = 'listReply' in options ? options.listReply : { sessions: [summary] }
   let saveReply: unknown = 'saveReply' in options ? options.saveReply : { ok: true }
   let failure: Error | null = null
 
@@ -91,11 +91,21 @@ afterEach(() => {
 })
 
 describe('listSessions', () => {
-  it('gives back the summaries the tab sent', async () => {
+  it('gives back the answer the tab sent', async () => {
     installChrome()
     const { listSessions } = await importApi()
 
-    expect(await listSessions()).toEqual([summary])
+    expect(await listSessions()).toEqual({ sessions: [summary] })
+  })
+
+  it('carries back what the tab said about a page it cannot reach', async () => {
+    const chrome = installChrome()
+    chrome.setListReply({ sessions: [], unreachable: true })
+    const { listSessions } = await importApi()
+
+    // Not the same as an empty list: the popup shows one as "nothing to record here" and the
+    // other as "this page cannot be recorded at all", and only the tab knows which it is.
+    expect(await listSessions()).toEqual({ sessions: [], unreachable: true })
   })
 
   it('asks the active tab and only its top frame', async () => {
@@ -121,30 +131,30 @@ describe('listSessions', () => {
     expect(chrome.sent.map((item) => item.tabId)).toEqual([7])
   })
 
-  it('gives back an empty list on a tab with no content script', async () => {
+  it('gives back an empty answer on a tab with no content script', async () => {
     const chrome = installChrome()
     chrome.breakTab()
     const { listSessions } = await importApi()
 
     // chrome://, the extension store, a tab older than the installation. An uncaught rejection
     // would leave the popup in "Loading…" for good.
-    expect(await listSessions()).toEqual([])
+    expect(await listSessions()).toEqual({ sessions: [] })
   })
 
-  it('gives back an empty list when the tab answers nothing', async () => {
+  it('gives back an empty answer when the tab answers nothing', async () => {
     const chrome = installChrome()
     chrome.setListReply(undefined)
     const { listSessions } = await importApi()
 
     // That is how Chrome answers when there is no listener at all and the channel closed unanswered.
-    expect(await listSessions()).toEqual([])
+    expect(await listSessions()).toEqual({ sessions: [] })
   })
 
   it('troubles nobody when there is no active tab', async () => {
     const chrome = installChrome({ tabs: [] })
     const { listSessions } = await importApi()
 
-    expect(await listSessions()).toEqual([])
+    expect(await listSessions()).toEqual({ sessions: [] })
     expect(chrome.sent).toEqual([])
   })
 
@@ -153,7 +163,7 @@ describe('listSessions', () => {
     const chrome = installChrome({ tabs: [{}] })
     const { listSessions } = await importApi()
 
-    expect(await listSessions()).toEqual([])
+    expect(await listSessions()).toEqual({ sessions: [] })
     expect(chrome.sent).toEqual([])
   })
 })

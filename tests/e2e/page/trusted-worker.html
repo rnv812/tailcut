@@ -1,0 +1,60 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>trusted worker player</title>
+<!--
+  A page that requires a trusted address wherever a script address is expected. Its own worker is
+  built from a TrustedScriptURL and works; the wrapper hands the constructor a plain string, which
+  such a page refuses outright. Nothing of this page can be recorded, and the one thing that must
+  not happen is the page losing its player over it.
+
+  The policy comes as a header, from tests/e2e/worker.spec.ts.
+-->
+<video id="v" controls width="640" style="background:#000"></video>
+<script>
+  const WORKER = `
+    self.addEventListener('message', (event) => {
+      if (!event.data || event.data.type !== 'play') return
+      const source = new MediaSource()
+      const handle = source.handle
+      self.postMessage({ type: 'handle', handle }, [handle])
+      source.addEventListener('sourceopen', async () => {
+        const buffer = source.addSourceBuffer('video/mp4; codecs="avc1.4d401e"')
+        for (const bytes of event.data.segments) {
+          await new Promise((done) => {
+            buffer.addEventListener('updateend', done, { once: true })
+            buffer.appendBuffer(bytes)
+          })
+        }
+        self.postMessage({ type: 'done' })
+      })
+    })
+  `
+
+  const policy = trustedTypes.createPolicy('player', { createScriptURL: (address) => address })
+  const video = document.getElementById('v')
+  ;(async () => {
+    const segments = []
+    for (const url of [
+      '/fixtures/h264/init-stream0.m4s',
+      '/fixtures/h264/chunk-stream0-00001.m4s',
+      '/fixtures/h264/chunk-stream0-00002.m4s',
+      '/fixtures/h264/chunk-stream0-00003.m4s',
+    ]) {
+      segments.push(await (await fetch(url)).arrayBuffer())
+    }
+
+    const address = URL.createObjectURL(new Blob([WORKER], { type: 'text/javascript' }))
+    const worker = new Worker(policy.createScriptURL(address))
+
+    worker.addEventListener('error', (event) => {
+      window.workerError = event.message || 'error'
+      window.allAppended = true
+    })
+    worker.addEventListener('message', (event) => {
+      if (event.data.type === 'handle') video.srcObject = event.data.handle
+      if (event.data.type === 'done') window.allAppended = true
+    })
+
+    worker.postMessage({ type: 'play', segments }, segments)
+  })()
+</script>

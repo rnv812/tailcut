@@ -15,11 +15,14 @@ const append: PageToBridge = {
   bytes: new ArrayBuffer(4),
 }
 const source: PageToBridge = { type: 'tc:source', sourceId: 's', objectUrl: 'blob:https://a.test/1' }
+/** A MediaSource inside a worker: announced by name, because it has no address of its own. */
+const worker: PageToBridge = { type: 'tc:worker', sourceId: 'w1s1' }
 const drm: PageToBridge = { type: 'tc:drm', sourceId: 's' }
 
 const accepted: [string, PageToBridge][] = [
   ['tc:append', append],
   ['tc:source', source],
+  ['tc:worker', worker],
   ['tc:drm', drm],
 ]
 
@@ -27,18 +30,21 @@ const accepted: [string, PageToBridge][] = [
 const bridgeToPage: [string, BridgeToPage][] = [
   ['the handshake', { type: 'tc:ready' }],
   [
-    'a list of sessions',
-    [
-      {
-        key: 'https://site.example/watch|avc1|inf',
-        url: 'https://site.example/watch',
-        title: 'Clip',
-        duration: 6,
-        bytes: 1543,
-        omits: 'gap',
-      },
-    ],
+    'an answer with sessions in it',
+    {
+      sessions: [
+        {
+          key: 'https://site.example/watch|avc1|inf',
+          url: 'https://site.example/watch',
+          title: 'Clip',
+          duration: 6,
+          bytes: 1543,
+          omits: 'gap',
+        },
+      ],
+    },
   ],
+  ['an answer about a page that cannot be recorded', { sessions: [], unreachable: true }],
 ]
 
 /** The bridge listens to the page's window: everything the page and its scripts send lands there. */

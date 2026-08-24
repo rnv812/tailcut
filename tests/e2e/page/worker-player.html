@@ -1,0 +1,93 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>worker player</title>
+<!--
+  Twitch's shape, live and VOD alike: the MediaSource and its SourceBuffer are built inside a
+  dedicated worker, and the page is handed a MediaSourceHandle through srcObject.
+  URL.createObjectURL(MediaSource) is never called in the main world and addSourceBuffer is never
+  reached there, so a hook that lives only in the page sees nothing at all while the whole of the
+  material goes by.
+
+  The worker is made from a blob, which is how the measured player makes its own: both of Twitch's
+  workers are blob:https://www.twitch.tv/… .
+-->
+<video id="v" controls width="640" style="background:#000"></video>
+<script>
+  const WORKER = `
+    // Everything the worker was ever sent, by the shape of the message. The handshake of an
+    // extension that hooks this worker must not show up here: the page's own handler is not the
+    // place for it.
+    const seen = []
+    self.addEventListener('message', (event) => {
+      const data = event.data
+      seen.push(data && typeof data === 'object' ? Object.keys(data).join(',') : String(data))
+    })
+
+    self.addEventListener('message', (event) => {
+      if (!event.data || event.data.type !== 'play') return
+      const segments = event.data.segments
+
+      const source = new MediaSource()
+      // What crosses to the page is not the MediaSource but its handle.
+      const handle = source.handle
+      self.postMessage({ type: 'handle', handle }, [handle])
+
+      source.addEventListener('sourceopen', async () => {
+        const buffer = source.addSourceBuffer('video/mp4; codecs="avc1.4d401e"')
+        for (const bytes of segments) {
+          await new Promise((done) => {
+            buffer.addEventListener('updateend', done, { once: true })
+            buffer.appendBuffer(bytes)
+          })
+          self.postMessage({ type: 'appended' })
+        }
+        self.postMessage({ type: 'done', seen, location: String(self.location.href) })
+      })
+    })
+  `
+
+  const INIT = '/fixtures/h264/init-stream0.m4s'
+  const SEGMENTS = [
+    '/fixtures/h264/chunk-stream0-00001.m4s',
+    '/fixtures/h264/chunk-stream0-00002.m4s',
+    '/fixtures/h264/chunk-stream0-00003.m4s',
+  ]
+
+  const video = document.getElementById('v')
+  window.appended = 0
+  /** What the page's own worker handler was given. */
+  window.pageMessages = []
+  /** What the worker's own handler was given. */
+  window.workerSaw = null
+
+  // The player is built after the page has fetched something, as a real one is: twitch builds its
+  // two workers 1024 and 1079 ms after document_start, once its bundle has loaded. A worker built
+  // in the first burst of parsing — before the browser has run a single task — is a case of its
+  // own, and tests/e2e/page/worker-early.html is that case.
+  ;(async () => {
+    const segments = []
+    for (const url of [INIT, ...SEGMENTS]) segments.push(await (await fetch(url)).arrayBuffer())
+
+    const worker = new Worker(URL.createObjectURL(new Blob([WORKER], { type: 'text/javascript' })))
+    window.worker = worker
+
+    worker.addEventListener('message', (event) => {
+      const data = event.data
+      window.pageMessages.push(data && data.type ? data.type : Object.keys(data || {}).join(','))
+
+      if (data.type === 'handle') video.srcObject = data.handle
+      if (data.type === 'appended') window.appended++
+      if (data.type === 'done') {
+        window.workerSaw = data.seen
+        window.workerLocation = data.location
+        window.allAppended = true
+      }
+    })
+
+    worker.addEventListener('error', (event) => {
+      window.workerError = event.message || 'error'
+    })
+
+    worker.postMessage({ type: 'play', segments }, segments)
+  })()
+</script>

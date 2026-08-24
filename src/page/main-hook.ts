@@ -1,4 +1,5 @@
 import type { PageToBridge } from '../shared/protocol'
+import { installWorkerHook } from './worker-hook'
 
 interface TrackedBuffer {
   sourceId: string
@@ -98,6 +99,11 @@ SourceBuffer.prototype.appendBuffer = function (data: BufferSource): void {
 
   return originalAppendBuffer.call(this, data)
 }
+
+// The wrappers above see a MediaSource of this realm and nothing else. A player that builds its
+// own inside a worker — twitch, both live and VOD — passes every one of these by, and the whole
+// of its material with them; the worker is reached from src/page/worker-hook.ts.
+installWorkerHook(send)
 
 const originalRequestMediaKeySystemAccess = navigator.requestMediaKeySystemAccess
 // Охрана обязательна: расширение объявлено на <all_urls>, а на http-страницах Chrome не отдаёт

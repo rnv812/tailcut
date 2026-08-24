@@ -174,6 +174,10 @@ async function verdictsWhen(
 /**
  * Asks the bridge for the list of sessions through the same channel the popup uses: a message
  * with a MessageChannel port, the answer arriving in the port. null — it did not answer in time.
+ *
+ * The answer holds more than the sessions — it also says whether the page has a player out of
+ * reach — and the sessions are what this set is about; the rest of the answer is checked in
+ * tests/bridge/bridge.test.ts and in tests/e2e/worker.spec.ts.
  */
 function listSessions(page: Page, timeout = 3_000): Promise<Summary[] | null> {
   return page.evaluate(async (limit) => {
@@ -184,7 +188,7 @@ function listSessions(page: Page, timeout = 3_000): Promise<Summary[] | null> {
       const timer = setTimeout(() => resolve(null), limit)
       channel.port1.onmessage = (event) => {
         clearTimeout(timer)
-        resolve(event.data)
+        resolve((event.data as { sessions: Summary[] }).sessions)
       }
       iframe.contentWindow!.postMessage({ type: 'tc:list' }, '*', [channel.port2])
     })

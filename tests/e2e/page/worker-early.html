@@ -1,0 +1,62 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>early worker player</title>
+<!--
+  The limit of the mechanism, written down as a page.
+
+  This player builds its worker in the first burst of parsing — before the browser has run a
+  single task after document_start. The hook cannot wrap it: whether a blob worker may be started
+  here at all is a question only a policy refusal can answer, and that refusal arrives on the next
+  task (measured: 40 times out of 40, and never sooner). Wrapping on a guess would cost such a
+  page its worker outright, so nothing is wrapped until the answer is in.
+
+  A real player is nowhere near this early — twitch builds its workers at 1024 and 1079 ms — but
+  when it happens the page must still be told that nothing of it can be recorded.
+-->
+<video id="v" controls width="640" style="background:#000"></video>
+<script>
+  const WORKER = `
+    self.addEventListener('message', (event) => {
+      if (!event.data || event.data.type !== 'play') return
+      const source = new MediaSource()
+      const handle = source.handle
+      self.postMessage({ type: 'handle', handle }, [handle])
+      source.addEventListener('sourceopen', async () => {
+        const buffer = source.addSourceBuffer('video/mp4; codecs="avc1.4d401e"')
+        for (const bytes of event.data.segments) {
+          await new Promise((done) => {
+            buffer.addEventListener('updateend', done, { once: true })
+            buffer.appendBuffer(bytes)
+          })
+        }
+        self.postMessage({ type: 'done' })
+      })
+    })
+  `
+
+  // Right here, in the first script of the page, with nothing awaited before it.
+  const worker = new Worker(URL.createObjectURL(new Blob([WORKER], { type: 'text/javascript' })))
+
+  const video = document.getElementById('v')
+  worker.addEventListener('error', (event) => {
+    window.workerError = event.message || 'error'
+    window.allAppended = true
+  })
+  worker.addEventListener('message', (event) => {
+    const data = event.data
+    if (data.type === 'handle') video.srcObject = data.handle
+    if (data.type === 'done') window.allAppended = true
+  })
+  ;(async () => {
+    const segments = []
+    for (const url of [
+      '/fixtures/h264/init-stream0.m4s',
+      '/fixtures/h264/chunk-stream0-00001.m4s',
+      '/fixtures/h264/chunk-stream0-00002.m4s',
+      '/fixtures/h264/chunk-stream0-00003.m4s',
+    ]) {
+      segments.push(await (await fetch(url)).arrayBuffer())
+    }
+    worker.postMessage({ type: 'play', segments }, segments)
+  })()
+</script>

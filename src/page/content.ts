@@ -1,5 +1,11 @@
-import { BRIDGE_PATH, isExtensionToTab, isPageToBridge } from '../shared/protocol'
-import { markDrmSeen, registerSource, startWatching } from './watcher'
+import { BRIDGE_PATH, SOURCE_EVENT, isExtensionToTab, isPageToBridge } from '../shared/protocol'
+import {
+  bindSource,
+  markDrmSeen,
+  registerSource,
+  registerWorkerSource,
+  startWatching,
+} from './watcher'
 
 let bridgePromise: Promise<HTMLIFrameElement> | null = null
 
@@ -103,6 +109,9 @@ window.addEventListener('message', async (event: MessageEvent) => {
   // To the watcher first, before the wait for the bridge: it needs the address from
   // createObjectURL at its very next poll, and the bridge may still be loading by then.
   if (message.type === 'tc:source') registerSource(message.sourceId, message.objectUrl)
+  // A MediaSource built inside a worker: it has no address, so the watcher is told of it by name
+  // alone and learns which element plays it from SOURCE_EVENT below.
+  if (message.type === 'tc:worker') registerWorkerSource(message.sourceId)
   if (message.type === 'tc:drm') markDrmSeen()
 
   const iframe = await ensureBridge()
@@ -136,7 +145,29 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
 // kept is decided by the isolated world — here, on the signals of the element — and the verdict
 // goes to the bridge addressed, with the identifier of the stream. A rejection of one <video>
 // then leaves its neighbour on the same page alone.
-startWatching(async (sourceId, verdict) => {
-  const iframe = await ensureBridge()
-  iframe.contentWindow?.postMessage({ type: 'tc:verdict', sourceId, verdict }, '*')
-})
+startWatching(
+  async (sourceId, verdict) => {
+    const iframe = await ensureBridge()
+    iframe.contentWindow?.postMessage({ type: 'tc:verdict', sourceId, verdict }, '*')
+  },
+  // The page holds a player this extension cannot reach: its MediaSource lives in a worker that
+  // the hook was not allowed to wrap, so not a byte of it was ever copied and none ever will be.
+  // The popup is told, because a popup that shows nothing looks broken rather than honest.
+  async () => {
+    const iframe = await ensureBridge()
+    iframe.contentWindow?.postMessage({ type: 'tc:unreachable' }, '*')
+  },
+)
+
+// Which stream an element is playing, when the stream comes out of a worker and has no address to
+// be found by. The hook says it as an event on the element, because the two worlds share the DOM
+// and nothing else; `composedPath()[0]` is the element itself even inside an open shadow tree,
+// where `target` would have been retargeted to the host of it.
+document.addEventListener(
+  SOURCE_EVENT,
+  (event: Event) => {
+    const element = event.composedPath()[0]
+    if (element) bindSource(element, String((event as CustomEvent).detail ?? ''))
+  },
+  true,
+)

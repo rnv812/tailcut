@@ -74,7 +74,8 @@ const OLDER: SessionSummary = {
   bytes: 90_000_000,
 }
 
-type Answer = (sessions: SessionSummary[]) => Promise<void>
+/** Answers the popup the way the tab does: the sessions, and what is known about the page. */
+type Answer = (sessions: SessionSummary[], unreachable?: boolean) => Promise<void>
 
 /** Window fields the offline popup harness plants for the page to answer through. */
 type Harness = { __answer: (value: unknown) => void; __save: { ok: boolean } }
@@ -124,10 +125,13 @@ async function offlinePopup(): Promise<{
 
   await popup.goto(POPUP_URL)
 
-  const answer: Answer = (sessions) =>
-    popup.evaluate((list) => {
-      ;(window as unknown as Harness).__answer(list)
-    }, sessions)
+  const answer: Answer = (sessions, unreachable) =>
+    popup.evaluate(
+      ([list, out]) => {
+        ;(window as unknown as Harness).__answer({ sessions: list, unreachable: out })
+      },
+      [sessions, unreachable] as [SessionSummary[], boolean | undefined],
+    )
 
   /** The bridge refuses: the session is gone, or there is nothing in it to cut. */
   const refuseSave = () =>

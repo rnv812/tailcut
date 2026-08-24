@@ -3,12 +3,16 @@ import {
   type ExtensionToTab,
   type Omission,
   type SaveResult,
+  type SessionList,
   type SessionSummary,
 } from '../shared/protocol'
 
-// The summary is described by the protocol and not by the popup: let the two descriptions drift
+// The answer is described by the protocol and not by the popup: let the two descriptions drift
 // apart and the popup would read fields the bridge does not send, showing undefined in silence.
-export type { Omission, SaveResult, SessionSummary }
+export type { Omission, SaveResult, SessionList, SessionSummary }
+
+/** What a tab that cannot answer amounts to: no sessions, and nothing said about the page. */
+const NOTHING: SessionList = { sessions: [] }
 
 /**
  * The tab the popup took its list from. Remembered because the session to save has to be exactly
@@ -26,20 +30,22 @@ async function targetTabId(): Promise<number | undefined> {
 }
 
 /**
- * Asks the tab what it has gathered. The popup only shows the answer: there is no parsing and no
- * assembly here — it is obliged to open instantly.
+ * Asks the tab what it has gathered, and what it could not. The popup only shows the answer:
+ * there is no parsing and no assembly here — it is obliged to open instantly.
  */
-export async function listSessions(): Promise<SessionSummary[]> {
+export async function listSessions(): Promise<SessionList> {
   const tabId = await targetTabId()
-  if (tabId === undefined) return []
+  if (tabId === undefined) return NOTHING
 
   const request: ExtensionToTab = { type: 'tc:list' }
   try {
-    return (await chrome.tabs.sendMessage(tabId, request, TOP_FRAME)) ?? []
+    const reply: SessionList | undefined = await chrome.tabs.sendMessage(tabId, request, TOP_FRAME)
+    return reply ?? NOTHING
   } catch {
     // A page with no content script: chrome://, the extension store, a tab older than the
-    // installation. An empty list is honester here than an error — there is nothing to record.
-    return []
+    // installation. An empty answer is honester here than an error — there is nothing to record,
+    // and nothing is known about the page either.
+    return NOTHING
   }
 }
 

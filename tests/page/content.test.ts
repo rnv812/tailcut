@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { BRIDGE_PATH } from '../../src/shared/protocol'
+import { BRIDGE_PATH, SOURCE_EVENT } from '../../src/shared/protocol'
 
 const EXTENSION_ORIGIN = 'chrome-extension://abcdefghijklmnopabcdefghijklmnop'
 const BRIDGE_URL = `${EXTENSION_ORIGIN}/${BRIDGE_PATH}`
@@ -128,10 +128,16 @@ function installDom(options: { title?: string } = {}) {
   const location = { href: PAGE_URL }
   vi.stubGlobal('location', location)
 
+  /** Listeners the content script put on the document: the naming of a worker's stream. */
+  const documentListeners: Record<string, Array<(event: Event) => void>> = {}
+
   const document = {
     title: options.title ?? PAGE_TITLE,
     visibilityState: 'visible',
     querySelectorAll: () => videos,
+    addEventListener: (type: string, listener: (event: Event) => void) => {
+      ;(documentListeners[type] ??= []).push(listener)
+    },
     createElement: (tagName: string) => {
       const element = fakeElement(tagName)
       created.push(element)
@@ -174,6 +180,21 @@ function installDom(options: { title?: string } = {}) {
     goTo: (href: string, title: string): void => {
       location.href = href
       document.title = title
+    },
+    /**
+     * The main world names the stream an element is playing, the way worker-hook.ts does it: an
+     * event on the element, with the identifier in `detail` and the element itself first in
+     * `composedPath()` — which is where it stays even inside a shadow tree.
+     */
+    nameSource: async (element: unknown, detail: string): Promise<void> => {
+      const event = {
+        type: SOURCE_EVENT,
+        detail,
+        target: element,
+        composedPath: () => [element],
+      } as unknown as Event
+      for (const listener of documentListeners[SOURCE_EVENT] ?? []) listener(event)
+      await new Promise((resolve) => setTimeout(resolve, 0))
     },
     /** Runs one poll of the watcher and lets the microtask queue drain. */
     tick: async (): Promise<void> => {
@@ -699,5 +720,96 @@ describe('requests from the popup and the service worker', () => {
 
     expect(kept).toEqual([false])
     expect(dom.forwarded()).toEqual([])
+  })
+})
+
+
+describe('a player whose MediaSource lives in a worker', () => {
+  /** A real player: big, unmuted, with controls — and with no address, because it plays a handle. */
+  const handlePlayer = () =>
+    fakeVideo({
+      src: '',
+      currentSrc: '',
+      muted: false,
+      loop: false,
+      controls: true,
+      getBoundingClientRect: () => ({
+        width: 640,
+        height: 360,
+        top: 0,
+        left: 0,
+        bottom: 360,
+        right: 640,
+      }),
+    })
+
+  async function withBridge() {
+    const dom = installDom()
+    await importContent()
+    dom.deliverLoad()
+    return dom
+  }
+
+  it('judges the element the main world named, and says so with the stream identifier', async () => {
+    const dom = await withBridge()
+    const player = handlePlayer()
+    dom.videos.push(player)
+
+    // Two messages, two channels: the stream is announced through the page window, and which
+    // element plays it comes as an event, because a MediaSource in a worker has no address for
+    // the isolated world to find it by.
+    await dom.deliverMessage({ type: 'tc:worker', sourceId: 'w1s1' })
+    await dom.nameSource(player, 'w1s1')
+    for (let poll = 0; poll < 13; poll++) await dom.tick()
+
+    expect(dom.forwarded().map((post) => post.message)).toContainEqual({
+      type: 'tc:verdict',
+      sourceId: 'w1s1',
+      verdict: 'promote',
+    })
+  })
+
+  it('refuses a stream out of a worker that no element is playing', async () => {
+    const dom = await withBridge()
+    dom.videos.push(handlePlayer())
+
+    // Announced and never named: the handle went somewhere this side cannot measure. The bridge
+    // keeps whatever it is not told to drop, so silence would record a stream nobody judged.
+    await dom.deliverMessage({ type: 'tc:worker', sourceId: 'w1s1' })
+    for (let poll = 0; poll < 13; poll++) await dom.tick()
+
+    expect(dom.forwarded().map((post) => post.message)).toContainEqual({
+      type: 'tc:verdict',
+      sourceId: 'w1s1',
+      verdict: 'reject',
+    })
+  })
+
+  it('tells the bridge that a page whose worker it could not reach cannot be recorded', async () => {
+    const dom = await withBridge()
+    const player = handlePlayer()
+    dom.videos.push(player)
+
+    // An empty name: the element is playing a stream out of a worker and the hook cannot say
+    // whose, because that worker was never wrapped. Nothing of it was copied and nothing ever
+    // will be — and the user is owed that plainly rather than an empty popup.
+    await dom.nameSource(player, '')
+    for (let poll = 0; poll < 4; poll++) await dom.tick()
+
+    expect(dom.forwarded().map((post) => post.message)).toContainEqual({ type: 'tc:unreachable' })
+  })
+
+  it('says nothing of the sort once the stream has been named', async () => {
+    const dom = await withBridge()
+    const player = handlePlayer()
+    dom.videos.push(player)
+
+    await dom.nameSource(player, '')
+    await dom.nameSource(player, 'w1s1')
+    for (let poll = 0; poll < 13; poll++) await dom.tick()
+
+    expect(dom.forwarded().map((post) => post.message)).not.toContainEqual({
+      type: 'tc:unreachable',
+    })
   })
 })

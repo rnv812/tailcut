@@ -140,11 +140,23 @@ async function startWatcher() {
   vi.resetModules()
 
   const seen: Reported[] = []
+  /** How many times the watcher has said that this page holds a stream it cannot reach. */
+  const unreachable = { times: 0 }
   const watcher = await import('../../src/page/watcher')
-  watcher.startWatching((sourceId, verdict) => seen.push({ sourceId, verdict }))
+  watcher.startWatching(
+    (sourceId, verdict) => seen.push({ sourceId, verdict }),
+    () => unreachable.times++,
+  )
 
-  return { ...watcher, seen }
+  return { ...watcher, seen, unreachable }
 }
+
+/**
+ * An element playing a stream out of a worker: it carries a MediaSourceHandle and no address at
+ * all. Measured on twitch — `video.currentSrc` is empty on both the live page and the VOD one.
+ */
+const handleVideo = (overrides: Record<string, unknown> = {}) =>
+  fakeVideo({ src: '', currentSrc: '', ...overrides })
 
 /** Ставит на страницу элемент и связывает его поток с адресом, как это делает хук. */
 function place(
@@ -490,5 +502,97 @@ describe('the watcher and a stream it cannot reach', () => {
     // The other way round: here the element is in plain sight and it is the stream that is
     // unknown. A verdict has no addressee, and one sent anyway would land on a stranger's session.
     expect(watcher.seen).toEqual([])
+  })
+})
+
+
+describe('the watcher and a MediaSource in a worker', () => {
+  it('refuses a stream out of a worker until an element is seen to play it', async () => {
+    const watcher = await startWatcher()
+    // A MediaSource built in a worker has no address: nothing here can find the element playing
+    // it, and until the main world names one the stream is out of reach. Silence would mean the
+    // registry keeping material no verdict was ever spoken about.
+    watcher.registerWorkerSource('w1s1')
+
+    tick()
+
+    expect(watcher.seen).toEqual([{ sourceId: 'w1s1', verdict: 'reject' }])
+  })
+
+  it('judges the element the stream was named on', async () => {
+    const watcher = await startWatcher()
+    const video = handleVideo()
+    videos.push(video)
+    watcher.registerWorkerSource('w1s1')
+    watcher.bindSource(video as unknown as HTMLMediaElement, 'w1s1')
+
+    tick(13)
+
+    expect(watcher.seen).toEqual([{ sourceId: 'w1s1', verdict: 'promote' }])
+  })
+
+  it('takes the name even before the stream is announced', async () => {
+    const watcher = await startWatcher()
+    const video = handleVideo()
+    videos.push(video)
+    // The name comes as an event on the element and the announcement as a message through the
+    // page: two channels, and neither is behind the other by anything but chance.
+    watcher.bindSource(video as unknown as HTMLMediaElement, 'w1s1')
+
+    tick(13)
+
+    expect(watcher.seen).toEqual([{ sourceId: 'w1s1', verdict: 'promote' }])
+  })
+
+  it('judges a banner in a worker as a banner', async () => {
+    const watcher = await startWatcher()
+    const banner = handleVideo({ muted: true, loop: true, controls: false, box: box(160, 90) })
+    videos.push(banner)
+    watcher.bindSource(banner as unknown as HTMLMediaElement, 'w1s1')
+
+    tick(13)
+
+    expect(watcher.seen).toEqual([{ sourceId: 'w1s1', verdict: 'reject' }])
+  })
+
+  it('says the page cannot be recorded when the stream has no name at all', async () => {
+    const watcher = await startWatcher()
+    const video = handleVideo()
+    videos.push(video)
+    // An empty name is what a worker the hook was not allowed to wrap looks like from here: the
+    // element is playing a handle and nothing can say whose. An empty popup would look broken;
+    // the user is told instead.
+    watcher.bindSource(video as unknown as HTMLMediaElement, '')
+
+    tick(4)
+
+    expect(watcher.unreachable.times).toBe(1)
+    expect(watcher.seen, 'there is no stream to speak about, so no verdict is spoken').toEqual([])
+  })
+
+  it('does not say it twice', async () => {
+    const watcher = await startWatcher()
+    const video = handleVideo()
+    videos.push(video)
+    watcher.bindSource(video as unknown as HTMLMediaElement, '')
+
+    tick(40)
+
+    expect(watcher.unreachable.times).toBe(1)
+  })
+
+  it('says nothing when the name arrives right after the element', async () => {
+    const watcher = await startWatcher()
+    const video = handleVideo()
+    videos.push(video)
+    // The assignment is announced without a name first and named a moment later: both come from
+    // the main world, and the naming waits for the worker's own message.
+    watcher.bindSource(video as unknown as HTMLMediaElement, '')
+    watcher.bindSource(video as unknown as HTMLMediaElement, 'w1s1')
+
+    tick(13)
+
+    expect(watcher.unreachable.times).toBe(0)
+    expect(watcher.seen).toEqual([{ sourceId: 'w1s1', verdict: 'promote' }])
   })
 })

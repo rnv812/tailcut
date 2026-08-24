@@ -7,11 +7,14 @@ import {
   listSessions,
   saveAll,
   type Omission,
-  type SessionSummary,
+  type SessionList,
 } from './api'
 
 /** How a session is signed when the page never told its title. */
 const UNTITLED = 'Untitled'
+
+/** A page with nothing on it worth recording, or with nothing played on it yet. */
+const NOTHING = 'Nothing recorded on this page yet.'
 
 /**
  * What the file will be missing, in the words the user is shown.
@@ -27,21 +30,40 @@ const OMITTED: Record<Omission, string> = {
   gap: 'Recording has gaps: the longest piece is saved.',
 }
 
+/**
+ * A page whose player tailcut could not reach.
+ *
+ * Its video is played out of a worker the extension was not allowed to wrap, so not one byte of
+ * it ever passed through the recording: no later moment will change that, and there is nothing
+ * for the user to wait for. Said in as many words, because the alternative is a popup that shows
+ * nothing at all and looks broken instead of honest.
+ */
+const UNREACHABLE = 'tailcut cannot reach the player on this page, so nothing of it was recorded.'
+
+/** The same page, with something else on it that was recorded. */
+const UNREACHABLE_BESIDE = 'Another player on this page is out of reach and was not recorded.'
+
 function Popup() {
-  // null — the tab has not answered yet. An empty array differs from it: on that the popup
-  // already knows there was nothing to record, and says so in words.
-  const [sessions, setSessions] = useState<SessionSummary[] | null>(null)
+  // null — the tab has not answered yet. An answer with no sessions in it differs from that: on
+  // that the popup already knows there was nothing to record, and says so in words.
+  const [answer, setAnswer] = useState<SessionList | null>(null)
   // The session the user picked out of the list; null — none was picked and the freshest stands.
   const [pickedKey, setPickedKey] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [failed, setFailed] = useState(false)
 
   useEffect(() => {
-    listSessions().then(setSessions)
+    listSessions().then(setAnswer)
   }, [])
 
-  if (sessions === null) return <div class="pad muted">Loading…</div>
-  if (!sessions.length) return <div class="pad muted">Nothing recorded on this page yet.</div>
+  if (answer === null) return <div class="pad muted">Loading…</div>
+
+  const sessions = answer.sessions
+  if (!sessions.length) {
+    // Two different silences, and the difference is the whole point: a page with nothing worth
+    // recording on it, and a page whose player never reached the extension at all.
+    return <div class="pad muted">{answer.unreachable ? UNREACHABLE : NOTHING}</div>
+  }
 
   // The list comes newest first: at the top is what is being watched right now, and that is what
   // the popup opens on. A page has several sessions as a matter of course — a feed of short clips
@@ -93,6 +115,11 @@ function Popup() {
         {omitted && (
           <div class="omits" data-testid="omits">
             {omitted}
+          </div>
+        )}
+        {answer.unreachable && (
+          <div class="omits" data-testid="unreachable">
+            {UNREACHABLE_BESIDE}
           </div>
         )}
         <button class="primary" data-testid="save" disabled={saving} onClick={() => void save()}>

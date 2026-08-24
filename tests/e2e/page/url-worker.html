@@ -1,0 +1,50 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>url worker player</title>
+<!--
+  The same player as worker-player.html, with its worker started from an address instead of from a
+  blob — the shape a bundler emits with `new Worker(new URL('./worker.js', import.meta.url))`.
+  Wrapping such a worker means loading it out of a blob, and a blob has no base address to resolve
+  anything against: what the worker reports back is how much of its own ground it kept.
+
+  The page is also the one served with a policy that forbids blob workers, where the hook must
+  leave the worker alone altogether. See tests/e2e/worker.spec.ts.
+-->
+<video id="v" controls width="640" style="background:#000"></video>
+<script>
+  const INIT = '/fixtures/h264/init-stream0.m4s'
+  const SEGMENTS = [
+    '/fixtures/h264/chunk-stream0-00001.m4s',
+    '/fixtures/h264/chunk-stream0-00002.m4s',
+    '/fixtures/h264/chunk-stream0-00003.m4s',
+  ]
+
+  const video = document.getElementById('v')
+  window.probes = null
+  ;(async () => {
+    const segments = []
+    for (const url of [INIT, ...SEGMENTS]) segments.push(await (await fetch(url)).arrayBuffer())
+
+    // Two shapes of the same thing, chosen by the fragment: a classic worker started from an
+    // address, and a module worker. Wrapping treats them differently — one is loaded with
+    // importScripts and the other with import() — and both have to come out unchanged.
+    const asModule = location.hash === '#module'
+    const worker = asModule
+      ? new Worker('/js/module-worker.mjs', { type: 'module' })
+      : new Worker('/js/url-worker.js')
+    worker.addEventListener('error', (event) => {
+      window.workerError = event.message || 'error'
+      window.allAppended = true
+    })
+    worker.addEventListener('message', (event) => {
+      const data = event.data
+      if (data.type === 'handle') video.srcObject = data.handle
+      if (data.type === 'done') {
+        window.probes = data.probes
+        window.allAppended = true
+      }
+    })
+
+    worker.postMessage({ type: 'play', segments }, segments)
+  })()
+</script>

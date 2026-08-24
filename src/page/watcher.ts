@@ -13,6 +13,31 @@ const watched = new Map<HTMLVideoElement, Watched>()
 /** адрес из createObjectURL → идентификатор потока */
 const sourcesByUrl = new Map<string, string>()
 /**
+ * Every stream the hook has named, addressed or not.
+ *
+ * A stream nobody is playing is refused (see startWatching), and to be refused it first has to be
+ * known. An address is not what makes it known: a MediaSource built inside a worker has none at
+ * all, and the only thing that ties it to the page is the handle its element was given.
+ */
+const announced = new Set<string>()
+/** element → the stream out of a worker it was named as playing */
+const boundSources = new WeakMap<object, string>()
+/**
+ * Elements playing a stream out of a worker that nothing could name, and how many polls each has
+ * been in that state. See bindSource: this is the page tailcut has to refuse out loud.
+ */
+const unnamed = new Map<object, number>()
+
+/**
+ * How long an element is given to have its stream named before the page is called unrecordable.
+ *
+ * The naming crosses from the main world in the same task the handle is assigned in, or a
+ * millisecond later if the worker's own message is still on its way; a second is far more than
+ * either needs, and the cost of being hasty is telling the user a page cannot be recorded while
+ * it is being recorded.
+ */
+const UNNAMED_POLLS = 2
+/**
  * What the bridge has already been told about each stream.
  *
  * By stream and not by element: one element plays several streams in turn — a switch of quality
@@ -32,10 +57,48 @@ export function markDrmSeen(): void {
  * A stream with no address is not remembered: it is tied to nothing, and nothing here can find
  * the element playing it. It is not refused either, for the same reason — the watcher never hears
  * of it (see the unclaimed streams in startWatching). The hook only reports one for a MediaSource
- * of a realm it did not wrap.
+ * of a realm it did not wrap; a MediaSource inside a worker has no address of its own and comes
+ * in through registerWorkerSource instead, where it is remembered and can therefore be refused.
  */
 export function registerSource(sourceId: string, objectUrl: string): void {
-  if (objectUrl) sourcesByUrl.set(objectUrl, sourceId)
+  if (!objectUrl) return
+  sourcesByUrl.set(objectUrl, sourceId)
+  announced.add(sourceId)
+}
+
+/**
+ * The hook has opened a MediaSource inside a worker — twitch, live and VOD.
+ *
+ * There is no address to remember: what the page is given is a MediaSourceHandle, and on the
+ * element `currentSrc` stays empty. The stream is remembered all the same, because a stream that
+ * is known can be refused, and one that is not would be recorded with no verdict ever spoken
+ * about it. The element playing it, if there is one, arrives separately through bindSource.
+ */
+export function registerWorkerSource(sourceId: string): void {
+  announced.add(sourceId)
+}
+
+/**
+ * The main world says which stream an element is playing.
+ *
+ * Only for streams out of a worker: the two worlds share the DOM and nothing else, so the hook
+ * cannot hand this side a stream identifier by any other route than an event on the element
+ * itself (SOURCE_EVENT in the protocol).
+ *
+ * An empty identifier is the other half of the message: the element is playing a handle and the
+ * hook cannot say whose — its worker was never wrapped. Nothing of that stream will ever be
+ * recorded, and after UNNAMED_POLLS the page is declared unrecordable rather than left looking
+ * empty.
+ */
+export function bindSource(element: object, sourceId: string): void {
+  if (!sourceId) {
+    if (!boundSources.has(element)) unnamed.set(element, 0)
+    return
+  }
+
+  boundSources.set(element, sourceId)
+  announced.add(sourceId)
+  unnamed.delete(element)
 }
 
 /**
@@ -43,7 +106,12 @@ export function registerSource(sourceId: string, objectUrl: string): void {
  * адрес из createObjectURL, а какому <video> его присвоили — видно лишь отсюда.
  */
 function sourceIdOf(element: HTMLVideoElement): string | null {
-  return sourcesByUrl.get(element.currentSrc) ?? sourcesByUrl.get(element.src) ?? null
+  return (
+    boundSources.get(element) ??
+    sourcesByUrl.get(element.currentSrc) ??
+    sourcesByUrl.get(element.src) ??
+    null
+  )
 }
 
 function signalsOf(state: Watched): VideoSignals {
@@ -98,7 +166,14 @@ function reachRoots(root: ParentNode, found: ShadowRoot[]): void {
   }
 }
 
-export function startWatching(onVerdict: (sourceId: string, verdict: TriageVerdict) => void): void {
+export function startWatching(
+  onVerdict: (sourceId: string, verdict: TriageVerdict) => void,
+  /** Said once, when this page holds a stream no verdict can ever be spoken about. */
+  onUnreachable: () => void = () => {},
+): void {
+  /** Whether the page has already been declared unrecordable. */
+  let saidUnreachable = false
+
   /** Shadow roots already under observation: a weak set, so a detached tree can still be freed. */
   const observed = new WeakSet<ShadowRoot>()
 
@@ -199,8 +274,28 @@ export function startWatching(onVerdict: (sourceId: string, verdict: TriageVerdi
     // A refusal costs nothing when the element does turn up. What was collected under an
     // unconfirmed rejection waits out of sight and comes back whole the moment the verdict turns
     // — see Probation in the session store.
-    for (const sourceId of sourcesByUrl.values()) {
+    for (const sourceId of announced) {
       if (!claimed.has(sourceId)) tell(sourceId, 'reject')
+    }
+
+    // An element playing a stream out of a worker that nothing could name. There is no stream
+    // identifier to refuse and nothing to record: the worker was never wrapped, so not one byte
+    // of it was ever copied. What is left is to say so — an honest refusal beats a popup that
+    // shows nothing and looks broken.
+    for (const [element, polls] of unnamed) {
+      if (!(element as { isConnected?: boolean }).isConnected) {
+        unnamed.delete(element)
+        continue
+      }
+      if (polls + 1 < UNNAMED_POLLS) {
+        unnamed.set(element, polls + 1)
+        continue
+      }
+
+      unnamed.delete(element)
+      if (saidUnreachable) continue
+      saidUnreachable = true
+      onUnreachable()
     }
   }
 
