@@ -9,6 +9,9 @@ import {
 import { editOffset, samplesInSegment, trackDefaults } from '../../src/core/iso/samples'
 import { sampleEntryBytes, videoSampleEntry } from '../../src/core/iso/entry'
 import { parseInit } from '../../src/core/iso/init'
+import { planClip } from '../../src/core/export/plan'
+import { assembleMp4 } from '../../src/core/export/assemble'
+import { ByteMap, clipSourceOf } from '../../src/core/export/source'
 import type { TrackKind } from '../../src/shared/types'
 
 const read = (path: string): Uint8Array => new Uint8Array(readFileSync(path))
@@ -102,4 +105,91 @@ test('a progressive file entered part-way in plays from the frame the edit list 
   expect(played.ended).toBe(true)
   expect(played.duration).toBeCloseTo(5.875, 2)
   expect(played.frameColours).toBeGreaterThan(1)
+})
+
+/** The three experiment clips, cut out of the same fixture the unit tests cut. */
+function material(): { source: ReturnType<typeof clipSourceOf>; map: ByteMap } {
+  const map = new ByteMap()
+  const inputOf = (kind: 'video' | 'audio', initPath: string, paths: string[]) => ({
+    kind,
+    initBytes: read(initPath),
+    segments: paths.map((path) => {
+      const bytes = read(path)
+      return { bytes, at: map.place(bytes) }
+    }),
+  })
+
+  const source = clipSourceOf([
+    inputOf(
+      'video',
+      'tests/fixtures/h264/init-stream0.m4s',
+      [1, 2, 3].map((n) => `tests/fixtures/h264/chunk-stream0-0000${n}.m4s`),
+    ),
+    inputOf(
+      'audio',
+      'tests/fixtures/h264/init-stream1.m4s',
+      [1, 2, 3, 4].map((n) => `tests/fixtures/h264/chunk-stream1-0000${n}.m4s`),
+    ),
+  ])
+
+  return { source, map }
+}
+
+test('a clip cut out of the middle plays in a browser from the frame it was cut at', async () => {
+  const { source, map } = material()
+  const file = onDisk(
+    'e2e-clip-middle.mp4',
+    assembleMp4(planClip(source!, { in: 30 / 24, out: 100 / 24, sound: true }), (at) =>
+      map.bytesOf(at),
+    ),
+  )
+  const played = await playInBrowser(file)
+
+  expect(played.error).toBeNull()
+  expect(played.ended).toBe(true)
+  // 71 frames: the 70 asked for and the one reordered frame the container cannot hide (§8.2).
+  expect(played.duration).toBeCloseTo(71 / 24, 2)
+  expect(played.reached).toBeGreaterThan(70 / 24)
+  expect(played.frameColours).toBeGreaterThan(1)
+  expect(played.audioTracks).toBe(1)
+  expect(played.audioBytes).toBeGreaterThan(0)
+})
+
+test('a clip across a collapsed hole plays straight through', async () => {
+  // The middle segment of both tracks is missing and the two holes are not the same length. If
+  // the collapse were wrong the browser would either stall on a frame for two seconds or run the
+  // sound away from the picture; what it must do is play six seconds of material in four.
+  const map = new ByteMap()
+  const inputOf = (kind: 'video' | 'audio', initPath: string, paths: string[]) => ({
+    kind,
+    initBytes: read(initPath),
+    segments: paths.map((path) => {
+      const bytes = read(path)
+      return { bytes, at: map.place(bytes) }
+    }),
+  })
+
+  const source = clipSourceOf([
+    inputOf('video', 'tests/fixtures/h264/init-stream0.m4s', [
+      'tests/fixtures/h264/chunk-stream0-00001.m4s',
+      'tests/fixtures/h264/chunk-stream0-00003.m4s',
+    ]),
+    inputOf('audio', 'tests/fixtures/h264/init-stream1.m4s', [
+      'tests/fixtures/h264/chunk-stream1-00001.m4s',
+      'tests/fixtures/h264/chunk-stream1-00003.m4s',
+      'tests/fixtures/h264/chunk-stream1-00004.m4s',
+    ]),
+  ])!
+
+  const file = onDisk(
+    'e2e-clip-gap.mp4',
+    assembleMp4(planClip(source, { in: 0, out: 6, sound: true }), (at) => map.bytesOf(at)),
+  )
+  const played = await playInBrowser(file)
+
+  expect(played.error).toBeNull()
+  expect(played.ended).toBe(true)
+  expect(played.duration).toBeCloseTo(4, 1)
+  expect(played.frameColours).toBeGreaterThan(1)
+  expect(played.audioBytes).toBeGreaterThan(0)
 })
