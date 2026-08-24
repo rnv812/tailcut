@@ -264,6 +264,46 @@ describe('buildProgressiveMp4', () => {
     expect([view.getUint32(16), view.getInt32(20)]).toEqual([1, 0])
   })
 
+  it('writes a ctts when the shift is in the composition and not in the first sample', () => {
+    // ffmpeg's negative_cts_offsets — the layout a DASH or HLS packager emits — moves the whole
+    // composition down until the first sample needs no offset at all: this fixture's
+    // 1024K 2560 1024 0 512 … becomes 0K 1536 0 −1024 −512 …. A clip always begins at a sync
+    // sample, so on such a source the sample this writer sees first carries a zero however hard
+    // the frames behind it are reordered, and an answer read off that one sample writes no ctts
+    // at all. Measured on a writer that reads it off that one sample: ffprobe still counts 144
+    // frames over six seconds and says nothing, and the frames come out at 0, 0.125, 0.166667 …
+    // — decode order, two of them on one tick, ffmpeg reporting a dts that goes backwards. Opens,
+    // probes clean, plays garbage.
+    const shifted: ProgressiveTrack = {
+      ...video,
+      samples: video.samples.map((sample) => ({ ...sample, cts: sample.cts - 1024 })),
+      // What the fixture hides with an edit list, this layout hides in the composition itself.
+      skipTicks: 0,
+    }
+    expect([shifted.samples[0]!.cts, shifted.samples[0]!.sync]).toEqual([0, true])
+
+    const bytes = buildProgressiveMp4([shifted])
+    expect(boxesOf(bytes, ['moov', 'trak', 'mdia', 'minf', 'stbl'])).toContain('ctts')
+
+    const body = boxBody(bytes, findBox(bytes, ['moov', 'trak', 'mdia', 'minf', 'stbl', 'ctts'])!)
+    const view = new DataView(body.buffer, body.byteOffset, body.byteLength)
+    expect(view.getUint8(0)).toBe(1)
+    expect(view.getUint32(4)).toBe(131) // the runs of the fixture, every one of them moved down
+    expect([view.getUint32(8), view.getInt32(12)]).toEqual([1, 0])
+    expect([view.getUint32(16), view.getInt32(20)]).toEqual([1, 1536])
+    expect([view.getUint32(24), view.getInt32(28)]).toEqual([1, 0])
+    expect([view.getUint32(32), view.getInt32(36)]).toEqual([1, -1024])
+
+    // The same material either way, so the same times to the frame: the shift and the edit list
+    // the fixture carries instead of it leave every frame in the same place.
+    const file = writeTemp('progressive-shifted.mp4', bytes)
+    const probe = probeFile(file)
+    expect(probe.stderr).toBe('')
+    expect(Number(probe.probed!.streams[0]!.nb_read_frames)).toBe(144)
+    expect(frameTimes(file, 'v')).toEqual(frameTimes(sourceVideo, 'v'))
+    expect(decodeWarnings(file)).toBe('')
+  })
+
   it('writes the wide forms when asked, and they read the same', () => {
     const wide = writeTemp('progressive-h264-64.mp4', buildProgressiveMp4([video, audio], {
       largeOffsets: true,
@@ -297,6 +337,67 @@ describe('buildProgressiveMp4', () => {
     expect(needsWideOffsets(0, limit - 7)).toBe(true)
     // The same material with tables in front of it does not fit any more.
     expect(needsWideOffsets(4096, limit - 8)).toBe(true)
+  })
+
+  it('weighs the moov it just measured, and not the ftyp on its own', () => {
+    // And the writer has to hand it the moov, which is the whole reason the function was pulled
+    // out of it. The window this decides in is as wide as the moov and sits just under four
+    // gigabytes: a payload an stco can still address on its own stops being addressable once the
+    // tables in front of it are counted, and every chunk offset past the first is then written
+    // modulo 2^32 — measured on a writer that leaves the moov out of the weighing, the sound's
+    // chunk of this very file comes back at byte 937.
+    //
+    // Putting the question at all needs a four-gigabyte file, so the picture states a length and
+    // carries nothing: `set` copies as many bytes as the source array holds, which is none, and
+    // the output is a lazily allocated buffer written no further than the moov.
+    const stub = (byteLength: number): OutSample => ({
+      bytes: Object.defineProperty(new Uint8Array(0), 'byteLength', { value: byteLength }),
+      duration: 512,
+      cts: 0,
+      sync: true,
+    })
+
+    const tail = audio.samples[0]!
+    const shape = (byteLength: number): ProgressiveTrack[] => [
+      { ...video, samples: [stub(byteLength)], skipTicks: 0 },
+      { ...audio, samples: [tail], skipTicks: 0 },
+    ]
+
+    // The ftyp is the same box whatever the file behind it holds, so its length is measured on a
+    // file small enough to hold rather than written down here as a number.
+    const small = buildProgressiveMp4(shape(1024))
+    const ftypBytes = topLevelBoxes(small).find((b) => b.type === 'ftyp')!.size
+
+    // The largest payload that still clears four gigabytes with the mdat header and the ftyp in
+    // front of it, and no room left for the moov: this file needs the wide forms because of the
+    // tables and for no other reason.
+    const payload = 0xffffffff - 8 - ftypBytes
+    const bytes = buildProgressiveMp4(shape(payload - tail.bytes.byteLength))
+
+    const moov = findBox(bytes, ['moov'])!
+    const traks = childBoxes(bytes, moov).filter((b) => b.type === 'trak')
+    const stblOf = (trak: Box): Box => {
+      const mdia = childBoxes(bytes, trak).find((b) => b.type === 'mdia')!
+      const minf = childBoxes(bytes, mdia).find((b) => b.type === 'minf')!
+      return childBoxes(bytes, minf).find((b) => b.type === 'stbl')!
+    }
+
+    // One sync sample of no composition offset apiece, so neither track carries a ctts or an
+    // stss and the only question left in the table is how wide its chunk offset is stated.
+    expect(traks.map((trak) => childBoxes(bytes, stblOf(trak)).map((b) => b.type))).toEqual([
+      ['stsd', 'stts', 'stsc', 'stsz', 'co64'],
+      ['stsd', 'stts', 'stsc', 'stsz', 'co64'],
+    ])
+
+    const co64 = childBoxes(bytes, stblOf(traks[1]!)).find((b) => b.type === 'co64')!
+    const body = boxBody(bytes, co64)
+    const at = new DataView(body.buffer, body.byteOffset, body.byteLength).getBigUint64(8)
+    expect(at).toBeGreaterThan(0xffffffffn) // a place four bytes cannot point at
+    expect(at).toBe(BigInt(bytes.byteLength - tail.bytes.byteLength))
+
+    const mdat = topLevelBoxes(bytes).find((b) => b.type === 'mdat')!
+    expect(mdat.headerSize).toBe(16)
+    expect(bytes.byteLength).toBe(ftypBytes + moov.size + mdat.headerSize + payload)
   })
 
   it('hides the head, and states exactly what is left behind it', () => {
