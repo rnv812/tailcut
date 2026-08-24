@@ -238,4 +238,42 @@ node -e '
   fs.writeFileSync(process.argv[2], data.subarray(0, at))
 ' "$work/cenc.mp4" "$out/cenc/init-stream0.m4s"
 
-ls -la "$out/h264" "$out/minute" "$out/vp9" "$out/av1" "$out/webm" "$out/muxed" "$out/cenc"
+# The set that holds more than one of everything a reader walks.
+#
+# Four rounds of mutation testing kept finding one family of defect: a reader handed a container
+# with several of something takes the first and calls it the one it was asked about. The `muxed`
+# and `muxed-edits` sets closed two of those and left the rest alive, because ffmpeg writes one
+# trun per traf, one entry per stsd and zeroes in every trex, and states the sample defaults in the
+# tfhd of every fragment — so the walk over runs never turns twice, the "first entry only" contract
+# of a sample description is never put to the question, and the fall-through to the movie is never
+# taken.
+#
+# So this set is ffmpeg's material in a container written by hand. What the encoder can state, the
+# encoder states: two tracks with a timescale each (30000 for the picture, forced with
+# -video_track_timescale so that a frame is 3000 ticks rather than the 1024 an AAC frame happens to
+# be at 22050 as well), an edit list each with a media_time that is not a rounding of the other's
+# (6000 ticks of B-frame reordering delay against 1024 of encoder priming), a moof carrying a traf
+# per track. What no encoder writes, tools/make-multi-fixture.mjs restates around the very same
+# coded frames: several truns per traf with their bytes interleaved so that consecutive runs are
+# not adjacent, a tfhd that states none of its optional fields beside one that states all of them
+# including the sample description index, a trex per track carrying what those fragments no longer
+# say, and a second entry in every stsd.
+#
+# Nothing is invented: the file the segments reassemble into decodes to the same picture and the
+# same sound as the one ffmpeg wrote, byte for byte, which tests/core/multi-track.test.ts checks
+# before it checks anything else.
+ffmpeg -y -f lavfi -i "color=c=#202040:s=256x144:r=10:d=6" \
+       -f lavfi -i "sine=frequency=440:duration=6" \
+       -vf "drawbox=x='mod(t*60\,220)':y='60+40*sin(t)':w=30:h=30:color=orange:t=fill" \
+       -c:v libx264 -profile:v main -crf 30 -g 20 -keyint_min 20 -sc_threshold 0 \
+       -pix_fmt yuv420p -c:a aac -b:a 16k -ar 22050 -ac 1 \
+       -video_track_timescale 30000 \
+       -shortest "$work/source-multi.mp4"
+
+ffmpeg -y -i "$work/source-multi.mp4" -c copy \
+       -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof+delay_moov \
+       "$work/multi.mp4"
+
+node "$(dirname "$0")/make-multi-fixture.mjs" "$work/multi.mp4" "$out/multi"
+
+ls -la "$out/h264" "$out/minute" "$out/vp9" "$out/av1" "$out/webm" "$out/muxed" "$out/muxed-edits" "$out/multi" "$out/cenc"

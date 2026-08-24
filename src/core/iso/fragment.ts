@@ -127,6 +127,16 @@ export function trafDuration(data: Uint8Array, traf: Box, movieDefault = 0): num
  * `declared` is what the init segment of this very buffer said about its tracks — pass the tracks
  * of a parsed `InitInfo`. Left out, a fragment that states nothing of its own has no length, which
  * is the honest answer when the movie header is not to hand.
+ *
+ * **One traf of the moof, the first one it states.** `FragmentInfo` names a single track, and a
+ * muxed buffer hands over a moof with a traf per track; what comes back then describes the leading
+ * one and says so in `trackId`. That is enough for what asks: the registry lays one chunk per
+ * media segment on the map, the segment carries both tracks whichever of them was measured, and
+ * the two cover the same stretch of the recording to within the tenths of a second their
+ * boundaries differ by. What must not slip is which track the number belongs to — measured against
+ * the wrong trex, the 43 packets of a two-second sound fragment come out five and a half seconds
+ * long — and that is why the movie default is looked up by `trackId` and not taken from the head
+ * of `declared`.
  */
 export function parseFragment(
   data: Uint8Array,
