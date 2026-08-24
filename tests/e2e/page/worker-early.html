@@ -1,20 +1,16 @@
 <!doctype html>
-<meta charset="utf-8" />
-<title>early worker player</title>
-<!--
-  The limit of the mechanism, written down as a page.
-
-  This player builds its worker in the first burst of parsing — before the browser has run a
-  single task after document_start. The hook cannot wrap it: whether a blob worker may be started
-  here at all is a question only a policy refusal can answer, and that refusal arrives on the next
-  task (measured: 40 times out of 40, and never sooner). Wrapping on a guess would cost such a
-  page its worker outright, so nothing is wrapped until the answer is in.
-
-  A real player is nowhere near this early — twitch builds its workers at 1024 and 1079 ms — but
-  when it happens the page must still be told that nothing of it can be recorded.
--->
-<video id="v" controls width="640" style="background:#000"></video>
 <script>
+  // The worker, first of everything.
+  //
+  // This is the whole point of the page, so it stands in front of the document rather than after
+  // it: every byte the parser reads before this line is a chance for it to yield, and one yield
+  // lets the task that carries the policy answer run first. The page then gets a wrapped worker,
+  // which is correct behaviour and the other case entirely — and the case this page exists to
+  // show goes untested while the run stays green. Measured before the reordering: the parser
+  // yielded first in six runs out of twelve.
+  //
+  // Everything the worker needs is inline here for the same reason: a fetch, a stylesheet or an
+  // element in front of it would each be another yield.
   const WORKER = `
     self.addEventListener('message', (event) => {
       if (!event.data || event.data.type !== 'play') return
@@ -33,10 +29,24 @@
       })
     })
   `
-
-  // Right here, in the first script of the page, with nothing awaited before it.
   const worker = new Worker(URL.createObjectURL(new Blob([WORKER], { type: 'text/javascript' })))
+</script>
+<meta charset="utf-8" />
+<title>early worker player</title>
+<!--
+  The limit of the mechanism, written down as a page.
 
+  This player builds its worker in the first burst of parsing — before the browser has run a
+  single task after document_start. The hook cannot wrap it: whether a blob worker may be started
+  here at all is a question only a policy refusal can answer, and that refusal arrives on the next
+  task (measured: 40 times out of 40, and never sooner). Wrapping on a guess would cost such a
+  page its worker outright, so nothing is wrapped until the answer is in.
+
+  A real player is nowhere near this early — twitch builds its workers at 1024 and 1079 ms — but
+  when it happens the page must still be told that nothing of it can be recorded.
+-->
+<video id="v" controls width="640" style="background:#000"></video>
+<script>
   const video = document.getElementById('v')
   worker.addEventListener('error', (event) => {
     window.workerError = event.message || 'error'
