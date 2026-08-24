@@ -20,7 +20,17 @@ import type { TrackKind } from '../../src/shared/types'
 
 const read = (path: string): Uint8Array => new Uint8Array(readFileSync(path))
 
-/** One track of a fixture, taken apart into the samples the writer takes in. */
+/**
+ * One track of a fixture, taken apart into the samples the writer takes in.
+ *
+ * A walk from segments to samples that deliberately does not go through `sampleRunOf`, which is
+ * where everything reading a recording thins an overlap out. The writer is what is under test
+ * here, and it has to be handed exactly what the container holds: a thinning step in the middle
+ * would make this a test of the indexer, and a writer defect could hide behind a sample the
+ * indexer had quietly taken away. The segments are named one by one by each test rather than
+ * arriving off a map, and the currency is coded bytes rather than the addresses a clip is
+ * planned by.
+ */
 function trackOf(
   initPath: string,
   segmentPaths: string[],

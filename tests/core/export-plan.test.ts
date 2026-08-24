@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
   AUDIO_WARMUP_PACKETS,
-  locateSamples,
   planClip,
   planPreview,
   seamsOf,
@@ -11,7 +10,7 @@ import {
   type SourceSample,
   type SourceTrack,
 } from '../../src/core/export/plan'
-import { editOffset, samplesInSegment, trackDefaults } from '../../src/core/iso/samples'
+import { editOffset, sampleRunOf, trackDefaults } from '../../src/core/iso/samples'
 import { audioSampleEntry, sampleEntryBytes, videoSampleEntry } from '../../src/core/iso/entry'
 import { parseInit } from '../../src/core/iso/init'
 import { presentationTicks } from '../../src/core/iso/progressive'
@@ -47,23 +46,25 @@ class Bank {
   }
 }
 
+/**
+ * A track indexed the way `sourceTrackOf` indexes one — through `sampleRunOf`, the single walk
+ * from segments to samples — and assembled by hand only so that a test can hand the plan a
+ * fixture and a bank of its own.
+ */
 function trackFrom(
   bank: Bank,
   init: Uint8Array,
   segments: Uint8Array[],
   kind: TrackKind,
 ): SourceTrack {
-  const defaults = trackDefaults(init)
   const declared = parseInit(init)!.tracks.find((t) => t.kind === kind)!
   const entry = kind === 'video' ? videoSampleEntry(init) : audioSampleEntry(init)
-  const samples = []
-
-  for (const segment of segments) {
-    const at = bank.add(segment)
-    for (const track of samplesInSegment(segment, defaults)) {
-      samples.push(...locateSamples(track.samples, at))
-    }
-  }
+  const run = sampleRunOf({
+    segments: segments.map((bytes) => ({ bytes, source: bank.add(bytes) })),
+    trackId: declared.trackId,
+    defaults: trackDefaults(init),
+    loneTrack: true,
+  })
 
   return {
     kind,
@@ -72,7 +73,8 @@ function trackFrom(
     width: entry?.codedWidth ?? 0,
     height: entry?.codedHeight ?? 0,
     editOffset: editOffset(init, declared.trackId),
-    samples,
+    samples: run.samples,
+    dropped: run.dropped,
   }
 }
 
@@ -122,7 +124,18 @@ function madeTrack(
   }
 
   const shape = kind === 'video' ? { width: 320, height: 240 } : { width: 0, height: 0 }
-  return { kind, timescale, sampleEntry: new Uint8Array(0), ...shape, editOffset: 0, samples }
+  // Stated sample by sample rather than walked out of a container, so there was never a repeat
+  // for `sampleRunOf` to drop: these runs are arithmetic, and every decode time in them is
+  // written once by the test that asked for it.
+  return {
+    kind,
+    timescale,
+    sampleEntry: new Uint8Array(0),
+    ...shape,
+    editOffset: 0,
+    samples,
+    dropped: 0,
+  }
 }
 
 /** The longest stretch of a track with no material in it, in seconds. */
@@ -237,19 +250,6 @@ const webmPicture: SourceTrack = (() => {
 
 const trackByKind = (tracks: PlannedTrack[], kind: TrackKind): PlannedTrack =>
   tracks.find((t) => t.kind === kind)!
-
-describe('locateSamples', () => {
-  it('addresses samples inside the byte source their segment sits in', () => {
-    const segment = read(videoPath(1))
-    const [track] = samplesInSegment(segment, trackDefaults(read(VIDEO_INIT)))
-    const located = locateSamples(track!.samples, { at: 5000, length: segment.byteLength })
-
-    expect(located).toHaveLength(48)
-    expect(located[0]!.source).toEqual({ at: 5760, length: 5082 })
-    expect(located[0]!.pts).toBe(1024)
-    expect(located[1]!.source).toEqual({ at: 10842, length: 2417 })
-  })
-})
 
 describe('seamsOf', () => {
   it('finds nothing in material with no holes', () => {

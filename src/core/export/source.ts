@@ -1,7 +1,7 @@
 import { audioSampleEntry, sampleEntryBytes, videoSampleEntry } from '../iso/entry'
 import { parseInit } from '../iso/init'
-import { editOffset, samplesInSegment, trackDefaults } from '../iso/samples'
-import { locateSamples, type ClipSource, type SourceSample, type SourceTrack } from './plan'
+import { editOffset, sampleRunOf, trackDefaults } from '../iso/samples'
+import type { ClipSource, SourceTrack } from './plan'
 import type { Located, TrackKind } from '../../shared/types'
 
 /** One media segment and where its bytes live, wherever that is. */
@@ -38,28 +38,20 @@ export function sourceTrackOf(input: SourceTrackInput): SourceTrack | null {
   )
   if (!sampleEntry || !declared || !(declared.timescale > 0)) return null
 
+  // The walk, the ordering and the thinning of an overlap are `sampleRunOf`'s and not this
+  // function's: the frame table the editor draws is built by the same call, and when the two
+  // walked the segments apiece they disagreed about how many samples a recording held.
+  //
   // Sample defaults live in the trex of the init, and a packager is free to state them nowhere
   // else. Ours is one of those: the sound it rewrites out of WebM carries no flags in its truns.
-  const defaults = trackDefaults(input.initBytes)
-  const samples: SourceSample[] = []
+  const run = sampleRunOf({
+    segments: input.segments.map((segment) => ({ bytes: segment.bytes, source: segment.at })),
+    trackId: entry.trackId,
+    defaults: trackDefaults(input.initBytes),
+    loneTrack: true,
+  })
 
-  for (const segment of input.segments) {
-    const tracks = samplesInSegment(segment.bytes, defaults)
-    // A single-track segment sometimes numbers its traf with something of its own; there is only
-    // one track it could be about, so it is taken as that one.
-    const found =
-      tracks.find((track) => track.trackId === entry.trackId) ??
-      (tracks.length === 1 ? tracks[0] : undefined)
-    if (!found) continue
-
-    for (const sample of locateSamples(found.samples, segment.at)) samples.push(sample)
-  }
-
-  if (!samples.length) return null
-
-  // The map keeps its chunks in order of media time, but a caller is free to hand them over in
-  // any order at all, and the writer lays samples down exactly as they arrive.
-  samples.sort((a, b) => a.dts - b.dts)
+  if (!run.samples.length) return null
 
   return {
     kind: input.kind,
@@ -68,7 +60,8 @@ export function sourceTrackOf(input: SourceTrackInput): SourceTrack | null {
     width: entry.codedWidth,
     height: entry.codedHeight,
     editOffset: editOffset(input.initBytes, entry.trackId),
-    samples,
+    samples: run.samples,
+    dropped: run.dropped,
   }
 }
 

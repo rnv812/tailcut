@@ -1,4 +1,4 @@
-import { editOffset, samplesInSegment, trackDefaults } from '../iso/samples'
+import { editOffset, sampleRunOf, trackDefaults, type PlacedSegment } from '../iso/samples'
 import type { Located } from '../../shared/types'
 
 export interface Frame {
@@ -28,7 +28,7 @@ export interface FrameInput {
   /** Ticks per second of that track. */
   timescale: number
   /** Media segments, with the place of their bytes in the source they were read out of. */
-  segments: Array<{ bytes: Uint8Array; source: Located }>
+  segments: readonly PlacedSegment[]
 }
 
 /**
@@ -44,9 +44,6 @@ export interface PlannedTiming {
   samples: ReadonlyArray<{ source: Located; duration: number; cts: number }>
 }
 
-/** Two frames closer than this are the same frame arrived twice. */
-const SAME_FRAME_SECONDS = 1e-6
-
 /**
  * The frames of one representation, in the order they are shown.
  *
@@ -58,49 +55,44 @@ const SAME_FRAME_SECONDS = 1e-6
  * A pure function of an init segment and some media segments, which is why it lives here beside
  * the sample index rather than in the editor: the export plan needs the same table the player
  * does, and a second implementation would be a second chance to disagree about the edit offset.
+ *
+ * Which is why the walk itself is not here. `sampleRunOf` is the one place segments become
+ * samples, and a recording that overlaps itself — an ordinary re-watch — is thinned there, by
+ * decode time in ticks, once for both readers. This table counted the repeats out by comparing
+ * seconds while the index a clip is cut from kept them, and the two answers were six seconds and
+ * eight. How many samples the overlap cost is `SampleRun.dropped`, and the export index is where
+ * it is kept (`SourceTrack.dropped`): a table of what is shown has nobody to tell.
  */
 export function framesOf(input: FrameInput): Frame[] {
   const { timescale } = input
   if (!(timescale > 0)) return []
 
-  const defaults = trackDefaults(input.init)
   // The edit list is not junk: it compensates the delay of B-frames, of AAC priming and of Opus
   // pre-roll, the player takes it off every time, and a table built without subtracting it sits
   // exactly that delay away from what <video> reports — 83 ms on our own fixture.
   const edit = editOffset(input.init, input.trackId)
-  const frames: Frame[] = []
+  const run = sampleRunOf({
+    segments: input.segments,
+    trackId: input.trackId,
+    defaults: trackDefaults(input.init),
+  })
 
-  for (const segment of input.segments) {
-    for (const track of samplesInSegment(segment.bytes, defaults)) {
-      if (track.trackId !== input.trackId) continue
-
-      for (const sample of track.samples) {
-        const pts = (sample.pts - edit) / timescale
-        frames.push({
-          pts,
-          out: pts,
-          duration: sample.duration / timescale,
-          sync: sample.sync,
-          source: { at: segment.source.at + sample.at, length: sample.size },
-        })
-      }
+  const frames: Frame[] = run.samples.map((sample) => {
+    const pts = (sample.pts - edit) / timescale
+    return {
+      pts,
+      out: pts,
+      duration: sample.duration / timescale,
+      sync: sample.sync,
+      source: sample.source,
     }
-  }
+  })
 
   // Decode order is not display order: composition offsets put B-frames out of it, and a table of
   // frames is a table of what is shown and when.
   frames.sort((a, b) => a.pts - b.pts)
 
-  // Chunks may overlap on the map — a re-watch that came back with slightly different boundaries
-  // leaves both — and the frames inside the overlap are then the same frames twice.
-  const unique: Frame[] = []
-  for (const frame of frames) {
-    const last = unique[unique.length - 1]
-    if (last && Math.abs(frame.pts - last.pts) < SAME_FRAME_SECONDS) continue
-    unique.push(frame)
-  }
-
-  return unique
+  return frames
 }
 
 /**

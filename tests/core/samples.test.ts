@@ -1,11 +1,18 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { editOffset, samplesInSegment, trackDefaults } from '../../src/core/iso/samples'
+import {
+  editOffset,
+  locateSamples,
+  sampleRunOf,
+  samplesInSegment,
+  trackDefaults,
+} from '../../src/core/iso/samples'
 import { ingestInit } from '../../src/core/container'
 import { buildAudioInit, buildFragment, buildVideoInit } from '../../src/core/iso/build'
 import { parseFragment } from '../../src/core/iso/fragment'
 import { childBoxes, findBox, topLevelBoxes as topLevelBoxesOf } from '../../src/core/iso/reader'
 import { boxOf, fullBoxOf, i64, u16, u32, u64, zeroes } from '../../src/core/iso/writer'
+import type { Located } from '../../src/shared/types'
 
 const read = (path: string): Uint8Array => new Uint8Array(readFileSync(path))
 
@@ -633,5 +640,146 @@ describe('samplesInSegment', () => {
     // The offsets are counted from the start of the segment, not from the start of the buffer
     // the segment happens to sit in.
     expect(samplesInSegment(view, defaults)).toEqual(samplesInSegment(videoSegments[0]!, defaults))
+  })
+})
+describe('sampleRunOf', () => {
+  const defaults = trackDefaults(h264Video)
+
+  /** Segments laid end to end in an address space of their own, as a snapshot lays them. */
+  function placed(segments: Uint8Array[]): Array<{ bytes: Uint8Array; source: Located }> {
+    let at = 1_000
+    return segments.map((bytes) => {
+      const source: Located = { at, length: bytes.byteLength }
+      at += bytes.byteLength
+      return { bytes, source }
+    })
+  }
+
+  const ticksOf = (samples: Array<{ dts: number; duration: number; sync: boolean }>) =>
+    samples.map((sample) => [sample.dts, sample.duration, sample.sync])
+
+  /** One traf of `count` samples of one length, numbered whatever the caller says. */
+  const trafOf = (trackId: number, duration: number, count: number, offset: number): number[] =>
+    raw('traf', [
+      ...raw('tfhd', [
+        ...be32(0x020000 | 0x000008 | 0x000010),
+        ...be32(trackId),
+        ...be32(duration),
+        ...be32(4),
+      ]),
+      ...raw('tfdt', [...be32(0), ...be32(0)]),
+      ...raw('trun', [...be32(0x000001), ...be32(count), ...int32(offset)]),
+    ])
+
+  it('addresses samples inside the byte source their segment sits in', () => {
+    const segment = videoSegments[0]!
+    const [track] = samplesInSegment(segment, defaults)
+    const located = locateSamples(track!.samples, { at: 5000, length: segment.byteLength })
+
+    expect(located).toHaveLength(48)
+    expect(located[0]!.source).toEqual({ at: 5760, length: 5082 })
+    expect(located[0]!.pts).toBe(1024)
+    expect(located[1]!.source).toEqual({ at: 10842, length: 2417 })
+  })
+
+  it('walks a run of segments into one sequence in decode order', () => {
+    // Handed over backwards, because the caller is free to: the map keeps its chunks in time
+    // order but a snapshot may be read in any order, and the writer lays samples down exactly as
+    // they arrive.
+    const run = sampleRunOf({ segments: placed([...videoSegments].reverse()), trackId: 1, defaults })
+
+    expect(run.samples).toHaveLength(144)
+    expect(run.dropped).toBe(0)
+    const times = run.samples.map((sample) => sample.dts)
+    expect(times).toEqual([...times].sort((a, b) => a - b))
+  })
+
+  it('carries a decode time once and says how many copies it dropped', () => {
+    // A re-watch: the middle chunk of the recording came back and both copies stayed on the map.
+    const segments = placed([videoSegments[0]!, videoSegments[1]!, videoSegments[1]!, videoSegments[2]!])
+    const run = sampleRunOf({ segments, trackId: 1, defaults })
+
+    expect(run.samples).toHaveLength(144)
+    expect(run.dropped).toBe(48)
+    // The copy that came first is the one that stayed: nothing was taken out of the second.
+    const repeat = segments[2]!.source
+    const inside = run.samples.filter(
+      (sample) => sample.source.at >= repeat.at && sample.source.at < repeat.at + repeat.length,
+    )
+    expect(inside).toEqual([])
+    // And the repeat was dropped whole rather than merged into its twin: what comes out is the
+    // run the recording would have had if the chunk had arrived once.
+    const once = sampleRunOf({ segments: placed(videoSegments), trackId: 1, defaults })
+    expect(ticksOf(run.samples)).toEqual(ticksOf(once.samples))
+  })
+
+  it('measures sameness in ticks, where a tolerance in seconds cannot reach', () => {
+    // The rule this replaced compared presentation times in seconds and called anything within a
+    // microsecond of another the same frame. Nothing says a track is counted in thousandths: on
+    // one counted in ten-millionths two neighbouring samples are a tenth of a microsecond apart,
+    // and both of them are real. There is no timescale in this function for that reason.
+    const init = buildVideoInit({
+      trackId: 1,
+      timescale: 10_000_000,
+      sampleEntry,
+      width: 256,
+      height: 144,
+    })
+    const fragment = buildFragment(1, 0, [
+      { duration: 1, bytes: Uint8Array.from([1, 2, 3]) },
+      { duration: 1, bytes: Uint8Array.from([4, 5, 6]) },
+    ])
+
+    const run = sampleRunOf({
+      segments: placed([fragment]),
+      trackId: 1,
+      defaults: trackDefaults(init),
+    })
+
+    expect(run.samples.map((sample) => sample.dts)).toEqual([0, 1])
+    expect(run.dropped).toBe(0)
+  })
+
+  it('leaves the trafs of the other tracks of a muxed segment alone', () => {
+    const segment = segmentOf(moofOf(trafOf(1, 512, 2, 300), trafOf(2, 1024, 2, 308)), 16)
+
+    expect(sampleRunOf({ segments: placed([segment]), trackId: 2, defaults: NO_DEFAULTS }).samples
+      .map((sample) => sample.dts)).toEqual([0, 1024])
+    // Told to take a lone traf, it still does not take one of two: there is no telling which of
+    // them the caller meant, and picking the first hands this track the samples of the other.
+    expect(
+      sampleRunOf({ segments: placed([segment]), trackId: 9, defaults: NO_DEFAULTS, loneTrack: true })
+        .samples,
+    ).toEqual([])
+  })
+
+  it('takes the only traf of a segment as the track asked for, but only when told to', () => {
+    // A segment carrying one track is free to number its traf anything, and packagers do differ
+    // from their own init here. The index a clip is cut from reads such a segment — there is one
+    // track it could be about — and the frame table does not: it answers about the number it was
+    // given or about nothing at all.
+    const segment = segmentOf(moofOf(trafOf(7, 512, 3, 100)), 12)
+    const asked = { segments: placed([segment]), trackId: 1, defaults: NO_DEFAULTS }
+
+    expect(sampleRunOf(asked).samples).toEqual([])
+    expect(sampleRunOf({ ...asked, loneTrack: true }).samples.map((sample) => sample.dts)).toEqual([
+      0, 512, 1024,
+    ])
+  })
+
+  it('costs an unreadable segment its own samples and no more', () => {
+    const rubbish = new Uint8Array(64).fill(0x7f)
+    const run = sampleRunOf({
+      segments: placed([videoSegments[0]!, rubbish, videoSegments[1]!]),
+      trackId: 1,
+      defaults,
+    })
+
+    expect(run.samples).toHaveLength(96)
+    expect(run.dropped).toBe(0)
+  })
+
+  it('gives an empty run rather than nothing at all when there are no segments', () => {
+    expect(sampleRunOf({ segments: [], trackId: 1, defaults })).toEqual({ samples: [], dropped: 0 })
   })
 })

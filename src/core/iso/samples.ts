@@ -1,3 +1,4 @@
+import type { Located } from '../../shared/types'
 import { boxBody, childBoxes, findBox, topLevelBoxes, type Box } from './reader'
 import { trackIdOf } from './entry'
 
@@ -285,4 +286,112 @@ function readRun(
   }
 
   return { dts, at }
+}
+
+/** One media segment, and where its bytes lie in whatever source it was read out of. */
+export interface PlacedSegment {
+  bytes: Uint8Array
+  source: Located
+}
+
+/** A sample addressed in that source rather than in the segment it was found in. */
+export interface LocatedSample {
+  dts: number
+  pts: number
+  duration: number
+  sync: boolean
+  source: Located
+}
+
+/** Samples of one segment, addressed inside the byte source that segment lies in. */
+export function locateSamples(samples: SampleRef[], segment: Located): LocatedSample[] {
+  return samples.map((sample) => ({
+    dts: sample.dts,
+    pts: sample.pts,
+    duration: sample.duration,
+    sync: sample.sync,
+    source: { at: segment.at + sample.at, length: sample.size },
+  }))
+}
+
+export interface SampleRun {
+  /** In decode order, dts ascending, one sample per decode time. */
+  samples: LocatedSample[]
+  /** How many samples were dropped because that decode time was already taken. */
+  dropped: number
+}
+
+export interface SampleRunInput {
+  /** The segments of one run of the recording, in any order. */
+  segments: readonly PlacedSegment[]
+  /** Which ISO track of them to walk. */
+  trackId: number
+  /** What the movie says about samples a fragment leaves unsaid; see `trackDefaults`. */
+  defaults: Map<number, SampleDefaults>
+  /**
+   * Take the only traf of a segment even where it numbers the track something else.
+   *
+   * A segment carrying one track is free to number its traf anything, and packagers do differ
+   * from their own init here; there is only one track it could be about, so the index a clip is
+   * cut from takes it as that one. The frame table does not, and the difference is deliberate:
+   * the index has an init in hand that describes exactly this representation, while the table is
+   * asked for a numbered track and answers about that number or about nothing.
+   */
+  loneTrack?: boolean
+}
+
+/**
+ * Every sample of one track across a run of segments, each decode time carried once.
+ *
+ * **The only place this program turns segments into a sequence of samples.** The frame table the
+ * editor draws and steps by and the index a clip is cut from both come through here, and that is
+ * the point of the function: they used to walk the segments apiece, one of them dropped the
+ * repeats and the other kept them, and a recording of six seconds was previewed as six and
+ * written as eight — eight the decoder could not read, because the same coded frames twice in one
+ * decode timeline lose a H.264 decoder its reference state.
+ *
+ * Overlap is ordinary rather than exceptional: a re-watch comes back with boundaries a few frames
+ * off, the map keeps any two chunks whose starts differ by a millisecond or more
+ * (`SAME_CHUNK_TOLERANCE_SECONDS` in `core/timeline/map.ts`), and both copies are then handed
+ * over to be indexed.
+ *
+ * A sample is its decode time in ticks of the track, and never a time in seconds: seconds are
+ * where the rounding lives, and a tolerance in seconds is exactly what let a duplicate through as
+ * close-but-not-equal. Of two samples at one decode time the first in run order stays and the
+ * later one goes whole — not merged, because half of one copy and half of the other is a frame
+ * nobody recorded. The count of the dropped is handed back and not swallowed: a recording that
+ * overlaps itself is something the interface will want to say out loud, and a fact thrown away
+ * here cannot be said anywhere later.
+ */
+export function sampleRunOf(input: SampleRunInput): SampleRun {
+  const arrived: LocatedSample[] = []
+
+  for (const segment of input.segments) {
+    const tracks = samplesInSegment(segment.bytes, input.defaults)
+    const found =
+      tracks.find((track) => track.trackId === input.trackId) ??
+      (input.loneTrack && tracks.length === 1 ? tracks[0] : undefined)
+    if (!found) continue
+
+    for (const sample of locateSamples(found.samples, segment.source)) arrived.push(sample)
+  }
+
+  // The map keeps its chunks in order of media time, but a caller is free to hand them over in
+  // any order at all, and the writer lays samples down exactly as they arrive. The sort is stable
+  // — the language says so — which is what makes "the first at this decode time" mean the first
+  // that arrived rather than whichever the sort left in front.
+  arrived.sort((a, b) => a.dts - b.dts)
+
+  const samples: LocatedSample[] = []
+  let dropped = 0
+
+  for (const sample of arrived) {
+    if (samples[samples.length - 1]?.dts === sample.dts) {
+      dropped++
+      continue
+    }
+    samples.push(sample)
+  }
+
+  return { samples, dropped }
 }

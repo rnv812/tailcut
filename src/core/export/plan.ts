@@ -1,5 +1,5 @@
 import type { Located, TrackKind } from '../../shared/types'
-import type { SampleRef } from '../iso/samples'
+import type { LocatedSample } from '../iso/samples'
 import { presentationTicks } from '../iso/progressive'
 
 /**
@@ -12,14 +12,13 @@ import { presentationTicks } from '../iso/progressive'
  */
 export const AUDIO_WARMUP_PACKETS = 4
 
-/** One sample of the recording, with its bytes named rather than held. */
-export interface SourceSample {
-  dts: number
-  pts: number
-  duration: number
-  sync: boolean
-  source: Located
-}
+/**
+ * One sample of the recording, with its bytes named rather than held.
+ *
+ * The vocabulary of a clip for what `sampleRunOf` hands back, and the same type rather than a
+ * second declaration of it: a shape restated is a shape that drifts.
+ */
+export type SourceSample = LocatedSample
 
 export interface SourceTrack {
   kind: TrackKind
@@ -32,6 +31,15 @@ export interface SourceTrack {
   editOffset: number
   /** Every sample of the representation, in decode order, dts ascending. */
   samples: SourceSample[]
+  /**
+   * How many samples the index dropped because the recording held their decode time twice.
+   *
+   * A re-watch overlaps itself and the map keeps both copies (`core/timeline/map.ts`), so this is
+   * an ordinary number and not an alarm. It is carried rather than counted and forgotten because
+   * whoever assembles a clip is the one who can say it out loud — the interface has nowhere to
+   * put it yet, and a fact dropped at the index cannot be recovered further down.
+   */
+  dropped: number
 }
 
 export interface ClipSource {
@@ -92,17 +100,6 @@ export interface Seam {
    * material before it had finished, which a decode timeline cannot say.
    */
   pull: number
-}
-
-/** Samples of one segment, addressed inside the byte source that segment lies in. */
-export function locateSamples(samples: SampleRef[], segment: Located): SourceSample[] {
-  return samples.map((sample) => ({
-    dts: sample.dts,
-    pts: sample.pts,
-    duration: sample.duration,
-    sync: sample.sync,
-    source: { at: segment.at + sample.at, length: sample.size },
-  }))
 }
 
 export function seamsOf(source: ClipSource): Seam[] {

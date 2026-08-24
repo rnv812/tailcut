@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
-import { concatBytes } from '../../src/core/iso/writer'
+import { buildFragment, buildVideoInit } from '../../src/core/iso/build'
+import { boxOf, concatBytes, u16, u32, zeroes } from '../../src/core/iso/writer'
 import { FrameTable, framesOf, retimeToPlan, type Frame } from '../../src/core/timeline/frames'
 import { parseInit as parseWebmInit } from '../../src/core/webm/init'
 import { webmToIso } from '../../src/core/webm/to-iso'
@@ -191,6 +192,34 @@ describe('framesOf', () => {
       segments: placed([SEGMENTS[0]!, SEGMENTS[0]!]),
     })
     expect(twice).toHaveLength(48)
+  })
+
+  it('counts a repeat out by decode time and not by how close two seconds are', () => {
+    // The table used to thin its own overlaps, by comparing presentation times and calling
+    // anything within a microsecond of another the same frame. Nothing says a track is counted in
+    // thousandths: on one counted in ten-millionths two neighbouring frames are a tenth of a
+    // microsecond apart and both are real, and that rule swallowed the second of them. The rule
+    // now lives in `sampleRunOf`, is stated in ticks, and both readers of a recording share it.
+    const fine = buildVideoInit({
+      trackId: TRACK_ID,
+      timescale: 10_000_000,
+      sampleEntry: boxOf('tSt1', zeroes(6), u16(1), zeroes(8), u16(2, 16, 0, 0), u32(0)),
+      width: 256,
+      height: 144,
+    })
+    const fragment = buildFragment(TRACK_ID, 0, [
+      { duration: 1, bytes: Uint8Array.from([1, 2, 3]) },
+      { duration: 1, bytes: Uint8Array.from([4, 5, 6]) },
+    ])
+
+    const frames = framesOf({
+      init: fine,
+      trackId: TRACK_ID,
+      timescale: 10_000_000,
+      segments: placed([fragment]),
+    })
+
+    expect(frames.map((frame) => frame.pts)).toEqual([0, 1e-7])
   })
 
   it('skips a track of the segment that is not the one asked for', () => {

@@ -2,13 +2,12 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { assembleMp4 } from '../../src/core/export/assemble'
 import {
-  locateSamples,
   planClip,
   planPreview,
   type ClipSource,
   type SourceTrack,
 } from '../../src/core/export/plan'
-import { editOffset, samplesInSegment, trackDefaults } from '../../src/core/iso/samples'
+import { editOffset, sampleRunOf, trackDefaults } from '../../src/core/iso/samples'
 import { audioSampleEntry, sampleEntryBytes, videoSampleEntry } from '../../src/core/iso/entry'
 import { parseInit } from '../../src/core/iso/init'
 import { boxBody, childBoxes, findBox, topLevelBoxes } from '../../src/core/iso/reader'
@@ -40,20 +39,24 @@ class Bank {
   }
 }
 
+/**
+ * A track indexed the way `sourceTrackOf` indexes one — through `sampleRunOf`, the single walk
+ * from segments to samples — and assembled by hand only so that a test can pick the fixture
+ * segments and the bank they land in.
+ */
 function trackOf(bank: Bank, initPath: string, segmentPaths: string[], kind: TrackKind): SourceTrack {
   const init = read(initPath)
-  const defaults = trackDefaults(init)
   const declared = parseInit(init)!.tracks.find((t) => t.kind === kind)!
   const entry = kind === 'video' ? videoSampleEntry(init) : audioSampleEntry(init)
-  const samples = []
-
-  for (const path of segmentPaths) {
-    const segment = read(path)
-    const at = bank.add(segment)
-    for (const track of samplesInSegment(segment, defaults)) {
-      samples.push(...locateSamples(track.samples, at))
-    }
-  }
+  const run = sampleRunOf({
+    segments: segmentPaths.map((path) => {
+      const bytes = read(path)
+      return { bytes, source: bank.add(bytes) }
+    }),
+    trackId: declared.trackId,
+    defaults: trackDefaults(init),
+    loneTrack: true,
+  })
 
   return {
     kind,
@@ -62,7 +65,8 @@ function trackOf(bank: Bank, initPath: string, segmentPaths: string[], kind: Tra
     width: entry?.codedWidth ?? 0,
     height: entry?.codedHeight ?? 0,
     editOffset: editOffset(init, declared.trackId),
-    samples,
+    samples: run.samples,
+    dropped: run.dropped,
   }
 }
 

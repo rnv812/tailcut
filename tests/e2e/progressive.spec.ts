@@ -16,7 +16,12 @@ import type { TrackKind } from '../../src/shared/types'
 
 const read = (path: string): Uint8Array => new Uint8Array(readFileSync(path))
 
-/** The same taking-apart the unit test does, kept here so the spec runs on its own. */
+/**
+ * The same taking-apart the unit test does, kept here so the spec runs on its own — and, for the
+ * same reason as there, not routed through `sampleRunOf`: the writer has to be handed exactly
+ * what the container holds, or a defect of its own could hide behind a sample the indexer had
+ * taken away.
+ */
 function trackOf(
   initPath: string,
   segmentPaths: string[],
