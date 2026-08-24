@@ -1,5 +1,8 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 
+/** Origin моста: страницы расширения стоят на нём, а документ сайта — никогда. */
+const EXTENSION_ORIGIN = 'chrome-extension://abcdefghijklmnopabcdefghijklmnop'
+
 const MIME = 'video/mp4; codecs="avc1.4d401e"'
 /** Звуковая дорожка: у любого DASH/HLS-потока она живёт своим SourceBuffer на том же MediaSource. */
 const AUDIO_MIME = 'audio/mp4; codecs="mp4a.40.2"'
@@ -99,7 +102,13 @@ function installPage(options: { eme?: boolean } = {}) {
 
   let urlCounter = 0
 
+  /** Слушатели окна: через них до хука доходит слово моста. */
+  const listeners: Array<(event: MessageEvent) => void> = []
+
   vi.stubGlobal('window', {
+    addEventListener(type: string, listener: (event: MessageEvent) => void): void {
+      if (type === 'message') listeners.push(listener)
+    },
     postMessage(message: unknown, _targetOrigin: string, transfer: Transferable[] = []): void {
       const bytes = (message as { bytes?: unknown }).bytes
       posted.push({
@@ -147,6 +156,15 @@ function installPage(options: { eme?: boolean } = {}) {
     SourceBuffer: FakeSourceBuffer,
     /** Сообщения одного типа в порядке отправки. */
     of: (type: string): Posted[] => posted.filter((item) => item.message.type === type),
+    /**
+     * Сообщение в окно страницы. Origin называется явно: хук слушает только своё расширение, а
+     * то же самое сообщение с origin страницы обязан пропускать мимо ушей.
+     */
+    deliver(data: unknown, origin = EXTENSION_ORIGIN): void {
+      for (const listener of listeners) {
+        listener({ data, origin } as unknown as MessageEvent)
+      }
+    },
   }
 }
 
@@ -596,5 +614,95 @@ describe('объявленная длительность', () => {
     mediaSource.duration = 7
 
     expect(page.of('tc:duration').map((item) => item.transferred)).toEqual([0])
+  })
+})
+
+describe('отказ страницы', () => {
+  /**
+   * Хранилище на той стороне отказывает целой странице — по защите материала, и навсегда
+   * (§5.4). Хук об этом не знал и продолжал копировать: на dash.js ClearKey через postMessage
+   * прошло и было выброшено 53 сообщения на 29.7 МБ, на Widevine — 40 на 34.7 МБ за сорок
+   * секунд. Цена отказа равнялась цене записи.
+   */
+  const REFUSED = { type: 'tc:refused' }
+
+  it('перестаёт копировать сегменты, когда мост объявил страницу отказанной', async () => {
+    const page = installPage()
+    await importHook()
+    const { sourceBuffer } = openSource(page)
+
+    sourceBuffer.appendBuffer(segment(512))
+    await flush()
+    expect(page.of('tc:append'), 'подготовка: до отказа сегменты уходят мосту').toHaveLength(1)
+
+    page.deliver(REFUSED)
+
+    sourceBuffer.appendBuffer(segment(512))
+    sourceBuffer.appendBuffer(segment(512))
+    await flush()
+
+    expect(page.of('tc:append'), 'после отказа хук всё ещё копирует и шлёт').toHaveLength(1)
+  })
+
+  it('не мешает плееру: страница дописывает свои байты как ни в чём не бывало', async () => {
+    const page = installPage()
+    await importHook()
+    const { sourceBuffer } = openSource(page)
+
+    page.deliver(REFUSED)
+
+    const buffer = segment(300)
+    const expected = digest(new Uint8Array(buffer))
+    sourceBuffer.appendBuffer(buffer)
+    await flush()
+
+    // Отказ — это про запись, а не про воспроизведение: браузер обязан получить те же байты,
+    // и буфер страницы обязан остаться при ней.
+    expect(sourceBuffer.appended).toEqual([{ byteLength: 300, digest: expected }])
+    expect(buffer.byteLength, 'буфер страницы отсоединён после отказа').toBe(300)
+  })
+
+  it('молчит и обо всём остальном: новых источников, буферов и длин мост уже не ждёт', async () => {
+    const page = installPage()
+    await importHook()
+
+    page.deliver(REFUSED)
+
+    const { mediaSource } = openSource(page)
+    mediaSource.duration = 42
+
+    expect(page.posted, 'после отказа мосту ушло что-то ещё').toEqual([])
+  })
+
+  it('слушает только своё расширение: то же сообщение со стороны страницы ничего не меняет', async () => {
+    const page = installPage()
+    await importHook()
+    const { sourceBuffer } = openSource(page)
+
+    // Страница вольна написать что угодно в собственное окно. Прими хук это за слово моста —
+    // и у сайта появился бы выключатель записи; origin расширения документ сайта носить не может.
+    page.deliver(REFUSED, 'https://site.example')
+
+    sourceBuffer.appendBuffer(segment(512))
+    await flush()
+
+    expect(page.of('tc:append')).toHaveLength(1)
+  })
+
+  it('не путается в чужих сообщениях того же окна', async () => {
+    const page = installPage()
+    await importHook()
+    const { sourceBuffer } = openSource(page)
+
+    // В окно страницы шлют все кому не лень, и хук сам отправляет туда же. Ни одно из этого
+    // отказом не является.
+    page.deliver({ type: 'tc:ready' })
+    page.deliver(null)
+    page.deliver('tc:refused')
+
+    sourceBuffer.appendBuffer(segment(512))
+    await flush()
+
+    expect(page.of('tc:append')).toHaveLength(1)
   })
 })

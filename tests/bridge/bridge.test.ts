@@ -120,11 +120,12 @@ function isSummary(value: unknown): value is SessionSummary {
 }
 
 /** The variant of the BridgeToPage union a value fits; null — it fits none of them. */
-function variantOf(value: unknown): 'tc:ready' | 'session list' | null {
+function variantOf(value: unknown): 'tc:ready' | 'tc:refused' | 'session list' | null {
   if (typeof value !== 'object' || value === null) return null
   const fields = value as Record<string, unknown>
 
   if (fields.type === 'tc:ready' && Object.keys(fields).length === 1) return 'tc:ready'
+  if (fields.type === 'tc:refused' && Object.keys(fields).length === 1) return 'tc:refused'
 
   const known = ['sessions', 'unreachable']
   const fits =
@@ -778,6 +779,69 @@ describe('the bridge refuses a page that plays encrypted media', () => {
 
     expect(sender.posts, 'the bridge answered a report of encryption').toEqual([])
   })
+
+  /**
+   * The refusal has to travel back out to the world that does the copying.
+   *
+   * Everything above is about what the registry keeps, and the answer is nothing. What the hook
+   * in the main world does meanwhile is copy every append and post it here to be dropped:
+   * measured on dash.js ClearKey, 53 messages and 29.7 MB thrown away, and on Widevine 40 and
+   * 34.7 MB, over forty seconds apiece. The cost of refusing equalled the cost of recording.
+   *
+   * It is the one refusal that may be sent: it never turns (see refuseEncrypted) and it covers
+   * the whole page. A triage rejection must not go out this way — it turns as often as not, and
+   * a reader that missed the middle of a byte stream cannot find its place again.
+   */
+  it('tells the page that the copying may stop', async () => {
+    const win = await loadBridge()
+    win.context()
+
+    encrypted(win)
+
+    expect(win.parent.posts.map((post) => post.message)).toEqual([
+      { type: 'tc:ready' },
+      { type: 'tc:refused' },
+    ])
+  })
+
+  it('tells it just as plainly when nobody announced the page and the boxes did', async () => {
+    const win = await loadBridge()
+    win.context()
+
+    win.append(cencInitBytes, 's1')
+
+    expect(win.parent.posts.map((post) => post.message)).toEqual([
+      { type: 'tc:ready' },
+      { type: 'tc:refused' },
+    ])
+  })
+
+  it('says it once, however much the page goes on sending', async () => {
+    const win = await loadBridge()
+    win.context()
+
+    encrypted(win)
+    win.append(initBytes, 's1')
+    win.append(seg1Bytes, 's1')
+    encrypted(win)
+    win.answer()
+
+    // Repeating it would put a message on every append of a page that is already refused, which
+    // is the very traffic this is here to end.
+    expect(win.parent.posts.filter((post) => variantOf(post.message) === 'tc:refused')).toHaveLength(
+      1,
+    )
+  })
+
+  it('says nothing of the sort on a page in the clear', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes, 's1')
+    win.append(seg1Bytes, 's1')
+    win.answer()
+
+    expect(win.parent.posts.map((post) => post.message)).toEqual([{ type: 'tc:ready' }])
+  })
 })
 
 describe('a page holding a player the extension could not reach', () => {
@@ -842,9 +906,14 @@ describe('BridgeToPage describes everything the bridge sends', () => {
     // variant (`BridgeToPage = { type: 'tc:ready' }`, as it was before this change) or drifts
     // away from the summary the bridge actually returns.
     const handshake: BridgeToPage = { type: 'tc:ready' }
+    const refusal: BridgeToPage = { type: 'tc:refused' }
     const list: BridgeToPage = win.answer()
 
-    expect([variantOf(handshake), variantOf(list)]).toEqual(['tc:ready', 'session list'])
+    expect([variantOf(handshake), variantOf(refusal), variantOf(list)]).toEqual([
+      'tc:ready',
+      'tc:refused',
+      'session list',
+    ])
   })
 })
 

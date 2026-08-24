@@ -1,4 +1,4 @@
-import type { PageToBridge } from '../shared/protocol'
+import { EXTENSION_ORIGIN_PREFIX, type PageToBridge } from '../shared/protocol'
 import { installWorkerHook } from './worker-hook'
 
 interface TrackedBuffer {
@@ -13,7 +13,36 @@ let counter = 0
 
 const nextId = (prefix: string): string => `${prefix}${++counter}`
 
+/**
+ * The registry has refused this page for good, so there is nothing here worth copying.
+ *
+ * Set by the bridge and never cleared, because the refusal behind it is never cleared either: it
+ * is the protected-media one of §5.4, it covers the whole page, and no later moment turns it (see
+ * `PageRefused` in the protocol for why a triage rejection may not arrive here). Until this word
+ * comes the hook copies everything and asks nothing — it stands on a player's synchronous path,
+ * and a hook that reasoned about material would be a hook that costs more than it is allowed to.
+ *
+ * Reading it costs the appendBuffer wrapper one boolean beside a WeakMap lookup it was doing
+ * anyway, and when it is set the wrapper stops making the copy altogether — so the synchronous
+ * path is never heavier for this and is lighter on exactly the pages that were paying for
+ * nothing. Measured before it existed: 29.7 MB copied and thrown away on dash.js ClearKey in
+ * forty seconds, 34.7 MB on Widevine.
+ */
+let refused = false
+
+window.addEventListener('message', (event: MessageEvent) => {
+  // Only the bridge may say this. Its frame stands on the extension origin, and a document of the
+  // site cannot carry that scheme however it posts — while a page may put anything at all into
+  // its own window, and a refusal it could imitate would be a switch for turning recording off.
+  if (!event.origin.startsWith(EXTENSION_ORIGIN_PREFIX)) return
+  if ((event.data as { type?: unknown } | null)?.type === 'tc:refused') refused = true
+})
+
 function send(message: PageToBridge, transfer: Transferable[] = []): void {
+  // The last stop for everything, the appends a wrapped worker forwards included: those are
+  // copied in a realm of their own, out of reach of the guard below, and the page is refused all
+  // the same.
+  if (refused) return
   window.postMessage(message, '*', transfer)
 }
 
@@ -122,7 +151,11 @@ SourceBuffer.prototype.appendBuffer = function (data: BufferSource): void {
   // appendBuffer на объекте из кадра about:blank, куда хук не попал: свои приходят из
   // обёрнутого addSourceBuffer. Без охраны такой вызов сыпал бы TypeError из микрозадачи —
   // необъяснимой ошибкой в консоли на каждый сегмент.
-  if (tracked) {
+  //
+  // `refused` рядом — это отказ страницы (см. выше): копию делать незачем, её на той стороне
+  // выбросят. Проверка стоит булева чтения при уже сделанном поиске в WeakMap, а экономит
+  // копию сегмента на каждый вызов.
+  if (tracked && !refused) {
     const bytes = copyOf(data)
     // Отправляем в микрозадаче: синхронный путь плеера остаётся пустым.
     queueMicrotask(() => {

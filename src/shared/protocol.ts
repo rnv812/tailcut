@@ -109,13 +109,48 @@ export interface SessionList {
 }
 
 /**
- * Everything the bridge sends outwards and nothing besides. There are two channels and the union
- * describes both: the handshake goes to the window that inserted the bridge, and the answer to a
- * list request only into the MessageChannel port that came with it. A message not described here
- * is an undeclared part of the protocol: the receiver does not know of it, and the next reader of
- * the code learns of it from the bridge implementation rather than from the type.
+ * Nothing of this page will be kept, so nothing of it need be copied.
+ *
+ * The one word the registry sends back out to the world that does the copying. The hook in the
+ * MAIN world knows nothing of sessions, verdicts or protection — that is the whole point of it,
+ * and parsing on the synchronous path of a player is out of the question — so it goes on copying
+ * every append and posting it here to be dropped. Measured on dash.js ClearKey: 53 messages and
+ * 29.7 MB thrown away in forty seconds, and on Widevine 40 messages and 34.7 MB. The cost of
+ * refusing equalled the cost of recording.
+ *
+ * Only one refusal may be sent this way, and it is the protected-media one (see
+ * SessionStore.refuseEncrypted): it covers the whole page and it never turns. A triage rejection
+ * must not travel here even though it looks alike. A rejection turns — a pause, a hidden tab, an
+ * element off the screen are all rejections of §5.5 — and a hook that stopped copying mid-stream
+ * would leave the reader on this side inside a segment with no way of finding its place again:
+ * MSE hands a SourceBuffer a byte stream, not a list of segments, and the init that would explain
+ * the next header went past in the first second of playback.
+ *
+ * It carries no identifier because it has nothing to address: the page is refused, all of it.
  */
-export type BridgeToPage = { type: 'tc:ready' } | SessionList
+export interface PageRefused {
+  type: 'tc:refused'
+}
+
+/**
+ * Everything the bridge sends outwards and nothing besides. There are two channels and the union
+ * describes both: the handshake and the refusal go to the window that inserted the bridge, and
+ * the answer to a list request only into the MessageChannel port that came with it. A message not
+ * described here is an undeclared part of the protocol: the receiver does not know of it, and the
+ * next reader of the code learns of it from the bridge implementation rather than from the type.
+ */
+export type BridgeToPage = { type: 'tc:ready' } | PageRefused | SessionList
+
+/**
+ * How the main world tells a message of the bridge from a message of the page.
+ *
+ * The bridge stands in a frame on the extension origin and posts to `window.parent`, which is the
+ * page — and both worlds of that page hear it. The MAIN world has no `chrome.runtime` to check an
+ * identity with, and it has to check something: a page may post whatever it likes into its own
+ * window, and a refusal it could imitate would be a switch for turning the recording off. An
+ * origin is the one thing it cannot imitate — no document of a site carries this scheme.
+ */
+export const EXTENSION_ORIGIN_PREFIX = 'chrome-extension://'
 
 /**
  * Requests to the content script of a tab: sent by the popup and by the service worker through

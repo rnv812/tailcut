@@ -113,6 +113,35 @@ let pageContext: PageContext = { url: document.referrer, title: '' }
  */
 let unreachable = false
 
+/**
+ * Whether the main world has already been told that this page is refused; see tellRefusal.
+ */
+let refusalTold = false
+
+/**
+ * Tells the world that does the copying that it may stop.
+ *
+ * The registry refuses a protected page outright and drops every byte that arrives after — but
+ * the hook goes on copying each append and posting it here, because it knows nothing of any of
+ * this and must not: it stands on the synchronous path of somebody's player. Measured on dash.js
+ * ClearKey, 53 messages and 29.7 MB were copied and thrown away in forty seconds; on Widevine, 40
+ * and 34.7 MB. The cost of refusing equalled the cost of recording.
+ *
+ * Sent to `window.parent` for the same reason the handshake is: the bridge stands up in every
+ * frame of the page, and the document that inserted it is the one whose hook is doing the
+ * copying. Sent once — a message per append of a page that is already refused would be the very
+ * traffic this ends. And sent only for the one refusal that never turns: a triage rejection would
+ * take the byte stream away from the reader in the middle of a segment, and there is no init
+ * segment coming to help it find its place again.
+ */
+function tellRefusal(): void {
+  if (refusalTold || !store.encrypted) return
+  refusalTold = true
+
+  const refusal: BridgeToPage = { type: 'tc:refused' }
+  window.parent.postMessage(refusal, '*')
+}
+
 function summaries(): SessionSummary[] {
   return store.list().map((session) => ({
     key: session.key,
@@ -265,6 +294,7 @@ window.addEventListener('message', (event: MessageEvent) => {
   // container it does not read, or a player whose bytes come by a road of their own.
   if (data?.type === 'tc:encrypted') {
     store.refuseEncrypted()
+    tellRefusal()
     return
   }
 
@@ -303,6 +333,11 @@ window.addEventListener('message', (event: MessageEvent) => {
       bytes: new Uint8Array(data.bytes),
       now: Date.now(),
     })
+
+    // The registry reads protection out of the boxes it was parsing anyway, so the refusal may
+    // begin here as readily as it does in tc:encrypted above — and this is the one that fires on
+    // the pages that never announce themselves.
+    tellRefusal()
   }
 })
 

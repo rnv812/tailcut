@@ -51,3 +51,7 @@ On the development machine (Chromium 151, WSL2), over twenty-five runs:
 Both numbers are printed on every run, so run it to see where your machine
 stands. A number outside that band is not automatically a regression — it is an
 invitation to look at what changed on the synchronous path.
+
+A page tailcut has refused outright — protected media — costs nothing after the
+refusal: the registry tells the hook, and the copying stops where it starts
+rather than at the far end of a message.

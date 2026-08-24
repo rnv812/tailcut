@@ -30,6 +30,8 @@ type Probe = {
   tcSource: SeenSource[]
   tcAppend: number
   tcEncrypted: number
+  /** How many times the bridge told the main world that this page is refused. */
+  tcRefused: number
 }
 type PageState = { allAppended?: boolean; headStart?: boolean }
 /** What tests/e2e/page/scrolled.html offers the test: one fragment appended on demand. */
@@ -93,6 +95,7 @@ async function open(htmlFile: string, url: string) {
     probe.tcSource = []
     probe.tcAppend = 0
     probe.tcEncrypted = 0
+    probe.tcRefused = 0
 
     window.addEventListener('message', (event: MessageEvent) => {
       const data = event.data as Record<string, unknown> | null
@@ -106,6 +109,8 @@ async function open(htmlFile: string, url: string) {
         probe.tcAppend++
       } else if (data.type === 'tc:encrypted') {
         probe.tcEncrypted++
+      } else if (data.type === 'tc:refused') {
+        probe.tcRefused++
       }
     })
   })
@@ -574,8 +579,18 @@ test('a page that plays encrypted media is left with nothing at all', async () =
     'nothing announced this page as protected: the refusal has to come out of the bytes alone',
   ).toBe(0)
 
-  // And nothing more is taken in. The hook in the MAIN world goes on copying every append — it
-  // knows nothing of any of this — and a page plays for as long as it is open.
+  // And nothing more is taken in — nor copied. The refusal travels back out to the hook in the
+  // MAIN world, which knows nothing of protection and would otherwise go on copying every append
+  // of a page that is playing for as long as it is open: measured on dash.js ClearKey as 29.7 MB
+  // handed over and dropped in forty seconds, and on Widevine as 34.7 MB.
+  await page.waitForFunction(() => (window as unknown as Probe).tcRefused > 0, undefined, {
+    timeout: 15_000,
+  })
+  const copiedBefore = await page.evaluate(() => (window as unknown as Probe).tcAppend)
+  expect(copiedBefore, 'setup: the page was recorded in the clear before the refusal').toBeGreaterThan(
+    0,
+  )
+
   await page.evaluate(() => (window as unknown as EncryptedPage).appendMore())
   await page.waitForFunction(
     () => (window as unknown as EncryptedPage).appendedAfter > 0,
@@ -586,6 +601,10 @@ test('a page that plays encrypted media is left with nothing at all', async () =
     await sessionsWhen(page, (sessions) => sessions.length === 0),
     `the page went on recording after the refusal; page console: ${log()}`,
   ).toEqual([])
+  expect(
+    await page.evaluate(() => (window as unknown as Probe).tcAppend),
+    `the hook went on copying the segments of a refused page; page console: ${log()}`,
+  ).toBe(copiedBefore)
 
   // The user is told which silence this is. A protected page that shows "Nothing recorded on this
   // page yet" is a deliberate refusal wearing the face of a defect.
