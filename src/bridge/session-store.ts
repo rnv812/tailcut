@@ -481,7 +481,9 @@ export function selectMaterial(session: Session): MuxTrack[] {
  * segment is already what a saved file is assembled from.
  */
 function isoChunk(track: TrackHeader, bytes: Uint8Array): Chunk | null {
-  const fragment = parseFragment(bytes)
+  // The tracks of the init go with the bytes: a fragment may state nothing about how long its
+  // samples last, and then the `trex` this init was read for is the only thing that does.
+  const fragment = parseFragment(bytes, track.info.tracks)
   if (!fragment) return null
 
   // Tracks inside a moof are marked with the trackId from the init; on a single-track stream

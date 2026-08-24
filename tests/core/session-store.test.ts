@@ -12,6 +12,7 @@ import { parseInit } from '../../src/core/iso/init'
 import { parseFragment } from '../../src/core/iso/fragment'
 import type { MuxTrack } from '../../src/core/mux'
 import type { Chunk } from '../../src/shared/types'
+import { withTrexDefault, withoutTfhdDefault } from './trex-defaults'
 
 const init = new Uint8Array(readFileSync('tests/fixtures/h264/init-stream0.m4s'))
 const seg1 = new Uint8Array(readFileSync('tests/fixtures/h264/chunk-stream0-00001.m4s'))
@@ -690,6 +691,57 @@ describe('SessionStore: a stream appended in slices', () => {
     // Every kind is there over the whole of the shared stretch, which is what a saved file is.
     expect(summarize(session).duration).toBeGreaterThan(5.9)
     expect(selectMaterial(session).map((m) => m.segments.length)).toEqual([3, 4])
+  })
+})
+
+describe('SessionStore: a packager that states its sample durations in the trex', () => {
+  /**
+   * dzen.ru, measured. The truns of its picture carry sizes and no durations, its tfhd carries no
+   * default, and the whole length of a sample is one field of the init segment — which is the
+   * third and last place ISO/IEC 14496-12 §8.8.3 allows it to be. Read as nothing, every fragment
+   * measured out as an instant and could join no run: 25 seconds of watching with 82 seconds
+   * buffered came out of the registry as one segment of six, and two loads out of four came out
+   * as a session of zero bytes with nothing to save at all.
+   *
+   * The fixtures of this repository are ffmpeg's and state their durations in the tfhd, so the
+   * shape has to be made: the same segments with that field taken out and its value put where
+   * dzen keeps it. See tests/core/trex-defaults.ts.
+   */
+  const trexInit = withTrexDefault(init, 1, 512)
+  const trexSegs = videoSegs.map(withoutTfhdDefault)
+
+  it('lays such fragments on the map at their true length', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: trexInit })
+    for (const segment of trexSegs) store.append({ ...page, bytes: segment })
+
+    const track = only(store.list()[0]!)
+    // Three segments of two seconds, end to end: one run and no gap between them.
+    expect(track.map.runs().map((run) => [run.start, run.end])).toEqual([[0, 6]])
+  })
+
+  it('promises the same clip it would have promised with the durations in every fragment', () => {
+    const stated = new SessionStore()
+    stated.append({ ...page, bytes: init })
+    for (const segment of videoSegs) stated.append({ ...page, bytes: segment })
+
+    const inTrex = new SessionStore()
+    inTrex.append({ ...page, bytes: trexInit })
+    for (const segment of trexSegs) inTrex.append({ ...page, bytes: segment })
+
+    expect(summarize(inTrex.list()[0]!).duration).toEqual(summarize(stated.list()[0]!).duration)
+    expect(summarize(inTrex.list()[0]!).duration).toBe(6)
+  })
+
+  it('leaves a fragment measureless when no trex speaks for its track either', () => {
+    // The fall-through ends here and invents nothing: a movie that states the length of a sample
+    // nowhere at all leaves the fragment with none, exactly as before.
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    for (const segment of trexSegs) store.append({ ...page, bytes: segment })
+
+    const track = only(store.list()[0]!)
+    expect(track.map.duration()).toBe(0)
   })
 })
 

@@ -79,30 +79,59 @@ function parseTrunDuration(data: Uint8Array, trun: Box, defaultSampleDuration: n
 }
 
 /**
- * How long one track fragment lasts, in ticks of its own track: the sample durations its trun
- * boxes state, falling back to the default in the tfhd for a trun that states none of its own.
- * Zero when neither of the two carries a duration — a packager that keeps its defaults in the
- * trex alone says nothing here, and inventing a length for such a fragment would be worse.
+ * What the movie header said about a track, for a fragment that says nothing about itself.
+ *
+ * Shaped so that the tracks of a parsed init segment can be handed over as they are: `TrackInfo`
+ * satisfies it. Only the two fields are read, and only when the fragment leaves no other way of
+ * measuring its samples.
+ */
+export interface MovieDefaults {
+  trackId: number
+  /** Ticks one sample of that track lasts, as its `trex` states; absent or zero — none stated. */
+  defaultSampleDuration?: number
+}
+
+/**
+ * How long one track fragment lasts, in ticks of its own track.
+ *
+ * The three places 14496-12 §8.8.3 allows a sample duration to be stated, read in the order it
+ * lays down: the `trun` per sample, then the `default_sample_duration` of the `tfhd` for a `trun`
+ * that states none, then the `trex` of the movie for a `tfhd` that states none either. Falling
+ * through only the first two used to be enough for every site measured, and then it was not:
+ * dzen.ru writes its picture with the length of a sample in the `trex` and nowhere else, and read
+ * as zero its fragments measured out as instants — 92 seconds of recording came out as the one
+ * segment whose `trun` happened to carry its own samples.
+ *
+ * Zero when none of the three carries a duration. Nothing is invented for such a fragment.
  *
  * Shared with the muxer, which needs the same number to work out how long a clip is: two readings
  * of one trun would be two chances to read it differently.
  */
-export function trafDuration(data: Uint8Array, traf: Box): number {
+export function trafDuration(data: Uint8Array, traf: Box, movieDefault = 0): number {
   const children = childBoxes(data, traf)
   const tfhdBox = children.find((b) => b.type === 'tfhd')
   if (!tfhdBox) return 0
 
   const { defaultSampleDuration } = parseTfhd(data, tfhdBox)
+  const perSample = defaultSampleDuration || movieDefault
 
   let duration = 0
   for (const trun of children.filter((b) => b.type === 'trun')) {
-    duration += parseTrunDuration(data, trun, defaultSampleDuration)
+    duration += parseTrunDuration(data, trun, perSample)
   }
 
   return duration
 }
 
-export function parseFragment(data: Uint8Array): FragmentInfo | null {
+/**
+ * `declared` is what the init segment of this very buffer said about its tracks — pass the tracks
+ * of a parsed `InitInfo`. Left out, a fragment that states nothing of its own has no length, which
+ * is the honest answer when the movie header is not to hand.
+ */
+export function parseFragment(
+  data: Uint8Array,
+  declared: readonly MovieDefaults[] = [],
+): FragmentInfo | null {
   const moof = topLevelBoxes(data).find((b) => b.type === 'moof')
   if (!moof) return null
 
@@ -114,9 +143,14 @@ export function parseFragment(data: Uint8Array): FragmentInfo | null {
   const tfdtBox = children.find((b) => b.type === 'tfdt')
   if (!tfhdBox || !tfdtBox) return null
 
+  const { trackId } = parseTfhd(data, tfhdBox)
+  // The default of this track and not of the first one declared: a muxed init describes several,
+  // and the picture and the sound of one video do not last the same.
+  const movieDefault = declared.find((t) => t.trackId === trackId)?.defaultSampleDuration ?? 0
+
   return {
-    trackId: parseTfhd(data, tfhdBox).trackId,
+    trackId,
     baseMediaDecodeTime: parseTfdt(data, tfdtBox),
-    duration: trafDuration(data, traf),
+    duration: trafDuration(data, traf, movieDefault),
   }
 }

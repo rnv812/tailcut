@@ -101,6 +101,7 @@ function spanOf(
   bytes: Uint8Array,
   ids: Map<number, number>,
   timescales: Map<number, number>,
+  defaults: Map<number, number>,
 ): Span | null {
   const moof = typeIn(topLevelBoxes(bytes), 'moof')
   if (!moof) return null
@@ -116,13 +117,16 @@ function spanOf(
     if (!tfhd || !tfdt) return null
 
     const id = ids.get(view.getUint32(tfhd.start + tfhd.headerSize + 4))
-    const timescale = id === undefined ? undefined : timescales.get(id)
+    if (id === undefined) return null
+    const timescale = timescales.get(id)
     if (timescale === undefined) return null
 
     const from = decodeTicksOf(bytes, tfdt) / timescale
-    // Zero for a packager that keeps its sample defaults in the trex: the fragment then measures
-    // out as an instant, and the clip is as long as the fragments that do state their samples.
-    const to = from + trafDuration(bytes, traf) / timescale
+    // The sample defaults of the movie go in beside the fragment: a packager may state the length
+    // of a sample in its trex and nowhere else (14496-12 §8.8.3), and the fragment then measures
+    // out as an instant unless the trex is read with it. Measured on dzen.ru, where every video
+    // fragment past the first states nothing at all about its samples.
+    const to = from + trafDuration(bytes, traf, defaults.get(id) ?? 0) / timescale
     if (start === null || from < start) start = from
     if (to > end) end = to
   }
@@ -135,6 +139,7 @@ function fragmentsOf(
   segment: Uint8Array,
   ids: Map<number, number>,
   timescales: Map<number, number>,
+  defaults: Map<number, number>,
 ): Fragment[] {
   const boxes = topLevelBoxes(segment)
   const last = boxes[boxes.length - 1]
@@ -153,7 +158,7 @@ function fragmentsOf(
     // the first moof — the styp and the sidx — describes the segment as a standalone delivery and
     // is left behind.
     const stop = starts[index + 1] ?? end
-    const span = spanOf(segment.subarray(start, stop), ids, timescales)
+    const span = spanOf(segment.subarray(start, stop), ids, timescales, defaults)
     if (!span) continue
 
     fragments.push({ segment, start, end: stop, time: span.start, until: span.end, ids })
@@ -290,6 +295,14 @@ export function muxFragmentedMp4(tracks: MuxTrack[]): Uint8Array {
   const trexs: Uint8Array[] = []
   /** track_id in the file being built → ticks per second of that track. */
   const timescales = new Map<number, number>()
+  /**
+   * track_id in the file being built → the sample duration its trex states, in its own ticks.
+   *
+   * Kept beside the timescales because a fragment may state nothing about the length of its own
+   * samples, and then this is the only thing that measures it. Filled from the same trex boxes
+   * that are copied into the file below, so the file and the measurement agree by construction.
+   */
+  const defaults = new Map<number, number>()
   const fragments: Fragment[] = []
   let nextTrackId = 1
 
@@ -341,11 +354,14 @@ export function muxFragmentedMp4(tracks: MuxTrack[]): Uint8Array {
       // Sample defaults for a track that did not make it into the file: nothing to state them for.
       if (id === undefined) continue
       view.setUint32(at, id)
+      defaults.set(id, view.getUint32(at + 8))
       trexs.push(sliceOf(init, trex))
     }
 
     for (const segment of track.segments) {
-      for (const fragment of fragmentsOf(segment, ids, timescales)) fragments.push(fragment)
+      for (const fragment of fragmentsOf(segment, ids, timescales, defaults)) {
+        fragments.push(fragment)
+      }
     }
   }
 

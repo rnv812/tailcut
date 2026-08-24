@@ -63,7 +63,10 @@ describe('buildAudioInit', () => {
   it('reads back through the parser of init segments', () => {
     expect(parseInit(init)).toEqual({
       tracks: [
-        { trackId: TRACK_ID, kind: 'audio', timescale: TIMESCALE, codec: 'tSt1', width: 0, height: 0 },
+        {
+          trackId: TRACK_ID, kind: 'audio', timescale: TIMESCALE, codec: 'tSt1',
+          width: 0, height: 0, defaultSampleDuration: 0,
+        },
       ],
     })
   })
@@ -252,6 +255,7 @@ describe('buildVideoInit', () => {
           codec: 'tSt2',
           width: WIDTH,
           height: HEIGHT,
+          defaultSampleDuration: 0,
         },
       ],
     })

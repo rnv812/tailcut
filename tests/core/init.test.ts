@@ -11,7 +11,10 @@ describe('parseInit', () => {
     // весь разбор целиком: и состав дорожек, и каждое поле — точные значения,
     // а не «больше нуля»: чужое поле tkhd/mdhd тоже положительно
     expect(parseInit(h264)).toEqual({
-      tracks: [{ trackId: 1, kind: 'video', timescale: 12288, codec: 'avc1', width: 320, height: 240 }],
+      tracks: [{
+        trackId: 1, kind: 'video', timescale: 12288, codec: 'avc1',
+        width: 320, height: 240, defaultSampleDuration: 0,
+      }],
     })
   })
 
@@ -142,7 +145,51 @@ function moov(...traks: Uint8Array[]): Uint8Array {
   return box('moov', box('mvhd', zeros(100)), ...traks)
 }
 
+/** trex: version and flags, track_ID, sample_description_index, then the four defaults. */
+function trex(trackId: number, sampleDuration: number): Uint8Array {
+  return box(
+    'trex',
+    zeros(4), u32(trackId), u32(1), u32(sampleDuration), u32(0), u32(0),
+  )
+}
+
+/** The same moov with an mvex in it: this is where a movie states its sample defaults. */
+function moovWithMvex(trexes: Uint8Array[], ...traks: Uint8Array[]): Uint8Array {
+  return box('moov', box('mvhd', zeros(100)), box('mvex', ...trexes), ...traks)
+}
+
 describe('parseInit на синтетических init-сегментах', () => {
+  it('reports the sample duration the movie states for a track in its trex', () => {
+    // dzen.ru delivers its picture this way: the trun of every fragment past the first states no
+    // durations at all and the tfhd states no default, so this one field of the init segment is
+    // the whole of what says how long a sample lasts. Read as zero, 92 seconds of picture came
+    // out of the registry as 6.
+    const init = moovWithMvex(
+      [trex(1, 3600)],
+      trak({ trackId: 1, handler: 'vide', timescale: 90000, width: 852, height: 480 }),
+    )
+
+    expect(parseInit(init)!.tracks[0]!.defaultSampleDuration).toBe(3600)
+  })
+
+  it('reports each track its own default and not the first trex it meets', () => {
+    const init = moovWithMvex(
+      [trex(1, 3600), trex(2, 1023)],
+      trak({ trackId: 1, handler: 'vide', timescale: 90000, width: 852, height: 480 }),
+      trak({ trackId: 2, handler: 'soun', timescale: 48000, codec: 'mp4a' }),
+    )
+
+    const parsed = parseInit(init)!
+    expect(parsed.tracks.find((t) => t.trackId === 1)!.defaultSampleDuration).toBe(3600)
+    expect(parsed.tracks.find((t) => t.trackId === 2)!.defaultSampleDuration).toBe(1023)
+  })
+
+  it('reports no default at all for a movie without an mvex', () => {
+    const init = moov(trak({ trackId: 1, handler: 'vide', timescale: 12288, width: 320, height: 240 }))
+
+    expect(parseInit(init)!.tracks[0]!.defaultSampleDuration).toBe(0)
+  })
+
   it('округляет дробные размеры 16.16 до целых пикселей', () => {
     // анаморфный кадр: 853.33 в 16.16 — не целое число, .75 обязано уйти вверх
     const init = moov(trak({ trackId: 7, handler: 'vide', timescale: 12800, width: 853.33, height: 479.75 }))
@@ -172,7 +219,10 @@ describe('parseInit на синтетических init-сегментах', ()
       trackId: 1, handler: 'vide', timescale: 12288, extraTimescale: 90000, width: 320, height: 240,
     }))
     expect(parseInit(init)).toEqual({
-      tracks: [{ trackId: 1, kind: 'video', timescale: 12288, codec: 'avc1', width: 320, height: 240 }],
+      tracks: [{
+        trackId: 1, kind: 'video', timescale: 12288, codec: 'avc1',
+        width: 320, height: 240, defaultSampleDuration: 0,
+      }],
     })
   })
 
@@ -239,7 +289,10 @@ describe('parseInit на синтетических init-сегментах', ()
 
     const minimal = trak({ trackId: 3, handler: 'vide', timescale: 1000, width: 320, height: 240, stsd })
     expect(parseInit(moov(minimal))).toEqual({
-      tracks: [{ trackId: 3, kind: 'video', timescale: 1000, codec: 'avc1', width: 320, height: 240 }],
+      tracks: [{
+        trackId: 3, kind: 'video', timescale: 1000, codec: 'avc1',
+        width: 320, height: 240, defaultSampleDuration: 0,
+      }],
     })
   })
 
@@ -267,7 +320,10 @@ describe('parseInit на синтетических init-сегментах', ()
     it('отбрасывается, не мешая разбору соседней целой дорожки', () => {
       const whole = trak({ trackId: 1, handler: 'vide', timescale: 12288, width: 320, height: 240 })
       expect(parseInit(moov(whole, broken))).toEqual({
-        tracks: [{ trackId: 1, kind: 'video', timescale: 12288, codec: 'avc1', width: 320, height: 240 }],
+        tracks: [{
+          trackId: 1, kind: 'video', timescale: 12288, codec: 'avc1',
+          width: 320, height: 240, defaultSampleDuration: 0,
+        }],
       })
     })
 

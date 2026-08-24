@@ -22,6 +22,20 @@ export interface TrackInfo {
   channels?: number
   /** Audio only: sampling rate in hertz as the container declares it. */
   sampleRate?: number
+  /**
+   * ISO BMFF only: how long one sample of this track lasts, in its own ticks, as the `trex` of
+   * the movie header states it. Zero when the movie states nothing.
+   *
+   * It belongs to the init segment and is read out of it because a media segment may state
+   * nothing at all about the length of its samples, and then this is the only thing that does.
+   * 14496-12 §8.8.3 gives a packager three places to say it — the `trun` per sample, the `tfhd`
+   * per fragment, this per movie — and a reader has to fall through all three. Measured on
+   * dzen.ru: the picture states it here and nowhere else, and read as absent every fragment
+   * measured out as an instant.
+   *
+   * Absent on a track that did not arrive in ISO BMFF: Matroska has no such field.
+   */
+  defaultSampleDuration?: number
 }
 
 export interface InitInfo {

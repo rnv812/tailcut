@@ -97,7 +97,10 @@ describe('webmToIso: the track it declares', () => {
   it('writes an init segment the ISO BMFF reader makes sense of', () => {
     expect(parseInit(converter.initBytes)).toEqual({
       tracks: [
-        { trackId: 1, kind: 'audio', timescale: OPUS_SAMPLE_RATE, codec: 'Opus', width: 0, height: 0 },
+        {
+          trackId: 1, kind: 'audio', timescale: OPUS_SAMPLE_RATE, codec: 'Opus',
+          width: 0, height: 0, defaultSampleDuration: 0,
+        },
       ],
     })
   })
@@ -222,7 +225,10 @@ describe('webmToIso: the picture track it declares', () => {
   it('writes an init segment the ISO BMFF reader makes sense of', () => {
     expect(parseInit(video.initBytes)).toEqual({
       tracks: [
-        { trackId: 1, kind: 'video', timescale: 1000, codec: 'vp09', width: 256, height: 144 },
+        {
+          trackId: 1, kind: 'video', timescale: 1000, codec: 'vp09',
+          width: 256, height: 144, defaultSampleDuration: 0,
+        },
       ],
     })
   })

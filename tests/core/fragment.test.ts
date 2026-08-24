@@ -236,6 +236,61 @@ describe('parseFragment', () => {
     expect(f.duration).toBe(500)
   })
 
+  it('takes the sample duration from the trex when neither the trun nor the tfhd states one', () => {
+    // dzen.ru, measured: the trun states sizes and no durations, the tfhd states no default, and
+    // the length of every sample is in the trex of the init segment — 3600 ticks of 90000.
+    // Without this fall-through the fragment measures out as an instant and the picture of a
+    // 92-second recording collapses to the one segment that did state its samples.
+    const tfhd = box('tfhd', [...u32(0x00020020), ...u32(1), ...u32(0x01010000)])
+    const tfdt = box('tfdt', [...u32(0), ...u32(540000)])
+    const trun = box('trun', [
+      ...u32(0x000201), ...u32(3), ...u32(100), ...u32(500), ...u32(500), ...u32(500),
+    ])
+
+    const f = parseFragment(moof([...tfhd, ...tfdt, ...trun]), [
+      { trackId: 1, defaultSampleDuration: 3600 },
+    ])!
+    expect(f.trackId).toBe(1)
+    expect(f.baseMediaDecodeTime).toBe(540000)
+    expect(f.duration).toBe(10800)
+  })
+
+  it('prefers the default of the tfhd to the one of the trex', () => {
+    // The order of 14496-12 §8.8.3: the fragment's own word about itself outranks the movie's.
+    const tfhd = box('tfhd', [...u32(0x00000008), ...u32(1), ...u32(1024)])
+    const tfdt = box('tfdt', [...u32(0), ...u32(0)])
+    const trun = box('trun', [...u32(0x000000), ...u32(4)])
+
+    const f = parseFragment(moof([...tfhd, ...tfdt, ...trun]), [
+      { trackId: 1, defaultSampleDuration: 3600 },
+    ])!
+    expect(f.duration).toBe(4096)
+  })
+
+  it('prefers the durations of the trun to every default', () => {
+    const tfhd = box('tfhd', [...u32(0x00000008), ...u32(1), ...u32(1024)])
+    const tfdt = box('tfdt', [...u32(0), ...u32(0)])
+    const trun = box('trun', [...u32(0x000100), ...u32(3), ...u32(10), ...u32(20), ...u32(30)])
+
+    const f = parseFragment(moof([...tfhd, ...tfdt, ...trun]), [
+      { trackId: 1, defaultSampleDuration: 3600 },
+    ])!
+    expect(f.duration).toBe(60)
+  })
+
+  it('takes the default of the track the fragment names, not of the first track declared', () => {
+    const tfhd = box('tfhd', [...u32(0x00020020), ...u32(2), ...u32(0x01010000)])
+    const tfdt = box('tfdt', [...u32(0), ...u32(0)])
+    const trun = box('trun', [...u32(0x000201), ...u32(2), ...u32(100), ...u32(500), ...u32(500)])
+
+    const f = parseFragment(moof([...tfhd, ...tfdt, ...trun]), [
+      { trackId: 1, defaultSampleDuration: 3600 },
+      { trackId: 2, defaultSampleDuration: 1023 },
+    ])!
+    expect(f.trackId).toBe(2)
+    expect(f.duration).toBe(2046)
+  })
+
   it('берёт первый traf муксированного moof и не смешивает дорожки', () => {
     // Поведение по плану: фрагмент описывает одну дорожку, вторая молча
     // пропускается, а не складывается в ту же длительность.

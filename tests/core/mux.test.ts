@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto'
 import { muxFragmentedMp4 } from '../../src/core/mux'
 import { boxOf, concatBytes } from '../../src/core/iso/writer'
 import { boxBody, childBoxes, topLevelBoxes, type Box } from '../../src/core/iso/reader'
+import { withTrexDefault, withoutTfhdDefault } from './trex-defaults'
 
 /** Video of the fixture: timescale 12288, three segments of two seconds, 48 frames each. */
 const videoInit = new Uint8Array(readFileSync('tests/fixtures/h264/init-stream0.m4s'))
@@ -19,6 +20,8 @@ const audioSegments = [1, 2, 3, 4].map(
 
 /** Ticks per second of the two tracks — the two scales the muxer has to reconcile. */
 const VIDEO_TIMESCALE = 12288
+/** Ticks one frame of the picture lasts: 12288 / 24 fps, and what its tfhd states per fragment. */
+const VIDEO_SAMPLE_TICKS = 512
 const AUDIO_TIMESCALE = 44100
 
 /**
@@ -598,15 +601,45 @@ describe('muxFragmentedMp4', () => {
   })
 
   it('states no length at all for a header the fragments give no length to', () => {
-    // A packager that states the sample durations in the trex alone and nowhere else leaves
-    // nothing here to measure the clip by. Zero is what a fragmented file says in that case, and
-    // a player works the length out of the fragments; the ten minutes of the source would be a
-    // number invented out of material that is not in the file.
+    // A track that has collected nothing leaves nothing here to measure the clip by. Zero is what
+    // a fragmented file says in that case, and a player works the length out of the fragments;
+    // the ten minutes of the source would be a number invented out of material that is not in
+    // the file.
     const file = muxFragmentedMp4([
       { initBytes: withDeclaredDuration(videoInit, 600), segments: [] },
     ])
 
     expect(declaredSeconds(file)).toEqual([0, 0, 0])
+  })
+
+  it('measures a clip whose sample durations are stated in the trex alone', () => {
+    // The same material described the other way ISO/IEC 14496-12 §8.8.3 allows: nothing about a
+    // sample's length in the fragment, all of it in the movie header. dzen.ru delivers its
+    // picture exactly so, and read as an instant per fragment it gave a clip of 6 seconds out of
+    // 92 — the one segment whose trun happened to state its own samples.
+    //
+    // Asserted against the tfhd-shaped build of the same bytes rather than against numbers of its
+    // own: what has to hold is that the description makes no difference to the file.
+    //
+    // The picture alone, because the sound of this fixture would hide the failure: its last
+    // fragment is a partial one and states its three samples in the trun, so the clip would come
+    // out the right length however the fragments in front of it were read.
+    const stated = muxFragmentedMp4([video])
+    const inTrex = muxFragmentedMp4([
+      {
+        initBytes: withTrexDefault(videoInit, 1, VIDEO_SAMPLE_TICKS),
+        segments: videoSegments.map(withoutTfhdDefault),
+      },
+    ])
+
+    // Two seconds a segment, three of them: read as instants, the clip ends where its last
+    // fragment begins and the file says four seconds of the six it holds.
+    for (const seconds of declaredSeconds(inTrex)) expect(seconds).toBeCloseTo(6, 2)
+    expect(declaredSeconds(inTrex)).toEqual(declaredSeconds(stated))
+
+    const probed = probe('mux-trex-defaults.mp4', inTrex)
+    expect(Number(probed.format.duration)).toBeCloseTo(6, 1)
+    expect(probed.streams.map((s) => Number(s.nb_read_frames))).toEqual([VIDEO_FRAMES])
   })
 
   it('gives the header alone for a track that has collected nothing yet', () => {

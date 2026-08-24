@@ -40,10 +40,42 @@ function parseCodec(data: Uint8Array, stsd: Box): string | null {
   return String.fromCharCode(body[12]!, body[13]!, body[14]!, body[15]!)
 }
 
+/**
+ * Sample duration each track's `trex` states, by track_ID; empty when the movie has no `mvex`.
+ *
+ * The last of the three places a packager may say how long a sample lasts (14496-12 §8.8.3), and
+ * on some sites the only one: dzen.ru writes its picture with no durations in the `trun` and no
+ * default in the `tfhd`, so a fragment of it can be measured by nothing else. It is read here,
+ * once per init segment, and travels on the track — a media segment carries no `moov` to look it
+ * up in.
+ *
+ * trex: version and flags, track_ID, sample_description_index, then default_sample_duration.
+ */
+function sampleDefaults(data: Uint8Array, moov: Box): Map<number, number> {
+  const defaults = new Map<number, number>()
+
+  const mvex = childBoxes(data, moov).find((b) => b.type === 'mvex')
+  if (!mvex) return defaults
+
+  for (const trex of childBoxes(data, mvex)) {
+    if (trex.type !== 'trex') continue
+
+    const body = boxBody(data, trex)
+    // A trex too short to hold the field says nothing rather than being read past its end.
+    if (body.byteLength < 16) continue
+
+    const v = new DataView(body.buffer, body.byteOffset, body.byteLength)
+    defaults.set(v.getUint32(4), v.getUint32(12))
+  }
+
+  return defaults
+}
+
 export function parseInit(data: Uint8Array): InitInfo | null {
   const moov = topLevelBoxes(data).find((b) => b.type === 'moov')
   if (!moov) return null
 
+  const defaults = sampleDefaults(data, moov)
   const tracks: TrackInfo[] = []
 
   for (const trak of childBoxes(data, moov).filter((b) => b.type === 'trak')) {
@@ -66,7 +98,15 @@ export function parseInit(data: Uint8Array): InitInfo | null {
 
     const { trackId, width, height } = parseTkhd(data, tkhd)
 
-    tracks.push({ trackId, kind, timescale: parseTimescale(data, mdhd), codec, width, height })
+    tracks.push({
+      trackId,
+      kind,
+      timescale: parseTimescale(data, mdhd),
+      codec,
+      width,
+      height,
+      defaultSampleDuration: defaults.get(trackId) ?? 0,
+    })
   }
 
   return tracks.length ? { tracks } : null
