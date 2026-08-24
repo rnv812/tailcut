@@ -50,6 +50,20 @@ export interface FragmentInfo {
   duration: number
 }
 
+/**
+ * Where bytes are, rather than the bytes themselves: a range inside whatever byte source the
+ * reader is holding — a snapshot file, a buffer of segments read back out of one.
+ *
+ * It lives here and not in the module that first needed it because two of them need it and they
+ * must mean the same thing by it: the snapshot writes ranges down, the export plan addresses
+ * samples by them, and a second declaration of the same two fields would be a second chance to
+ * disagree about whether `length` counts from `at` or to it.
+ */
+export interface Located {
+  at: number
+  length: number
+}
+
 /** A piece of media data laid on a timeline measured in seconds. */
 export interface Chunk {
   start: number

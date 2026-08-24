@@ -14,11 +14,12 @@ const CONTAINERS = new Set([
 ])
 
 /**
- * The boxes lying between two offsets of the buffer.
+ * The boxes lying end to end in a range of the buffer.
  *
- * Exported for the one reader that cannot get at its boxes through a parent: a sample entry keeps
- * a fixed run of fields in front of its children, so where they begin is worked out by whoever
- * knows what kind of entry it is — see src/core/iso/encryption.ts.
+ * Exported because two of the places that need it are not containers in the sense the reader
+ * knows: an stsd states a version and an entry count in front of its children, and a sample entry
+ * a whole run of fields. Neither can be added to CONTAINERS — childBoxes would read those fields
+ * as a box header — so the caller states where the children start and reads them out itself.
  */
 export function boxesIn(data: Uint8Array, from: number, to: number): Box[] {
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength)

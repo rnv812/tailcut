@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { topLevelBoxes, findBox, childBoxes, boxBody } from '../../src/core/iso/reader'
+import { topLevelBoxes, findBox, childBoxes, boxBody, boxesIn } from '../../src/core/iso/reader'
 
 const init = new Uint8Array(readFileSync('tests/fixtures/h264/init-stream0.m4s'))
 const seg = new Uint8Array(readFileSync('tests/fixtures/h264/chunk-stream0-00001.m4s'))
@@ -491,5 +491,40 @@ describe('срез с ненулевым byteOffset', () => {
     expect(childBoxes(body, trakInBody).map((b) => b.type)).toEqual(
       childBoxes(init, findBox(init, ['moov', 'trak'])!).map((b) => b.type),
     )
+  })
+})
+
+describe('boxesIn', () => {
+  it('reads the boxes of a range whose parent is not a container', () => {
+    // stsd is a full box: four bytes of version and flags, four of entry count, and only then the
+    // sample entries. It is not in the container list and cannot be — the eight bytes in front of
+    // its children would be read as a box header — so childBoxes hands back nothing for it.
+    const stsd = findBox(init, ['moov', 'trak', 'mdia', 'minf', 'stbl', 'stsd'])!
+    expect(childBoxes(init, stsd)).toEqual([])
+
+    const entries = boxesIn(init, stsd.start + stsd.headerSize + 8, stsd.start + stsd.size)
+    expect(entries.map((b) => b.type)).toEqual(['avc1'])
+    expect(entries[0]!.size).toBe(170)
+
+    // The same for the sample entry itself: a fixed run of fields, then the boxes describing the
+    // codec. Eighty-six bytes in for a picture — see src/core/iso/entry.ts.
+    const entry = entries[0]!
+    const children = boxesIn(init, entry.start + 86, entry.start + entry.size)
+    expect(children.map((b) => b.type)).toEqual(['avcC', 'pasp', 'btrt'])
+  })
+
+  it('stops at the end of the range and not at the end of the buffer', () => {
+    const stsd = findBox(init, ['moov', 'trak', 'mdia', 'minf', 'stbl', 'stsd'])!
+    const entry = boxesIn(init, stsd.start + stsd.headerSize + 8, stsd.start + stsd.size)[0]!
+    const avcC = boxesIn(init, entry.start + 86, entry.start + entry.size)[0]!
+
+    // A range that ends one byte short of the pasp behind the avcC yields the avcC alone: the box
+    // that does not fit is dropped rather than half-read.
+    const narrow = boxesIn(init, entry.start + 86, avcC.start + avcC.size + 15)
+    expect(narrow.map((b) => b.type)).toEqual(['avcC'])
+
+    // An empty range and a backwards one are both nothing, not a throw.
+    expect(boxesIn(init, 8, 8)).toEqual([])
+    expect(boxesIn(init, 32, 8)).toEqual([])
   })
 })
