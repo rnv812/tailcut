@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { createHash } from 'node:crypto'
 import {
   buildAudioInit,
   buildFragment,
@@ -376,5 +377,31 @@ describe('buildFragment: sync sample information', () => {
     expect(trunFlags(mixed) & 0x000400).toBeTruthy()
     expect(body.getUint32(ENTRIES_AT + 8)).toBe(0x01010000)
     expect(body.getUint32(ENTRIES_AT + 12 + 8)).toBe(0x02000000)
+  })
+})
+
+describe('the bytes of the init segments', () => {
+  it('are what they were before the movie boxes moved into boxes.ts', () => {
+    // A characterisation test, not a specification: it exists so that a refactoring which was
+    // supposed to change nothing is caught the moment it changes something. If a later task has
+    // a reason to write these boxes differently, this is the test that has to be updated by
+    // hand, deliberately, with the new bytes measured.
+    const audio = buildAudioInit({ trackId: TRACK_ID, timescale: TIMESCALE, sampleEntry })
+    expect(audio.byteLength).toBe(557)
+    expect(createHash('sha256').update(audio).digest('hex')).toBe(
+      '6a5619c8e25bc4f6f91812f538b1e7370c6e78e125f3c478009fccf424ac99ba',
+    )
+
+    const video = buildVideoInit({
+      trackId: TRACK_ID,
+      timescale: VIDEO_TIMESCALE,
+      sampleEntry: visualSampleEntry,
+      width: WIDTH,
+      height: HEIGHT,
+    })
+    expect(video.byteLength).toBe(611)
+    expect(createHash('sha256').update(video).digest('hex')).toBe(
+      '4a21c74bbd6512475d4280a8e36b5036c77862a2fee1abdb35aba62eb1174442',
+    )
   })
 })

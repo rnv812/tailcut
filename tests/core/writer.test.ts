@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { boxOf, concatBytes } from '../../src/core/iso/writer'
+import { boxOf, concatBytes, i64, u64 } from '../../src/core/iso/writer'
 import { boxBody, topLevelBoxes } from '../../src/core/iso/reader'
 
 const bytes = (...values: number[]): Uint8Array => new Uint8Array(values)
@@ -42,5 +42,19 @@ describe('concatBytes', () => {
 
   it('gives an empty buffer for nothing at all', () => {
     expect(concatBytes([])).toHaveLength(0)
+  })
+})
+
+describe('i64', () => {
+  it('writes a media_time the way an elst version 1 states it', () => {
+    const view = new DataView(i64(1024).buffer)
+    expect(i64(0).byteLength).toBe(8)
+    expect(view.getBigInt64(0)).toBe(1024n)
+
+    // −1 is the legal way to state an empty edit: a hole at the head of the track rather than an
+    // offset into the material. u64 exists and cannot say it — it clamps at zero, which would
+    // turn a mistake in the caller into a silently different edit instead of a visible one.
+    expect(new DataView(i64(-1).buffer).getBigInt64(0)).toBe(-1n)
+    expect(new DataView(u64(-1).buffer).getBigUint64(0)).toBe(0n)
   })
 })

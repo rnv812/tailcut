@@ -70,6 +70,17 @@ export function u64(value: number): Uint8Array {
   return out
 }
 
+/**
+ * A signed 64-bit field: the media_time of an edit list, which is a positive offset into the
+ * material or −1 for an edit that shows nothing at all. u64 above clamps a negative value to
+ * zero, which is right for a decode time and wrong for this.
+ */
+export function i64(value: number): Uint8Array {
+  const out = new Uint8Array(8)
+  new DataView(out.buffer).setBigInt64(0, BigInt(Math.trunc(value)))
+  return out
+}
+
 /** A run of zero bytes: the reserved fields boxes are full of. */
 export function zeroes(count: number): Uint8Array {
   return new Uint8Array(count)

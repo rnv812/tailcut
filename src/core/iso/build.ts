@@ -1,4 +1,14 @@
-import { ascii, boxOf, concatBytes, fullBoxOf, u16, u32, u64, u8, zeroes } from './writer'
+import { ascii, boxOf, concatBytes, fullBoxOf, u32, u64 } from './writer'
+import {
+  dataInformation,
+  fileType,
+  handler,
+  mediaHeader,
+  mediaInformationHeader,
+  movieHeader,
+  trackHeader,
+} from './boxes'
+import type { TrackKind } from '../../shared/types'
 
 /**
  * Writing a fragmented mp4 for a track that did not arrive in one.
@@ -21,21 +31,6 @@ import { ascii, boxOf, concatBytes, fullBoxOf, u16, u32, u64, u8, zeroes } from 
 
 /** Ticks per second of the movie timeline. Milliseconds, as every mp4 in the wild counts. */
 const MOVIE_TIMESCALE = 1000
-
-/** The unity matrix: the picture is shown as it was coded, with no rotation and no scaling. */
-const UNITY_MATRIX = u32(0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000)
-
-/** Full volume, as an 8.8 fixed-point number. */
-const FULL_VOLUME = 0x0100
-
-/** track_enabled | track_in_movie: the track plays, and it is part of the presentation. */
-const TRACK_FLAGS = 0x000003
-
-/** 'und' as an mdhd packs a language: three five-bit letters, each offset from 0x60. */
-const UNDETERMINED_LANGUAGE = 0x55c4
-
-/** self-contained: the media lives in this very file, so the dref entry names nothing. */
-const DREF_SELF_CONTAINED = 0x000001
 
 /**
  * Sample flags for a frame every other frame is independent of: sample_depends_on = 2, and
@@ -62,9 +57,6 @@ const TRUN_SAMPLE_FLAGS = 0x000400
 
 /** Size and type: an mdat holding a media segment never needs the 64-bit form. */
 const MDAT_HEADER_SIZE = 8
-
-/** Whether a track shows a picture or plays a sound: the two are built out of different boxes. */
-type MediaKind = 'video' | 'audio'
 
 /** One track to declare. The codec shows up only as the sample entry it is described by. */
 export interface TrackSpec {
@@ -126,25 +118,21 @@ export function buildVideoInit(spec: VideoTrackSpec): Uint8Array {
 
 function buildInit(
   spec: TrackSpec,
-  kind: MediaKind,
+  kind: TrackKind,
   width: number,
   height: number,
   defaultSampleFlags: number,
 ): Uint8Array {
   const trak = boxOf(
     'trak',
-    trackHeader(spec.trackId, kind, width, height),
+    trackHeader(spec.trackId, kind, width, height, 0),
     boxOf(
       'mdia',
-      mediaHeader(spec.timescale),
-      kind === 'video' ? handler('vide', 'VideoHandler') : handler('soun', 'SoundHandler'),
+      mediaHeader(spec.timescale, 0),
+      handler(kind),
       boxOf(
         'minf',
-        kind === 'video'
-          // graphicsmode: copy, and an opcolor of three zeroes. The flags of a vmhd are fixed at
-          // one by the specification, unlike every other full box in this file.
-          ? fullBoxOf('vmhd', 0, 1, u16(0, 0, 0, 0))
-          : fullBoxOf('smhd', 0, 0, u16(0, 0)), // balance, reserved
+        mediaInformationHeader(kind),
         dataInformation(),
         sampleTable(spec.sampleEntry),
       ),
@@ -153,12 +141,12 @@ function buildInit(
 
   const moov = boxOf(
     'moov',
-    movieHeader(spec.trackId + 1),
+    movieHeader(MOVIE_TIMESCALE, 0, spec.trackId + 1),
     trak,
     boxOf('mvex', fullBoxOf('trex', 0, 0, u32(spec.trackId, 1, 0, 0, defaultSampleFlags))),
   )
 
-  return concatBytes([fileType(), moov])
+  return concatBytes([fileType('iso5', 0x200, ['iso5', 'iso6', 'mp41']), moov])
 }
 
 /**
@@ -190,70 +178,6 @@ export function buildFragment(
   const moof = boxOf('moof', mfhd, boxOf('traf', tfhd, tfdt, trackRun(samples, dataOffset)))
 
   return concatBytes([moof, mediaData(samples)])
-}
-
-function fileType(): Uint8Array {
-  return boxOf('ftyp', ascii('iso5'), u32(0x200), ascii('iso5'), ascii('iso6'), ascii('mp41'))
-}
-
-function movieHeader(nextTrackId: number): Uint8Array {
-  return fullBoxOf(
-    'mvhd',
-    0,
-    0,
-    u32(0, 0, MOVIE_TIMESCALE, 0), // creation, modification, timescale, duration
-    u32(0x00010000), // rate: normal speed
-    u16(FULL_VOLUME),
-    zeroes(10),
-    UNITY_MATRIX,
-    zeroes(24), // pre_defined
-    u32(nextTrackId),
-  )
-}
-
-/**
- * The track header. Volume belongs to a sound track and the frame size to a picture one, and each
- * writes zero where the other writes a number: that is how a reader that looks no further than
- * this box can still tell what it is holding.
- *
- * The frame size goes down as a 16.16 fixed-point number of pixels, which is the shape of the
- * field — it exists to allow a non-square display size, and a track coded and shown at the same
- * size states the coded one twice.
- */
-function trackHeader(trackId: number, kind: MediaKind, width: number, height: number): Uint8Array {
-  const video = kind === 'video'
-
-  return fullBoxOf(
-    'tkhd',
-    0,
-    TRACK_FLAGS,
-    u32(0, 0, trackId, 0, 0), // creation, modification, track_ID, reserved, duration
-    zeroes(8),
-    u16(0, 0, video ? 0 : FULL_VOLUME, 0), // layer, alternate_group, volume, reserved
-    UNITY_MATRIX,
-    u32(width * 0x10000, height * 0x10000),
-  )
-}
-
-function mediaHeader(timescale: number): Uint8Array {
-  return fullBoxOf(
-    'mdhd',
-    0,
-    0,
-    u32(0, 0, timescale, 0), // creation, modification, timescale, duration
-    u16(UNDETERMINED_LANGUAGE, 0), // language, pre_defined
-  )
-}
-
-function handler(type: string, name: string): Uint8Array {
-  return fullBoxOf('hdlr', 0, 0, u32(0), ascii(type), zeroes(12), ascii(name), u8(0))
-}
-
-function dataInformation(): Uint8Array {
-  return boxOf(
-    'dinf',
-    fullBoxOf('dref', 0, 0, u32(1), fullBoxOf('url ', 0, DREF_SELF_CONTAINED)),
-  )
 }
 
 function sampleTable(sampleEntry: Uint8Array): Uint8Array {
