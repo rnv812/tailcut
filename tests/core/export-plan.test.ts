@@ -238,6 +238,19 @@ describe('seamsOf', () => {
     expect(widestHole(wider.audio!)).toBeGreaterThan(seam!.pull + 1)
   })
 
+  it('finds a hole that lies between the first two samples', () => {
+    // The mirror of the case below, and the shape a stream chunked one frame to a fragment
+    // arrives in: an opening fragment of exactly one sample, and the dropout right behind it. A
+    // loop that starts one index in never compares that sample with the one after it, reports no
+    // seam at all, and the two seconds stay in the clip as a freeze on the very first frame.
+    const video = madeTrack('video', 12_288, 512, [
+      { at: 0, count: 1 },
+      { at: 24_576, count: 24 },
+    ])
+
+    expect(seamsOf({ video })).toEqual([{ from: 512 / 12_288, to: 2, pull: 2 - 512 / 12_288 }])
+  })
+
   it('finds a hole that lies between the last two samples', () => {
     // A closing run of exactly one sample — the tail a packager leaves at the end of a recording,
     // or a single frame that arrived after a long stall. A loop stopping one index short of the
@@ -463,6 +476,36 @@ describe('planClip', () => {
     expect(Math.abs(pulls[0]! - pulls[1]!)).toBeLessThan(0.001)
   })
 
+  it('pulls both tracks across a hole a single tick wide', () => {
+    // The narrowest hole there is. One tick of the picture is 81 microseconds and nothing to look
+    // at, but the sound around it lost 192 ticks of its own — 4.4 ms — and the pair is pulled by
+    // the smaller of the two, which is the tick. Read as no hole at all, the tick stays in front
+    // of the picture while the sound keeps the whole of its 192: the two part by 4 ms at this
+    // seam and stay parted, because nothing later in the clip brings them back.
+    const video = madeTrack('video', 12_288, 512, [
+      { at: 0, count: 4 }, // ends at 2048
+      { at: 2049, count: 4 }, // one tick behind it
+    ])
+    const audio = madeTrack('audio', 44_100, 1024, [
+      { at: 0, count: 7 }, // ends at 7168, inside the picture's tick
+      { at: 7360, count: 7 }, // 192 ticks behind it
+    ])
+    const source = { video, audio }
+
+    const [seam] = seamsOf(source)
+    expect(seam!.pull).toBeCloseTo(1 / 12_288, 12)
+
+    const plan = planClip(source, { in: 0, out: 0.5, sound: true })
+    // The picture's hole is the smaller one, so all of it goes: every frame states its own length.
+    expect(trackByKind(plan.tracks, 'video').samples.filter((s) => s.duration !== 512)).toEqual([])
+    // The sound moved by that same tick — 3.59 of its own, to the nearest one — and carries what
+    // is left of its own hole on the packet in front of the seam.
+    const audio_ = trackByKind(plan.tracks, 'audio')
+    expect(audio_.samples.filter((s) => s.duration !== 1024).map((s) => s.duration)).toEqual([
+      1024 + 192 - 4,
+    ])
+  })
+
   it('rounds the entry point to the nearest tick of the track', () => {
     // The one place in the program where seconds go back into ticks, and the one fixture family
     // cannot exercise it: 512 ticks of 12288 and 1024 of 44100 divide and multiply back exactly
@@ -537,6 +580,71 @@ describe('planClip', () => {
     // sound, which never stopped, plays on. 24576 ticks of hole on top of its own 512.
     const stretched = video.samples.filter((s) => s.duration !== 512)
     expect(stretched.map((s) => s.duration)).toEqual([512 + 24576])
+  })
+
+  it('keeps every tick of a one-sided hole, however narrow the hole is', () => {
+    // Nothing pulls a hole the sound does not share, so the whole of it stays in front of the
+    // picture whatever its width — and the narrow ones are the dangerous ones. A hole of a tick,
+    // or of a few hundred, dropped instead of kept is up to 167 ms of picture gone at this
+    // timescale, per seam and cumulative over the clip, and the file still opens and still plays:
+    // only the stts deltas moved, so the picture runs ahead of a sound that never stopped.
+    const video = madeTrack('video', 12_288, 512, [
+      { at: 0, count: 4 }, // ends at 2048
+      { at: 2049, count: 4 }, // a tick behind it, ending at 4097
+      { at: 4397, count: 4 }, // 300 ticks behind that, ending at 6445
+      { at: 8445, count: 4 }, // and 2000 behind that
+    ])
+    const audio = madeTrack('audio', 44_100, 1024, [{ at: 0, count: 40 }])
+    const source = { video, audio }
+
+    // Every one of the three is the picture's alone: the sound plays through all of them.
+    expect(seamsOf(source).map((seam) => seam.pull)).toEqual([0, 0, 0])
+
+    const plan = planClip(source, { in: 0, out: 1, sound: true })
+    const stretched = trackByKind(plan.tracks, 'video').samples.filter((s) => s.duration !== 512)
+    expect(stretched.map((s) => s.duration)).toEqual([512 + 1, 512 + 300, 512 + 2000])
+    // The sound has no hole to carry anywhere.
+    expect(trackByKind(plan.tracks, 'audio').samples.filter((s) => s.duration !== 1024)).toEqual([])
+  })
+
+  it('leaves a hole that only touches a seam out of the pull', () => {
+    // A hole that meets a seam at an instant belongs to no seam: there was material on the other
+    // track for every moment of it, so none of it is closed and all of it stays in front of the
+    // sound. Answered with the seam's pull instead, the packet in front of such a hole comes out
+    // 0.3 s short and everything behind it plays that much early against a picture that did not
+    // move. Both edges have to be strict, so both are here: the sound resumes exactly where the
+    // picture's hole opens, and stops again exactly where that hole closes.
+    const video = madeTrack('video', 12_288, 512, [
+      { at: 0, count: 24 }, // a second of picture, then a second of none
+      { at: 24_576, count: 24 },
+    ])
+    const audio = madeTrack('audio', 44_100, 1024, [
+      { at: 0, count: 20 }, // stops at 20480 and resumes at 44100 — exactly 1 s, the seam's edge
+      { at: 44_100, count: 10 }, // ends at 54340: the hole that does lie inside the seam
+      { at: 67_720, count: 20 }, // ends at 88200 — exactly 2 s, the seam's other edge
+      { at: 132_300, count: 20 },
+    ])
+    const source = { video, audio }
+
+    const [seam] = seamsOf(source)
+    expect([seam!.from, seam!.to]).toEqual([1, 2])
+    // Pulled by the one hole of the sound that lies inside it: 13380 ticks of 44100, 0.30 s.
+    expect(seam!.pull).toBeCloseTo(13_380 / 44_100, 9)
+
+    const plan = planClip(source, { in: 0, out: 4, sound: true })
+    const packets = trackByKind(plan.tracks, 'audio').samples
+    // The two touching holes keep every tick of themselves; the one inside the seam is closed
+    // whole, so it leaves nothing on the packet in front of it.
+    expect(packets.filter((s) => s.duration !== 1024).map((s) => s.duration)).toEqual([
+      1024 + 23_620,
+      1024 + 44_100,
+    ])
+    // The picture, whose hole the seam is measured across, carries what the pull did not take:
+    // 12288 ticks of hole less the 3728 the sound's 13380 come to in the picture's scale.
+    const frames = trackByKind(plan.tracks, 'video').samples
+    expect(frames.filter((s) => s.duration !== 512).map((s) => s.duration)).toEqual([
+      512 + 12_288 - 3728,
+    ])
   })
 
   it('drops the sound when the clip asks for none', () => {

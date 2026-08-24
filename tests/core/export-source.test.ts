@@ -9,6 +9,8 @@ import {
 } from '../../src/core/export/source'
 import { findBox } from '../../src/core/iso/reader'
 import { parseInit } from '../../src/core/iso/init'
+import { samplesInSegment } from '../../src/core/iso/samples'
+import { boxOf, concatBytes, fullBoxOf, u32, u64 } from '../../src/core/iso/writer'
 import type { Located } from '../../src/shared/types'
 
 const read = (path: string): Uint8Array => new Uint8Array(readFileSync(`tests/fixtures/${path}`))
@@ -39,6 +41,39 @@ function renumberedTraf(segment: Uint8Array, trackId: number): Uint8Array {
     trackId,
   )
   return copy
+}
+
+/**
+ * A muxed segment: one moof with a traf per track, and the sample bytes of all of them behind it.
+ * Built by hand because nothing in the repository is muxed — every packager here, and our own
+ * WebM rewriter with it, writes one track to a segment.
+ */
+function muxedSegment(...trackIds: number[]): Uint8Array {
+  const COUNT = 2
+  const SIZE = 4
+  const traf = (trackId: number, dataOffset: number): Uint8Array =>
+    boxOf(
+      'traf',
+      // default-base-is-moof, and one duration and one size for every sample of the run
+      fullBoxOf('tfhd', 0, 0x020000 | 0x000008 | 0x000010, u32(trackId, 512, SIZE)),
+      fullBoxOf('tfdt', 1, 0, u64(0)),
+      fullBoxOf('trun', 0, 0x000001, u32(COUNT, dataOffset)),
+    )
+
+  // A trun addresses its samples from the first byte of the moof, so the moof has to be measured
+  // before it can be written: built once to be measured, once for keeps. The fields are of fixed
+  // width, so the second comes out exactly as long as the first.
+  const moofOf = (offsets: number[]): Uint8Array =>
+    boxOf(
+      'moof',
+      fullBoxOf('mfhd', 0, 0, u32(1)),
+      ...trackIds.map((trackId, i) => traf(trackId, offsets[i]!)),
+    )
+  const measured = moofOf(trackIds.map(() => 0))
+  const moof = moofOf(trackIds.map((_, i) => measured.byteLength + 8 + i * COUNT * SIZE))
+  const payload = new Uint8Array(trackIds.length * COUNT * SIZE).fill(0x5a)
+
+  return concatBytes([moof, boxOf('mdat', payload)])
 }
 
 describe('sourceTrackOf', () => {
@@ -117,6 +152,28 @@ describe('sourceTrackOf', () => {
     // Read exactly as the untouched segment is: the number in the traf changes nothing else.
     expect(track.samples).toEqual(untouched.samples)
     expect(track.samples).toHaveLength(48)
+  })
+
+  it('refuses a segment of two tracks that numbers neither of them the way the init does', () => {
+    // The fallback above stands on there being one track the segment could be about. Where there
+    // are two there is no such certainty, and taking whichever traf came first hands this track
+    // the samples of the other one — sound indexed as picture, copied into the file as picture,
+    // and nothing anywhere saying so: the sizes add up and the writer writes what it is handed.
+    // Refusing the segment costs the track of the recording and says so by leaving it empty.
+    const muxed = muxedSegment(7, 8)
+    const map = new ByteMap()
+    expect(
+      samplesInSegment(muxed, new Map()).map((track) => track.trackId),
+      'the segment does not carry the two trafs this test is about',
+    ).toEqual([7, 8])
+
+    expect(
+      sourceTrackOf({
+        kind: 'video',
+        initBytes: VIDEO_INIT,
+        segments: [{ bytes: muxed, at: map.place(muxed) }],
+      }),
+    ).toBeNull()
   })
 
   it('skips a segment it cannot read instead of throwing', () => {
@@ -245,6 +302,24 @@ describe('bytesFrom', () => {
       expect(from + sample.source.length).toBe(bytes.byteLength)
       expect(lookup(sample.source)).toEqual(bytes.subarray(from, from + sample.source.length))
     }
+  })
+
+  it('reads a sample that begins where the slice in front of it ends', () => {
+    // Slices laid end to end: a snapshot is read in one piece, and the ranges an export fetches
+    // meet wherever two segments were stored next to each other. The first byte of a slice
+    // belongs to that slice, so the search has to step past the one it has run off the end of
+    // instead of stopping on it — stopping there looks for the sample in the buffer in front of
+    // it, runs off the end of that, and throws on the first sample of every slice but the first.
+    const material = VIDEO[0]!
+    const slices: Located[] = [
+      { at: 0, length: 10 },
+      { at: 10, length: 10 },
+    ]
+    const lookup = bytesFrom(slices, [material.subarray(0, 10), material.subarray(10, 20)])
+
+    expect(lookup({ at: 10, length: 4 })).toEqual(material.subarray(10, 14))
+    // And the last byte of the slice in front of it is still that slice's own.
+    expect(lookup({ at: 9, length: 1 })).toEqual(material.subarray(9, 10))
   })
 
   it('finds the buffer a sample is in and refuses one that was never read', () => {
