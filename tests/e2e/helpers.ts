@@ -349,14 +349,27 @@ export interface Playback {
  * Plays a saved file through to the end in a browser and reports what happened.
  *
  * A browser of its own, without the extension: what is under test is the file, and nothing the
- * extension does while a finished clip is being played would belong in the answer. The flag turns
- * on the track lists — `HTMLMediaElement.audioTracks` is behind it in Chromium, and without it a
- * page has no way of saying how many audio tracks a file was found to have.
+ * extension does while a finished clip is being played would belong in the answer.
+ *
+ * Two flags. `AudioVideoTracks` turns on the track lists — `HTMLMediaElement.audioTracks` is
+ * behind it in Chromium, and without it a page has no way of saying how many audio tracks a file
+ * was found to have. `--disable-audio-output` keeps the browser away from the machine's sound
+ * device: playback is clocked by the audio output, and on a host without one the clock crawls —
+ * measured here on a plain ffmpeg-made clip of five seconds that reached 1.02 s in twenty, having
+ * nothing to do with tailcut at all. A clip with sound in it then never fires `ended`, and the
+ * suite reads a fact about the host as a fact about the file.
+ *
+ * It is not a weakening, and the callers are what keep it honest: what they read is `audioBytes`,
+ * the count of bytes the audio decoder actually consumed, and the decoder runs the same without a
+ * device to play into. Measured on the same clip: 46 230 bytes decoded and `ended` at 5.000 s with
+ * the flag, against 11 162 bytes and a stall without it. Take the decoding away and every scenario
+ * with sound fails on `audioBytes > 0` instead of passing quietly. The element itself stays
+ * unmuted — a muted element is the case where the decoder may never be asked for a byte.
  */
 export async function playInBrowser(file: string): Promise<Playback> {
   const browser = await chromium.launch({
     headless: false,
-    args: ['--enable-blink-features=AudioVideoTracks'],
+    args: ['--enable-blink-features=AudioVideoTracks', '--disable-audio-output'],
   })
 
   try {
@@ -421,7 +434,12 @@ export interface Remuxed {
  * network and needs no escaping beyond the encoding.
  */
 export async function playThroughMse(file: string, type: string): Promise<Remuxed> {
-  const browser = await chromium.launch({ headless: false })
+  // Away from the sound device for the same reason as in playInBrowser: this one waits for `ended`
+  // too, and a host with no audio output makes the play head crawl whatever is being played.
+  const browser = await chromium.launch({
+    headless: false,
+    args: ['--disable-audio-output'],
+  })
 
   try {
     const page = await browser.newPage()
