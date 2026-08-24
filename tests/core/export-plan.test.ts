@@ -146,6 +146,21 @@ function pullsAcrossSeam(source: ClipSource, tracks: PlannedTrack[]): number[] {
   })
 }
 
+/**
+ * Where every planned sample is composed in the file being written, in ticks counted from the
+ * head of it: the decode time it lands at, which is the sum of the durations in front of it, plus
+ * its own composition offset. The frame the clip opens on is the earliest of these at or after
+ * `skipTicks`; everything composed before that is run-up the edit list hides.
+ */
+function composedFrames(track: PlannedTrack): Array<{ at: number; source: Located }> {
+  let decode = 0
+  return track.samples.map((sample) => {
+    const at = decode + sample.cts
+    decode += sample.duration
+    return { at, source: sample.source }
+  })
+}
+
 /** Everything the fixture has. */
 const whole = sourceOf([1, 2, 3], [1, 2, 3, 4])
 /** The same with the second segment of each track thrown away: a hole in the middle. */
@@ -359,6 +374,48 @@ describe('planClip', () => {
     // The out point is the end of the material, so what is left is everything behind the skip.
     expect(presentationTicks(video)).toBe(58368)
     expect(plan.duration).toBeCloseTo(4.75, 6)
+  })
+
+  it('enters at the key frame the requested frame is composed after, not the one it decodes after', () => {
+    // The two clocks part company at every key frame of this material. The fixture carries
+    // B-frames, so each sync sample is composed 1024 ticks — two frames of 512 — after it is
+    // decoded, and the last frames of a group are the ones that show it: frame 22 of the
+    // presentation is composed at 12288, which is to the tick the **decode** time of the key
+    // frame at index 24, while the frame itself decodes at index 21, three samples in front of
+    // that key frame.
+    //
+    // Entered by decode time, the run therefore starts at the key frame at 24 and the frame that
+    // was asked for is not in the file at all: the clip opens two frames late, on the key frame
+    // itself, and every measure of the plan agrees with itself while saying so — `skipTicks`
+    // comes out zero and the head lands exactly where the request pointed. Entered by
+    // composition time, the run starts at the key frame in front of the group the frame belongs
+    // to and the edit list hides the whole of it. The gap between the two clocks is the reorder
+    // delay, and it is the width of the mistake: two frames here, more on a deeper pyramid.
+    const key = whole.video.samples[24]!
+    const asked = whole.video.samples[21]!
+    expect(key.sync).toBe(true)
+    expect(key.pts - key.dts).toBe(1024)
+    expect(asked.pts).toBe(key.dts) // 12288 on one clock, 12288 on the other, two frames apart
+    expect(asked.sync).toBe(false)
+
+    const plan = planClip(whole, { in: 22 / 24, out: 6, sound: false })
+    const video = trackByKind(plan.tracks, 'video')
+
+    // The whole recording, from the key frame that opens it: everything in decode order in front
+    // of frame 22 is a reference for it or for the frames behind it, and it is cheap to keep.
+    expect(video.samples).toHaveLength(144)
+    expect(video.samples[0]!.source).toEqual(whole.video.samples[0]!.source)
+    // Twenty-four frames of run-up hidden — 12288 − 0 — and not the nothing an entry at 24 hides.
+    expect(video.skipTicks).toBe(12288)
+
+    // And the frame the clip opens on is the frame that was asked for, which is the promise of
+    // §8.2 the whole stage exists for. Entered at the key frame at 24, the earliest composition
+    // in the file lies 1024 ticks past a skip of zero, and this is the frame two later.
+    const shown = composedFrames(video)
+      .filter((frame) => frame.at >= video.skipTicks)
+      .sort((a, b) => a.at - b.at)[0]!
+    expect(shown.at).toBe(video.skipTicks)
+    expect(shown.source).toEqual(asked.source)
   })
 
   it('enters at the first key frame there is when the material starts mid-group', () => {
