@@ -191,7 +191,7 @@ window.addEventListener('message', (event: MessageEvent) => {
     // starts at document_start, and a single-page application loads the next video without a
     // navigation. Left to the moment of opening alone, the popup would say "Untitled" for a
     // video that has a name, and the saved file would be named after nothing.
-    store.retitle(pageContext.url, pageContext.title)
+    store.pageIsAt(pageContext.url, pageContext.title)
     return
   }
 

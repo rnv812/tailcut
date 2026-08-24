@@ -725,18 +725,23 @@ export class SessionStore {
   }
 
   /**
-   * The page has learned its own title, and the sessions already opened on it take it on.
+   * The page says where it stands. Two things follow from it, and both are corrections of a
+   * signature that was written before the page had finished saying it.
    *
-   * A session is signed with the title of the moment its first init segment arrived, and on a
-   * single-page application that moment comes before the title does: recording starts at
+   * The title. A session is signed with the title of the moment its first init segment arrived,
+   * and on a single-page application that moment comes before the title does: recording starts at
    * document_start, where <head> is not parsed yet, and the next video of the feed is loaded
    * without a navigation at all. Without this the file would be saved under the name of nothing.
+   * Only sessions at that very address take it, compared the way the merge key compares an
+   * address — through the referral marks. A page that has moved on keeps the previous video
+   * titled as it was: the material is that video's, and so is its name.
    *
-   * Only the sessions of that very address are touched, and the address is compared the way the
-   * merge key compares it — through the referral marks. A page that has moved on to another video
-   * keeps the previous one titled as it was: the material is that video's, and so is its name.
+   * The address. See followTo: the page can move after the material of the video it is moving to
+   * has already gone by.
    */
-  retitle(url: string, title: string): void {
+  pageIsAt(url: string, title: string): void {
+    this.followTo(url, title)
+
     // An empty title is not news but the absence of it: a page that has not filled in its <title>
     // yet, or a frame that never will. Erasing a name we already have for it would be a loss.
     if (!title) return
@@ -744,6 +749,73 @@ export class SessionStore {
     const normalized = normalizeUrl(url)
     for (const session of this.sessions.values()) {
       if (normalizeUrl(session.url) === normalized) session.title = title
+    }
+  }
+
+  /**
+   * The recording the page was feeding when it moved goes with it.
+   *
+   * A session is signed with the address the page showed when its first segment arrived, and on a
+   * feed of short clips that is not yet the address of what the segment holds. Measured on
+   * youtube.com/shorts: the arrow key opens the MediaSource of the next short and puts its first
+   * bytes through appendBuffer 6 to 156 milliseconds before `location.href` becomes that short's
+   * address — and in one run a whole short of 18.5 seconds arrived in a burst of eight calls
+   * spanning six milliseconds, with nothing appended afterwards to carry a corrected address. Two
+   * of four shorts were signed with the short above them: two rows of one name in the popup, and
+   * a file saved under the name of a stranger.
+   *
+   * The correction is the page's own word and not a guess about the bytes, and four things bound
+   * what it may take.
+   *
+   * The freshest session and no other. What the page is moving to is what it has just been fed,
+   * and material that arrived earlier belongs to what was on the screen earlier.
+   *
+   * A session with something in it. A stream that has announced itself and delivered nothing has
+   * no claim on any address yet — it will be signed the ordinary way when its first segment
+   * arrives. This is what keeps a second player, opened on the page the moment it moved, from
+   * swallowing the player that was already there.
+   *
+   * A session triage has not confirmed. A confirmed one has been watched playing, in view, for
+   * the whole grace period; its identity is settled, and a page that then moves on — to the feed,
+   * to the next article, leaving the player running in a corner — says nothing about it.
+   *
+   * An address nothing else stands at. A session already keyed there was opened by material of
+   * its own, and that video is accounted for: this stream is not it.
+   */
+  private followTo(url: string, title: string): void {
+    let freshest: StoredSession | undefined
+    for (const session of this.sessions.values()) {
+      if (!freshest || session.lastSeenAt > freshest.lastSeenAt) freshest = session
+    }
+
+    if (!freshest || freshest.confirmed) return
+    if (normalizeUrl(freshest.url) === normalizeUrl(url)) return
+    if (!freshest.tracks.some((track) => track.map.runs().length > 0)) return
+
+    const source = this.sources.get([...freshest.sources][0] ?? '')
+    if (!source) return
+
+    const key = sessionKey({
+      url,
+      codecs: source.codecs,
+      durationSeconds: source.durationSeconds,
+    })
+    if (this.sessions.has(key)) return
+
+    this.sessions.delete(freshest.key)
+    freshest.key = key
+    freshest.url = url
+    freshest.title = title
+    this.sessions.set(key, freshest)
+
+    // The sources move with it, or the next init at the new address would read as a move to
+    // another video and clear the headers of a stream that never stopped (see sourceFor).
+    const normalized = normalizeUrl(url)
+    for (const sourceId of freshest.sources) {
+      const feeding = this.sources.get(sourceId)
+      if (!feeding) continue
+      feeding.key = key
+      feeding.url = normalized
     }
   }
 

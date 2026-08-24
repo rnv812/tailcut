@@ -297,7 +297,7 @@ describe('SessionStore: what ends up in a session', () => {
     store.append({ ...page, title: '', bytes: init })
     expect(store.list()[0]!.title).toBe('')
 
-    store.retitle(page.url, 'Real title')
+    store.pageIsAt(page.url, 'Real title')
 
     // Without this the popup signs the session "Untitled" and the saved file is named after
     // nothing, though the page has been telling its title all along.
@@ -310,7 +310,7 @@ describe('SessionStore: what ends up in a session', () => {
 
     // The address the title arrives with carries a rewind mark the address of the first segment
     // did not. Compare the two literally and the session stays nameless on every rewind.
-    store.retitle(`${page.url}&t=42`, 'Real title')
+    store.pageIsAt(`${page.url}&t=42`, 'Real title')
 
     expect(store.list()[0]!.title).toBe('Real title')
   })
@@ -321,7 +321,7 @@ describe('SessionStore: what ends up in a session', () => {
 
     // A feed of short clips moves on without a navigation: the title that comes now belongs to
     // the next video, while the material of this session belongs to the previous one.
-    store.retitle('https://site.example/watch?v=next', 'Next clip')
+    store.pageIsAt('https://site.example/watch?v=next', 'Next clip')
 
     expect(store.list()[0]!.title).toBe('Clip')
   })
@@ -332,7 +332,7 @@ describe('SessionStore: what ends up in a session', () => {
 
     // Between two videos a player blanks its <title> for a moment. Taking that at face value
     // would cost the session the name it already had.
-    store.retitle(page.url, '')
+    store.pageIsAt(page.url, '')
 
     expect(store.list()[0]!.title).toBe('Clip')
   })
@@ -742,6 +742,153 @@ describe('SessionStore: a packager that states its sample durations in the trex'
 
     const track = only(store.list()[0]!)
     expect(track.map.duration()).toBe(0)
+  })
+})
+
+describe('SessionStore: a page whose address arrives after the stream does', () => {
+  /**
+   * youtube.com/shorts, measured. Pressing the arrow key opens the MediaSource of the next short
+   * and puts its first bytes through appendBuffer before location.href becomes that short's
+   * address — 78 and 156 milliseconds ahead of it in one run, and in another a whole short of
+   * 18.5 seconds arrived in eight calls spanning six milliseconds with nothing appended after.
+   * Two shorts out of four were signed with the short above them: two rows of one name in the
+   * popup, and a file saved under the name of a stranger.
+   *
+   * Nothing in the stream marks the moment: it is one stream, still flowing or already finished,
+   * and the page simply caught up with itself. What marks it is the page saying where it stands.
+   */
+  const later = { ...page, url: 'https://www.youtube.com/shorts/second', title: 'The second short' }
+
+  it('signs the recording the page was feeding with the address the page moved to', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: seg1 })
+
+    store.pageIsAt(later.url, later.title)
+
+    // One session and not two: it is one stream, and the page only caught up with itself.
+    expect(store.list()).toHaveLength(1)
+    const session = store.list()[0]!
+    expect(session.url).toBe(later.url)
+    expect(session.title).toBe(later.title)
+    expect(only(session).map.runs().flatMap((r) => r.chunks.map(shapeOf))).toEqual([
+      [0, 2, seg1.byteLength],
+    ])
+  })
+
+  it('puts it under the key of that address, so the next video does not merge into it', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: seg1 })
+    store.pageIsAt(later.url, later.title)
+
+    expect(store.list()[0]!.key).toBe(
+      sessionKey({ url: later.url, codecs: ['avc1'], durationSeconds: Infinity }),
+    )
+  })
+
+  it('goes on collecting the same stream into it after the move', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: seg1 })
+    store.pageIsAt(later.url, later.title)
+    store.append({ ...later, bytes: seg2, now: 2000 })
+
+    expect(store.list()).toHaveLength(1)
+    expect(store.list()[0]!.url).toBe(later.url)
+    expect(only(store.list()[0]!).map.runs().flatMap((r) => r.chunks.map(shapeOf))).toEqual([
+      [0, 2, seg1.byteLength],
+      [2, 4, seg2.byteLength],
+    ])
+  })
+
+  it('takes the init of the stream with it instead of losing the buffer it opened', () => {
+    // The address settles and then the page re-sends the init segment, as youtube does every few
+    // seconds. Read as "this source has moved to another video", that init would clear the
+    // headers of a stream still flowing and every segment after it would land nowhere.
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: seg1 })
+    store.pageIsAt(later.url, later.title)
+    store.append({ ...later, bytes: init, now: 2000 })
+    store.append({ ...later, bytes: seg2, now: 2100 })
+    store.append({ ...later, bytes: videoSegs[2]!, now: 2200 })
+
+    expect(store.list()).toHaveLength(1)
+    expect(only(store.list()[0]!).map.duration()).toBeCloseTo(6, 3)
+  })
+
+  it('leaves a confirmed recording where it is: what was watched keeps its name', () => {
+    // The miniplayer. The page has shown this video playing for the grace period, triage has
+    // granted the session its life, and a later move of the page — to the feed, to another
+    // article — says nothing about the material still arriving from the player left running.
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.promotePending('s1')
+    store.append({ ...page, bytes: seg1 })
+
+    store.pageIsAt(later.url, later.title)
+
+    expect(store.list()).toHaveLength(1)
+    expect(store.list()[0]!.url).toBe(page.url)
+    expect(store.list()[0]!.title).toBe(page.title)
+  })
+
+  it('leaves a stream that has delivered nothing yet where it is', () => {
+    // A second player opening on the page the moment it moved: its init is in, its first segment
+    // is not, and it has no claim on any address until it brings one. Without this the player
+    // that was already there would be swallowed by the address of the one that just appeared.
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+
+    store.pageIsAt(later.url, later.title)
+
+    expect(store.list()[0]!.url).toBe(page.url)
+    expect(store.list()[0]!.title).toBe(page.title)
+  })
+
+  it('leaves the recording of a video the page has come back around to', () => {
+    // The address the page moved to already has a session of its own, opened by material of its
+    // own. That video is accounted for, so this stream is not it.
+    const store = new SessionStore()
+    store.append({ ...later, sourceId: 's2', bytes: init })
+    store.append({ ...later, sourceId: 's2', bytes: seg1 })
+    store.append({ ...page, bytes: init, now: 2000 })
+    store.append({ ...page, bytes: seg2, now: 2100 })
+
+    store.pageIsAt(later.url, later.title)
+
+    expect(store.list().map((s) => s.url).sort()).toEqual([page.url, later.url])
+  })
+
+  it('does not move a recording for a mark in the address that names no other video', () => {
+    // ?t= is where the video was resumed from and not which video it is: normalizeUrl strips it,
+    // and a session must not be re-keyed for it.
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: seg1 })
+
+    const key = store.list()[0]!.key
+    store.pageIsAt(`${page.url}&t=30`, page.title)
+
+    expect(store.list()).toHaveLength(1)
+    expect(store.list()[0]!.key).toBe(key)
+    expect(store.list()[0]!.url).toBe(page.url)
+  })
+
+  it('moves only the freshest recording and not everything on the page', () => {
+    // Material that arrived earlier belongs to what was on the screen earlier. Only the one the
+    // page was feeding at the moment it moved goes with it.
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init, now: 1000 })
+    store.append({ ...page, bytes: seg1, now: 1000 })
+    const other = { ...page, sourceId: 's2', url: 'https://site.example/watch?v=other', title: 'Other' }
+    store.append({ ...other, bytes: init, now: 2000 })
+    store.append({ ...other, bytes: seg1, now: 2000 })
+
+    store.pageIsAt(later.url, later.title)
+
+    expect(store.list().map((s) => s.url)).toEqual([later.url, page.url])
   })
 })
 
