@@ -15,6 +15,8 @@ import { editOffset, samplesInSegment, trackDefaults } from '../../src/core/iso/
 import { audioSampleEntry, sampleEntryBytes, videoSampleEntry } from '../../src/core/iso/entry'
 import { parseInit } from '../../src/core/iso/init'
 import { presentationTicks } from '../../src/core/iso/progressive'
+import { parseInit as parseWebmInit } from '../../src/core/webm/init'
+import { webmToIso } from '../../src/core/webm/to-iso'
 import type { Located, TrackKind } from '../../src/shared/types'
 
 const read = (path: string): Uint8Array => new Uint8Array(readFileSync(path))
@@ -45,15 +47,18 @@ class Bank {
   }
 }
 
-function trackOf(bank: Bank, initPath: string, segmentPaths: string[], kind: TrackKind): SourceTrack {
-  const init = read(initPath)
+function trackFrom(
+  bank: Bank,
+  init: Uint8Array,
+  segments: Uint8Array[],
+  kind: TrackKind,
+): SourceTrack {
   const defaults = trackDefaults(init)
   const declared = parseInit(init)!.tracks.find((t) => t.kind === kind)!
   const entry = kind === 'video' ? videoSampleEntry(init) : audioSampleEntry(init)
   const samples = []
 
-  for (const path of segmentPaths) {
-    const segment = read(path)
+  for (const segment of segments) {
     const at = bank.add(segment)
     for (const track of samplesInSegment(segment, defaults)) {
       samples.push(...locateSamples(track.samples, at))
@@ -70,6 +75,13 @@ function trackOf(bank: Bank, initPath: string, segmentPaths: string[], kind: Tra
     samples,
   }
 }
+
+const trackOf = (
+  bank: Bank,
+  initPath: string,
+  segmentPaths: string[],
+  kind: TrackKind,
+): SourceTrack => trackFrom(bank, read(initPath), segmentPaths.map(read), kind)
 
 const videoPath = (n: number): string => `tests/fixtures/h264/chunk-stream0-0000${n}.m4s`
 const audioPath = (n: number): string => `tests/fixtures/h264/chunk-stream1-0000${n}.m4s`
@@ -200,6 +212,27 @@ const uneven: ClipSource = (() => {
 const midGroup: SourceTrack = (() => {
   const video = trackOf(new Bank(), VIDEO_INIT, [1, 2].map(videoPath), 'video')
   return { ...video, samples: video.samples.slice(5) }
+})()
+
+/** The type the page opened its SourceBuffer with; a VP9 track cannot be converted without it. */
+const VP9_TYPE = 'video/webm; codecs="vp09.00.10.08"'
+
+/**
+ * The picture of the WebM fixture, converted to ISO exactly as the capture converts it: sixty
+ * frames of VP9 at ten a second, timed in ticks of 1000, the first of them at 14 ms.
+ *
+ * Every frame of it therefore begins on a boundary that is off the whole tenth of a second —
+ * 0.014, 0.114, … 4.014 — and those are the boundaries a double cannot state exactly. No fixture
+ * packaged as mp4 has one: 512 ticks of 12288 and 1024 of 44100 divide and multiply back to the
+ * tick, which is why the rounding at both ends of a request is measured on this material.
+ */
+const webmPicture: SourceTrack = (() => {
+  const init = parseWebmInit(read('tests/fixtures/webm/init-stream0.webm'))!
+  const converter = webmToIso(init, VP9_TYPE)!
+  const segments = [1, 2, 3].map(
+    (n) => converter.segment(read(`tests/fixtures/webm/chunk-stream0-0000${n}.webm`))!.bytes,
+  )
+  return trackFrom(new Bank(), converter.initBytes, segments, 'video')
 })()
 
 const trackByKind = (tracks: PlannedTrack[], kind: TrackKind): PlannedTrack =>
@@ -583,6 +616,86 @@ describe('planClip', () => {
     expect(track.samples).toHaveLength(45)
     expect(track.samples[0]!.source).toEqual(video.samples[15]!.source)
     expect(track.skipTicks).toBe(0)
+
+    // The same rounding from the side truncating never reaches. 0.50049 s measures back as
+    // 45044.1 — a tick short of that same frame — so the frame on the screen at that instant is
+    // the one before it, frame fourteen, and that is where a clip asked for that instant starts.
+    // Rounded up instead of to the nearest tick it is 45045 on the nose, frame fifteen opens the
+    // clip, and the 33 ms of frame fourteen the user was looking at when the handle was placed
+    // are gone from the file with nothing to say they ever were there.
+    const early = planClip({ video }, { in: 0.50049, out: (60 * 3003) / 90_000, sound: false })
+    const from14 = early.tracks[0]!
+    expect(from14.samples).toHaveLength(46)
+    expect(from14.samples[0]!.source).toEqual(video.samples[14]!.source)
+    expect(from14.skipTicks).toBe(0)
+  })
+
+  it('rounds the out point to the nearest tick as well, and not up to the next one', () => {
+    // The other end of the same rule, on the material that can state it. The WebM fixture times
+    // its picture in milliseconds and starts it at 14, so the forty-first frame begins at 4.014 s
+    // exactly — and 4.014 × 1000 comes back out of a double as 4014.0000000000005, a hair above
+    // the tick that frame begins on. Rounded up, the hair takes the frame in: the clip runs
+    // 4.100 s and shows a frame past the instant the editor asked it to stop at. Rounded to the
+    // nearest tick it is the 4.000 s that was asked for, which is what the in point above does at
+    // its own end — and the plan has exactly one rule for turning a second into a tick.
+    const scale = webmPicture.timescale
+    const boundary = webmPicture.samples[40]!
+    expect([scale, webmPicture.editOffset]).toEqual([1000, 0])
+    expect(webmPicture.samples).toHaveLength(60)
+    expect(boundary.pts / scale).toBe(4.014)
+    expect(4.014 * scale).toBeGreaterThan(boundary.pts)
+
+    const plan = planClip({ video: webmPicture }, { in: 0, out: 4.014, sound: false })
+    const track = plan.tracks[0]!
+
+    // Forty frames, the last of them the one before the boundary: the frame that begins at the
+    // out point is the first frame not shown, and it stays out of the file.
+    expect(track.samples).toHaveLength(40)
+    expect(track.samples[39]!.source).toEqual(webmPicture.samples[39]!.source)
+    expect(track.skipTicks).toBe(0)
+    expect(plan.duration).toBeCloseTo(4, 9)
+
+    // And the same rule from below, which is the half a truncated tick gets wrong: 4.0146 s
+    // lands six tenths of a tick inside that same frame, part of the frame is therefore shown,
+    // and the whole of it goes into the file — the last sample any part of which is shown.
+    // Truncated to 4014 the frame is dropped instead, and a request six tenths of a millisecond
+    // longer than the one above comes out a tenth of a second shorter.
+    const inside = planClip({ video: webmPicture }, { in: 0, out: 4.0146, sound: false })
+    expect(inside.tracks[0]!.samples).toHaveLength(41)
+    expect(inside.tracks[0]!.samples[40]!.source).toEqual(boundary.source)
+    expect(inside.duration).toBeCloseTo(4.1, 9)
+  })
+
+  it('enters on the frame that is on the screen at the in point, not on the one after it', () => {
+    // An in point off the frame grid, which is where a dragged handle lands: 2.02 s sits inside
+    // the frame that begins at 2.0000, and the next one begins at 2.0417. The frame on the screen
+    // at that instant is the first of the two, and the clip has to open on it — §8.2 promises the
+    // clip starts at the instant that was asked for, and entering at the frame after it starts
+    // the clip 42 ms late instead. Nothing in the file would say so: the edit list dutifully
+    // hides the extra frame, the plan agrees with itself, and the material is simply not there.
+    const onScreen = whole.video.samples[48]!
+    const next = whole.video.samples[51]!
+    const seconds = (sample: SourceSample): number =>
+      (sample.pts - whole.video.editOffset) / whole.video.timescale
+    expect(seconds(onScreen)).toBeCloseTo(2, 9)
+    expect(seconds(next)).toBeCloseTo(2 + 1 / 24, 9)
+
+    const plan = planClip(whole, { in: 2.02, out: 3, sound: false })
+    const video = trackByKind(plan.tracks, 'video')
+
+    // 25600 − 24576: the frame at two seconds is composed a key frame's reorder delay after the
+    // sample the run starts at, and that delay is the whole of what the edit list hides here.
+    expect(video.skipTicks).toBe(1024)
+    const shown = composedFrames(video)
+      .filter((frame) => frame.at >= video.skipTicks)
+      .sort((a, b) => a.at - b.at)[0]!
+    expect(shown.at).toBe(video.skipTicks)
+    expect(shown.source).toEqual(onScreen.source)
+
+    // A second of clip out of the 0.98 that was asked for: an in point inside a frame rounds the
+    // head outwards, never inwards. Entered at the frame after it the clip comes out 0.958 —
+    // a frame short of the request instead of a frame over it.
+    expect(plan.duration).toBeCloseTo(1, 9)
   })
 
   it('rounds what is left of a collapsed hole to the nearest tick as well', () => {

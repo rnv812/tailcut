@@ -3,17 +3,42 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { concatBytes } from '../../src/core/iso/writer'
 import { FrameTable, framesOf, retimeToPlan, type Frame } from '../../src/core/timeline/frames'
+import { parseInit as parseWebmInit } from '../../src/core/webm/init'
+import { webmToIso } from '../../src/core/webm/to-iso'
 import type { Located } from '../../src/shared/types'
 
+const read = (path: string): Uint8Array => new Uint8Array(readFileSync(`tests/fixtures/${path}`))
+
 /** Video of the fixture: 320×240, 24 fps, timescale 12288, three segments of 48 frames. */
-const INIT = new Uint8Array(readFileSync('tests/fixtures/h264/init-stream0.m4s'))
-const SEGMENTS = [1, 2, 3].map(
-  (n) => new Uint8Array(readFileSync(`tests/fixtures/h264/chunk-stream0-0000${n}.m4s`)),
-)
+const INIT = read('h264/init-stream0.m4s')
+const SEGMENTS = [1, 2, 3].map((n) => read(`h264/chunk-stream0-0000${n}.m4s`))
 const TIMESCALE = 12_288
+/** Every init the fixtures hold numbers its one track 1, the converted WebM ones included. */
 const TRACK_ID = 1
 /** The elst of the fixture: 1024 ticks of B-frame delay the player takes back off every time. */
 const EDIT_TICKS = 1_024
+
+/**
+ * The sound of the same recording: AAC at 44100, 259 packets of 1024 ticks and a last one of 408
+ * where the recording stops mid-packet.
+ */
+const AAC_INIT = read('h264/init-stream1.m4s')
+const AAC_SEGMENTS = [1, 2, 3, 4].map((n) => read(`h264/chunk-stream1-0000${n}.m4s`))
+const AAC_TIMESCALE = 44_100
+
+/**
+ * The sound of the WebM fixture, converted to ISO the way the capture converts it: Opus at 48000,
+ * 300 packets, the first of them 21 ms long and the other 299 of the 20 ms Opus is written in.
+ *
+ * The odd packet is the long one here and the short one on the AAC track above, and the picture of
+ * every fixture in the repository runs at one length throughout — so these two tracks together are
+ * the only material that says which end of the sort `fps` reads.
+ */
+const OPUS = webmToIso(parseWebmInit(read('webm/init-stream1.webm'))!)!
+const OPUS_SEGMENTS = [1, 2, 3, 4].map(
+  (n) => OPUS.segment(read(`webm/chunk-stream1-0000${n}.webm`))!.bytes,
+)
+const OPUS_TIMESCALE = 48_000
 
 /** Where the bytes of the segments would sit in a snapshot; the table carries the places through. */
 function placed(segments: Uint8Array[]): Array<{ bytes: Uint8Array; source: Located }> {
@@ -25,10 +50,10 @@ function placed(segments: Uint8Array[]): Array<{ bytes: Uint8Array; source: Loca
   })
 }
 
-const table = (segments: Uint8Array[]) =>
-  FrameTable.of(
-    framesOf({ init: INIT, trackId: TRACK_ID, timescale: TIMESCALE, segments: placed(segments) }),
-  )
+const tableOf = (init: Uint8Array, timescale: number, segments: Uint8Array[]) =>
+  FrameTable.of(framesOf({ init, trackId: TRACK_ID, timescale, segments: placed(segments) }))
+
+const table = (segments: Uint8Array[]) => tableOf(INIT, TIMESCALE, segments)
 
 /**
  * The material as the capture saved it — the init and the segments end to end — written out so
@@ -205,6 +230,27 @@ describe('FrameTable', () => {
     expect(whole.keyframeTimes()[1]).toBeCloseTo(1, 9)
   })
 
+  it('lists the keyframes on the session clock and not on the clock of the file', () => {
+    // These are the times an entry point is chosen from, and the choice is made against a request
+    // the editor states in seconds of the session — the same seconds `planClip` takes. Here the
+    // preview enters two seconds into the recording: the two keyframes of the segment stand at 2
+    // and 3 on that clock and at 0 and 1 in the file, so a table answering with the file's clock
+    // hands the cut a key frame two seconds away from the one the user pointed at. On a table
+    // where the two clocks coincide — every other one in this file — the mistake is invisible.
+    const rows = table([SEGMENTS[1]!]).frames()
+    const shifted = FrameTable.of(
+      retimeToPlan(rows, {
+        timescale: TIMESCALE,
+        skipTicks: 0,
+        samples: rows.map((frame) => ({ source: frame.source, duration: 512, cts: 0 })),
+      }),
+    )
+
+    expect([...shifted.keyframeTimes()]).toEqual([2, 3])
+    // The same two frames on the clock this question is not asked in.
+    expect(shifted.frames().filter((frame) => frame.sync).map((frame) => frame.out)).toEqual([0, 1])
+  })
+
   it('asks for the middle of a frame and not for its boundary', () => {
     // This is the whole difference between missing backwards every time and never missing.
     for (const at of [0, 1, 40, 143]) {
@@ -263,6 +309,27 @@ describe('FrameTable', () => {
 
   it('takes the rate from the median frame length', () => {
     expect(whole.fps()).toBeCloseTo(24, 6)
+  })
+
+  it('takes the median and not the odd packet at either end of the sort', () => {
+    // The picture of the fixture is 144 frames of one length, where the median, the longest and
+    // the shortest are the same number and the rate above measures nothing. Both sound tracks
+    // carry the odd packet the median is there to see past, and they carry it at opposite ends:
+    // Opus has one of 21 ms among 299 of 20, AAC one of 9.25 ms among 259 of 23.2. Read off the
+    // longest packet the Opus track answers 47.6 instead of 50 — five percent out on one packet
+    // in three hundred — and read off the shortest the AAC track answers 108 instead of 43.
+    const opus = tableOf(OPUS.initBytes, OPUS_TIMESCALE, OPUS_SEGMENTS)
+    const aac = tableOf(AAC_INIT, AAC_TIMESCALE, AAC_SEGMENTS)
+    const lengths = (rows: readonly Frame[], scale: number) =>
+      [...new Set(rows.map((frame) => Math.round(frame.duration * scale)))].sort((a, b) => a - b)
+
+    expect(opus.count()).toBe(300)
+    expect(lengths(opus.frames(), OPUS_TIMESCALE)).toEqual([960, 1008])
+    expect(aac.count()).toBe(260)
+    expect(lengths(aac.frames(), AAC_TIMESCALE)).toEqual([408, 1024])
+
+    expect(opus.fps()).toBeCloseTo(50, 6)
+    expect(aac.fps()).toBeCloseTo(AAC_TIMESCALE / 1024, 6)
   })
 
   it('finds a frame by the clock of the file as well as by the clock of the session', () => {
