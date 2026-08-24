@@ -861,6 +861,23 @@ describe('SessionStore: a page whose address arrives after the stream does', () 
     expect(store.list().map((s) => s.url).sort()).toEqual([page.url, later.url])
   })
 
+  it('drops the previous video\'s name when the page moves before it has a new one', () => {
+    // youtube fills the <title> of a short in after the address of it: measured on the page as
+    // "YouTube" for a whole short. Keeping the name of the video above it would be a lie the
+    // popup shows and a file name the save writes; no name at all is the truth, and the title
+    // arrives on the next word from the page.
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: seg1 })
+
+    store.pageIsAt(later.url, '')
+    expect(store.list()[0]!.url).toBe(later.url)
+    expect(store.list()[0]!.title).toBe('')
+
+    store.pageIsAt(later.url, later.title)
+    expect(store.list()[0]!.title).toBe(later.title)
+  })
+
   it('does not move a recording for a mark in the address that names no other video', () => {
     // ?t= is where the video was resumed from and not which video it is: normalizeUrl strips it,
     // and a session must not be re-keyed for it.
