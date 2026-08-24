@@ -65,7 +65,7 @@ const keyFor = (url: string, codecs: string[] = ['avc1']): string =>
 type Post = { message: unknown; to: unknown }
 
 /** A download request in the shape the bridge hands it to Chrome. */
-type Download = { url: string; filename: string }
+type Download = { url: string; filename: string; conflictAction?: string }
 
 /** A receiving window: the bridge sends messages to it, the test looks at what arrived. */
 function receiver() {
@@ -177,6 +177,8 @@ function installWindow(referrer = REFERRER) {
   const revoked: string[] = []
   /** The download id; undefined — Chrome refused, as it does when writing is forbidden. */
   let downloadId: number | undefined = 1
+  /** What Chrome puts into runtime.lastError when it refuses; empty — it said nothing. */
+  let failureMessage = 'Download failed'
 
   // URL stays the real one: its constructor is called by the session key on every init segment.
   // Only the static blob methods, which Node does not have, are added.
@@ -212,7 +214,7 @@ function installWindow(referrer = REFERRER) {
     downloads: {
       download(options: Download, done: (id?: number) => void) {
         downloads.push(options)
-        lastError = downloadId === undefined ? { message: 'Download failed' } : undefined
+        lastError = downloadId === undefined ? { message: failureMessage } : undefined
         lastErrorRead = false
 
         done(downloadId)
@@ -283,9 +285,14 @@ function installWindow(referrer = REFERRER) {
     savedType(index = 0): string | undefined {
       return blobs.get(downloads[index]?.url ?? '')?.type
     },
-    /** Chrome refuses the download: writing forbidden, no space, cancelled by the user. */
-    failDownloads(): void {
+    /**
+     * Chrome refuses the download: writing forbidden, no space, a name the file system will not
+     * take, cancelled by the user. What it says about it comes back through runtime.lastError,
+     * and a refusal without a word to it is a shape the caller has to survive too.
+     */
+    failDownloads(message = 'Download failed'): void {
       downloadId = undefined
+      failureMessage = message
     },
   }
 }
@@ -732,8 +739,9 @@ describe('the bridge refuses a page that plays encrypted media', () => {
     const reply = win.save(key)
 
     // The popup keeps the key of a session it listed a moment ago: a save by that key must find
-    // nothing, and no file may reach the disk.
-    expect(reply.received).toEqual([{ ok: false }])
+    // nothing, and no file may reach the disk. It is gone from the registry, and that is exactly
+    // what the popup is told — the same words a session evicted by triage earns.
+    expect(reply.received).toEqual([{ ok: false, reason: 'gone' }])
     expect(win.downloads, 'a file of a protected page was written').toEqual([])
   })
 
@@ -981,6 +989,105 @@ describe('the bridge saves what it collected as a file', () => {
     expect(win.downloads[0]!.filename.endsWith('.mp4')).toBe(true)
   })
 
+  /**
+   * Titles as real pages write them.
+   *
+   * A page title travels into the file system through this name, and Chrome refuses a name it
+   * does not like by refusing the whole download — a refusal the popup used to answer by blaming
+   * the session for being gone. Measured: a title carrying U+200E LEFT-TO-RIGHT MARK, which is
+   * neither whitespace nor in the forbidden set, survived every step and took the save with it.
+   */
+  describe('a title that a file system will not take as it stands', () => {
+    /** Saves a session of this page under this title and gives back the name Chrome was handed. */
+    async function nameFor(title: string): Promise<string> {
+      const win = await loadBridge()
+      win.context(PAGE_URL, title)
+      win.append(initBytes)
+      win.append(seg1Bytes)
+
+      win.save(keyFor(PAGE_URL))
+
+      expect(win.downloads, 'no download was started').toHaveLength(1)
+      return win.downloads[0]!.filename
+    }
+
+    it('leaves no bidirectional mark in the name', async () => {
+      // A title in Arabic or Hebrew carries these by the handful, and a page writes them into a
+      // Latin title too — YouTube marks the direction around a channel name.
+      const name = await nameFor('\u200eНовости\u200f — \u202bэфир\u202c')
+
+      expect(name).toBe('Новости — эфир.mp4')
+    })
+
+    it('leaves no zero-width character in the name', async () => {
+      const name = await nameFor('A\u200bB\u200cC\u200dD\ufeffE')
+
+      // Invisible and removed rather than turned into a space: they stand between letters of one
+      // word as often as between words, and a gap where the eye sees none is a name nobody asked
+      // for.
+      expect(name).toBe('ABCDE.mp4')
+    })
+
+    it('leaves no control character in the name, of either range', async () => {
+      // C0 is already cut; C1 — the range above DEL — arrives from pages served in a legacy
+      // encoding and is refused by Chrome exactly as C0 is.
+      const name = await nameFor('Se\u0001rie\u007fs\u0085 o\u009fne')
+
+      expect(name).toBe('Se rie s o ne.mp4')
+    })
+
+    it('saves a title of nothing but invisible characters under the name of the extension', async () => {
+      const name = await nameFor('\u200e\u200b\u202a\u202c\ufeff')
+
+      // Cleaned out, such a title is an empty name, and an empty name is no name for a file.
+      expect(name).toBe('tailcut.mp4')
+    })
+
+    it('does not cut a title of emoji in the middle of a character', async () => {
+      // One letter and then emoji, so that the hundredth code unit falls between the halves of
+      // one of them: every emoji is a pair of surrogates, and a name holding half a pair is not
+      // valid Unicode — Chrome refuses it exactly as it refuses a control character.
+      const name = await nameFor(`a${'🎬'.repeat(200)}`)
+
+      expect(name, `a lone surrogate in the name: ${JSON.stringify(name)}`).not.toMatch(
+        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
+      )
+      expect(name.endsWith('.mp4')).toBe(true)
+    })
+
+    it('keeps a name inside the byte limit of a file system, not only the character limit', async () => {
+      const name = await nameFor('語'.repeat(300))
+
+      // A file system counts its limit in bytes and a page title is counted in characters: one
+      // character of this title is three bytes, so a hundred of them are three hundred — past
+      // what the common limits allow, and the download is refused with the popup saying nothing
+      // to the point.
+      expect(new TextEncoder().encode(name).byteLength).toBeLessThanOrEqual(204)
+      expect(name.endsWith('.mp4')).toBe(true)
+      expect(name.length, 'the title was thrown away instead of being cut').toBeGreaterThan(10)
+    })
+
+    it('keeps the emoji that do fit, rather than throwing the title away', async () => {
+      const name = await nameFor('🎬 Ночной эфир')
+
+      expect(name).toBe('🎬 Ночной эфир.mp4')
+    })
+  })
+
+  it('lets Chrome make a name of its own for the second file of the same title', async () => {
+    const win = await loadBridge()
+    win.context(PAGE_URL, 'Clip')
+    win.append(initBytes)
+    win.append(seg1Bytes)
+
+    win.save(keyFor(PAGE_URL))
+
+    // A feed leaves a session per video behind and their titles collide as a matter of course —
+    // and so do two long titles that differ past the length limit. Said out loud rather than left
+    // to the default: the alternative is the second save overwriting the first file in silence.
+    expect(win.downloads[0]).toMatchObject({ conflictAction: 'uniquify' })
+  })
+
   it('reports a started download into the port of the request', async () => {
     const win = await loadBridge()
     win.context()
@@ -992,7 +1099,7 @@ describe('the bridge saves what it collected as a file', () => {
     expect(reply.received).toEqual([{ ok: true }])
   })
 
-  it('refuses an unknown key instead of trying to download nothing', async () => {
+  it('refuses an unknown key instead of trying to download nothing, and says which refusal it is', async () => {
     const win = await loadBridge()
     win.context()
     win.append(initBytes)
@@ -1001,7 +1108,7 @@ describe('the bridge saves what it collected as a file', () => {
     // The page was reloaded while the popup was open: its key points at nothing.
     const reply = win.save('no such session')
 
-    expect(reply.received).toEqual([{ ok: false }])
+    expect(reply.received).toEqual([{ ok: false, reason: 'gone' }])
     expect(win.downloads, 'the bridge downloaded a session that does not exist').toEqual([])
   })
 
@@ -1011,24 +1118,40 @@ describe('the bridge saves what it collected as a file', () => {
     win.append(initBytes)
 
     // The player opened the stream and loaded nothing: there are no runs on the map. There is
-    // nowhere to take the longest one from, and the file would come out of a header alone.
+    // nowhere to take the longest one from, and the file would come out of a header alone. The
+    // session is right there in the registry, so «it may be gone from the page» would be a lie.
     const reply = win.save(keyFor(PAGE_URL))
 
-    expect(reply.received).toEqual([{ ok: false }])
+    expect(reply.received).toEqual([{ ok: false, reason: 'empty' }])
     expect(win.downloads).toEqual([])
   })
 
-  it('carries a refusal by Chrome to the popup as a refusal', async () => {
+  it('carries a refusal by Chrome to the popup as a refusal by Chrome', async () => {
     const win = await loadBridge()
     win.context()
     win.append(initBytes)
     win.append(seg1Bytes)
     win.failDownloads()
 
-    // No space on the disk, no write permission for the downloads directory, a user cancel.
+    // No space on the disk, no write permission for the downloads directory, a name the file
+    // system will not take, a user cancel. Answered as a plain «false» it was indistinguishable
+    // from a session that had been evicted, and the popup told the user the recording was gone
+    // while it sat in the registry untouched.
     const reply = win.save(keyFor(PAGE_URL))
 
-    expect(reply.received).toEqual([{ ok: false }])
+    expect(reply.received).toEqual([{ ok: false, reason: 'refused', detail: 'Download failed' }])
+  })
+
+  it('says what Chrome said, and does not invent a detail when Chrome gave none', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+    win.failDownloads('')
+
+    const reply = win.save(keyFor(PAGE_URL))
+
+    expect(reply.received).toEqual([{ ok: false, reason: 'refused' }])
   })
 
   it('reads a refusal by Chrome instead of leaving it to the frame console', async () => {

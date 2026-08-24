@@ -7,6 +7,8 @@ import {
   listSessions,
   saveAll,
   type Omission,
+  type SaveFailure,
+  type SaveResult,
   type SessionList,
 } from './api'
 
@@ -56,6 +58,29 @@ const UNREACHABLE = 'tailcut cannot reach the player on this page, so nothing of
 /** The same page, with something else on it that was recorded. */
 const UNREACHABLE_BESIDE = 'Another player on this page is out of reach and was not recorded.'
 
+/**
+ * Why no file appeared, in the words the user is shown.
+ *
+ * One sentence for each reason and not one for all three: answered as a single "could not save",
+ * the popup blamed the session for being gone whatever had happened. Measured on a title carrying
+ * an invisible U+200E LEFT-TO-RIGHT MARK — Chrome would not take the file name, the session was
+ * recording on untouched, and the user was sent looking for a recording that had not been lost.
+ */
+const SAVE_FAILED: Record<SaveFailure, string> = {
+  gone: 'This recording is no longer on the page.',
+  empty: 'There is nothing recorded to save yet.',
+  refused: 'Chrome would not save the file.',
+}
+
+/** A refusal that named no reason: an older bridge, or a tab that closed without answering. */
+const SAVE_FAILED_UNKNOWN = 'Could not save this session.'
+
+/** The complaint for one refusal, with whatever Chrome said about it after the sentence. */
+function complaintFor(failure: SaveResult): string {
+  const said = failure.reason ? SAVE_FAILED[failure.reason] : SAVE_FAILED_UNKNOWN
+  return failure.detail ? `${said} ${failure.detail}` : said
+}
+
 function Popup() {
   // null — the tab has not answered yet. An answer with no sessions in it differs from that: on
   // that the popup already knows there was nothing to record, and says so in words.
@@ -63,7 +88,9 @@ function Popup() {
   // The session the user picked out of the list; null — none was picked and the freshest stands.
   const [pickedKey, setPickedKey] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
-  const [failed, setFailed] = useState(false)
+  // The refusal of the last save, whole: the popup owes the user the reason and not only the
+  // fact. null — nothing has been refused since the last time the complaint was cleared.
+  const [failure, setFailure] = useState<SaveResult | null>(null)
 
   useEffect(() => {
     listSessions().then(setAnswer)
@@ -94,7 +121,7 @@ function Popup() {
   const pick = (key: string) => {
     setPickedKey(key)
     // The complaint belongs to the session it was made about.
-    setFailed(false)
+    setFailure(null)
   }
 
   // A code the popup has no words for shows nothing rather than an empty box: the bridge and the
@@ -103,10 +130,10 @@ function Popup() {
 
   const save = async () => {
     setSaving(true)
-    setFailed(false)
+    setFailure(null)
     const result = await saveAll(current.key)
     setSaving(false)
-    setFailed(!result.ok)
+    setFailure(result.ok ? null : result)
   }
 
   return (
@@ -141,9 +168,9 @@ function Popup() {
         <button class="primary" data-testid="save" disabled={saving} onClick={() => void save()}>
           {saving ? 'Saving…' : 'Save all'}
         </button>
-        {failed && (
+        {failure && (
           <div class="failed" data-testid="error" role="alert">
-            Could not save this session. It may be gone from the page.
+            {complaintFor(failure)}
           </div>
         )}
       </div>

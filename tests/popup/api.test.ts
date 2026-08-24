@@ -212,6 +212,47 @@ describe('saveAll', () => {
     expect(await saveAll(summary.key)).toEqual({ ok: false })
   })
 
+  it('carries the reason of the refusal, and what Chrome said about it', async () => {
+    const chrome = installChrome()
+    // The popup shows the reason to the user. Dropped here, a name Chrome would not take reaches
+    // the user as "this recording may be gone from the page" while it is being recorded on.
+    chrome.setSaveReply({ ok: false, reason: 'refused', detail: 'Invalid filename' })
+    const { saveAll } = await importApi()
+
+    expect(await saveAll(summary.key)).toEqual({
+      ok: false,
+      reason: 'refused',
+      detail: 'Invalid filename',
+    })
+  })
+
+  it('carries a reason that came without a detail as it is', async () => {
+    const chrome = installChrome()
+    chrome.setSaveReply({ ok: false, reason: 'gone' })
+    const { saveAll } = await importApi()
+
+    expect(await saveAll(summary.key)).toEqual({ ok: false, reason: 'gone' })
+  })
+
+  it('invents no reason out of an answer that names one nobody declared', async () => {
+    const chrome = installChrome()
+    // The answer crosses an extension message untyped, and a bridge of another version is a
+    // thing that happens. A word the popup has no sentence for would draw an empty complaint.
+    chrome.setSaveReply({ ok: false, reason: 'whatever', detail: 'x' })
+    const { saveAll } = await importApi()
+
+    expect(await saveAll(summary.key)).toEqual({ ok: false })
+  })
+
+  it('keeps nothing of the answer to a save that went through', async () => {
+    const chrome = installChrome()
+    chrome.setSaveReply({ ok: true, reason: 'gone' })
+    const { saveAll } = await importApi()
+
+    // A success carrying the leftovers of a refusal would light the complaint under a saved file.
+    expect(await saveAll(summary.key)).toEqual({ ok: true })
+  })
+
   it('counts an answer of nothing as a failure', async () => {
     const chrome = installChrome()
     // Chrome answers undefined when the channel closed with nobody answering.

@@ -339,6 +339,50 @@ describe('the popup and a save that failed', () => {
     expect(at('error')).toBeNull()
   })
 
+  it('names Chrome, and not the session, when it was Chrome that refused', async () => {
+    // The one failure the user cannot guess at. Measured on a title carrying U+200E LEFT-TO-RIGHT
+    // MARK: Chrome would not take the file name, the session sat in the registry recording on,
+    // and the popup told the user the recording was gone from the page.
+    await mount({
+      sessions: [fresh],
+      save: { ok: false, reason: 'refused', detail: 'Invalid filename' },
+    })
+
+    await click(saveButton())
+
+    const said = at('error')!.textContent!
+    expect(said).toContain('Invalid filename')
+    expect(said, 'the popup blamed the session for a refusal by Chrome').not.toContain('gone')
+  })
+
+  it('says the recording is gone only when it is gone', async () => {
+    await mount({ sessions: [fresh], save: { ok: false, reason: 'gone' } })
+
+    await click(saveButton())
+
+    expect(at('error')!.textContent).toContain('no longer on the page')
+  })
+
+  it('does not call an empty session a lost one', async () => {
+    // The stream opened and loaded nothing, or the second buffer has yet to bring a fragment.
+    // The session is right there in the list the popup is showing.
+    await mount({ sessions: [fresh], save: { ok: false, reason: 'empty' } })
+
+    await click(saveButton())
+
+    const said = at('error')!.textContent!
+    expect(said).toContain('nothing recorded')
+    expect(said).not.toContain('no longer on the page')
+  })
+
+  it('says something to the point when the refusal came with no reason to it', async () => {
+    await mount({ sessions: [fresh], save: { ok: false } })
+
+    await click(saveButton())
+
+    expect(at('error')!.textContent!.length).toBeGreaterThan(0)
+  })
+
   it('takes the complaint back when the next save goes through', async () => {
     const { setSaveReply } = await mount({ sessions: [fresh], save: { ok: false } })
 

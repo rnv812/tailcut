@@ -2,6 +2,7 @@ import {
   TOP_FRAME,
   type ExtensionToTab,
   type Omission,
+  type SaveFailure,
   type SaveResult,
   type SessionList,
   type SessionSummary,
@@ -9,7 +10,25 @@ import {
 
 // The answer is described by the protocol and not by the popup: let the two descriptions drift
 // apart and the popup would read fields the bridge does not send, showing undefined in silence.
-export type { Omission, SaveResult, SessionList, SessionSummary }
+export type { Omission, SaveFailure, SaveResult, SessionList, SessionSummary }
+
+/** The reasons the bridge may give; a reply naming anything else is a refusal without a reason. */
+const FAILURES: SaveFailure[] = ['gone', 'empty', 'refused']
+
+/**
+ * A refusal in a shape the popup can act on, out of whatever the tab actually answered.
+ *
+ * The reply crosses an extension message and is not typed on arrival: a bridge of another version,
+ * or a tab that answered nothing at all, has to come out as a refusal the popup can still show —
+ * with no reason to it rather than with a made-up one.
+ */
+function refusalOf(reply: SaveResult | undefined): SaveResult {
+  const reason = reply?.reason
+  if (!reason || !FAILURES.includes(reason)) return { ok: false }
+
+  const detail = reply?.detail
+  return typeof detail === 'string' && detail ? { ok: false, reason, detail } : { ok: false, reason }
+}
 
 /** What a tab that cannot answer amounts to: no sessions, and nothing said about the page. */
 const NOTHING: SessionList = { sessions: [] }
@@ -54,8 +73,10 @@ export async function listSessions(): Promise<SessionList> {
  * in the bridge, and its verdict comes back here.
  *
  * The answer is what the caller acts on: the bridge refuses when the session is gone — evicted by
- * triage, or lost to a reload under the open popup — and when Chrome refuses the download. Left
- * unread, a refusal is indistinguishable from a slow save: no file appears and nothing is said.
+ * triage, or lost to a reload under the open popup — when there is nothing in it to cut yet, and
+ * when Chrome refuses the download. Left unread, a refusal is indistinguishable from a slow save:
+ * no file appears and nothing is said. Read without its reason, it is worse than that — the popup
+ * used to answer a name Chrome would not take by telling the user the recording was gone.
  */
 export async function saveAll(key: string): Promise<SaveResult> {
   const tabId = await targetTabId()
@@ -66,7 +87,7 @@ export async function saveAll(key: string): Promise<SaveResult> {
     const result: SaveResult | undefined = await chrome.tabs.sendMessage(tabId, request, TOP_FRAME)
     // Chrome answers undefined when the channel closed with nobody answering: the tab was closed
     // or taken off the page while the file was being built. Nothing was saved.
-    return { ok: result?.ok === true }
+    return result?.ok === true ? { ok: true } : refusalOf(result)
   } catch {
     // A page with no content script, or a tab that is gone: an unhandled rejection would reach no
     // further than the console of the popup.

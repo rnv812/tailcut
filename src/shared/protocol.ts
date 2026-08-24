@@ -125,9 +125,30 @@ export type BridgeToPage = { type: 'tc:ready' } | SessionList
  */
 export type ExtensionToTab = { type: 'tc:list' } | { type: 'tc:save'; key: string }
 
+/**
+ * Why a save produced no file.
+ *
+ * Named rather than left as a plain `false`, because the popup has to say something to the user
+ * and the three are not the same news. Answered as one, the popup blamed the session for being
+ * gone whatever had happened — measured on a title carrying U+200E LEFT-TO-RIGHT MARK, where
+ * Chrome refused the file name and the user was told the recording had disappeared from a page
+ * that was still recording it.
+ *
+ * - `gone` — nothing in the registry under that key: evicted by triage, or lost with the page
+ *   under the open popup.
+ * - `empty` — the session is there and holds nothing a file could be cut from yet: a stream that
+ *   opened and loaded nothing, or a second buffer that has not brought its first fragment.
+ * - `refused` — Chrome would not start the download. What it said about it is in `detail`.
+ */
+export type SaveFailure = 'gone' | 'empty' | 'refused'
+
 /** What the bridge answers tc:save with. */
 export interface SaveResult {
   ok: boolean
+  /** Absent when the file was saved. */
+  reason?: SaveFailure
+  /** What Chrome answered when it refused; absent when it said nothing, and on the other two. */
+  detail?: string
 }
 
 /**
