@@ -519,6 +519,8 @@ export class SessionStore {
   private probation = new Map<string, Probation>()
   /** Sources whose rejection outlasted the review: nothing of them is kept any more. */
   private screenedOut = new Set<string>()
+  /** The page asked for a key system: see refuseDrm. Once set, it is never cleared. */
+  private drmRefused = false
 
   /**
    * Takes what a page appended to one of its SourceBuffers and works out for itself what it is.
@@ -529,6 +531,11 @@ export class SessionStore {
    * src/core/stream.ts — so the segments are recovered first, and only whole ones are read.
    */
   append(input: AppendInput): void {
+    // Nothing of a protected page is read at all — not even to keep a reader in its place. This
+    // is the one refusal that never turns (see refuseDrm), so there is no later verdict for a
+    // reader to be ready for, and parsing on would only be a way of holding on to the material.
+    if (this.drmRefused) return
+
     // Every append is read, whatever verdict stands over its source: a verdict decides whether
     // material is kept, not whether it is parsed. MSE gives a SourceBuffer a byte stream and not
     // a list of segments, so a reader that skipped the rejected stretch of one would come back
@@ -709,6 +716,39 @@ export class SessionStore {
   }
 
   /**
+   * The page has asked the browser for a key system: nothing of it is kept, and nothing more is
+   * taken in. §5.4 of the design refuses DRM before a single byte is copied, and §2 promises the
+   * user that a protected page is answered plainly instead of half-recorded.
+   *
+   * It is not a verdict and does not travel with one. A verdict is about an element — the watcher
+   * measures a <video> and speaks about the stream that element is playing — while the request
+   * for keys comes from the player and names no element and no media source at all. Measured on
+   * tv.apple.com, where the player sits inside a shadow root: tc:drm went out four times, a
+   * verdict not once, and the registry offered 149.6 MB of a protected page for saving. So the
+   * refusal comes in by itself and covers the whole page, sessions, sources, probation and all;
+   * the watcher rejecting the elements it can reach is a second line and not the first.
+   *
+   * It is also final. A page that has asked once may go on to play something unprotected — the
+   * survey saw sixteen capability probes on a news page whose video was in the clear — and this
+   * takes that page's recording with it. Telling a probe from real protection needs a signal we
+   * do not have here (the `encrypted` event, or the boxes of the stream itself), and until there
+   * is one the safe way round is this one: on a page that may be protected we keep nothing.
+   */
+  refuseDrm(): void {
+    this.drmRefused = true
+
+    // Everything, and not only what is listed: material under review is out of the list already
+    // (see Probation), and a verdict turning would hand it straight back.
+    this.sessions.clear()
+    this.sources.clear()
+    this.streams.clear()
+    this.probation.clear()
+    this.rejected.clear()
+    this.promoted.clear()
+    this.screenedOut.clear()
+  }
+
+  /**
    * Triage: the source is deemed junk. Its session leaves the registry unless it has been
    * confirmed or someone else is still feeding it; a confirmed session survives the rejection —
    * recording simply freezes (a pause, a hidden tab, the element leaving the screen) and what has
@@ -722,6 +762,7 @@ export class SessionStore {
    * either would mean losing every segment of the video that follows, verdict or no verdict.
    */
   dropPending(sourceId: string): void {
+    if (this.drmRefused) return
     this.rejected.add(sourceId)
 
     const source = this.sources.get(sourceId)
@@ -742,6 +783,10 @@ export class SessionStore {
 
   /** Probation served: a rejection of this source no longer takes its session away. */
   promotePending(sourceId: string): void {
+    // The watcher goes on measuring the elements it can reach, and one of them may well deserve
+    // its life. On a page that asked for keys none of them gets it: see refuseDrm.
+    if (this.drmRefused) return
+
     this.promoted.add(sourceId)
     this.rejected.delete(sourceId)
     this.screenedOut.delete(sourceId)
@@ -754,6 +799,8 @@ export class SessionStore {
 
   /** A hold after a rejection: the source is recorded again but has not earned its life yet. */
   resumePending(sourceId: string): void {
+    if (this.drmRefused) return
+
     this.rejected.delete(sourceId)
     this.screenedOut.delete(sourceId)
     this.release(sourceId)

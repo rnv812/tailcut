@@ -54,13 +54,56 @@ const bannerVideo = () =>
     box: box(160, 90),
   })
 
+/**
+ * A tree a query can be run against. The document and a shadow root answer the same two questions
+ * and differ in nothing else the watcher asks: `video` gives the players of that tree alone, `*`
+ * every element of it — the only way to find out which of them hosts a shadow tree of its own.
+ */
+interface FakeRoot {
+  videos: FakeVideo[]
+  /** Elements of this tree, each with the shadow root it hosts; null — closed or none at all. */
+  elements: Array<{ shadowRoot: FakeRoot | null }>
+  querySelectorAll(selector: string): unknown[]
+}
+
+function fakeRoot(): FakeRoot {
+  const videos: FakeVideo[] = []
+  const elements: Array<{ shadowRoot: FakeRoot | null }> = []
+
+  return {
+    videos,
+    elements,
+    querySelectorAll: (selector: string) => (selector === 'video' ? videos : elements),
+  }
+}
+
 let now = 0
+let documentRoot: FakeRoot = fakeRoot()
 let videos: FakeVideo[] = []
+
+/**
+ * Hangs an open shadow root on the page — or inside another root — and gives back its inside.
+ * That is where the player of tv.apple.com plays, and a flat query over the document misses it.
+ */
+function attachShadow(into: FakeRoot = documentRoot): FakeRoot {
+  const root = fakeRoot()
+  into.elements.push({ shadowRoot: root })
+  return root
+}
+
+/**
+ * A host whose shadow root is closed: `element.shadowRoot` is null on it and the browser offers
+ * nothing else to ask. Whatever plays inside cannot be reached from here by any means.
+ */
+function attachClosedShadow(into: FakeRoot = documentRoot): void {
+  into.elements.push({ shadowRoot: null })
+}
 
 /** Модельная страница: живой список <video>, видимая вкладка и управляемые часы. */
 function installDom(): void {
   now = 0
-  videos = []
+  documentRoot = fakeRoot()
+  videos = documentRoot.videos
 
   vi.useFakeTimers()
   // Часы наблюдателя стоят отдельно от таймеров: время двигает tick(), а не сама очередь.
@@ -68,7 +111,7 @@ function installDom(): void {
   vi.stubGlobal('document', {
     visibilityState: 'visible',
     documentElement: {},
-    querySelectorAll: () => videos,
+    querySelectorAll: (selector: string) => documentRoot.querySelectorAll(selector),
   })
   vi.stubGlobal('innerWidth', 1280)
   vi.stubGlobal('innerHeight', 800)
@@ -108,8 +151,9 @@ function place(
   watcher: { registerSource: (sourceId: string, objectUrl: string) => void },
   element: FakeVideo,
   sourceId: string,
+  root: FakeRoot = documentRoot,
 ): FakeVideo {
-  videos.push(element)
+  root.videos.push(element)
   watcher.registerSource(sourceId, element.src)
   return element
 }
@@ -264,9 +308,13 @@ describe('наблюдатель: что уходит мосту', () => {
     watcher.registerSource('s2', 'blob:player-2')
     tick()
 
+    // The stream left behind is refused: no element plays it any more, so nothing can be measured
+    // about it ever again. What it collected is not lost by that — it had been promoted, and a
+    // rejection of a confirmed session is the freeze of §5.5 and keeps the material.
     expect(watcher.seen).toEqual([
       { sourceId: 's1', verdict: 'promote' },
       { sourceId: 's2', verdict: 'promote' },
+      { sourceId: 's1', verdict: 'reject' },
     ])
   })
 
@@ -307,5 +355,140 @@ describe('наблюдатель: что уходит мосту', () => {
     tick()
 
     expect(watcher.seen).toEqual([{ sourceId: 's1', verdict: 'reject' }])
+  })
+})
+
+
+describe('the watcher and the shadow DOM', () => {
+  it('finds a player inside an open shadow root', async () => {
+    const watcher = await startWatcher()
+    place(watcher, fakeVideo(), 's1', attachShadow())
+
+    tick(13)
+
+    // document.querySelectorAll stops at the boundary of a shadow tree, and tv.apple.com plays a
+    // 1265x712 element behind one. Unfound is unmeasured, and unmeasured is a stream the bridge
+    // keeps without anybody having judged it.
+    expect(watcher.seen).toEqual([{ sourceId: 's1', verdict: 'promote' }])
+  })
+
+  it('finds a player two shadow roots deep', async () => {
+    const watcher = await startWatcher()
+    place(watcher, fakeVideo(), 's1', attachShadow(attachShadow()))
+
+    tick(13)
+
+    expect(watcher.seen).toEqual([{ sourceId: 's1', verdict: 'promote' }])
+  })
+
+  it('finds a shadow root that was attached after the watcher had started', async () => {
+    const watcher = await startWatcher()
+    tick(2)
+
+    // Players build their shadow trees lazily — on the first click on a poster, on the move to
+    // the next clip. attachShadow changes nothing in the DOM and fires no mutation, so a root can
+    // only be noticed by looking again.
+    place(watcher, fakeVideo(), 's1', attachShadow())
+    tick(13)
+
+    expect(watcher.seen).toEqual([{ sourceId: 's1', verdict: 'promote' }])
+  })
+
+  it('finds a player put into a shadow root that was already there', async () => {
+    const watcher = await startWatcher()
+    const root = attachShadow()
+    tick(2)
+
+    place(watcher, fakeVideo(), 's1', root)
+    tick(13)
+
+    expect(watcher.seen).toEqual([{ sourceId: 's1', verdict: 'promote' }])
+  })
+
+  it('judges a player in a shadow root on its own merits, not by its neighbour', async () => {
+    const watcher = await startWatcher()
+    place(watcher, bannerVideo(), 's-banner', attachShadow())
+    place(watcher, fakeVideo(), 's-player', attachShadow())
+
+    tick(13)
+
+    expect(watcher.seen).toEqual([
+      { sourceId: 's-banner', verdict: 'reject' },
+      { sourceId: 's-player', verdict: 'promote' },
+    ])
+  })
+})
+
+describe('the watcher and a stream it cannot reach', () => {
+  it('refuses a stream whose element is behind a closed shadow root', async () => {
+    const watcher = await startWatcher()
+    // A closed root gives out no reference to itself: whatever plays inside will never be
+    // measured. Silence here means the bridge keeps the material of a stream nobody judged — and
+    // that is how the material of a DRM page came to be offered for saving.
+    attachClosedShadow()
+    watcher.registerSource('s1', 'blob:hidden')
+
+    tick()
+
+    expect(watcher.seen).toEqual([{ sourceId: 's1', verdict: 'reject' }])
+  })
+
+  it('does not repeat the refusal on every poll', async () => {
+    const watcher = await startWatcher()
+    attachClosedShadow()
+    watcher.registerSource('s1', 'blob:hidden')
+
+    tick(40)
+
+    expect(watcher.seen).toEqual([{ sourceId: 's1', verdict: 'reject' }])
+  })
+
+  it('takes the refusal back the moment the element turns up', async () => {
+    const watcher = await startWatcher()
+    watcher.registerSource('s1', 'blob:player')
+    tick()
+    expect(watcher.seen, 'setup: an unreachable stream is refused first').toEqual([
+      { sourceId: 's1', verdict: 'reject' },
+    ])
+
+    // The element was late rather than hidden: the page had not attached its shadow tree yet, or
+    // had not put the address on the element. What was set aside under the rejection comes back
+    // whole — that is what the probation of the session store is for.
+    place(watcher, fakeVideo(), 's1', attachShadow())
+    tick(13)
+
+    expect(watcher.seen).toEqual([
+      { sourceId: 's1', verdict: 'reject' },
+      { sourceId: 's1', verdict: 'hold' },
+      { sourceId: 's1', verdict: 'promote' },
+    ])
+  })
+
+  it('refuses the stream of an element that left the page', async () => {
+    const watcher = await startWatcher()
+    const video = place(watcher, fakeVideo(), 's1')
+    tick(13)
+
+    // The player threw the element away — the feed moved on to the next clip. Its stream stays
+    // announced, and nothing measurable is playing it any more.
+    videos.length = 0
+    video.isConnected = false
+    tick()
+
+    expect(watcher.seen).toEqual([
+      { sourceId: 's1', verdict: 'promote' },
+      { sourceId: 's1', verdict: 'reject' },
+    ])
+  })
+
+  it('says nothing about an element whose stream was never announced', async () => {
+    const watcher = await startWatcher()
+    videos.push(fakeVideo())
+
+    tick(13)
+
+    // The other way round: here the element is in plain sight and it is the stream that is
+    // unknown. A verdict has no addressee, and one sent anyway would land on a stranger's session.
+    expect(watcher.seen).toEqual([])
   })
 })

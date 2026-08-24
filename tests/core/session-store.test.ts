@@ -1043,6 +1043,110 @@ describe('SessionStore: triage verdicts', () => {
   })
 })
 
+describe('SessionStore: a page that asks for a key system', () => {
+  /**
+   * DRM is the one refusal that is not a verdict of triage.
+   *
+   * A verdict is about an element: the watcher measures the <video> and says what its stream is
+   * worth. The request for keys comes from the player and is tied to no element at all, and on a
+   * page whose element the watcher cannot reach — one playing inside a closed shadow root — no
+   * verdict is ever spoken. Measured on tv.apple.com: tc:drm went out four times, tc:verdict not
+   * once, and the registry kept 149.6 MB of a protected page and offered it for saving. So the
+   * refusal has its own way in, and what it promises is stronger than a rejection: not "nothing
+   * more is collected" but "nothing of this page is kept at all".
+   */
+  it('erases everything the page had collected before the keys were asked for', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: seg1 })
+    expect(store.list(), 'setup: the material has to be in the registry first').toHaveLength(1)
+
+    store.refuseDrm()
+
+    expect(store.list()).toEqual([])
+  })
+
+  it('leaves nothing behind that a save could still reach', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: seg1 })
+    const key = store.list()[0]!.key
+
+    store.refuseDrm()
+
+    // The popup holds the key of a session it listed a moment ago, and a save asks the registry
+    // by that key alone. A session merely hidden from the list would still be saved by it.
+    expect(store.get(key)).toBeUndefined()
+  })
+
+  it('takes nothing in once the refusal stands', () => {
+    const store = new SessionStore()
+    store.refuseDrm()
+
+    // The hook goes on copying every appendBuffer — it knows nothing of verdicts — and a protected
+    // page plays for as long as it is open.
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: seg1 })
+
+    expect(store.list()).toEqual([])
+  })
+
+  it('covers every source of the page and not only the one that was playing', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: seg1 })
+    store.append({ ...page, sourceId: 's2', bytes: init })
+    store.append({ ...page, sourceId: 's2', bytes: seg1 })
+
+    // The keys are asked for by the player, and which of the media sources of the page they are
+    // for is not said anywhere. A refusal for one source alone would keep the material of the
+    // neighbouring one — of the same protected page.
+    store.refuseDrm()
+
+    expect(store.list()).toEqual([])
+  })
+
+  it('is not undone by a promotion', () => {
+    const store = new SessionStore()
+    store.refuseDrm()
+
+    // The watcher goes on measuring whatever elements it can reach, and an element it can reach
+    // is promoted on its merits. A promotion arriving after the refusal must not open the page up
+    // again: triage decides what is worth keeping, and DRM decides that nothing here may be.
+    store.promotePending('s1')
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: seg1 })
+
+    expect(store.list()).toEqual([])
+  })
+
+  it('is not undone by a hold', () => {
+    const store = new SessionStore()
+    store.refuseDrm()
+
+    store.resumePending('s1')
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: seg1 })
+
+    expect(store.list()).toEqual([])
+  })
+
+  it('drops what a rejection had set aside instead of giving it back', () => {
+    const store = new SessionStore()
+    store.dropPending('s1')
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: seg1 })
+
+    // Material of a source under review waits out of sight and comes back whole when the verdict
+    // turns (see Probation). The refusal has to reach it there too — a hidden store is still a
+    // store, and the turn of a verdict would hand the page's material straight back.
+    store.refuseDrm()
+    store.promotePending('s1')
+
+    expect(store.list()).toEqual([])
+  })
+})
+
 describe('SessionStore: two tracks of one media source', () => {
   /**
    * The layout every MSE player uses, YouTube included: one MediaSource per <video> and one

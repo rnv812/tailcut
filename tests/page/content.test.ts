@@ -536,17 +536,41 @@ describe('the triage verdict', () => {
     })
   })
 
-  it('does not go to the bridge for an element with an unknown address', async () => {
+  it('refuses a stream that no element of the page is playing', async () => {
     const dom = await withBridge()
-    dom.videos.push(fakeVideo({ src: 'blob:someone-else', currentSrc: 'blob:someone-else' }))
+    // A real player, and it is playing something else. The stream of s1 is played by something
+    // out of reach — an element inside a closed shadow root, or one not attached yet.
+    dom.videos.push(
+      fakeVideo({
+        src: 'blob:someone-else',
+        currentSrc: 'blob:someone-else',
+        muted: false,
+        loop: false,
+        controls: true,
+        getBoundingClientRect: () => ({
+          width: 640,
+          height: 360,
+          top: 0,
+          left: 0,
+          bottom: 360,
+          right: 640,
+        }),
+      }),
+    )
 
     await dom.deliverMessage({ type: 'tc:source', sourceId: 's1', objectUrl: 'blob:banner' })
-    await dom.tick()
+    for (let poll = 0; poll < 13; poll++) await dom.tick()
 
-    // A verdict with no addressee would erase a foreign session in the registry — whichever
-    // came first.
-    expect(dom.forwarded().map((post) => (post.message as { type: string }).type)).toEqual([
-      'tc:source',
+    // The stream is refused and the verdict of the neighbour is not lent to it: the bridge keeps
+    // whatever it is not told to drop, so silence would record a stream nobody ever judged, while
+    // the neighbour's promotion would confirm the wrong one. Thirteen polls is past the probation
+    // of the player, which is what makes the two outcomes tell each other apart.
+    expect(dom.forwarded()).toEqual([
+      {
+        message: { type: 'tc:source', sourceId: 's1', objectUrl: 'blob:banner' },
+        transfer: undefined,
+      },
+      { message: { type: 'tc:verdict', sourceId: 's1', verdict: 'reject' }, transfer: undefined },
     ])
   })
 

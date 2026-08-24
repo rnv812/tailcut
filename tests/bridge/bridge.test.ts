@@ -494,7 +494,6 @@ describe('the bridge puts segments into the session registry', () => {
 describe('the bridge and foreign messages', () => {
   const foreign: [string, unknown][] = [
     ['tc:source', { type: 'tc:source', sourceId: 's', objectUrl: 'blob:x' }],
-    ['tc:drm', { type: 'tc:drm', sourceId: 's' }],
     ['a foreign type', { type: 'webpackHotUpdate' }],
     ['null', null],
     ['a string', 'tc:append'],
@@ -618,6 +617,63 @@ describe('the bridge takes triage verdicts', () => {
     const sender = win.deliver({ type: 'tc:verdict', sourceId: 's1', verdict: 'promote' })
 
     expect(sender.posts, 'the bridge answered a verdict').toEqual([])
+  })
+})
+
+describe('the bridge refuses a page with DRM', () => {
+  /** The hook reports the request for a key system the moment the player makes it. */
+  const drm = (win: ReturnType<typeof installWindow>) =>
+    win.deliver({ type: 'tc:drm', sourceId: 'page' })
+
+  it('erases what the page had collected before the keys were asked for', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes, 's1')
+    win.append(seg1Bytes, 's1')
+    expect(win.list(), 'setup: the material has to be in the registry first').toHaveLength(1)
+
+    drm(win)
+
+    // The refusal comes in on its own and not through a verdict. On a page whose element the
+    // watcher cannot reach — tv.apple.com plays inside a shadow root — no verdict is ever spoken,
+    // and the whole of the promise "we do not record DRM" rests on this message alone.
+    expect(win.list()).toEqual([])
+  })
+
+  it('keeps nothing the page appends after it', async () => {
+    const win = await loadBridge()
+    win.context()
+
+    drm(win)
+    win.append(initBytes, 's1')
+    win.append(seg1Bytes, 's1')
+
+    expect(win.list()).toEqual([])
+  })
+
+  it('has nothing left to hand a save', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes, 's1')
+    win.append(seg1Bytes, 's1')
+    const key = win.list()[0]!.key
+
+    drm(win)
+    const reply = win.save(key)
+
+    // The popup keeps the key of a session it listed a moment ago: a save by that key must find
+    // nothing, and no file may reach the disk.
+    expect(reply.received).toEqual([{ ok: false }])
+    expect(win.downloads, 'a file of a protected page was written').toEqual([])
+  })
+
+  it('does not answer the sender of tc:drm', async () => {
+    const win = await loadBridge()
+    win.context()
+
+    const sender = win.deliver({ type: 'tc:drm', sourceId: 'page' })
+
+    expect(sender.posts, 'the bridge answered a DRM report').toEqual([])
   })
 })
 

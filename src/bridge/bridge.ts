@@ -131,6 +131,16 @@ window.addEventListener('message', (event: MessageEvent) => {
 
   if (!isPageToBridge(data)) return
 
+  // The player asked the browser for a key system, and that is the end of this page: §5.4 refuses
+  // DRM outright, and the refusal is acted on here rather than left to triage. A verdict speaks
+  // about an element the watcher has found, and on a page whose <video> lives in a shadow root it
+  // never finds one — tv.apple.com sent this message four times while no verdict was ever spoken,
+  // and the registry went on offering the material of a protected page for saving.
+  if (data.type === 'tc:drm') {
+    store.refuseDrm()
+    return
+  }
+
   if (data.type === 'tc:append') {
     store.append({
       sourceId: data.sourceId,

@@ -10,6 +10,12 @@ const PLAYER_URL = 'https://tailcut.test/player'
 const MIXED_URL = 'https://tailcut.test/mixed'
 /** A player the page leaves above the window for a moment while it lays itself out. */
 const SCROLLED_URL = 'https://tailcut.test/scrolled'
+/** A player inside an open shadow root — the layout of tv.apple.com. */
+const SHADOW_URL = 'https://tailcut.test/shadow'
+/** The same player behind a closed shadow root: nothing can reach it, ours included. */
+const CLOSED_SHADOW_URL = 'https://tailcut.test/closed-shadow'
+/** A page that asks the browser for a key system, the way a protected player does. */
+const DRM_URL = 'https://tailcut.test/drm'
 
 /** A verdict in the form the content script sends it to the bridge in. */
 type SeenVerdict = { sourceId: string; verdict: string }
@@ -17,10 +23,19 @@ type SeenVerdict = { sourceId: string; verdict: string }
 type SeenSource = { sourceId: string; objectUrl: string }
 
 /** What the listener the test plants in every document of the page has gathered. */
-type Probe = { tcVerdict: SeenVerdict[]; tcSource: SeenSource[]; tcAppend: number }
+type Probe = {
+  tcVerdict: SeenVerdict[]
+  tcSource: SeenSource[]
+  tcAppend: number
+  tcDrm: number
+}
 type PageState = { allAppended?: boolean; headStart?: boolean }
 /** What tests/e2e/page/scrolled.html offers the test: one fragment appended on demand. */
 type StepPage = { appendSegment: (index: number) => Promise<void> }
+/** The address of the stream a page publishes for the test when the element is out of reach. */
+type NamedSource = { playerSrc?: string }
+/** What tests/e2e/page/drm.html offers the test: the moment the player asks for keys. */
+type DrmPage = { askForKeys: () => void; keysAsked?: boolean; keysError: string | null }
 
 /** A session summary in the form the bridge answers a tc:list request with. */
 type Summary = {
@@ -65,6 +80,7 @@ async function open(htmlFile: string, url: string) {
     probe.tcVerdict = []
     probe.tcSource = []
     probe.tcAppend = 0
+    probe.tcDrm = 0
 
     window.addEventListener('message', (event: MessageEvent) => {
       const data = event.data as Record<string, unknown> | null
@@ -76,6 +92,8 @@ async function open(htmlFile: string, url: string) {
         probe.tcSource.push({ sourceId: String(data.sourceId), objectUrl: String(data.objectUrl) })
       } else if (data.type === 'tc:append') {
         probe.tcAppend++
+      } else if (data.type === 'tc:drm') {
+        probe.tcDrm++
       }
     })
   })
@@ -116,6 +134,18 @@ function sourceIdOf(page: Page, selector: string): Promise<string> {
     const video = document.querySelector<HTMLVideoElement>(sel)!
     return probe.tcSource.find((source) => source.objectUrl === video.src)?.sourceId ?? ''
   }, selector)
+}
+
+/**
+ * Stream identifier of the player the page names itself. The element of such a page lives inside
+ * a shadow root, where a query from the outside does not reach — which is the whole point of it,
+ * so the address comes from the page rather than from the element.
+ */
+function namedSourceId(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const probe = window as unknown as Probe & NamedSource
+    return probe.tcSource.find((source) => source.objectUrl === probe.playerSrc)?.sourceId ?? ''
+  })
 }
 
 /** The last verdict about the given source; undefined — nothing came about it at all. */
@@ -356,6 +386,128 @@ test('a player the page scrolls out of sight for a moment keeps its recording', 
     await sessionsWhen(page, oneCompleteSession),
     `the moment of rejection took the recording with it; page console: ${log()}`,
   ).toEqual([await playerSession(SCROLLED_URL, 'scrolled player')])
+
+  await context.close()
+})
+
+test('a player inside an open shadow root is found and recorded', async () => {
+  const { context, page, extensionId, log } = await open('shadow.html', SHADOW_URL)
+  const bridge = await bridgeFrame(page, extensionId, log)
+  await pageDone(page)
+
+  // The element plays, is the size of a player and has its controls — everything triage asks for.
+  // The only unusual thing about it is where it lives: document.querySelectorAll('video') finds
+  // nothing on this page, and on tv.apple.com it found nothing either.
+  await page.evaluate(() => {
+    const video = document.getElementById('host')!.shadowRoot!.querySelector('video')!
+    video.loop = true
+    return video.play()
+  })
+
+  const player = await namedSourceId(page)
+  expect(player, `the stream of the player is tied to no address; page console: ${log()}`).not.toBe(
+    '',
+  )
+
+  const seen = await verdictsWhen(bridge, (list) => latest(list, player) === 'promote')
+  expect(latest(seen, player), `the player in the shadow root got no verdict; ${log()}`).toBe(
+    'promote',
+  )
+
+  expect(
+    await sessionsWhen(page, oneCompleteSession),
+    `the session of the player in the shadow root is missing; page console: ${log()}`,
+  ).toEqual([await playerSession(SHADOW_URL, 'shadow player')])
+
+  await context.close()
+})
+
+test('a player inside a closed shadow root is refused rather than recorded unjudged', async () => {
+  const { context, page, extensionId, log } = await open('closed-shadow.html', CLOSED_SHADOW_URL)
+  const bridge = await bridgeFrame(page, extensionId, log)
+  await pageDone(page)
+
+  // The bytes reach the bridge all the same — the hook in the MAIN world knows nothing of the
+  // DOM. Without checking that, an empty registry would prove nothing at all.
+  await bridge
+    .waitForFunction(() => (window as unknown as Probe).tcAppend >= 4, undefined, { timeout: 5_000 })
+    .catch(() => undefined)
+  expect(
+    await bridge.evaluate(() => (window as unknown as Probe).tcAppend),
+    `the segments never reached the bridge; page console: ${log()}`,
+  ).toBeGreaterThanOrEqual(4)
+
+  const player = await namedSourceId(page)
+  expect(player, `the stream of the player is tied to no address; page console: ${log()}`).not.toBe(
+    '',
+  )
+
+  // A closed root cannot be entered: element.shadowRoot is null on the host and the browser
+  // offers nothing else to ask. So the element is never measured — and the answer to that must be
+  // a refusal and not silence, because the bridge keeps whatever it is not told to drop.
+  const seen = await verdictsWhen(bridge, (list) => latest(list, player) === 'reject', 5_000)
+  expect(latest(seen, player), `the unreachable stream got no verdict at all; ${log()}`).toBe(
+    'reject',
+  )
+  expect(
+    seen.map((item) => item.verdict),
+    'nothing that was never measured may be promoted',
+  ).not.toContain('promote')
+
+  expect(
+    await sessionsWhen(page, (sessions) => sessions.length === 0),
+    `material nobody judged stayed in the registry; page console: ${log()}`,
+  ).toEqual([])
+
+  await context.close()
+})
+
+test('a page that asks for a key system is left with nothing at all', async () => {
+  const { context, page, extensionId, log } = await open('drm.html', DRM_URL)
+  const bridge = await bridgeFrame(page, extensionId, log)
+  await pageDone(page)
+
+  // The clip plays out its probation first, exactly as the trailer of tv.apple.com does before
+  // that page ever mentions EME. A session that has served it is confirmed, and a rejection of a
+  // confirmed session is the freeze of §5.5: recording stops and everything collected stays. So
+  // this is the state in which a refusal by verdict alone leaves the material of the page behind.
+  await page.evaluate(() => {
+    const video = document.querySelector('video')!
+    video.loop = true
+    return video.play()
+  })
+
+  const player = await sourceIdOf(page, 'video')
+  const seen = await verdictsWhen(bridge, (list) => latest(list, player) === 'promote')
+  expect(latest(seen, player), `setup: the player was never promoted; ${log()}`).toBe('promote')
+  expect(
+    await sessionsWhen(page, oneCompleteSession),
+    `setup: the material has to be in the registry first; page console: ${log()}`,
+  ).toEqual([await playerSession(DRM_URL, 'clearkey player')])
+
+  // And now the player asks the browser for a key system — nothing else about the page changes.
+  // There is no circumvention in this: the refusal is on the request itself, before a single key
+  // is handed out, and the material here is the same unencrypted fixture as everywhere else.
+  await page.evaluate(() => (window as unknown as DrmPage).askForKeys())
+  await page.waitForFunction(() => (window as unknown as DrmPage).keysAsked === true, undefined, {
+    timeout: 15_000,
+  })
+
+  expect(
+    await page.evaluate(() => (window as unknown as DrmPage).keysError),
+    'the page never got its key system, so nothing was refused for the right reason',
+  ).toBeNull()
+  expect(
+    await bridge.evaluate(() => (window as unknown as Probe).tcDrm),
+    `the report of the key request never reached the bridge; page console: ${log()}`,
+  ).toBeGreaterThan(0)
+
+  // Everything goes with it, the six seconds already earned included. §2 promises the user that
+  // a protected page is refused outright, and a session left in the list is an offer to save it.
+  expect(
+    await sessionsWhen(page, (sessions) => sessions.length === 0),
+    `the material of a page with DRM stayed in the registry; page console: ${log()}`,
+  ).toEqual([])
 
   await context.close()
 })
