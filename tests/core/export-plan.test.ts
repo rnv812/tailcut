@@ -156,6 +156,36 @@ const holed = sourceOf([1, 3], [1, 3, 4])
  * lost per track — and it is not the picture's in any material the fixtures hold.
  */
 const wider = sourceOf([1, 3], [1, 4])
+/**
+ * One hole in the picture with two holes of the sound inside it, of different length: the sound
+ * dropped out twice while the picture was away once. `seamsOf` pulls the pair by the wider of the
+ * two — that is what the `Math.max` in it is for — so at the narrower hole the seam wants to
+ * close more than there is to close. No arrangement of whole segments makes this shape — a lost
+ * segment of sound is two seconds long, and two of those do not fit inside one two-second hole of
+ * the picture — so the packets are dropped out of the index by hand instead.
+ */
+const uneven: ClipSource = (() => {
+  const source = sourceOf([1, 3], [1, 2, 3, 4])
+  const scale = source.audio!.timescale
+  // Inside the picture's hole, which runs from 2 s to 4 s: 0.30 s of packets gone, then 0.79 s.
+  const lost = (dts: number): boolean => {
+    const at = dts / scale
+    return (at >= 2.2 && at < 2.5) || (at >= 3 && at < 3.8)
+  }
+  const samples = source.audio!.samples.filter((sample) => !lost(sample.dts))
+  return { video: source.video, audio: { ...source.audio!, samples } }
+})()
+
+/**
+ * A recording joined mid-group: the first five frames are not in the index, so the earliest
+ * sample references a group the material does not hold and the first sync sample lies nineteen
+ * behind it. A capture hooked into a running stream lands here — an LL-HLS or LL-DASH part is
+ * under no obligation to begin on an IDR — and no arrangement of whole segments produces it.
+ */
+const midGroup: SourceTrack = (() => {
+  const video = trackOf(new Bank(), VIDEO_INIT, [1, 2].map(videoPath), 'video')
+  return { ...video, samples: video.samples.slice(5) }
+})()
 
 const trackByKind = (tracks: PlannedTrack[], kind: TrackKind): PlannedTrack =>
   tracks.find((t) => t.kind === kind)!
@@ -278,6 +308,27 @@ describe('planPreview', () => {
     expect(video.samples.slice(0, 5).map((s) => s.cts)).toEqual([1024, 2560, 1024, 0, 512])
     expect(video.samples[0]!.sync).toBe(true)
   })
+
+  it('hides nothing at the head of a sound that starts after the picture', () => {
+    // The preview asks for the picture's own span, and the sound of a recording whose first
+    // second of packets never arrived begins a second behind it. The entry point of the sound
+    // then lies in front of the packet it enters at, and there is nothing at its head to hide.
+    // A skip below zero is not harmless the way a skip of zero is: no edit list is written
+    // either way, so sync is unhurt, but `presentationTicks` subtracts it — and subtracting a
+    // negative inflates the tkhd, the mvhd and `plan.duration` past the material that is there.
+    const samples = whole.audio!.samples.filter((sample) => sample.dts >= whole.audio!.timescale)
+    const late: ClipSource = { video: whole.video, audio: { ...whole.audio!, samples } }
+    const plan = planPreview(late)
+    const audio = trackByKind(plan.tracks, 'audio')
+
+    expect(late.audio!.samples[0]!.dts).toBe(45056) // a second in, to the nearest packet
+    expect(audio.samples).toHaveLength(216)
+    expect(audio.skipTicks).toBe(0)
+    expect(presentationTicks(audio)).toBe(220568)
+    // Five seconds of packets cannot state six seconds of presentation, whatever the picture
+    // beside them runs for.
+    expect(presentationTicks(audio) / audio.timescale).toBeLessThanOrEqual(plan.duration)
+  })
 })
 
 describe('planClip', () => {
@@ -295,6 +346,29 @@ describe('planClip', () => {
     // The out point is the end of the material, so what is left is everything behind the skip.
     expect(presentationTicks(video)).toBe(58368)
     expect(plan.duration).toBeCloseTo(4.75, 6)
+  })
+
+  it('enters at the first key frame there is when the material starts mid-group', () => {
+    // No sync sample at or before the entry point: the recording begins in the middle of a group
+    // of pictures. The earliest place a decoder can be started is the first key frame there is,
+    // and everything in front of it has to stay out of the file — those frames reference a group
+    // the recording does not hold, and a player draws them as garbage rather than refusing them.
+    expect(midGroup.samples[0]!.sync).toBe(false)
+    const syncs = midGroup.samples.filter((sample) => sample.sync)
+    expect(syncs).toHaveLength(3)
+
+    const plan = planClip({ video: midGroup }, { in: 0, out: 3, sound: false })
+    const video = trackByKind(plan.tracks, 'video')
+
+    // The first key frame, and not the last one either: entering at the final key frame of the
+    // recording would throw away all but the tail of what was asked for.
+    expect(video.samples[0]!.sync).toBe(true)
+    expect(video.samples[0]!.source).toEqual(syncs[0]!.source)
+    expect(video.samples).toHaveLength(48)
+    // The entry point lies before the first decodable frame, so there is nothing left to hide.
+    expect(video.skipTicks).toBe(0)
+    expect(presentationTicks(video)).toBe(25600)
+    expect(plan.duration).toBeCloseTo(25600 / 12288, 9)
   })
 
   it('gives the sound a running start and hides it too', () => {
@@ -432,6 +506,29 @@ describe('planClip', () => {
     expect(trackByKind(plan.tracks, 'audio').samples.filter((s) => s.duration !== 1024)).toEqual([])
   })
 
+  it('leaves a packet whole where its hole is narrower than the pull of the seam', () => {
+    // The seam pulls by the wider of the two holes of the sound, so at the narrower one the pull
+    // is longer than the hole. What is left over is not a shortening: taking it off the packet in
+    // front gives a negative duration, which the writer states as a zero stts delta — the file
+    // still opens, ffprobe still reads a plausible header, and the sound has silently lost
+    // packets and runs short against a picture that did not move.
+    const [seam] = seamsOf(uneven)
+    expect(seam!.pull).toBeCloseTo(34816 / 44100, 9) // the wider of the two, 0.79 s
+
+    const plan = planClip(uneven, { in: 0, out: 8, sound: true })
+    const audio = trackByKind(plan.tracks, 'audio')
+    const video = trackByKind(plan.tracks, 'video')
+
+    expect(audio.samples).toHaveLength(213)
+    expect(Math.min(...audio.samples.map((s) => s.duration))).toBeGreaterThan(0)
+    // Every packet keeps exactly its own length: neither hole of the sound has anything left over
+    // once the seam has been pulled, and neither loses any of itself to the other one.
+    expect(audio.samples.reduce((total, s) => total + s.duration, 0)).toBe(217496)
+    expect(presentationTicks(audio)).toBe(216472)
+    // The picture is the track with the leftover here, and it carries it the usual way.
+    expect(video.samples.filter((s) => s.duration !== 512).map((s) => s.duration)).toEqual([15387])
+  })
+
   it('leaves a one-sided hole alone', () => {
     const oneSided: ClipSource = { video: holed.video, audio: whole.audio }
     const video = trackByKind(planClip(oneSided, { in: 0, out: 6, sound: true }).tracks, 'video')
@@ -471,5 +568,10 @@ describe('planClip', () => {
       bytes: 0,
     })
     expect(planPreview(empty).tracks).toEqual([])
+
+    // Sound beside a picture with no samples in it is not a clip either: a file with no picture
+    // is not what the editor was asked for, so the export is refused rather than half written.
+    const mute: ClipSource = { video: { ...whole.video, samples: [] }, audio: whole.audio }
+    expect(planClip(mute, { in: 0, out: 1, sound: true }).tracks).toEqual([])
   })
 })

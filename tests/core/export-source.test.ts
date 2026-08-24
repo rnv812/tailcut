@@ -8,6 +8,7 @@ import {
   type SourceTrackInput,
 } from '../../src/core/export/source'
 import { findBox } from '../../src/core/iso/reader'
+import { parseInit } from '../../src/core/iso/init'
 import type { Located } from '../../src/shared/types'
 
 const read = (path: string): Uint8Array => new Uint8Array(readFileSync(`tests/fixtures/${path}`))
@@ -133,6 +134,22 @@ describe('sourceTrackOf', () => {
     expect(track.samples).toHaveLength(48)
   })
 
+  it('gives nothing for an init whose media header states no timescale', () => {
+    // Every instant of a plan is a division by this number, and a zero here is not caught
+    // anywhere downstream: the seams come out at Infinity, the entry point rounds to NaN, and the
+    // writer states a header no player can read. Refused where the track is read instead.
+    const broken = new Uint8Array(VIDEO_INIT)
+    const mdhd = findBox(broken, ['moov', 'trak', 'mdia', 'mdhd'])!
+    const view = new DataView(broken.buffer, broken.byteOffset, broken.byteLength)
+    // mdhd: version and flags, then the times — two of them in a version 0, four in a version 1.
+    const version = view.getUint8(mdhd.start + mdhd.headerSize)
+    view.setUint32(mdhd.start + mdhd.headerSize + (version === 1 ? 20 : 12), 0)
+    const stated = parseInit(broken)!.tracks.find((track) => track.kind === 'video')!
+    expect(stated.timescale, 'the fixture kept its timescale after all').toBe(0)
+
+    expect(sourceTrackOf(placed('video', broken, VIDEO).input)).toBeNull()
+  })
+
   it('gives nothing for an init that describes no track of that kind', () => {
     expect(sourceTrackOf(placed('video', AUDIO_INIT, AUDIO).input)).toBeNull()
     expect(sourceTrackOf(placed('video', VIDEO_INIT, []).input)).toBeNull()
@@ -206,6 +223,30 @@ describe('ByteMap', () => {
 })
 
 describe('bytesFrom', () => {
+  it('reads a sample that ends flush with the end of its slice', () => {
+    // An mdat ends where its last sample ends, so the last sample of every segment — and of every
+    // slice an export fetches — sits flush against the end of the buffer it was read into. A
+    // boundary one byte tight rejects it, and every export throws on the last sample of a slice.
+    const { input } = placed('video', VIDEO_INIT, VIDEO)
+    const track = sourceTrackOf(input)!
+    const lookup = bytesFrom(
+      input.segments.map((segment) => segment.at),
+      input.segments.map((segment) => segment.bytes),
+    )
+
+    // The forty-eighth frame closes the first segment; the last frame of all closes the third.
+    for (const { index, segment } of [
+      { index: 47, segment: 0 },
+      { index: 143, segment: 2 },
+    ]) {
+      const sample = track.samples[index]!
+      const bytes = VIDEO[segment]!
+      const from = sample.source.at - input.segments[segment]!.at.at
+      expect(from + sample.source.length).toBe(bytes.byteLength)
+      expect(lookup(sample.source)).toEqual(bytes.subarray(from, from + sample.source.length))
+    }
+  })
+
   it('finds the buffer a sample is in and refuses one that was never read', () => {
     const material = VIDEO[0]!
     const slices: Located[] = [
