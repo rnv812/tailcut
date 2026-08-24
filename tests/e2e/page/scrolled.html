@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>scrolled player</title>
+<style>
+  body { margin: 0 }
+  video { display: block; background: #000 }
+  /* Room to scroll the player off the top of the window, the way a laying-out page does. */
+  #rest { height: 3000px }
+</style>
+<video id="v" controls width="640"></video>
+<div id="rest"></div>
+<script>
+  const INIT = '/fixtures/h264/init-stream0.m4s'
+  const SEGMENTS = [
+    '/fixtures/h264/chunk-stream0-00001.m4s',
+    '/fixtures/h264/chunk-stream0-00002.m4s',
+    '/fixtures/h264/chunk-stream0-00003.m4s',
+  ]
+
+  const video = document.getElementById('v')
+  const mediaSource = new MediaSource()
+  video.src = URL.createObjectURL(mediaSource)
+
+  window.appended = 0
+  /** The init segment and the first fragment are in: everything after this is up to the test. */
+  window.headStart = false
+
+  mediaSource.addEventListener('sourceopen', async () => {
+    const sb = mediaSource.addSourceBuffer('video/mp4; codecs="avc1.4d401e"')
+
+    const append = (buffer) =>
+      new Promise((resolve) => {
+        sb.addEventListener('updateend', resolve, { once: true })
+        sb.appendBuffer(buffer)
+      })
+
+    const fetchBytes = async (url) => (await fetch(url)).arrayBuffer()
+
+    // The head of the stream arrives at once, as it does on rutube and on dzen: both sites give
+    // out every init segment they have in the first second of playback and never repeat one.
+    await append(await fetchBytes(INIT))
+    window.appended++
+    await append(await fetchBytes(SEGMENTS[0]))
+    window.appended++
+
+    // The rest goes in on demand: the test moves the page between the fragments and waits for
+    // the verdict each move produces.
+    window.appendSegment = async (index) => {
+      await append(await fetchBytes(SEGMENTS[index]))
+      window.appended++
+    }
+
+    window.headStart = true
+  })
+</script>

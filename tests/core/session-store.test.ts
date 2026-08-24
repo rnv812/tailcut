@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
+  MAX_PROBATION_BYTES,
   SessionStore,
   selectMaterial,
   summarize,
@@ -899,6 +900,147 @@ describe('SessionStore: triage verdicts', () => {
 
     expect(store.list()).toHaveLength(1)
   })
+
+  it('keeps everything a source collected when the rejection turns back', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: videoSegs[0]! })
+
+    // What rutube and dzen do to themselves on five loads out of seven: the element of the
+    // player stands above the viewport for one poll of the watcher while the page lays itself
+    // out, the verdict of that moment is a rejection, and a second later it is a hold again.
+    // Between the two there is material, and past them there is the whole of the recording —
+    // the init segments of both sites went by in the first second and never come again.
+    store.dropPending('s1')
+    store.append({ ...page, bytes: videoSegs[1]! })
+    store.resumePending('s1')
+    store.append({ ...page, bytes: videoSegs[2]! })
+    store.promotePending('s1')
+
+    expect(store.list()).toHaveLength(1)
+    expect(only(store.list()[0]!).map.runs()[0]!.chunks.map(shapeOf)).toEqual([
+      [0, 2, videoSegs[0]!.byteLength],
+      [2, 4, videoSegs[1]!.byteLength],
+      [4, 6, videoSegs[2]!.byteLength],
+    ])
+  })
+
+  it('does not take the init of a stream away with a rejection', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+
+    store.dropPending('s1')
+    store.resumePending('s1')
+    // No second init: a site gives out all of them in the first second of playback, and a track
+    // whose header is gone cannot be found by anything that comes after it.
+    store.append({ ...page, bytes: videoSegs[0]! })
+
+    expect(store.list()).toHaveLength(1)
+    expect(only(store.list()[0]!).initBytes).toEqual(init)
+    expect(only(store.list()[0]!).map.runs()[0]!.chunks.map(shapeOf)).toEqual([
+      [0, 2, videoSegs[0]!.byteLength],
+    ])
+  })
+
+  it('does not lose the place of the reader in the stream over a rejection', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+
+    // A segment split across the verdict, the way a player that hands over its download as it
+    // arrives would deliver it. A reader that stopped at the rejection would come back in the
+    // middle of a segment and have to find the next header — the half it was holding lost, and
+    // with it the segment it belonged to.
+    const half = Math.floor(videoSegs[0]!.byteLength / 2)
+    store.append({ ...page, bytes: videoSegs[0]!.subarray(0, half) })
+    store.dropPending('s1')
+    store.append({ ...page, bytes: videoSegs[0]!.subarray(half) })
+    store.resumePending('s1')
+    store.append({ ...page, bytes: videoSegs[1]! })
+
+    expect(store.list()).toHaveLength(1)
+    expect(only(store.list()[0]!).map.runs()[0]!.chunks.map(shapeOf)).toEqual([
+      [0, 2, videoSegs[0]!.byteLength],
+      [2, 4, videoSegs[1]!.byteLength],
+    ])
+  })
+
+  it('keeps what arrived under a rejection that came before the first byte', () => {
+    const store = new SessionStore()
+
+    // The verdict travels on signals from the element while the bytes travel their own way, so a
+    // rejection can outrun the whole stream — on a page that opens scrolled past its player, it
+    // does. Nothing of it is offered while it stands, and everything of it is there once triage
+    // has said the element was a player after all.
+    store.dropPending('s1')
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: videoSegs[0]! })
+    expect(store.list()).toEqual([])
+
+    store.promotePending('s1')
+
+    expect(store.list()).toHaveLength(1)
+    expect(only(store.list()[0]!).map.runs()[0]!.chunks.map(shapeOf)).toEqual([
+      [0, 2, videoSegs[0]!.byteLength],
+    ])
+  })
+
+  it('gives a rejected source its place in a neighbour session back', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, sourceId: 's2', bytes: init })
+
+    // A banner and the real player under one key: the session lives on the neighbour, so it is
+    // not the rejected source's to take away — and what the rejected source collects meanwhile
+    // is not the neighbour's to be given either. Both hold until the verdict turns.
+    store.dropPending('s1')
+    store.append({ ...page, bytes: videoSegs[0]! })
+    expect(only(store.list()[0]!).map.runs()).toEqual([])
+
+    store.resumePending('s1')
+    store.append({ ...page, bytes: videoSegs[1]! })
+
+    expect(store.list()).toHaveLength(1)
+    expect(only(store.list()[0]!).map.runs()[0]!.chunks.map(shapeOf)).toEqual([
+      [0, 2, videoSegs[0]!.byteLength],
+      [2, 4, videoSegs[1]!.byteLength],
+    ])
+  })
+
+  it('offers nothing of a source while its rejection stands', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: videoSegs[0]! })
+
+    store.dropPending('s1')
+    store.append({ ...page, bytes: videoSegs[1]! })
+
+    // Set aside is not kept: while the verdict stands there is no session, nothing to summarize
+    // and nothing to save. Only a verdict that turns brings the material back.
+    expect(store.list()).toEqual([])
+  })
+
+  it('keeps nothing of a rejection that stands', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.dropPending('s1')
+
+    // The hook in the MAIN world knows nothing of verdicts and copies to the last, and a banner
+    // plays for as long as the page is open. What is set aside while the verdict is under review
+    // is bounded: material that outlasts the review is not the misreading of a moment, and the
+    // source goes back to costing nothing.
+    const enough = Math.ceil(MAX_PROBATION_BYTES / videoSegs[0]!.byteLength) + 1
+    for (let i = 0; i < enough; i++) store.append({ ...page, bytes: videoSegs[0]! })
+
+    store.resumePending('s1')
+    expect(store.list()).toEqual([])
+
+    // The material is gone; the reading of the stream is not. A source screened out for minutes
+    // and brought back records from that moment on, without waiting for an init that never comes.
+    store.append({ ...page, bytes: videoSegs[1]! })
+    expect(only(store.list()[0]!).map.runs()[0]!.chunks.map(shapeOf)).toEqual([
+      [2, 4, videoSegs[1]!.byteLength],
+    ])
+  })
 })
 
 describe('SessionStore: two tracks of one media source', () => {
@@ -1050,6 +1192,23 @@ describe('SessionStore: two tracks of one media source', () => {
     store.dropPending('s1')
 
     expect(store.list()).toEqual([])
+  })
+
+  it('gives both tracks back when the rejection turns', () => {
+    const store = new SessionStore()
+    feedBothTracks(store)
+
+    // The verdict is about the element and so is its turning: a player of picture and sound is
+    // two buffers, and a moment of rejection has to cost neither of them. This is the shape
+    // rutube and dzen deliver in — two SourceBuffers, every init in the first second.
+    store.dropPending('s1')
+    store.promotePending('s1')
+
+    expect(store.list()).toHaveLength(1)
+    expect(summarize(store.list()[0]!)).toEqual({
+      duration: 6,
+      bytes: [...videoSegs, ...audioSegs].reduce((total, b) => total + b.byteLength, 0),
+    })
   })
 })
 

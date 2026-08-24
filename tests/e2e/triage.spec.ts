@@ -8,6 +8,8 @@ const BANNER_URL = 'https://tailcut.test/banner'
 const PLAYER_URL = 'https://tailcut.test/player'
 /** A banner and a real player on one page: a verdict about one must not touch the other. */
 const MIXED_URL = 'https://tailcut.test/mixed'
+/** A player the page leaves above the window for a moment while it lays itself out. */
+const SCROLLED_URL = 'https://tailcut.test/scrolled'
 
 /** A verdict in the form the content script sends it to the bridge in. */
 type SeenVerdict = { sourceId: string; verdict: string }
@@ -16,7 +18,9 @@ type SeenSource = { sourceId: string; objectUrl: string }
 
 /** What the listener the test plants in every document of the page has gathered. */
 type Probe = { tcVerdict: SeenVerdict[]; tcSource: SeenSource[]; tcAppend: number }
-type PageState = { allAppended?: boolean }
+type PageState = { allAppended?: boolean; headStart?: boolean }
+/** What tests/e2e/page/scrolled.html offers the test: one fragment appended on demand. */
+type StepPage = { appendSegment: (index: number) => Promise<void> }
 
 /** A session summary in the form the bridge answers a tc:list request with. */
 type Summary = {
@@ -294,6 +298,64 @@ test('a rejection of the banner does not touch the player on the same page', asy
     await sessionsWhen(page, oneCompleteSession),
     `the rejection of the banner should not have touched the player session; page console: ${log()}`,
   ).toEqual([await playerSession(MIXED_URL, 'banner and player')])
+
+  await context.close()
+})
+
+test('a player the page scrolls out of sight for a moment keeps its recording', async () => {
+  const { context, page, extensionId, log } = await open('scrolled.html', SCROLLED_URL)
+  const bridge = await bridgeFrame(page, extensionId, log)
+
+  // The head of the stream — the init segment and the first fragment — is in before anything
+  // else happens, which is where rutube and dzen put theirs: measured at 1.85 to 2.96 seconds,
+  // and no site of the survey ever sent a second init.
+  await page.waitForFunction(() => (window as unknown as PageState).headStart === true, undefined, {
+    timeout: 15_000,
+  })
+  await page.evaluate(() => {
+    const video = document.querySelector('video')!
+    video.loop = true
+    return video.play()
+  })
+
+  const player = await sourceIdOf(page, 'video')
+  expect(player, `the stream of the player is tied to no address; page console: ${log()}`).not.toBe(
+    '',
+  )
+
+  // The page lays itself out and leaves the player above the window: on rutube and dzen this
+  // happens around four seconds in, with the element at rect.top ≈ −740 px, and it lasts a poll
+  // of the watcher or two. Off the screen is a rejection, and the player has not played its six
+  // seconds yet, so nothing about it is confirmed.
+  await page.evaluate(() => window.scrollTo(0, 1200))
+  const rejected = await verdictsWhen(bridge, (list) => latest(list, player) === 'reject')
+  expect(latest(rejected, player), `the player got no rejection; page console: ${log()}`).toBe(
+    'reject',
+  )
+
+  // The player goes on downloading through all of it: a fragment arrives under the verdict.
+  await page.evaluate(() => (window as unknown as StepPage).appendSegment(1))
+
+  // And the page settles: the element is back in the window and the verdict turns.
+  await page.evaluate(() => window.scrollTo(0, 0))
+  const held = await verdictsWhen(bridge, (list) => latest(list, player) === 'hold')
+  expect(latest(held, player), `the player never came back from the rejection; ${log()}`).toBe(
+    'hold',
+  )
+  await page.evaluate(() => (window as unknown as StepPage).appendSegment(2))
+
+  const seen = await verdictsWhen(bridge, (list) => latest(list, player) === 'promote')
+  expect(latest(seen, player), `the player was never promoted; page console: ${log()}`).toBe(
+    'promote',
+  )
+
+  // Everything the player sent is there: the fragment from before the rejection, the one that
+  // arrived under it, and the one after it. A verdict of a moment costs the recording nothing —
+  // which is the whole of the difference between a file and «Nothing recorded on this page yet».
+  expect(
+    await sessionsWhen(page, oneCompleteSession),
+    `the moment of rejection took the recording with it; page console: ${log()}`,
+  ).toEqual([await playerSession(SCROLLED_URL, 'scrolled player')])
 
   await context.close()
 })

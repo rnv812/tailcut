@@ -8,16 +8,22 @@ import type { Omission } from '../shared/protocol'
 import type { Chunk, InitInfo, TrackKind } from '../shared/types'
 
 /**
- * One SourceBuffer of a media source: its own init segment, its own timescale, its own map of
- * media time. MSE hands video and audio to separate buffers, so in the usual case a track here
- * is exactly one media track; a muxed init puts several ISO tracks into one buffer, and then
- * one track carries both kinds — the segments of such a buffer are shared by them anyway.
+ * What the init segment of one SourceBuffer declared: everything needed to read the segments
+ * that follow it. MSE hands video and audio to separate buffers, so in the usual case a header
+ * here describes exactly one media track; a muxed init puts several ISO tracks into one buffer,
+ * and then one header carries both kinds — the segments of such a buffer are shared by them
+ * anyway.
  *
- * A track is also a representation in the sense of the design (§6.2): a new init on the same
- * buffer with different codecs or a different frame size opens a track of its own instead of
+ * A header is also a representation in the sense of the design (§6.2): a new init on the same
+ * buffer with different codecs or a different frame size opens one of its own instead of
  * spoiling the material already collected under the previous one.
+ *
+ * It lives on the media source and not only on the session it feeds, because it is not material:
+ * a verdict decides whether what a stream carries is kept, and a stream whose header is gone is
+ * not readable at all. Sites give out their init segments in the first second of playback and
+ * never repeat them, so a header thrown away is a buffer whose every later segment lands nowhere.
  */
-export interface Track {
+interface TrackHeader {
   /** SourceBuffer the stream came from. Unique inside its media source, not across the page. */
   bufferId: string
   /** Identity of the representation inside the session — see representationOf(). */
@@ -27,13 +33,17 @@ export interface Track {
   /** ftyp and moov of the track, in ISO BMFF whatever container the page delivered it in. */
   initBytes: Uint8Array
   info: InitInfo
-  map: PtsMap
   /**
    * Set on a track that did not arrive in ISO BMFF: turns each of its media segments into one.
    * Handed over by ingestInit, which is the one place a second container is spoken of. Absent on
    * an mp4 track, whose segments are already what a file is built of.
    */
   convert?: SegmentConverter
+}
+
+/** A header of a stream together with the material collected under it inside one session. */
+export interface Track extends TrackHeader {
+  map: PtsMap
 }
 
 /**
@@ -74,6 +84,11 @@ interface SourceState {
   /** bufferId of a SourceBuffer → representation its stream currently belongs to. */
   buffers: Map<string, string>
   /**
+   * Every representation this source has opened → the init that declared it. Reading the stream
+   * of a buffer depends on nothing else, and no verdict takes any of it away — see TrackHeader.
+   */
+  headers: Map<string, TrackHeader>
+  /**
    * Every codec this source has ever opened, in the order they appeared. The merge key is built
    * of all of them, so it describes the video as a whole and not the init that came last.
    */
@@ -85,6 +100,61 @@ interface SourceState {
    * a moment later.
    */
   refused: boolean
+}
+
+/**
+ * The material of a source whose rejection has not been settled yet: taken out of the registry
+ * and kept out of sight, and given back whole the moment the verdict turns.
+ *
+ * This is the probation buffer of the design (§5.4). A rejection of a source that has not earned
+ * its life yet is a doubt and not a freeze: what is at stake is the whole recording, because the
+ * verdict may be the misreading of a single moment — the player element standing above the
+ * viewport for one poll while the page lays itself out. Erasing on the spot answers a doubt with
+ * the heaviest loss there is, so the material waits here instead, out of every list and out of
+ * every save, until triage says which it was.
+ *
+ * A confirmed session is a different matter and does not come here: it has nothing to lose, and
+ * a rejection of it is the freeze of §5.5 — a pause, a hidden tab, an element off the screen are
+ * not recorded at all.
+ */
+interface Probation {
+  url: string
+  title: string
+  createdAt: number
+  lastSeenAt: number
+  /**
+   * representation → its header and the segments collected under it, in the order they arrived.
+   * The header travels with the material rather than being looked up again on the way out: it is
+   * what the segments were read through, and what a saved file would need in front of them.
+   */
+  material: Map<string, HeldTrack>
+  /** Weight of what has arrived since the rejection: what the review is measured against. */
+  bytes: number
+}
+
+/** One stream's worth of what a source set aside: what it is, and what was collected of it. */
+interface HeldTrack {
+  header: TrackHeader
+  chunks: Chunk[]
+}
+
+/**
+ * Largest amount of material set aside for a source whose rejection is under review.
+ *
+ * A cap and not a budget: a verdict that is going to turn turns within a poll or two of the
+ * watcher, half a second apart, and the couple of segments that arrive meanwhile are far below
+ * this. What it stops is the other case — a banner, a hover preview, a page whose material is
+ * refused for DRM — from being held for as long as the page is open. Material that outlasts the
+ * review is not the misreading of a moment: the rejection stands, and the source goes back to
+ * costing nothing at all.
+ */
+export const MAX_PROBATION_BYTES = 8 * 1024 * 1024
+
+/** Where the page stood when material arrived: what a session opened for it is signed with. */
+interface PageContext {
+  url: string
+  title: string
+  now: number
 }
 
 export interface AppendInput {
@@ -399,7 +469,7 @@ export function selectMaterial(session: Session): MuxTrack[] {
  * A chunk out of an ISO BMFF media segment. The bytes travel on as they arrived: a captured
  * segment is already what a saved file is assembled from.
  */
-function isoChunk(track: Track, bytes: Uint8Array): Chunk | null {
+function isoChunk(track: TrackHeader, bytes: Uint8Array): Chunk | null {
   const fragment = parseFragment(bytes)
   if (!fragment) return null
 
@@ -441,8 +511,14 @@ export class SessionStore {
   private sources = new Map<string, SourceState>()
   /** sourceId and bufferId → the byte stream that SourceBuffer is being fed, half-read. */
   private streams = new Map<string, SegmentStream>()
-  /** Rejected sources: their bytes are not kept while the verdict stands. */
+  /** Rejected sources: what they carry is not offered while the verdict stands. */
   private rejected = new Set<string>()
+  /** Triage has granted these sources their life, whether or not they have a session yet. */
+  private promoted = new Set<string>()
+  /** sourceId → the material set aside while its rejection is under review; see Probation. */
+  private probation = new Map<string, Probation>()
+  /** Sources whose rejection outlasted the review: nothing of them is kept any more. */
+  private screenedOut = new Set<string>()
 
   /**
    * Takes what a page appended to one of its SourceBuffers and works out for itself what it is.
@@ -453,11 +529,12 @@ export class SessionStore {
    * src/core/stream.ts — so the segments are recovered first, and only whole ones are read.
    */
   append(input: AppendInput): void {
-    // The MAIN world hook knows nothing about verdicts and copies to the last: triage lives here.
-    // A rejection works forwards as well as backwards — otherwise a banner that got one before
-    // its first segment would open a session right after it.
-    if (this.rejected.has(input.sourceId)) return
-
+    // Every append is read, whatever verdict stands over its source: a verdict decides whether
+    // material is kept, not whether it is parsed. MSE gives a SourceBuffer a byte stream and not
+    // a list of segments, so a reader that skipped the rejected stretch of one would come back
+    // inside a segment and have to find its place again by the next header — and by then the
+    // init segment of that buffer is long past. Where the material goes is settled below, once
+    // there is a whole segment to place.
     for (const unit of this.streamOf(input).push(input.bytes)) {
       if (unit.kind === 'init') {
         // An init in a container or a codec the ingest boundary will not take opens no track, and
@@ -476,26 +553,96 @@ export class SessionStore {
 
   /**
    * One media segment onto the map of the track it belongs to. Which container it is written in
-   * was settled when the init of its buffer arrived: the track is found first and the bytes read
+   * was settled when the init of its buffer arrived: the header is found first and the bytes read
    * second, through whichever reading its own buffer was opened with.
    *
    * A segment before its init is a normal thing: the page may have started playing before the
    * bridge stood up. There is nowhere to put it, and that is not an error.
    */
   private take(input: AppendInput, bytes: Uint8Array): void {
-    const found = this.locate(input)
-    if (!found) return
+    const source = this.sources.get(input.sourceId)
+    // A buffer whose init never arrived: a second player on the page whose beginning we missed,
+    // or a stream in a container the parser does not read. Dumping its segments into a
+    // neighbouring track would mix two streams into one map.
+    const representation = source?.buffers.get(input.bufferId)
+    const header = representation === undefined ? undefined : source?.headers.get(representation)
+    if (!source || !header) return
 
-    const { session, track } = found
-    const chunk = track.convert ? convertedChunk(track.convert, bytes) : isoChunk(track, bytes)
+    const chunk = header.convert ? convertedChunk(header.convert, bytes) : isoChunk(header, bytes)
     if (!chunk) return
 
+    if (this.rejected.has(input.sourceId)) {
+      // A rejection of a confirmed session is a freeze and nothing is recorded under it (§5.5);
+      // a rejection of a source that has not earned its life yet is a doubt, and the material
+      // waits for it to be settled instead of being thrown away — see Probation.
+      if (!this.sessions.get(source.key)?.confirmed) this.setAside(input, header, chunk)
+      return
+    }
+
+    const session = this.sessionOf(source, input)
     // The map is per buffer, so the deduplication rule of PtsMap ("the same start means the same
     // piece") compares only segments of one stream, as it was meant to. Inside one buffer two
     // appends with the same start really are one segment appended twice: a muxed segment carries
     // all of its tracks in one call.
-    track.map.insert(chunk)
+    this.trackFor(session, header).map.insert(chunk)
     session.lastSeenAt = input.now
+  }
+
+  /**
+   * The session this source feeds, opened here when it has none. An init segment that arrived
+   * under a rejection opened no session, and the material that comes once the verdict has turned
+   * has to find one anyway — waiting for the next init would mean waiting for one that, on the
+   * sites this was measured on, never comes.
+   */
+  private sessionOf(source: SourceState, input: AppendInput): StoredSession {
+    return this.sessions.get(source.key) ?? this.bind(source, input.sourceId, input)
+  }
+
+  /** The track of the session this header's material belongs on; opened there if it has none. */
+  private trackFor(session: StoredSession, header: TrackHeader): Track {
+    const existing = session.tracks.find((t) => t.representation === header.representation)
+    if (existing) return existing
+
+    const track: Track = { ...header, map: new PtsMap() }
+    session.tracks.push(track)
+    return track
+  }
+
+  /**
+   * A segment of a source whose rejection is under review: set aside instead of collected, and
+   * out of sight until triage settles which kind of rejection it was.
+   *
+   * Nothing of what is set aside can be listed or saved. What it costs is bounded — see
+   * MAX_PROBATION_BYTES: material that outlasts the review is dropped for good, and the source
+   * keeps nothing more while the verdict stands.
+   */
+  private setAside(input: AppendInput, header: TrackHeader, chunk: Chunk): void {
+    if (this.screenedOut.has(input.sourceId)) return
+
+    let held = this.probation.get(input.sourceId)
+    if (!held) {
+      held = {
+        url: input.url,
+        title: input.title,
+        createdAt: input.now,
+        lastSeenAt: input.now,
+        material: new Map(),
+        bytes: 0,
+      }
+      this.probation.set(input.sourceId, held)
+    }
+
+    held.bytes += chunk.bytes.byteLength
+    if (held.bytes > MAX_PROBATION_BYTES) {
+      this.probation.delete(input.sourceId)
+      this.screenedOut.add(input.sourceId)
+      return
+    }
+
+    const under = held.material.get(header.representation)
+    if (under) under.chunks.push(chunk)
+    else held.material.set(header.representation, { header, chunks: [chunk] })
+    held.lastSeenAt = input.now
   }
 
   /**
@@ -562,10 +709,17 @@ export class SessionStore {
   }
 
   /**
-   * Triage: the source is deemed junk. What it collected is erased unless the session has been
+   * Triage: the source is deemed junk. Its session leaves the registry unless it has been
    * confirmed or someone else is still feeding it; a confirmed session survives the rejection —
    * recording simply freezes (a pause, a hidden tab, the element leaving the screen) and what has
    * been collected stays.
+   *
+   * Leaving the registry is not being destroyed. An unconfirmed session goes into the probation
+   * of its source, where nothing can list it and nothing can save it, and comes back whole if the
+   * verdict turns — the rejection may be the misreading of a single moment, and on the sites this
+   * was measured on it usually is. What the source has parsed of its stream is not touched at
+   * all: the reader keeps its place and the headers of its buffers keep theirs, because losing
+   * either would mean losing every segment of the video that follows, verdict or no verdict.
    */
   dropPending(sourceId: string): void {
     this.rejected.add(sourceId)
@@ -574,37 +728,78 @@ export class SessionStore {
     if (!source) return
 
     const session = this.sessions.get(source.key)
-    if (session?.confirmed) return
-
-    this.sources.delete(sourceId)
-    // The half-read segments of its buffers go with it: nobody will finish them now, and they
-    // would be assembled onto a track that no longer exists.
-    for (const key of this.streams.keys()) {
-      if (key.startsWith(`${sourceId}\u0000`)) this.streams.delete(key)
-    }
-    if (!session) return
+    if (!session || session.confirmed) return
 
     // The verdict is addressed: a session that a neighbouring source is also feeding stays. The
     // key is built from the page address and the codecs, so a banner and the real player next to
-    // it may well share one, and erasing the session would kill the neighbour's recording.
+    // it may well share one, and taking the session away would kill the neighbour's recording.
     session.sources.delete(sourceId)
-    if (session.sources.size === 0) this.sessions.delete(session.key)
+    if (session.sources.size > 0) return
+
+    this.sessions.delete(session.key)
+    this.probation.set(sourceId, probationOf(session))
   }
 
-  /** Probation served: a rejection of this source no longer erases its session. */
+  /** Probation served: a rejection of this source no longer takes its session away. */
   promotePending(sourceId: string): void {
+    this.promoted.add(sourceId)
     this.rejected.delete(sourceId)
+    this.screenedOut.delete(sourceId)
 
-    const source = this.sources.get(sourceId)
-    if (!source) return
-
-    const session = this.sessions.get(source.key)
+    // Remembered on the source and not on the session alone: a source promoted before its first
+    // init has no session yet, and the one it opens later is confirmed from the start.
+    const session = this.release(sourceId)
     if (session) session.confirmed = true
   }
 
   /** A hold after a rejection: the source is recorded again but has not earned its life yet. */
   resumePending(sourceId: string): void {
     this.rejected.delete(sourceId)
+    this.screenedOut.delete(sourceId)
+    this.release(sourceId)
+  }
+
+  /**
+   * The verdict has turned: what was set aside goes back into the registry, on the maps of the
+   * very tracks it was collected under, and the session it belonged to is the session it becomes
+   * again. Gives back the session this source feeds, if it has one at all.
+   */
+  private release(sourceId: string): StoredSession | undefined {
+    const source = this.sources.get(sourceId)
+    if (!source) return undefined
+
+    const held = this.probation.get(sourceId)
+    if (!held) {
+      // Nothing was set aside — the rejection came before the first segment, or outlasted the
+      // review. The source simply takes its place in whatever session it was feeding again.
+      const current = this.sessions.get(source.key)
+      if (current) this.join(current, sourceId)
+      return current
+    }
+
+    this.probation.delete(sourceId)
+    const session = this.bind(source, sourceId, {
+      url: held.url,
+      title: held.title,
+      now: held.lastSeenAt,
+    })
+    if (source.refused) session.refusedTracks = true
+
+    for (const { header, chunks } of held.material.values()) {
+      const track = this.trackFor(session, header)
+      for (const chunk of chunks) track.map.insert(chunk)
+    }
+
+    // The session is no younger for the time it spent out of sight: it was opened when its first
+    // material arrived, and the popup shows it under the address and the name of that moment.
+    if (held.createdAt < session.createdAt) {
+      session.createdAt = held.createdAt
+      session.url = held.url
+      session.title = held.title
+    }
+    session.lastSeenAt = Math.max(session.lastSeenAt, held.lastSeenAt)
+
+    return session
   }
 
   /**
@@ -622,26 +817,32 @@ export class SessionStore {
       if (!source.codecs.includes(track.codec)) source.codecs.push(track.codec)
     }
 
-    const session = this.bind(source, input)
+    // The representation may be known already: a reload, a return to the previous quality or
+    // simply a repeated init. The header stays the one the stream was first read with — the
+    // material already collected was read through it.
+    if (!source.headers.has(representation)) {
+      source.headers.set(representation, {
+        bufferId: input.bufferId,
+        representation,
+        kinds: kindsOf(info),
+        initBytes: opened.initBytes,
+        info,
+        convert: opened.convert ?? undefined,
+      })
+    }
+
+    // A rejected source opens no session: what it collects is set aside until the verdict is
+    // settled (see Probation), and the header above is kept whatever that verdict turns out to
+    // be. The session and the material come together again in release().
+    if (this.rejected.has(input.sourceId)) return
+
+    const session = this.bind(source, input.sourceId, input)
     session.lastSeenAt = input.now
     // A buffer refused before this one was opened: the loss is the session's from the moment it
     // has one.
     if (source.refused) session.refusedTracks = true
 
-    // The representation is already known: this is a reload, a return to the previous quality or
-    // simply a repeated init. The session keeps the init it was opened with — the material
-    // already on the map was collected under it.
-    if (session.tracks.some((t) => t.representation === representation)) return
-
-    session.tracks.push({
-      bufferId: input.bufferId,
-      representation,
-      kinds: kindsOf(info),
-      initBytes: opened.initBytes,
-      info,
-      map: new PtsMap(),
-      convert: opened.convert ?? undefined,
-    })
+    this.trackFor(session, source.headers.get(representation)!)
   }
 
   /**
@@ -655,7 +856,14 @@ export class SessionStore {
   private sourceFor(input: AppendInput): SourceState {
     let source = this.sources.get(input.sourceId)
     if (!source) {
-      source = { key: '', url: '', buffers: new Map(), codecs: [], refused: false }
+      source = {
+        key: '',
+        url: '',
+        buffers: new Map(),
+        headers: new Map(),
+        codecs: [],
+        refused: false,
+      }
       this.sources.set(input.sourceId, source)
     }
 
@@ -665,7 +873,14 @@ export class SessionStore {
       source.key = ''
       source.codecs = []
       source.buffers.clear()
+      source.headers.clear()
       source.refused = false
+      // Everything triage worked out about the previous video goes with it, the material set
+      // aside under a rejection included: it was collected under headers this source no longer
+      // has, and the video it belonged to is one the page has scrolled past.
+      this.promoted.delete(input.sourceId)
+      this.screenedOut.delete(input.sourceId)
+      this.probation.delete(input.sourceId)
     }
 
     return source
@@ -677,18 +892,21 @@ export class SessionStore {
    * time: the video buffer opens first and the audio one a moment later, and only together do
    * they describe the video.
    */
-  private bind(source: SourceState, input: AppendInput): StoredSession {
+  private bind(source: SourceState, sourceId: string, context: PageContext): StoredSession {
     const key = sessionKey({
-      url: input.url,
+      url: context.url,
       codecs: source.codecs,
       durationSeconds: Infinity,
     })
 
     const previous = this.sessions.get(source.key)
-    if (previous && previous.key === key) return previous
+    if (previous && previous.key === key) {
+      this.join(previous, sourceId)
+      return previous
+    }
 
     source.key = key
-    previous?.sources.delete(input.sourceId)
+    previous?.sources.delete(sourceId)
     // Nobody else is feeding the old session: it does not split, it simply becomes known under
     // the wider key together with everything it has collected.
     const alone = previous !== undefined && previous.sources.size === 0
@@ -699,59 +917,91 @@ export class SessionStore {
       if (previous && alone) {
         this.sessions.delete(previous.key)
         previous.key = key
-        previous.sources.add(input.sourceId)
+        this.join(previous, sourceId)
         this.sessions.set(key, previous)
         return previous
       }
 
-      const created = this.createSession(key, input)
-      if (previous) carryRepresentations(previous, created, source)
-      created.sources.add(input.sourceId)
+      const created = this.createSession(key, context)
+      if (previous) this.carryTracks(created, source)
+      this.join(created, sourceId)
       this.sessions.set(key, created)
       return created
     }
 
-    target.sources.add(input.sourceId)
+    this.join(target, sourceId)
     if (previous && alone) {
       absorb(target, previous)
       this.sessions.delete(previous.key)
     } else if (previous) {
-      carryRepresentations(previous, target, source)
+      this.carryTracks(target, source)
     }
     return target
   }
 
-  private createSession(key: string, input: AppendInput): StoredSession {
+  /**
+   * The source starts feeding this session. A source triage has already promoted confirms it on
+   * the spot: the life was granted to the element, and the session it feeds — this one now — is
+   * what the grant was about.
+   */
+  private join(session: StoredSession, sourceId: string): void {
+    session.sources.add(sourceId)
+    if (this.promoted.has(sourceId)) session.confirmed = true
+  }
+
+  /**
+   * The source has moved to another session while the old one lives on with other sources: their
+   * material is common and cannot be untangled, so it stays where it is and the source starts
+   * collecting the same representations anew. Only the headers travel — without them the buffers
+   * whose init has already passed would have nowhere to append until the next one.
+   */
+  private carryTracks(session: StoredSession, source: SourceState): void {
+    for (const representation of source.buffers.values()) {
+      const header = source.headers.get(representation)
+      if (header) this.trackFor(session, header)
+    }
+  }
+
+  private createSession(key: string, context: PageContext): StoredSession {
     return {
       key,
-      url: input.url,
-      title: input.title,
+      url: context.url,
+      title: context.title,
       tracks: [],
-      createdAt: input.now,
-      lastSeenAt: input.now,
+      createdAt: context.now,
+      lastSeenAt: context.now,
       refusedTracks: false,
       sources: new Set(),
       confirmed: false,
     }
   }
+}
 
-  private locate(input: AppendInput): { session: StoredSession; track: Track } | undefined {
-    const source = this.sources.get(input.sourceId)
-    if (!source) return
+/** A session taken out of the registry, in the form its source holds it while under review. */
+function probationOf(session: StoredSession): Probation {
+  const material = new Map<string, HeldTrack>()
 
-    // A buffer whose init never arrived: a second player on the page whose beginning we missed,
-    // or a stream in a container the parser does not read. Dumping its segments into a
-    // neighbouring track would mix two streams into one map.
-    const representation = source.buffers.get(input.bufferId)
-    if (representation === undefined) return
+  for (const track of session.tracks) {
+    // The map stays behind with the session that is leaving; what goes aside is the header and
+    // the segments themselves, and they are put on a map again when the verdict turns.
+    const { map, ...header } = track
+    const chunks: Chunk[] = []
+    for (const run of map.runs()) chunks.push(...run.chunks)
+    // A track with nothing under it is nothing to set aside: its header is on the source that
+    // opened it, and it is from there that a track of it is opened again.
+    if (chunks.length) material.set(header.representation, { header, chunks })
+  }
 
-    const session = this.sessions.get(source.key)
-    if (!session) return
-
-    const track = session.tracks.find((t) => t.representation === representation)
-    if (!track) return
-
-    return { session, track }
+  return {
+    url: session.url,
+    title: session.title,
+    createdAt: session.createdAt,
+    lastSeenAt: session.lastSeenAt,
+    material,
+    // The review is measured on what arrives under the verdict, not on what was collected before
+    // it: the cap is there to bound how long a page can keep appending to a rejection that is
+    // never going to turn.
+    bytes: 0,
   }
 }
 
@@ -782,18 +1032,4 @@ function absorb(target: StoredSession, absorbed: StoredSession): void {
   // A track refused on either visit is a track missing from the file either way.
   target.refusedTracks = target.refusedTracks || absorbed.refusedTracks
   for (const sourceId of absorbed.sources) target.sources.add(sourceId)
-}
-
-/**
- * The source moves to another session while its old one keeps living on other sources: their
- * material is common and cannot be untangled, so it stays where it is and the source starts
- * collecting the same representations anew. Only the init segments are carried over — without
- * them the buffers whose init has already passed would have nowhere to append until the next one.
- */
-function carryRepresentations(from: Session, to: Session, source: SourceState): void {
-  for (const representation of source.buffers.values()) {
-    if (to.tracks.some((t) => t.representation === representation)) continue
-    const track = from.tracks.find((t) => t.representation === representation)
-    if (track) to.tracks.push({ ...track, map: new PtsMap() })
-  }
 }
