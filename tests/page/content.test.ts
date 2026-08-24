@@ -514,6 +514,75 @@ describe('the page context for the bridge', () => {
     // would be work for nobody: the bridge would rewrite the same title over and over.
     expect(dom.contexts()).toEqual([CONTEXT])
   })
+
+  it('re-reads the page when a new media source is announced, without waiting for a poll', async () => {
+    const dom = installDom()
+    await importContent()
+    dom.deliverLoad()
+
+    // A feed of short clips changes its address and opens the MediaSource of the next video in
+    // the same breath. Measured on youtube.com/shorts: the SourceBuffers of one short were
+    // created with the address of that short already in location.href, and half a second before
+    // the next poll — so all four sessions of the run were signed with the address and the title
+    // of the previous video, and the user saved a file under a stranger's name.
+    dom.goTo('https://site.example/shorts/next', 'The next clip')
+    await dom.deliverMessage({ type: 'tc:source', sourceId: 's2', objectUrl: 'blob:next' })
+
+    expect(dom.contexts().at(-1), 'the bridge was left on the previous video').toEqual({
+      type: 'tc:context',
+      url: 'https://site.example/shorts/next',
+      title: 'The next clip',
+    })
+  })
+
+  it('signs a segment with the page it arrived on, not with the page of the last poll', async () => {
+    const dom = installDom()
+    await importContent()
+    dom.deliverLoad()
+
+    dom.goTo('https://site.example/shorts/next', 'The next clip')
+    await dom.deliverMessage({
+      type: 'tc:append',
+      sourceId: 's2',
+      bufferId: 'b2',
+      mime: 'video/mp4',
+      bytes: new ArrayBuffer(8),
+    })
+
+    // A session is opened by the first init segment, so the fresh address has to be with the
+    // bridge before the bytes are — not on the poll that comes after them.
+    const posts = dom.created[0]!.posted
+    expect(posts.map((post) => (post.message as { type: string }).type)).toEqual([
+      'tc:context',
+      'tc:context',
+      'tc:append',
+    ])
+    expect(posts.at(-2)!.message).toEqual({
+      type: 'tc:context',
+      url: 'https://site.example/shorts/next',
+      title: 'The next clip',
+    })
+  })
+
+  it('sends no second context when the page has not moved under the material', async () => {
+    const dom = installDom()
+    await importContent()
+    dom.deliverLoad()
+
+    for (let i = 0; i < 3; i++) {
+      await dom.deliverMessage({
+        type: 'tc:append',
+        sourceId: 's1',
+        bufferId: 'b1',
+        mime: 'video/mp4',
+        bytes: new ArrayBuffer(8),
+      })
+    }
+
+    // Reading the page before every append is two string comparisons; sending the pair again
+    // would be a message and a retitle of every session per segment.
+    expect(dom.contexts()).toEqual([CONTEXT])
+  })
 })
 
 describe('the triage verdict', () => {

@@ -4,13 +4,18 @@ import { bindSource, registerSource, registerWorkerSource, startWatching } from 
 let bridgePromise: Promise<HTMLIFrameElement> | null = null
 
 /**
- * How often the address and the title of the page are re-read.
+ * How often the address and the title of the page are re-read when nothing else has asked.
+ *
+ * A backstop and not the mechanism. What signs a session is read at the moment the material
+ * arrives (see the forwarding below), so the poll no longer decides anything about the address of
+ * a recording; what is left for it is the page that changes its <title> with no media traffic to
+ * ride along with — a single-page application fills that in after the player has already started,
+ * and the popup would go on showing the name of nothing.
  *
  * By polling and not by observation: a title change is a character-data mutation inside <head>,
- * and an address change on a single-page application is a pushState with nothing in the DOM to
- * watch at all. A MutationObserver wide enough to catch the first would fire on every text node
- * a busy page touches, which is exactly the cost this extension must not impose. Two string
- * comparisons twice a second cost nothing beside it.
+ * and a MutationObserver wide enough to catch it would fire on every text node a busy page
+ * touches, which is exactly the cost this extension must not impose. Two string comparisons twice
+ * a second cost nothing beside it.
  */
 const CONTEXT_POLL_MS = 500
 
@@ -76,12 +81,11 @@ export function ensureBridge(): Promise<HTMLIFrameElement> {
 }
 
 /**
- * Keeps the bridge's idea of the page up to date.
+ * Keeps the bridge's idea of the page up to date between one piece of material and the next.
  *
- * At document_start the page has no title yet, and on a single-page application it has no final
- * address either: YouTube fills its <title> in after the player has already started and swaps
- * both when the next video is opened without a navigation. Told once, the bridge would sign every
- * session of such a page with nothing, and the saved file would be named after nothing.
+ * At document_start the page has no title yet: YouTube fills its <title> in after the player has
+ * already started. A page that plays nothing more after that would otherwise keep the name it had
+ * at the moment its session opened, which is no name at all.
  */
 function watchContext(): void {
   setInterval(() => {
@@ -108,6 +112,19 @@ window.addEventListener('message', async (event: MessageEvent) => {
   if (message.type === 'tc:worker') registerWorkerSource(message.sourceId)
 
   const iframe = await ensureBridge()
+
+  // The page is read here, in front of whatever it is that arrived, and not left to the poll.
+  //
+  // A single-page application changes what it is playing without a navigation, and the two moments
+  // that matter — a new MediaSource, and the first bytes through it — are exactly the moments this
+  // line stands in front of. Measured on youtube.com/shorts: the address of a short was already in
+  // location.href when its SourceBuffers were created, and the poll was still half a second away,
+  // so all four sessions of the run were signed with the previous video (address, title and merge
+  // key alike) and the user saved a file named after a stranger.
+  //
+  // It costs two string comparisons per message: tellContext sends nothing when the page has not
+  // moved, which on an ordinary page is every time after the first.
+  tellContext(iframe)
 
   if (message.type === 'tc:append') {
     iframe.contentWindow?.postMessage(message, '*', [message.bytes])
