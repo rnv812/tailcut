@@ -1,6 +1,7 @@
-import { audioSampleEntry, sampleEntryBytes, videoSampleEntry } from '../iso/entry'
+import { audioSampleEntry, sampleEntryBytes, sampleEntryOf, videoSampleEntry } from '../iso/entry'
 import { parseInit } from '../iso/init'
-import { editOffset, sampleRunOf, trackDefaults } from '../iso/samples'
+import { samplesInMovie } from '../iso/movie'
+import { editOffset, locateSamples, sampleRunOf, trackDefaults } from '../iso/samples'
 import type { ClipSource, SourceTrack } from './plan'
 import type { Located, TrackKind } from '../../shared/types'
 
@@ -66,21 +67,79 @@ export function sourceTrackOf(input: SourceTrackInput): SourceTrack | null {
 }
 
 /**
+ * The tracks of an ordinary complete file, indexed straight out of its movie box.
+ *
+ * The other way material arrives, and the one the capture never sees: no init segment, no
+ * fragments, one `moov` describing every sample of every track and an `mdat` holding them. What
+ * comes out is the same `SourceTrack` the fragmented path produces, so the cut and the writer
+ * behind it cannot tell the two apart — which is the whole point of doing it here rather than in
+ * a saving path of its own.
+ *
+ * `total` is the length of the file the offsets are counted in, and it is not decoration: it is
+ * what stops a table claiming samples past the last byte there is. Pass zero where the server
+ * would not say, and the tables are believed.
+ *
+ * The bytes handed in need only be the movie box — a few kilobytes fetched out of a file that was
+ * deliberately not downloaded (src/core/iso/locate.ts). Every address that comes back is counted
+ * from the first byte of the file all the same, because that is what a chunk offset means.
+ */
+export function movieTracksOf(moov: Uint8Array, total: number): SourceTrack[] {
+  const declared = parseInit(moov)?.tracks ?? []
+  const tracks: SourceTrack[] = []
+
+  for (const indexed of samplesInMovie(moov, total)) {
+    // A movie box of a fragmented file describes its tracks and holds no samples: that is the
+    // honest answer for it, and here it means there is nothing to cut.
+    if (indexed.samples.length === 0) continue
+
+    const track = declared.find((candidate) => candidate.trackId === indexed.trackId)
+    const entry = sampleEntryOf(moov, indexed.trackId)
+    const bytes = sampleEntryBytes(moov, indexed.trackId)
+    if (!track || !entry || !bytes || !(track.timescale > 0)) continue
+
+    tracks.push({
+      kind: track.kind,
+      timescale: track.timescale,
+      sampleEntry: bytes,
+      width: entry.codedWidth,
+      height: entry.codedHeight,
+      editOffset: editOffset(moov, indexed.trackId),
+      // The offsets of a movie box are already counted from the first byte of the file, so the
+      // source they are placed in begins there.
+      samples: locateSamples(indexed.samples, { at: 0, length: total }),
+      // A complete file states each sample once. There is no re-watch to overlap with: that is a
+      // property of a recording assembled out of what a player happened to fetch twice.
+      dropped: 0,
+    })
+  }
+
+  return tracks
+}
+
+/**
  * The tracks of a recording as one source to cut from.
  *
  * The leading slot is the picture where there is one: it is the finer scale, and `planClip`
  * measures the clip by whatever stands there (§8.2 — the sound is cut to the picture and not the
  * other way round). A recording of sound alone leads with the sound, because it still has to be
  * exportable: the popup has offered to save such a session since the capture stage.
+ *
+ * A file with more than one track of a kind — two languages, two qualities — gives up all but
+ * one of them: an mp4 track carries one stream and the file being written has one of each. Which
+ * of them is taken is the caller's business, and this takes the first it is handed.
  */
-export function clipSourceOf(inputs: readonly SourceTrackInput[]): ClipSource | null {
-  const tracks = inputs.map(sourceTrackOf).filter((track): track is SourceTrack => track !== null)
-
+export function clipSourceFrom(tracks: readonly SourceTrack[]): ClipSource | null {
   const lead = tracks.find((track) => track.kind === 'video') ?? tracks[0]
   if (!lead) return null
 
   const audio = tracks.find((track) => track !== lead && track.kind === 'audio')
   return audio ? { video: lead, audio } : { video: lead }
+}
+
+export function clipSourceOf(inputs: readonly SourceTrackInput[]): ClipSource | null {
+  return clipSourceFrom(
+    inputs.map(sourceTrackOf).filter((track): track is SourceTrack => track !== null),
+  )
 }
 
 /**

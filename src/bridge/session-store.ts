@@ -8,6 +8,9 @@ import {
 import { SegmentStream } from '../core/stream'
 import { PtsMap } from '../core/timeline/map'
 import { durationToken, normalizeUrl, sessionKey } from '../core/session-key'
+import { cutPlain, type OpenedFile, type PlainFile } from '../core/export/plain'
+import type { ExportPlan } from '../core/export/plan'
+import type { RangeReader } from '../core/iso/locate'
 import type { MuxTrack } from '../core/mux'
 import type { Omission } from '../shared/protocol'
 import type { Chunk, InitInfo, TrackKind } from '../shared/types'
@@ -70,6 +73,36 @@ export interface Session {
    * a file that is sound alone would be promised as if it were the whole video.
    */
   refusedTracks: boolean
+  /**
+   * The material stayed in the file it came from, and this is where to read it.
+   *
+   * The other kind of session, and the only field that tells the two apart. A capture out of MSE
+   * holds its material as `tracks`, segment by segment, because the bytes went past once and
+   * would never come again; an ordinary file was never intercepted at all — the browser fetched
+   * it and the extension saw nothing — so what is held is an index of it and the reader that
+   * fetches by that index (§5.6, src/core/export/plain.ts).
+   *
+   * Everything else about the session is the same thing: the same registry, the same merge key,
+   * the same triage, the same eviction, the same summary in the popup and the same button. What
+   * differs is one branch in planSave and one in the writer, and it is one branch because both
+   * kinds end at the same cut and the same file.
+   */
+  plain?: PlainMaterial
+}
+
+/** An ordinary file behind a session: what it holds, how to read it, and how much has arrived. */
+export interface PlainMaterial {
+  /** The address of the file, as the element resolved it. */
+  url: string
+  file: PlainFile
+  read: RangeReader
+  /**
+   * Stretches of media time the element holds, in seconds — its own `buffered`, less whatever
+   * eviction has taken off the front. This is what a save may take from, and the popup states
+   * the length of the longest of them; see the note at the head of core/export/plain.ts for why
+   * it is this and not the whole file.
+   */
+  buffered: Span[]
 }
 
 /** Bookkeeping of the registry itself: consumers of a session never need it. */
@@ -208,6 +241,38 @@ function kindsOf(info: InitInfo): TrackKind[] {
   const kinds: TrackKind[] = []
   for (const track of info.tracks) if (!kinds.includes(track.kind)) kinds.push(track.kind)
   return kinds
+}
+
+/**
+ * The pairs of `HTMLMediaElement.buffered` as spans, cut off at the earliest time on offer.
+ *
+ * Read from a page and therefore not trusted: a range of no length, a range the wrong way round
+ * and a number that is not one all reach this, and every one of them would become a clip planned
+ * over nonsense. The order is the element's, which is ascending; the sort is here because
+ * nothing in the platform promises it.
+ */
+function spansOf(pairs: ReadonlyArray<readonly [number, number]>, floor: number): Span[] {
+  const spans: Span[] = []
+
+  for (const [start, end] of pairs) {
+    if (!Number.isFinite(start) || !Number.isFinite(end)) continue
+    if (!(end > start)) continue
+    spans.push({ start, end })
+  }
+
+  return clampSpans(spans.sort((a, b) => a.start - b.start), floor)
+}
+
+/** The same spans with everything before `floor` taken off; see PlainState.floor. */
+function clampSpans(spans: readonly Span[], floor: number): Span[] {
+  const kept: Span[] = []
+
+  for (const span of spans) {
+    const start = Math.max(span.start, floor)
+    if (span.end > start) kept.push({ start, end: span.end })
+  }
+
+  return kept
 }
 
 /** Common part of two sorted lists of disjoint spans. */
@@ -352,27 +417,45 @@ function extentOf(chunks: Chunk[]): Span | null {
  * plays without a picture; a rendition and a gap only shorten it, and the length in the summary
  * has already counted them.
  */
-function omissionsOf(session: Session, chosen: Track[], stretches: Span[]): Omission[] {
+function omissionsOf(losses: {
+  refusedTracks: boolean
+  rendition: boolean
+  stretches: number
+}): Omission[] {
   const omitted: Omission[] = []
 
-  if (session.refusedTracks) omitted.push('track')
-  // Only a rendition that holds something is a loss. A second init with no fragment under it
-  // costs the file nothing, and warning about it would be a warning about every quality switch
-  // the moment it happens.
-  const dropped = session.tracks.some((t) => !chosen.includes(t) && t.map.duration() > 0)
-  if (dropped) omitted.push('rendition')
-  if (stretches.length > 1) omitted.push('gap')
+  if (losses.refusedTracks) omitted.push('track')
+  if (losses.rendition) omitted.push('rendition')
+  if (losses.stretches > 1) omitted.push('gap')
 
   return omitted
 }
 
+/**
+ * What a save is made of, and where its bytes are.
+ *
+ * The two kinds of material meet here and nowhere else above it: the popup, the badge, the frame
+ * addressing and the protocol all read the three numbers beside this and never look inside it.
+ *
+ * - `captured` — segments already in this frame's memory, copied into a fragmented file whole.
+ * - `plain` — a cut planned over a file that is still on somebody's server, to be assembled once
+ *   the ranges it names have been read (src/bridge/write.ts).
+ */
+export type SaveSource =
+  | { kind: 'captured'; tracks: MuxTrack[] }
+  | { kind: 'plain'; read: RangeReader; plan: ExportPlan }
+
 /** What a save of this session would write, and what it would leave behind. */
 export interface SavePlan {
-  /** The streams of the file, in the order the muxer writes them: the picture first. */
-  material: MuxTrack[]
+  source: SaveSource
   /** Length of the clip in seconds: the stretch its material was chosen over. */
   duration: number
-  /** Weight of the media data that goes into it; the boxes around it are a kilobyte or two. */
+  /**
+   * Weight of the media data that goes into it; the boxes around it are a kilobyte or two.
+   *
+   * Zero means there is nothing to write, and it means that for both kinds: a captured session of
+   * init segments alone, or a file whose element holds not one whole frame yet.
+   */
   bytes: number
   /** What the file will not hold of what the session has; empty when it holds all of it. */
   omitted: Omission[]
@@ -392,6 +475,41 @@ export interface SavePlan {
  * buffer has not brought a fragment yet.
  */
 export function planSave(session: Session): SavePlan {
+  return session.plain ? planPlainSave(session, session.plain) : planCapturedSave(session)
+}
+
+/**
+ * The same three questions asked of a file that is still on a server.
+ *
+ * The material is not here to be weighed, so the cut is planned instead — and it is the very cut
+ * the editor uses (`planClip`), over the very index the editor walks, ending in the very writer
+ * that writes an exported clip. Nothing about a plain save is written twice: what is different
+ * about it is where the bytes come from, and that is a reader handed to the writer.
+ */
+function planPlainSave(session: Session, material: PlainMaterial): SavePlan {
+  const cut = cutPlain(material.file, material.buffered)
+  const nothing: SavePlan = {
+    source: { kind: 'plain', read: material.read, plan: { tracks: [], duration: 0, bytes: 0 } },
+    duration: 0,
+    bytes: 0,
+    omitted: [],
+  }
+
+  if (!cut) return nothing
+
+  return {
+    source: { kind: 'plain', read: material.read, plan: cut.plan },
+    duration: cut.plan.duration,
+    bytes: cut.plan.bytes,
+    omitted: omissionsOf({
+      refusedTracks: session.refusedTracks || material.file.refusedTracks,
+      rendition: cut.rendition,
+      stretches: cut.stretches,
+    }),
+  }
+}
+
+function planCapturedSave(session: Session): SavePlan {
   const chosen = mainTracks(session)
   const stretches = commonStretches(chosen)
   const longest = longestOf(stretches)
@@ -409,10 +527,17 @@ export function planSave(session: Session): SavePlan {
   for (const track of material) for (const segment of track.segments) bytes += segment.byteLength
 
   return {
-    material,
+    source: { kind: 'captured', tracks: material },
     duration: longest ? lengthOf(picked, longest) : 0,
     bytes,
-    omitted: omissionsOf(session, chosen, stretches),
+    omitted: omissionsOf({
+      refusedTracks: session.refusedTracks,
+      // Only a rendition that holds something is a loss. A second init with no fragment under it
+      // costs the file nothing, and warning about it would be a warning about every quality
+      // switch the moment it happens.
+      rendition: session.tracks.some((t) => !chosen.includes(t) && t.map.duration() > 0),
+      stretches: stretches.length,
+    }),
   }
 }
 
@@ -471,9 +596,14 @@ export function summarize(session: Session): {
   return summary
 }
 
-/** The material a saved file is built out of. */
+/**
+ * The captured segments a saved file is built out of; empty for a session whose material never
+ * passed through this frame at all. See planSave: what a save is made of is a SaveSource, and
+ * this is the one kind of it that is a list of buffers.
+ */
 export function selectMaterial(session: Session): MuxTrack[] {
-  return planSave(session).material
+  const plan = planSave(session)
+  return plan.source.kind === 'captured' ? plan.source.tracks : []
 }
 
 /**
@@ -518,6 +648,67 @@ function convertedChunk(convert: SegmentConverter, bytes: Uint8Array): Chunk | n
   return { start: converted.start, end: converted.end, bytes: converted.bytes }
 }
 
+/** What the page has said about one ordinary file, and what came back when it was opened. */
+export interface PlainInput {
+  sourceId: string
+  /** The address of the file, exactly as it will have to be fetched. */
+  url: string
+  /** Where the page stands: what a session opened for this file is signed with and shown as. */
+  pageUrl: string
+  title: string
+  /** How long the whole file is as the element states it; zero while it states nothing. */
+  durationSeconds: number
+  buffered: Array<[number, number]>
+  now: number
+}
+
+/**
+ * Reads the tables of an ordinary file.
+ *
+ * Handed in rather than reached for, because it is the one thing in this registry that touches
+ * the network, and because a test of the registry has no business making requests. Absent — every
+ * plain source is noted, judged and never opened, which is what a build with no reader would do.
+ */
+export type PlainOpener = (url: string) => Promise<OpenedFile | null>
+
+export interface StoreOptions {
+  openPlain?: PlainOpener
+}
+
+/** Everything the registry keeps about one ordinary file the page is playing. */
+interface PlainState {
+  sourceId: string
+  /** The address to fetch from, as the element resolved it. */
+  url: string
+  /** The same, normalised: the first component of the merge key. */
+  keyUrl: string
+  durationSeconds: number
+  buffered: Span[]
+  /**
+   * Earliest media time still on offer, in seconds. Raised by eviction and never by a report:
+   * a page goes on saying it holds the whole file, and a stretch that has been evicted is gone
+   * whatever the page says next.
+   */
+  floor: number
+  page: PageContext
+  /**
+   * The page as it stood when this file first became a session: what it is signed with.
+   *
+   * Kept apart from `page`, which moves with the page. A session taken out of the registry by a
+   * rejection and put back when the verdict turns has to come back as the session it was, under
+   * the address and the name the popup was already showing for it.
+   */
+  signature?: PageContext
+  /** The tables, once they have been read; absent until triage promotes the source. */
+  opened?: OpenedFile
+  /** A read of the tables is on its way. */
+  reading: boolean
+  /** The tables could not be read at all, and no later poll will change that. */
+  unreadable: boolean
+  /** Key of the session this file currently feeds; empty while it feeds none. */
+  key: string
+}
+
 export class SessionStore {
   private sessions = new Map<string, StoredSession>()
   /** What each MediaSource of the page feeds, and where. */
@@ -542,6 +733,27 @@ export class SessionStore {
   private declaredDurations = new Map<string, number>()
   /** Encrypted media was seen on this page: see refuseEncrypted. Once set, it is never cleared. */
   private encryptedSeen = false
+  /** sourceId → the ordinary file that source is playing; see plain(). */
+  private plainSources = new Map<string, PlainState>()
+  /** Reads of the tables now in flight: what settled() waits on. */
+  private reads = new Set<Promise<void>>()
+  private readonly openPlain?: PlainOpener
+
+  constructor(options: StoreOptions = {}) {
+    this.openPlain = options.openPlain
+  }
+
+  /**
+   * Waits for every read of a file's tables that is on its way.
+   *
+   * For tests and for nothing else. Opening a file is the one thing in this registry that is not
+   * immediate, and a test that checked the list a tick after promoting a source would be racing
+   * a fetch. Loops rather than awaiting once: opening a file can start another, and the point is
+   * to come back when the registry has stopped moving.
+   */
+  async settled(): Promise<void> {
+    while (this.reads.size > 0) await Promise.all([...this.reads])
+  }
 
   /**
    * Whether this page played protected media. Read by the bridge, which owes the popup the
@@ -594,6 +806,158 @@ export class SessionStore {
 
       this.take(input, unit.bytes)
     }
+  }
+
+  /**
+   * A media element of the page is playing an ordinary file, and this is everything the page can
+   * say about it: where it is, how long it is, and how much of it the browser holds (§5.6).
+   *
+   * No material comes with it and none ever will: the browser fetched the file itself and this
+   * extension saw not one byte of it. What arrives instead is an address, and what is done with
+   * an address is nothing at all until triage has promoted the source. Ten of the eighteen
+   * measured pages that deliver a plain file hold nothing but muted looping previews and
+   * three-second animations, and a page of them would otherwise cost a request apiece for
+   * material that would be refused a moment later.
+   *
+   * Said again whenever any of the three changes — the metadata arriving, the download making
+   * headway — and silent while none does, so this is called a handful of times per file rather
+   * than twice a second.
+   */
+  plain(input: PlainInput): void {
+    if (this.encryptedSeen) return
+
+    let state = this.plainSources.get(input.sourceId)
+    if (!state) {
+      state = {
+        sourceId: input.sourceId,
+        url: input.url,
+        keyUrl: normalizeUrl(input.url),
+        durationSeconds: input.durationSeconds,
+        buffered: [],
+        floor: 0,
+        page: { url: input.pageUrl, title: input.title, now: input.now },
+        reading: false,
+        unreadable: false,
+        key: '',
+      }
+      this.plainSources.set(input.sourceId, state)
+    }
+
+    state.durationSeconds = input.durationSeconds
+    state.buffered = spansOf(input.buffered, state.floor)
+    // The page as it stands now. A session already opened keeps the address and the name it was
+    // opened with — pageIsAt corrects the name the ordinary way — and this is what a session
+    // opened later will be signed with.
+    state.page = { url: input.pageUrl, title: input.title, now: input.now }
+
+    this.readPlain(state)
+    this.syncPlain(state)
+  }
+
+  /**
+   * Reads the tables of a file, once, and only for a source that has earned it.
+   *
+   * The whole cost of a plain source is here: two ranged requests of a few kilobytes, made after
+   * triage has said the element is a real player being really watched. A rejected source, a
+   * source still serving its probation, and a source on a page with no reader at all make no
+   * request whatever.
+   */
+  private readPlain(state: PlainState): void {
+    if (!this.openPlain || state.opened || state.reading || state.unreadable) return
+    if (!this.promoted.has(state.sourceId)) return
+
+    state.reading = true
+    const read = this.openPlain(state.url)
+      .then((opened) => {
+        state.reading = false
+        if (this.encryptedSeen) return
+
+        // A file whose tables could not be read at all: an address that is gone, a server that
+        // will not range, bytes that are not an mp4. It is refused for good — nothing about the
+        // file will be different on the next poll — rather than retried twice a second.
+        if (!opened) {
+          state.unreadable = true
+          return
+        }
+
+        // Protection found in the file's own boxes. It is the page that is refused and not this
+        // source: §5.4 makes encryption a property of the material, and the refusal never turns.
+        if (opened.file.encrypted) {
+          this.refuseEncrypted()
+          return
+        }
+
+        state.opened = opened
+        this.syncPlain(state)
+      })
+      .catch(() => {
+        state.reading = false
+        state.unreadable = true
+      })
+      .finally(() => {
+        this.reads.delete(read)
+      })
+
+    this.reads.add(read)
+  }
+
+  /**
+   * Puts the file into the registry as a session, or takes it out again.
+   *
+   * A plain session is a view over what is known about the source, and that is what makes the
+   * probation of §5.4 free here: the captured path has to carry its material out of the registry
+   * and back in again, because the bytes exist nowhere else, while this holds an index that never
+   * left the source. A rejection removes the session; the verdict turning puts it back whole.
+   */
+  private syncPlain(state: PlainState): void {
+    const opened = state.opened
+    if (!opened || this.encryptedSeen) return
+
+    const key = sessionKey({
+      url: state.keyUrl,
+      codecs: opened.file.codecs,
+      // What the page states, and what the file itself says where the page has stated nothing.
+      durationSeconds: state.durationSeconds || opened.file.durationSeconds,
+    })
+
+    // The key moved — the metadata arrived and gave the file a length it did not have. The
+    // session moves with it rather than leaving a twin behind under the old one.
+    if (state.key && state.key !== key) this.dropPlainSession(state)
+    state.key = key
+
+    const standing = this.sessions.get(key)
+    // A rejection that the session has not outgrown: out of every list and out of every save. A
+    // confirmed session is the freeze of §5.5 instead — it stays exactly as it is, and the
+    // stretch it offers stops growing because nothing here is updated under a rejection.
+    if (this.rejected.has(state.sourceId) && !standing?.confirmed) {
+      this.dropPlainSession(state)
+      return
+    }
+    if (this.rejected.has(state.sourceId)) return
+
+    state.signature ??= state.page
+    const session = standing ?? this.createSession(key, state.signature)
+    session.plain = {
+      url: state.url,
+      file: opened.file,
+      read: opened.read,
+      buffered: state.buffered,
+    }
+    session.sources.add(state.sourceId)
+    if (this.promoted.has(state.sourceId)) session.confirmed = true
+    if (state.page.now > session.lastSeenAt) session.lastSeenAt = state.page.now
+    this.sessions.set(key, session)
+  }
+
+  /** Takes the session this file feeds out of the registry; the file itself is not touched. */
+  private dropPlainSession(state: PlainState): void {
+    const session = this.sessions.get(state.key)
+    if (!session) return
+
+    session.sources.delete(state.sourceId)
+    // A session another source is also feeding stays: the key is built from the address of the
+    // material, so this only happens where two elements really are playing the same file.
+    if (session.sources.size === 0) this.sessions.delete(state.key)
   }
 
   /**
@@ -823,6 +1187,19 @@ export class SessionStore {
     for (const session of this.sessions.values()) {
       for (const track of session.tracks) track.map.evict(windowSeconds, currentTime)
     }
+
+    // The same rule over the other kind of material: what lies further back than the buffer
+    // reaches is no longer on offer. There is nothing to free by it — a plain session holds an
+    // index and not the material — so what it does is keep the promise the same on both kinds:
+    // the popup offers as far back as the setting says and no further, whichever way the video
+    // arrived. A captured map drops whole segments because a segment is what it holds; here the
+    // unit is a sample, so the stretch is cut at the line rather than at the segment before it.
+    for (const state of this.plainSources.values()) {
+      const floor = currentTime - windowSeconds
+      if (floor > state.floor) state.floor = floor
+      state.buffered = clampSpans(state.buffered, state.floor)
+      this.syncPlain(state)
+    }
   }
 
   /**
@@ -854,6 +1231,9 @@ export class SessionStore {
     this.sessions.clear()
     this.sources.clear()
     this.streams.clear()
+    // The files too, index and all. A read already on its way finds encryptedSeen set when it
+    // lands and puts nothing back.
+    this.plainSources.clear()
     this.probation.clear()
     this.rejected.clear()
     this.promoted.clear()
@@ -928,6 +1308,14 @@ export class SessionStore {
     if (this.encryptedSeen) return
     this.rejected.add(sourceId)
 
+    // An ordinary file: nothing is held here, so nothing has to be set aside. The session is
+    // simply taken out of the registry, and the verdict turning puts it back whole.
+    const plain = this.plainSources.get(sourceId)
+    if (plain) {
+      this.syncPlain(plain)
+      return
+    }
+
     const source = this.sources.get(sourceId)
     if (!source) return
 
@@ -954,6 +1342,15 @@ export class SessionStore {
     this.rejected.delete(sourceId)
     this.screenedOut.delete(sourceId)
 
+    // The moment an ordinary file has earned its life, and the first moment anything is fetched
+    // for it: the tables are read now and not when the page first mentioned the address.
+    const plain = this.plainSources.get(sourceId)
+    if (plain) {
+      this.readPlain(plain)
+      this.syncPlain(plain)
+      return
+    }
+
     // Remembered on the source and not on the session alone: a source promoted before its first
     // init has no session yet, and the one it opens later is confirmed from the start.
     const session = this.release(sourceId)
@@ -966,6 +1363,13 @@ export class SessionStore {
 
     this.rejected.delete(sourceId)
     this.screenedOut.delete(sourceId)
+
+    const plain = this.plainSources.get(sourceId)
+    if (plain) {
+      this.syncPlain(plain)
+      return
+    }
+
     this.release(sourceId)
   }
 

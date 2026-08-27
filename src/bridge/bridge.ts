@@ -5,10 +5,17 @@ import {
   type SessionList,
   type SessionSummary,
 } from '../shared/protocol'
-import { muxFragmentedMp4 } from '../core/mux'
-import { SessionStore, selectMaterial, summarize } from './session-store'
+import { openPlainFile } from './loader'
+import { SessionStore, planSave, summarize } from './session-store'
+import { writeSaveFile } from './write'
 
-const store = new SessionStore()
+/**
+ * The registry of this frame, with the one thing it cannot do for itself handed to it: reading a
+ * file that was never intercepted. The read has to be made from the extension origin, which is
+ * what this frame is and what the page is not — 48 CORS refusals out of 57 measured from the page
+ * — and the registry itself has no business knowing that.
+ */
+const store = new SessionStore({ openPlain: (url) => openPlainFile(url) })
 
 /**
  * How long a blob lives after a download starts. Chrome does not read it instantly, and an
@@ -185,6 +192,84 @@ function fileNameFor(title: string): string {
   return `${base || FALLBACK_NAME}.mp4`
 }
 
+/**
+ * Assembles a session into a file and hands it to Chrome to download.
+ *
+ * The file is put together here and not in the popup: what a save is made of lives in this frame,
+ * and pushing megabytes through extension messages would copy them twice and through JSON. What
+ * kind of material it is made of this function does not ask — see writeSaveFile.
+ *
+ * Awaited rather than immediate, because one of the two kinds has to read its material off the
+ * network first. That is also why the emptiness of a session is answered before any of it starts:
+ * a save that cannot produce a file must say so at once and not after a round trip.
+ */
+async function save(key: string, port: MessagePort | undefined): Promise<void> {
+  const session = store.get(key)
+
+  // Triage may have evicted the session and the page may have reloaded while the popup was open:
+  // the popup key then points at nothing.
+  if (!session) {
+    const missing: SaveResult = { ok: false, reason: 'gone' }
+    port?.postMessage(missing)
+    return
+  }
+
+  // A session made of init segments alone has nothing to cut, and neither has one whose second
+  // buffer is yet to bring a fragment, nor a file the element has not held a whole frame of. Told
+  // apart from the one above because the two are owed different words: this session is in the
+  // registry and recording, and "it may be gone from the page" would send the user looking for a
+  // loss that never happened.
+  const plan = planSave(session)
+  if (plan.bytes === 0) {
+    const empty: SaveResult = { ok: false, reason: 'empty' }
+    port?.postMessage(empty)
+    return
+  }
+
+  // A Blob only takes a view over a plain ArrayBuffer, while Uint8Array allows shared memory by
+  // type. Both writers allocate the buffer themselves and neither is shared.
+  const file = (await writeSaveFile(plan.source)) as Uint8Array<ArrayBuffer> | null
+
+  // Only the plain path reaches this: the material is on somebody's server, and the answer to a
+  // read of it may be a refusal. Said in the words of a refused download rather than of an empty
+  // session — the recording is there, and what failed was fetching it.
+  if (!file) {
+    const unread: SaveResult = { ok: false, reason: 'refused', detail: 'the file could not be read' }
+    port?.postMessage(unread)
+    return
+  }
+
+  const url = URL.createObjectURL(new Blob([file], { type: 'video/mp4' }))
+
+  chrome.downloads.download(
+    {
+      url,
+      filename: fileNameFor(session.title),
+      // Said out loud rather than left to the default. Two sessions of one page share a title as
+      // a matter of course — a feed leaves one behind per video — and so do two long titles that
+      // differ only past the length limit; overwriting would take the first file away without a
+      // word, and prompting would stop a save the user has already asked for.
+      conflictAction: 'uniquify',
+    },
+    (downloadId) => {
+      const failed = downloadId === undefined
+      // Read for two reasons. Unread, Chrome writes about it to the console itself and the frame
+      // fills with "Unchecked runtime.lastError" — errors of the extension by the look of them.
+      // And it is the only account of what actually went wrong: no space, no permission, a name
+      // the file system will not take. Answered as a plain "false", the last of those reached the
+      // user as "this recording may be gone from the page" while it sat in the registry recording
+      // on.
+      const detail = failed ? chrome.runtime.lastError?.message : undefined
+
+      setTimeout(() => URL.revokeObjectURL(url), failed ? 0 : REVOKE_DELAY_MS)
+
+      const result: SaveResult = failed ? { ok: false, reason: 'refused' } : { ok: true }
+      if (detail) result.detail = detail
+      port?.postMessage(result)
+    },
+  )
+}
+
 window.addEventListener('message', (event: MessageEvent) => {
   const data = event.data
 
@@ -218,62 +303,7 @@ window.addEventListener('message', (event: MessageEvent) => {
   // The file is put together here and not in the popup: the bytes live in this frame, and
   // pushing megabytes through extension messages would copy them twice and through JSON.
   if (data?.type === 'tc:save') {
-    const port = event.ports[0]
-    const session = store.get(String(data.key))
-    // Every track of the session over the stretch where all of them are there at once: a session
-    // holds a track per SourceBuffer, and a real player gives the picture and the sound apart.
-    const material = session ? selectMaterial(session) : []
-
-    // Triage may have evicted the session and the page may have reloaded while the popup was
-    // open: the popup key then points at nothing.
-    if (!session) {
-      const missing: SaveResult = { ok: false, reason: 'gone' }
-      port?.postMessage(missing)
-      return
-    }
-
-    // A session made of init segments alone has nothing to cut, and neither has one whose second
-    // buffer is yet to bring a fragment. Told apart from the one above because the two are owed
-    // different words: this session is in the registry and recording, and "it may be gone from
-    // the page" would send the user looking for a loss that never happened.
-    if (!material.length) {
-      const empty: SaveResult = { ok: false, reason: 'empty' }
-      port?.postMessage(empty)
-      return
-    }
-
-    // A Blob only takes a view over a plain ArrayBuffer, while Uint8Array allows shared memory
-    // by type. The muxer allocates the buffer itself and it is never shared.
-    const file = muxFragmentedMp4(material) as Uint8Array<ArrayBuffer>
-    const url = URL.createObjectURL(new Blob([file], { type: 'video/mp4' }))
-
-    chrome.downloads.download(
-      {
-        url,
-        filename: fileNameFor(session.title),
-        // Said out loud rather than left to the default. Two sessions of one page share a title
-        // as a matter of course — a feed leaves one behind per video — and so do two long titles
-        // that differ only past the length limit; overwriting would take the first file away
-        // without a word, and prompting would stop a save the user has already asked for.
-        conflictAction: 'uniquify',
-      },
-      (downloadId) => {
-        const failed = downloadId === undefined
-        // Read for two reasons. Unread, Chrome writes about it to the console itself and the
-        // frame fills with "Unchecked runtime.lastError" — errors of the extension by the look of
-        // them. And it is the only account of what actually went wrong: no space, no permission,
-        // a name the file system will not take. Answered as a plain "false", the last of those
-        // reached the user as "this recording may be gone from the page" while it sat in the
-        // registry recording on.
-        const detail = failed ? chrome.runtime.lastError?.message : undefined
-
-        setTimeout(() => URL.revokeObjectURL(url), failed ? 0 : REVOKE_DELAY_MS)
-
-        const result: SaveResult = failed ? { ok: false, reason: 'refused' } : { ok: true }
-        if (detail) result.detail = detail
-        port?.postMessage(result)
-      },
-    )
+    void save(String(data.key), event.ports[0])
     return
   }
 
@@ -320,6 +350,25 @@ window.addEventListener('message', (event: MessageEvent) => {
   // change from one to the next; the registry decides for itself whether it is news.
   if (data.type === 'tc:duration') {
     store.setDuration(data.sourceId, data.seconds)
+    return
+  }
+
+  // A media element of the page is playing an ordinary file. Nothing of its material passes
+  // through the extension — the browser fetched it and nobody intercepted a byte — so what
+  // arrives is an address and an account of how much of it the element holds. The registry
+  // decides what to do with that, and does nothing at all until triage has promoted the source.
+  if (data.type === 'tc:plain') {
+    store.plain({
+      sourceId: data.sourceId,
+      url: data.url,
+      // The frame's own address and title, exactly as a captured session is signed: the material
+      // is what the file holds, and the page is where the user saw it.
+      pageUrl: pageContext.url,
+      title: pageContext.title,
+      durationSeconds: data.durationSeconds,
+      buffered: data.buffered,
+      now: Date.now(),
+    })
     return
   }
 

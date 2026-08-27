@@ -144,24 +144,37 @@ export function planClip(source: ClipSource, request: ClipRequest): ExportPlan {
   }
 }
 
-/** The whole representation, holes closed and nothing trimmed: what the player previews. */
-export function planPreview(source: ClipSource): ExportPlan {
-  const samples = source.video.samples
-  const first = samples[0]
-  if (!first) return { tracks: [], duration: 0, bytes: 0 }
-
-  const scale = source.video.timescale
-  const offset = source.video.editOffset
+/**
+ * The stretch of presentation a track covers, in the seconds a clip is asked for.
+ *
+ * The same clock the browser counts `currentTime` and `buffered` in: an edit list moves the
+ * material to the presentation timeline by subtracting its media_time, and so does this. An empty
+ * span — no samples — comes back as zero to zero.
+ */
+export function presentationSpan(track: SourceTrack): { start: number; end: number } {
   let start = Infinity
   let end = 0
-  for (const sample of samples) {
+
+  for (const sample of track.samples) {
     if (sample.pts < start) start = sample.pts
     if (sample.pts + sample.duration > end) end = sample.pts + sample.duration
   }
 
+  if (start === Infinity) return { start: 0, end: 0 }
+  return {
+    start: (start - track.editOffset) / track.timescale,
+    end: (end - track.editOffset) / track.timescale,
+  }
+}
+
+/** The whole representation, holes closed and nothing trimmed: what the player previews. */
+export function planPreview(source: ClipSource): ExportPlan {
+  if (source.video.samples.length === 0) return { tracks: [], duration: 0, bytes: 0 }
+
+  const span = presentationSpan(source.video)
   return planClip(source, {
-    in: (start - offset) / scale,
-    out: (end - offset) / scale,
+    in: span.start,
+    out: span.end,
     sound: source.audio !== undefined,
   })
 }

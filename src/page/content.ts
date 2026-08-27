@@ -176,6 +176,15 @@ startWatching(
     const iframe = await ensureBridge()
     iframe.contentWindow?.postMessage({ type: 'tc:encrypted' }, '*')
   },
+  // A media element of this page is playing an ordinary file (§5.6). There is no material to
+  // carry — the browser fetched the file itself and the hook in the MAIN world never saw it — so
+  // what goes across is the address, the length and the stretch the element holds. The frame it
+  // goes to is the one that can act on it: the bridge stands on the extension origin, which is
+  // the only place a ranged fetch of somebody else's CDN is not refused.
+  async (source) => {
+    const iframe = await ensureBridge()
+    iframe.contentWindow?.postMessage({ type: 'tc:plain', ...source }, '*')
+  },
 )
 
 // Which stream an element is playing, when the stream comes out of a worker and has no address to

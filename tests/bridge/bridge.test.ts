@@ -267,10 +267,18 @@ function installWindow(referrer = REFERRER) {
     context(url = PAGE_URL, title = PAGE_TITLE): void {
       deliver({ type: 'tc:context', url, title })
     },
-    /** Asks the bridge to build a file — the way the popup does through the content script. */
-    save(key: string): ReturnType<typeof port> {
+    /**
+     * Asks the bridge to build a file — the way the popup does through the content script.
+     *
+     * Awaited, because building one is: a session whose material is still on somebody's server
+     * has to read it before there is a file, and the bridge answers when it has one either way.
+     * The wait is for the microtask queue and not for a clock — nothing here touches a network.
+     */
+    async save(key: string): Promise<ReturnType<typeof port>> {
       const reply = port()
       deliver({ type: 'tc:save', key }, { ports: [reply] })
+      await Promise.resolve()
+      await Promise.resolve()
       return reply
     },
     downloads,
@@ -483,7 +491,7 @@ describe('the bridge puts segments into the session registry', () => {
     win.append(seg1Bytes)
 
     win.context(PAGE_URL, 'Night broadcast')
-    win.save(keyFor(PAGE_URL))
+    await win.save(keyFor(PAGE_URL))
 
     // The name is read off the session at the moment of saving, and this is the whole point of
     // the title reaching it at all.
@@ -764,7 +772,7 @@ describe('the bridge refuses a page that plays encrypted media', () => {
     const key = win.list()[0]!.key
 
     encrypted(win)
-    const reply = win.save(key)
+    const reply = await win.save(key)
 
     // The popup keeps the key of a session it listed a moment ago: a save by that key must find
     // nothing, and no file may reach the disk. It is gone from the registry, and that is exactly
@@ -961,7 +969,7 @@ describe('the bridge saves what it collected as a file', () => {
     // Runs 0…1.95 and 3.95…6.02: the second one is longer.
     const win = await withAudio(0, 2, 3)
 
-    win.save(audioKey)
+    await win.save(audioKey)
 
     expect(digest(...mediaOf(await win.savedBytes()))).toBe(
       digest(...mediaOf(audioBytes[2]!), ...mediaOf(audioBytes[3]!)),
@@ -973,7 +981,7 @@ describe('the bridge saves what it collected as a file', () => {
     // the player loaded a piece after a rewind and stopped.
     const win = await withAudio(0, 1, 3)
 
-    win.save(audioKey)
+    await win.save(audioKey)
 
     expect(digest(...mediaOf(await win.savedBytes()))).toBe(
       digest(...mediaOf(audioBytes[0]!), ...mediaOf(audioBytes[1]!)),
@@ -986,7 +994,7 @@ describe('the bridge saves what it collected as a file', () => {
     win.append(initBytes)
     win.append(seg1Bytes)
 
-    win.save(keyFor(PAGE_URL))
+    await win.save(keyFor(PAGE_URL))
 
     // Chrome picks what to open the download with by the type of the blob;
     // application/octet-stream would send the clip into an "unknown file".
@@ -999,7 +1007,7 @@ describe('the bridge saves what it collected as a file', () => {
     win.append(initBytes)
     win.append(seg1Bytes)
 
-    win.save(keyFor(PAGE_URL))
+    await win.save(keyFor(PAGE_URL))
 
     // A title not in Latin is no reason to hand the user a file made of underscores.
     expect(win.downloads.map((item) => item.filename)).toEqual(['Ночной эфир.mp4'])
@@ -1013,7 +1021,7 @@ describe('the bridge saves what it collected as a file', () => {
     win.append(initBytes)
     win.append(seg1Bytes)
 
-    win.save(keyFor(PAGE_URL))
+    await win.save(keyFor(PAGE_URL))
 
     // Chrome reads both slashes as a path separator: "AC\DC.mp4" goes out not as a file but as
     // a directory AC with a file DC.mp4 inside — the user pressed "Save all" and found no clip.
@@ -1028,7 +1036,7 @@ describe('the bridge saves what it collected as a file', () => {
     win.append(initBytes)
     win.append(seg1Bytes)
 
-    win.save(keyFor(PAGE_URL))
+    await win.save(keyFor(PAGE_URL))
 
     // The title is set by the page and through the file name it leads straight into the file
     // system: Chrome reads dots at the edges as a path upwards and rejects the download whole.
@@ -1043,7 +1051,7 @@ describe('the bridge saves what it collected as a file', () => {
     win.append(initBytes)
     win.append(seg1Bytes)
 
-    win.save(keyFor(PAGE_URL))
+    await win.save(keyFor(PAGE_URL))
 
     // The extension is appended right after, and a trailing dot in the title doubles the
     // separator: «Серия 1..mp4». Windows also cuts dots and spaces off the end of a name itself.
@@ -1057,7 +1065,7 @@ describe('the bridge saves what it collected as a file', () => {
     win.append(initBytes)
     win.append(seg1Bytes)
 
-    win.save(keyFor(PAGE_URL))
+    await win.save(keyFor(PAGE_URL))
 
     expect(win.downloads[0]!.filename).toBe(`${'ц'.repeat(99)}.mp4`)
   })
@@ -1068,7 +1076,7 @@ describe('the bridge saves what it collected as a file', () => {
     win.append(initBytes)
     win.append(seg1Bytes)
 
-    win.save(keyFor(PAGE_URL))
+    await win.save(keyFor(PAGE_URL))
 
     expect(win.downloads[0]!.filename).toBe('tailcut.mp4')
   })
@@ -1079,7 +1087,7 @@ describe('the bridge saves what it collected as a file', () => {
     win.append(initBytes)
     win.append(seg1Bytes)
 
-    win.save(keyFor(PAGE_URL))
+    await win.save(keyFor(PAGE_URL))
 
     expect(win.downloads[0]!.filename.length).toBeLessThanOrEqual(104)
     expect(win.downloads[0]!.filename.endsWith('.mp4')).toBe(true)
@@ -1101,7 +1109,7 @@ describe('the bridge saves what it collected as a file', () => {
       win.append(initBytes)
       win.append(seg1Bytes)
 
-      win.save(keyFor(PAGE_URL))
+      await win.save(keyFor(PAGE_URL))
 
       expect(win.downloads, 'no download was started').toHaveLength(1)
       return win.downloads[0]!.filename
@@ -1176,7 +1184,7 @@ describe('the bridge saves what it collected as a file', () => {
     win.append(initBytes)
     win.append(seg1Bytes)
 
-    win.save(keyFor(PAGE_URL))
+    await win.save(keyFor(PAGE_URL))
 
     // A feed leaves a session per video behind and their titles collide as a matter of course —
     // and so do two long titles that differ past the length limit. Said out loud rather than left
@@ -1190,7 +1198,7 @@ describe('the bridge saves what it collected as a file', () => {
     win.append(initBytes)
     win.append(seg1Bytes)
 
-    const reply = win.save(keyFor(PAGE_URL))
+    const reply = await win.save(keyFor(PAGE_URL))
 
     expect(reply.received).toEqual([{ ok: true }])
   })
@@ -1202,7 +1210,7 @@ describe('the bridge saves what it collected as a file', () => {
     win.append(seg1Bytes)
 
     // The page was reloaded while the popup was open: its key points at nothing.
-    const reply = win.save('no such session')
+    const reply = await win.save('no such session')
 
     expect(reply.received).toEqual([{ ok: false, reason: 'gone' }])
     expect(win.downloads, 'the bridge downloaded a session that does not exist').toEqual([])
@@ -1216,7 +1224,7 @@ describe('the bridge saves what it collected as a file', () => {
     // The player opened the stream and loaded nothing: there are no runs on the map. There is
     // nowhere to take the longest one from, and the file would come out of a header alone. The
     // session is right there in the registry, so «it may be gone from the page» would be a lie.
-    const reply = win.save(keyFor(PAGE_URL))
+    const reply = await win.save(keyFor(PAGE_URL))
 
     expect(reply.received).toEqual([{ ok: false, reason: 'empty' }])
     expect(win.downloads).toEqual([])
@@ -1233,7 +1241,7 @@ describe('the bridge saves what it collected as a file', () => {
     // system will not take, a user cancel. Answered as a plain «false» it was indistinguishable
     // from a session that had been evicted, and the popup told the user the recording was gone
     // while it sat in the registry untouched.
-    const reply = win.save(keyFor(PAGE_URL))
+    const reply = await win.save(keyFor(PAGE_URL))
 
     expect(reply.received).toEqual([{ ok: false, reason: 'refused', detail: 'Download failed' }])
   })
@@ -1245,7 +1253,7 @@ describe('the bridge saves what it collected as a file', () => {
     win.append(seg1Bytes)
     win.failDownloads('')
 
-    const reply = win.save(keyFor(PAGE_URL))
+    const reply = await win.save(keyFor(PAGE_URL))
 
     expect(reply.received).toEqual([{ ok: false, reason: 'refused' }])
   })
@@ -1257,7 +1265,7 @@ describe('the bridge saves what it collected as a file', () => {
     win.append(seg1Bytes)
     win.failDownloads()
 
-    win.save(keyFor(PAGE_URL))
+    await win.save(keyFor(PAGE_URL))
 
     // Chrome hands a refusal over through chrome.runtime.lastError and, if the callback did not
     // read it, writes about it itself: the console of the bridge frame fills with "Unchecked
@@ -1272,7 +1280,7 @@ describe('the bridge saves what it collected as a file', () => {
     win.append(initBytes)
     win.append(seg1Bytes)
 
-    win.save(keyFor(PAGE_URL))
+    await win.save(keyFor(PAGE_URL))
 
     // An address revoked at once cuts a started download off: Chrome reads a blob slowly.
     vi.advanceTimersByTime(59_000)
@@ -1293,7 +1301,7 @@ describe('the bridge saves what it collected as a file', () => {
     win.append(seg1Bytes)
     win.failDownloads()
 
-    win.save(keyFor(PAGE_URL))
+    await win.save(keyFor(PAGE_URL))
     vi.advanceTimersByTime(0)
 
     // There will be no download and nobody to read the blob — no reason to hold it a minute.
@@ -1307,6 +1315,10 @@ describe('the bridge saves what it collected as a file', () => {
     win.append(seg1Bytes)
 
     expect(() => win.deliver({ type: 'tc:save', key: keyFor(PAGE_URL) })).not.toThrow()
+    // The build is awaited inside the bridge, so the download starts a microtask later; what is
+    // under test is that nobody threw for want of somebody to answer.
+    await Promise.resolve()
+    await Promise.resolve()
     expect(win.downloads, 'the download did not start').toHaveLength(1)
   })
 
@@ -1318,6 +1330,8 @@ describe('the bridge saves what it collected as a file', () => {
 
     const reply = port()
     const sender = win.deliver({ type: 'tc:save', key: keyFor(PAGE_URL) }, { ports: [reply] })
+    await Promise.resolve()
+    await Promise.resolve()
 
     // An answer into the window would tell any page that the extension has something on it.
     expect(sender.posts, 'the save answer went into the page window').toEqual([])
@@ -1386,7 +1400,7 @@ describe('the bridge tells apart the buffers of one media source', () => {
     win.context()
     feedBothTracks(win)
 
-    win.save(keyFor(PAGE_URL, ['avc1', 'mp4a']))
+    await win.save(keyFor(PAGE_URL, ['avc1', 'mp4a']))
 
     const file = await win.savedBytes()
     const moov = topLevelBoxes(file).find((box) => box.type === 'moov')!
