@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8" />
+<!--
+  Two embedded players on one page, each from its own address: a page of reviews, a lesson with
+  two clips in it, a feed of embeds. Each frame keeps a registry of its own, so what the popup has
+  to show is two sessions and not one — and "Save all" over either of them has to reach the frame
+  that holds its bytes.
+
+  The addresses differ on purpose: a session is keyed by the address of the video, and the same
+  clip embedded twice is one session by that key, not two.
+-->
+<title>a page of two embeds</title>
+<iframe id="first" src="https://tailcut.test/player" width="320" height="180"></iframe>
+<iframe id="second" src="https://other-site.example/player" width="320" height="180"></iframe>

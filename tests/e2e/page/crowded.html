@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8" />
+<!--
+  One embedded player among fifty frames of advertising. The extension stands up in every one of
+  them (both content scripts are declared with all_frames), so asking a tab means asking fifty-one
+  addressees — and the popup is obliged to open instantly all the same.
+
+  The frames are written in by script rather than by hand: what is being measured is their number.
+-->
+<title>a page full of frames</title>
+<iframe id="player" src="https://tailcut.test/player" width="320" height="180"></iframe>
+<script>
+  window.FILLER_FRAMES = 50
+
+  for (let i = 0; i < window.FILLER_FRAMES; i++) {
+    const frame = document.createElement('iframe')
+    frame.src = 'https://filler.example/advert?slot=' + i
+    frame.width = 10
+    frame.height = 10
+    document.body.appendChild(frame)
+  }
+</script>
