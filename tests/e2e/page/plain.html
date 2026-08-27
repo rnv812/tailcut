@@ -1,0 +1,47 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>An article about __NAME__</title>
+<!--
+  An ordinary page with an ordinary file on it: no MediaSource, no fetching of segments, nothing
+  for the hook in the MAIN world to intercept. The browser downloads the file itself and the
+  extension sees not one byte of it — which is what eighteen of the twenty-one live pages that
+  delivered any video at all look like.
+
+  Muted, because a page cannot start an unmuted element without a gesture and there is none here.
+  Triage records muted video under the balanced preset; what it refuses is muted AND looping AND
+  without controls, which is a banner. This has controls and does not loop.
+-->
+<p>Some words, and then a video.</p>
+<video id="v" controls muted width="640" src="__MEDIA__" style="background: #000"></video>
+<script>
+  const video = document.getElementById('v')
+
+  window.tcPlay = () => video.play()
+  window.tcPause = () => video.pause()
+
+  /** What the element knows about the file: the same three things the watcher reads off it. */
+  window.tcState = () => ({
+    currentTime: video.currentTime,
+    duration: video.duration,
+    buffered: Array.from({ length: video.buffered.length }, (_, i) => [
+      video.buffered.start(i),
+      video.buffered.end(i),
+    ]),
+  })
+
+  /**
+   * The page trying to read its own video by a ranged fetch.
+   *
+   * Refused, because the file is on another origin and the host sends no CORS header — the
+   * refusal that was measured 48 times out of 57 on live pages, and the reason the reads have to
+   * be made from the extension frame instead.
+   */
+  window.tcFetch = async () => {
+    try {
+      const answer = await fetch(video.src, { headers: { Range: 'bytes=0-15' } })
+      return `answered ${answer.status}`
+    } catch (error) {
+      return `refused: ${error}`
+    }
+  }
+</script>

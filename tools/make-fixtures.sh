@@ -303,4 +303,26 @@ ffmpeg -y -i "$work/source-muxed.mp4" -c copy -f mp4 "$out/plain/whole.mp4"
 # first ranged read and costs nothing further.
 ffmpeg -y -i "$work/source-muxed.mp4" -c copy -f mp4 -movflags +faststart "$out/plain/faststart.mp4"
 
+# Twenty seconds of the same cheap material, as an ordinary complete file in both layouts.
+#
+# The pair above is eighteen kilobytes and six seconds long, which is enough to compare two
+# readers and not enough to be watched: triage gives a player six seconds of real playing before
+# it will call it a player at all, and a clip that ends at the threshold cannot be watched partway
+# through. This is the file the browser tests actually play — long enough to watch a piece of,
+# small enough to sit in the repository at fifty-four kilobytes a copy.
+ffmpeg -y -f lavfi -i "color=c=#202040:s=256x144:r=10:d=20" \
+       -f lavfi -i "sine=frequency=440:duration=20" \
+       -vf "drawbox=x='mod(t*60\,220)':y='60+40*sin(t)':w=30:h=30:color=orange:t=fill" \
+       -c:v libx264 -profile:v main -crf 30 -g 20 -keyint_min 20 -sc_threshold 0 \
+       -pix_fmt yuv420p -c:a aac -b:a 16k -ar 22050 -ac 1 \
+       -shortest "$work/source-watched.mp4"
+
+# ftyp, free, mdat, moov: the movie box behind 46 kilobytes of material, so the probe at the front
+# of the file cannot reach it and the walk has to step over the mdat by its stated length.
+ffmpeg -y -i "$work/source-watched.mp4" -c copy -f mp4 "$out/plain/watched.mp4"
+# ftyp, moov, free, mdat: the movie box inside the first probe, and the whole file found in one
+# request.
+ffmpeg -y -i "$work/source-watched.mp4" -c copy -f mp4 -movflags +faststart \
+       "$out/plain/watched-faststart.mp4"
+
 ls -la "$out/h264" "$out/minute" "$out/vp9" "$out/av1" "$out/webm" "$out/muxed" "$out/muxed-edits" "$out/multi" "$out/cenc" "$out/plain"

@@ -5,6 +5,9 @@ import { sessionKey } from '../../src/core/session-key'
 import { boxBody, childBoxes, topLevelBoxes } from '../../src/core/iso/reader'
 import type { BridgeToPage, SessionList, SessionSummary } from '../../src/shared/protocol'
 
+/** An ordinary complete file, the shape a page delivers when it uses no MediaSource at all. */
+const plainBytes = new Uint8Array(readFileSync('tests/fixtures/plain/whole.mp4'))
+
 const initBytes = new Uint8Array(readFileSync('tests/fixtures/h264/init-stream0.m4s'))
 const seg1Bytes = new Uint8Array(readFileSync('tests/fixtures/h264/chunk-stream0-00001.m4s'))
 const seg2Bytes = new Uint8Array(readFileSync('tests/fixtures/h264/chunk-stream0-00002.m4s'))
@@ -304,6 +307,45 @@ function installWindow(referrer = REFERRER) {
     failDownloads(message = 'Download failed'): void {
       downloadId = undefined
       failureMessage = message
+    },
+  }
+}
+
+/**
+ * A host answering ranged reads, for the one kind of session whose material is not in this frame.
+ *
+ * The bridge reads such a file itself, through `fetch` on the extension origin, so the global has
+ * to answer. Every range it is asked for is recorded: what a plain source costs in requests is
+ * part of what the bridge is answerable for.
+ */
+function installHost(file: Uint8Array = plainBytes) {
+  const asked: string[] = []
+  let refusing = false
+
+  vi.stubGlobal('fetch', async (_url: string, init?: RequestInit) => {
+    const range = new Headers(init?.headers).get('range') ?? ''
+    asked.push(range)
+
+    if (refusing) return new Response(null, { status: 403 })
+
+    const match = /bytes=(\d+)-(\d+)/.exec(range)
+    if (!match) return new Response(null, { status: 400 })
+
+    const from = Number(match[1])
+    const to = Math.min(Number(match[2]), file.byteLength - 1)
+    const part = file.slice(from, to + 1)
+
+    return new Response(part.buffer as ArrayBuffer, {
+      status: 206,
+      headers: { 'content-range': `bytes ${from}-${to}/${file.byteLength}` },
+    })
+  })
+
+  return {
+    asked,
+    /** The host stops answering: an expired signed URL, a session that ended, a node gone away. */
+    refuse: () => {
+      refusing = true
     },
   }
 }
@@ -1422,5 +1464,103 @@ describe('the bridge tells apart the buffers of one media source', () => {
         ...mediaOf(audioBytes[3]!),
       ),
     )
+  })
+})
+
+describe('the bridge and a page playing an ordinary file', () => {
+  const CLIP = 'https://cdn.example/clip.mp4'
+  const SOURCE = `plain:${CLIP}`
+
+  /** What the content script sends on for such an element; see PlainSource in the protocol. */
+  const plain = (buffered: Array<[number, number]> = [[0, 6]]) => ({
+    type: 'tc:plain',
+    sourceId: SOURCE,
+    url: CLIP,
+    durationSeconds: 6,
+    buffered,
+  })
+
+  /**
+   * Lets whatever reads the bridge has started land before the list is asked for.
+   *
+   * Turns of the timer queue and not of the microtask queue: reading a body off a Response is
+   * real asynchronous work, and a wait made of resolved promises alone comes back before the
+   * first read has finished.
+   */
+  const settle = async () => {
+    for (let turn = 0; turn < 10; turn++) await new Promise((resolve) => setTimeout(resolve, 1))
+  }
+
+  it('reads nothing of the file until triage has promoted it', async () => {
+    const host = installHost()
+    const win = await loadBridge()
+    win.context()
+
+    win.deliver(plain())
+    win.deliver(plain([[0, 4]]))
+    await settle()
+
+    // The page said it is playing a file; nothing was fetched and nothing is offered. Ten of the
+    // eighteen measured pages that deliver a plain file hold nothing but muted looping previews.
+    expect(host.asked).toEqual([])
+    expect(win.list()).toEqual([])
+  })
+
+  it('turns a promoted file into a session the popup can save', async () => {
+    const host = installHost()
+    const win = await loadBridge()
+    win.context()
+
+    win.deliver(plain())
+    win.deliver({ type: 'tc:verdict', sourceId: SOURCE, verdict: 'promote' })
+    await settle()
+
+    // Two ranged reads of a few kilobytes: the front of the file, and the movie box behind the
+    // material. Not a byte of the material itself until somebody asks for a file.
+    expect(host.asked).toEqual(['bytes=0-8191', 'bytes=14681-18002'])
+
+    const [session] = win.list()
+    expect(session).toBeDefined()
+    // Signed with the page, like any other session, and keyed by the address of the material.
+    expect(session!.url).toBe(PAGE_URL)
+    expect(session!.title).toBe(PAGE_TITLE)
+    expect(session!.key).toBe(sessionKey({ url: CLIP, codecs: ['avc1', 'mp4a'], durationSeconds: 6 }))
+    expect(session!.duration).toBeGreaterThan(5.5)
+
+    const reply = await win.save(session!.key)
+    await settle()
+
+    // One more read for the material, and a file. Nothing above this line asked which kind of
+    // session it was looking at.
+    expect(host.asked).toHaveLength(3)
+    expect(reply.received).toEqual([{ ok: true }])
+    expect(win.downloads[0]!.filename).toBe(`${PAGE_TITLE}.mp4`)
+
+    const saved = await win.savedBytes()
+    expect(topLevelBoxes(saved).map((box) => box.type)).toEqual(['ftyp', 'moov', 'mdat'])
+  })
+
+  it('answers a save it cannot read with a refusal and not with an empty session', async () => {
+    const host = installHost()
+    const win = await loadBridge()
+    win.context()
+
+    win.deliver(plain())
+    win.deliver({ type: 'tc:verdict', sourceId: SOURCE, verdict: 'promote' })
+    await settle()
+
+    const key = win.list()[0]!.key
+    // The host goes away between the listing and the button — an expired signed URL, a session
+    // that ended. The recording is still there and what failed was fetching it, so the words are
+    // those of a refused download and not those of an empty session.
+    host.refuse()
+
+    const reply = await win.save(key)
+    await settle()
+
+    expect(win.downloads).toEqual([])
+    expect(reply.received).toEqual([
+      { ok: false, reason: 'refused', detail: 'the file could not be read' },
+    ])
   })
 })

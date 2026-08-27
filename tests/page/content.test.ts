@@ -718,6 +718,62 @@ describe('the triage verdict', () => {
     expect(dom.forwarded().map((post) => post.message)).toContainEqual({ type: 'tc:encrypted' })
   })
 
+  it('passes on what the page can say about an ordinary file it is playing', async () => {
+    const dom = await withBridge()
+    const url = 'https://cdn.example/clip.mp4'
+    dom.videos.push(
+      fakeVideo({
+        src: url,
+        currentSrc: url,
+        muted: false,
+        loop: false,
+        controls: true,
+        duration: 9.48,
+        buffered: { length: 1, start: () => 0, end: () => 3.2 },
+        getBoundingClientRect: () => ({
+          width: 640,
+          height: 360,
+          top: 0,
+          left: 0,
+          bottom: 360,
+          right: 640,
+        }),
+      }),
+    )
+
+    await dom.tick()
+
+    // Nothing of the material travels — there is none to travel, the browser fetched the file
+    // itself — so what crosses into the bridge is the address, the length and the stretch the
+    // element holds. Nothing else on the first poll: a hold is what the bridge already assumes.
+    expect(dom.forwarded().map((post) => post.message)).toEqual([
+      {
+        type: 'tc:plain',
+        sourceId: `plain:${url}`,
+        url,
+        durationSeconds: 9.48,
+        buffered: [[0, 3.2]],
+      },
+    ])
+
+    for (let poll = 0; poll < 13; poll++) await dom.tick()
+
+    // The verdict follows on the ordinary road, under the identifier the file was announced by,
+    // and it follows after: a verdict arriving first would be a verdict about something the
+    // bridge has never heard of. Said once, and the file is not announced again while the page
+    // knows nothing new about it.
+    expect(dom.forwarded().map((post) => post.message)).toEqual([
+      {
+        type: 'tc:plain',
+        sourceId: `plain:${url}`,
+        url,
+        durationSeconds: 9.48,
+        buffered: [[0, 3.2]],
+      },
+      { type: 'tc:verdict', sourceId: `plain:${url}`, verdict: 'promote' },
+    ])
+  })
+
   it('says nothing of the sort about a page that plays in the clear', async () => {
     const dom = await withBridge()
     dom.videos.push(fakeVideo())

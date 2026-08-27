@@ -7,6 +7,15 @@ Clip already-buffered video from any site and save it as MP4.
 Stage 1 of 5 — capture. The extension intercepts MSE segments, keeps a sliding
 window indexed by media time, and saves the buffered material as a single MP4.
 
+An ordinary `<video src>` is recorded as well, and it is the commoner case off
+the video platforms: eighteen of twenty-one live pages that delivered any video
+at all delivered it that way. Nothing of such a file passes through MSE, so
+there is nothing to intercept — what is kept is an index read out of the file
+itself by two ranged requests from the extension origin, and a save fetches the
+material of the clip in one more. It becomes a session like any other, under the
+same merge key, the same triage and the same button, and what is offered is the
+stretch that actually passed through the player rather than the whole file.
+
 Editing, disk history, re-encoding and extra sources land in later stages. See
 `docs/superpowers/specs/2026-08-22-tailcut-design.md`.
 

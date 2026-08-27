@@ -85,21 +85,3 @@ export function readsFor(ranges: readonly Located[], options: ReadOptions = {}):
 
   return reads
 }
-
-/**
- * How much of what is fetched is material the clip actually needs.
- *
- * Reported rather than asserted: the bridged holes are a deliberate cost and the only honest way
- * to know what it came to is to measure it on real files. A clip of a well-interleaved file comes
- * out at one, and anything far below it means the merge is bridging holes it should be stepping
- * around.
- */
-export function readEfficiency(ranges: readonly Located[], reads: readonly Located[]): number {
-  let wanted = 0
-  for (const range of ranges) wanted += range.length
-
-  let fetched = 0
-  for (const read of reads) fetched += read.length
-
-  return fetched > 0 ? wanted / fetched : 1
-}

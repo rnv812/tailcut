@@ -344,6 +344,11 @@ describe('what an ordinary file promises, and what it delivers', () => {
     await page.store.settled()
     const whole_ = summarize(page.store.list()[0]!).duration
 
+    // Frozen first, so that this says what it means: a rejection stops a recording growing and
+    // does not exempt it from the buffer length. The captured maps beside it are evicted whether
+    // their session is frozen or not.
+    page.store.dropPending(SOURCE)
+
     // Two seconds of buffer around a play head at the end of the file: the same rule the captured
     // maps are evicted by, over the other kind of material.
     page.store.evictAll(2, LENGTH)
@@ -353,7 +358,9 @@ describe('what an ordinary file promises, and what it delivers', () => {
     expect(kept).toBeCloseTo(2, 0)
 
     // And the page saying again that it holds the whole file does not bring it back: what was
-    // evicted is gone, whichever kind of material it was.
+    // evicted is gone, whichever kind of material it was. Recording is resumed first, or the
+    // number would be held still by the freeze rather than by the eviction.
+    page.store.resumePending(SOURCE)
     page.says({ buffered: [[0, LENGTH]], now: 3000 })
     await page.store.settled()
     expect(summarize(page.store.list()[0]!).duration).toBeCloseTo(kept, 5)

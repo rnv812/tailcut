@@ -3,12 +3,30 @@ import { readFileSync } from 'node:fs'
 import { locateMovie, type RangeRead } from '../../src/core/iso/locate'
 import { assembleMp4 } from '../../src/core/export/assemble'
 import { planClip } from '../../src/core/export/plan'
-import { planRanges, readEfficiency, readsFor } from '../../src/core/export/ranges'
+import { planRanges, readsFor } from '../../src/core/export/ranges'
 import { bytesFrom, clipSourceFrom, movieTracksOf } from '../../src/core/export/source'
 import { decodeWarnings, frameAt, frameByPlaying, probeFile, writeTemp } from '../support/media'
 import type { Located } from '../../src/shared/types'
 
 const read = (path: string): Uint8Array => new Uint8Array(readFileSync(path))
+
+/**
+ * How much of what is fetched is material the clip actually needs.
+ *
+ * Measured rather than asserted at large: the bridged holes are a deliberate cost, and the only
+ * honest way to know what it comes to is to count it on a real file. A clip of a well-interleaved
+ * file whose entry point is its own first frame comes out at one; anything far below that means
+ * the merge is bridging what it should be stepping around.
+ */
+function readEfficiency(ranges: readonly Located[], reads: readonly Located[]): number {
+  let wanted = 0
+  for (const range of ranges) wanted += range.length
+
+  let fetched = 0
+  for (const read of reads) fetched += read.length
+
+  return fetched > 0 ? wanted / fetched : 1
+}
 
 /** ftyp, free, mdat, moov — the movie box at the tail, where a muxer leaves it by default. */
 const whole = read('tests/fixtures/plain/whole.mp4')

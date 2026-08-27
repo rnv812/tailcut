@@ -8,7 +8,7 @@ import {
 import { SegmentStream } from '../core/stream'
 import { PtsMap } from '../core/timeline/map'
 import { durationToken, normalizeUrl, sessionKey } from '../core/session-key'
-import { cutPlain, type OpenedFile, type PlainFile } from '../core/export/plain'
+import { cutPlain, type OpenedFile, type PlainFile, type Span } from '../core/export/plain'
 import type { ExportPlan } from '../core/export/plan'
 import type { RangeReader } from '../core/iso/locate'
 import type { MuxTrack } from '../core/mux'
@@ -215,12 +215,6 @@ export interface AppendInput {
    * picture track is declared by the codec string and by nothing else the page sends.
    */
   mime?: string
-}
-
-/** A stretch of media time. */
-interface Span {
-  start: number
-  end: number
 }
 
 /**
@@ -1198,7 +1192,13 @@ export class SessionStore {
       const floor = currentTime - windowSeconds
       if (floor > state.floor) state.floor = floor
       state.buffered = clampSpans(state.buffered, state.floor)
-      this.syncPlain(state)
+
+      // Written onto the session rather than left to syncPlain, because eviction reaches a frozen
+      // session too. A rejection stops a recording growing (§5.5); it does not exempt what has
+      // already been gathered from the buffer length, and the captured maps next door are evicted
+      // frozen or not.
+      const session = this.sessions.get(state.key)
+      if (session?.plain) session.plain.buffered = state.buffered
     }
   }
 
