@@ -276,4 +276,31 @@ ffmpeg -y -i "$work/source-multi.mp4" -c copy \
 
 node "$(dirname "$0")/make-multi-fixture.mjs" "$work/multi.mp4" "$out/multi"
 
-ls -la "$out/h264" "$out/minute" "$out/vp9" "$out/av1" "$out/webm" "$out/muxed" "$out/muxed-edits" "$out/multi" "$out/cenc"
+# The same material as the `muxed-edits` set, written as an ordinary complete file — the shape 18
+# of the 21 pages that delivered video in the survey deliver it in, and the shape our reader was
+# not written for.
+#
+# From the very same `$work/source-muxed.mp4` and with the same `-c copy`, which is the whole point
+# of the set: the coded frames of `plain/whole.mp4` and of `muxed-edits/*.m4s` are the same bytes,
+# so the two files are one recording described twice — once by a moof per fragment, once by the
+# six tables of a movie box. Indexing both and comparing the sample lists field for field is what
+# tells us which of the two readers is wrong when they disagree
+# (tests/core/movie.test.ts).
+#
+# What ffmpeg puts in the tables here is not the degenerate case: the picture gets an stsc of two
+# runs over 59 chunks, the sound one of twenty runs whose chunks hold one, two or three packets
+# apiece, an stts of two entries because the last AAC frame is short, a ctts of 57 entries and an
+# stss naming three key frames of sixty. A reader that took "one chunk, one sample apiece" for the
+# general case comes apart on the sound of this file and on nothing else in the fixtures.
+rm -rf "$out/plain" && mkdir -p "$out/plain"
+
+# moov at the tail, which is where a muxer leaves it when nobody asks otherwise: ftyp, free, mdat,
+# moov. Locating that movie box costs a second ranged read; see src/core/iso/locate.ts.
+ffmpeg -y -i "$work/source-muxed.mp4" -c copy -f mp4 "$out/plain/whole.mp4"
+
+# The same file written for streaming — ftyp, moov, free, mdat — which a site that means its video
+# to start before it has finished downloading serves instead. The movie box is then inside the
+# first ranged read and costs nothing further.
+ffmpeg -y -i "$work/source-muxed.mp4" -c copy -f mp4 -movflags +faststart "$out/plain/faststart.mp4"
+
+ls -la "$out/h264" "$out/minute" "$out/vp9" "$out/av1" "$out/webm" "$out/muxed" "$out/muxed-edits" "$out/multi" "$out/cenc" "$out/plain"

@@ -24,6 +24,55 @@ export type PageToBridge =
    * tiktok.com/foryou, whose address does not change through a whole scroll.
    */
   | { type: 'tc:duration'; sourceId: string; seconds: number }
+  /**
+   * A media element of the page is playing an ordinary file: see PlainSource.
+   *
+   * Repeated as what the element knows changes — a length that was NaN until the metadata
+   * arrived, a buffered range that grows while the file downloads — and silent while it does not.
+   */
+  | ({ type: 'tc:plain' } & PlainSource)
+
+/**
+ * A media element playing an ordinary file: `currentSrc` is an http(s) address rather than a blob
+ * one, and not a byte of the material passes through MediaSource.
+ *
+ * Eighteen of the twenty-one live pages measured where video actually arrived deliver it this way,
+ * and it is the norm everywhere outside the video platforms — articles, documentation, landing
+ * pages, imageboards, file hosts. Nothing of it can be captured as it plays, because there is
+ * nothing to capture: the browser fetches the file itself and the extension never sees the bytes.
+ * What the page can say about it is said here, and the bytes are fetched again afterwards, from
+ * the extension origin (src/bridge/loader.ts).
+ *
+ * A plain source is filtered exactly like a stream out of MediaSource: the verdict about it
+ * travels the ordinary `tc:verdict` road under the identifier below. Ten of those eighteen pages
+ * held nothing but muted looping previews and three-second animations, and they must keep being
+ * refused — that filter is the whole reason this carries no material of its own.
+ */
+export interface PlainSource {
+  /**
+   * Identity of the file inside the page: the address with a prefix that keeps it apart from the
+   * identifiers the hook hands out for streams. It is the address and not a counter because two
+   * elements playing one file are playing one file, and because an element re-created by the page
+   * has to land on what was already known about what it plays.
+   */
+  sourceId: string
+  /** The address the element resolved, absolute, exactly as it will have to be fetched. */
+  url: string
+  /**
+   * How long the whole file is, in seconds, as the element states it; zero while it states
+   * nothing — before the metadata has arrived it is NaN, and on a stream of no stated end it is
+   * Infinity, and neither is a length.
+   */
+  durationSeconds: number
+  /**
+   * What the element holds right now, in seconds of media time: the pairs of `HTMLMediaElement.buffered`.
+   *
+   * The one thing the page knows that the file itself does not say — which stretch the user has
+   * actually got. It says nothing about which bytes those are; the map from seconds to bytes is
+   * read out of the container once the loader has it.
+   */
+  buffered: Array<[number, number]>
+}
 
 /**
  * How the main world tells the isolated one which stream an element is playing.
@@ -215,7 +264,8 @@ export function isPageToBridge(value: unknown): value is PageToBridge {
     type === 'tc:append' ||
     type === 'tc:source' ||
     type === 'tc:worker' ||
-    type === 'tc:duration'
+    type === 'tc:duration' ||
+    type === 'tc:plain'
   )
 }
 

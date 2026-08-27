@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import type { TriageVerdict } from '../../src/core/triage'
+import type { PlainSource } from '../../src/shared/protocol'
 
 /** Шаг опроса наблюдателя: столько модельного времени проходит за один tick(). */
 const POLL_MS = 500
@@ -15,6 +16,17 @@ const box = (width: number, height: number): Box => ({
   bottom: height,
   right: width,
 })
+
+/**
+ * `HTMLMediaElement.buffered` as the watcher reads it: a length and two accessors, nothing else.
+ */
+function ranges(...pairs: Array<[number, number]>) {
+  return {
+    length: pairs.length,
+    start: (index: number) => pairs[index]![0],
+    end: (index: number) => pairs[index]![1],
+  }
+}
 
 /**
  * Минимальный <video>: наблюдатель читает только перечисленное здесь. Значения по умолчанию —
@@ -33,6 +45,9 @@ function fakeVideo(overrides: Record<string, unknown> = {}) {
     readyState: 4,
     isConnected: true,
     mediaKeys: null,
+    /** Unknown until the metadata has arrived — which is what a media element reports as NaN. */
+    duration: NaN,
+    buffered: ranges(),
     box: box(640, 360),
     getBoundingClientRect(): Box {
       return (this as { box: Box }).box
@@ -155,14 +170,29 @@ async function startWatcher() {
   const unreachable = { times: 0 }
   /** How many times it has said that this page plays media that is encrypted. */
   const encrypted = { times: 0 }
+  /** Every ordinary file the watcher has reported, in the order the reports went out. */
+  const plain: PlainSource[] = []
+  /**
+   * Both kinds of report in one list, tagged. A plain source and the verdict about it are two
+   * messages about one thing, and the order they leave in is part of what is under test: a bridge
+   * that hears a rejection before it has heard of the source has nothing to apply it to.
+   */
+  const order: string[] = []
   const watcher = await import('../../src/page/watcher')
   watcher.startWatching(
-    (sourceId, verdict) => seen.push({ sourceId, verdict }),
+    (sourceId, verdict) => {
+      seen.push({ sourceId, verdict })
+      order.push(`verdict ${sourceId} ${verdict}`)
+    },
     () => unreachable.times++,
     () => encrypted.times++,
+    (source) => {
+      plain.push(source)
+      order.push(`plain ${source.sourceId}`)
+    },
   )
 
-  return { ...watcher, seen, unreachable, encrypted }
+  return { ...watcher, seen, unreachable, encrypted, plain, order }
 }
 
 /**
@@ -649,5 +679,201 @@ describe('the watcher and a stream that carries protection', () => {
 
     expect(watcher.encrypted.times).toBe(0)
     expect(watcher.seen).toEqual([{ sourceId: 's1', verdict: 'promote' }])
+  })
+})
+
+/**
+ * The address a plain file is reported under. It is derived from the address of the file and
+ * nothing else, so the test says it the way the watcher does rather than reading it back out of
+ * the report it is checking.
+ */
+const CLIP_URL = 'https://cdn.example/clip.mp4'
+const CLIP_ID = `plain:${CLIP_URL}`
+
+/**
+ * A <video> playing an ordinary file: an http address in currentSrc, no MediaSource anywhere.
+ * Eighteen of the twenty-one live pages where video arrived at all look like this.
+ */
+const plainVideo = (overrides: Record<string, unknown> = {}) =>
+  fakeVideo({ src: CLIP_URL, currentSrc: CLIP_URL, duration: 9.48, ...overrides })
+
+/** The same file as a muted looping preview with no controls: ten of those eighteen pages. */
+const plainBanner = () =>
+  plainVideo({ muted: true, loop: true, controls: false, box: box(160, 90) })
+
+/** Puts an element on the page without naming any stream for it: a plain file has none. */
+function stand(element: FakeVideo, root: FakeRoot = documentRoot): FakeVideo {
+  root.videos.push(element)
+  return element
+}
+
+describe('the watcher and an ordinary file', () => {
+  it('reports the address of a file an element is playing', async () => {
+    const watcher = await startWatcher()
+    stand(plainVideo({ buffered: ranges([0, 3.2]) }))
+
+    tick()
+
+    // Everything the page knows about the file and nothing the extension had to fetch to learn:
+    // the address to read it from, the length the element measured out of the metadata, and the
+    // stretch the browser is already holding.
+    expect(watcher.plain).toEqual([
+      { sourceId: CLIP_ID, url: CLIP_URL, durationSeconds: 9.48, buffered: [[0, 3.2]] },
+    ])
+  })
+
+  it('goes through the same filter: a muted looping preview served as a file is refused', async () => {
+    const watcher = await startWatcher()
+    stand(plainBanner())
+
+    tick(40)
+
+    // Ten of the eighteen pages that deliver a plain file hold nothing but these — hover previews
+    // and three-second animations. Triage rejects them today over MSE and must go on rejecting
+    // them when the same material arrives as a file.
+    expect(watcher.seen).toEqual([{ sourceId: CLIP_ID, verdict: 'reject' }])
+  })
+
+  it('promotes a file that was actually watched, like any other source', async () => {
+    const watcher = await startWatcher()
+    stand(plainVideo())
+
+    tick(12)
+    expect(watcher.seen, 'the grace period is the same six seconds').toEqual([])
+
+    tick()
+    expect(watcher.seen).toEqual([{ sourceId: CLIP_ID, verdict: 'promote' }])
+  })
+
+  it('reports the source before it says anything about it', async () => {
+    const watcher = await startWatcher()
+    stand(plainBanner())
+
+    tick()
+
+    // The two are one thing said in two messages, and a rejection that arrives first is a
+    // rejection of a source the other side has never heard of.
+    expect(watcher.order).toEqual([`plain ${CLIP_ID}`, `verdict ${CLIP_ID} reject`])
+  })
+
+  it('says nothing about an element playing a MediaSource', async () => {
+    const watcher = await startWatcher()
+    place(watcher, fakeVideo(), 's1')
+
+    tick(13)
+
+    // A blob address is the address of a MediaSource, and that material is captured as it is
+    // appended. Reported as a file it would be fetched a second time, over the network, whole.
+    expect(watcher.plain).toEqual([])
+  })
+
+  it.each([
+    ['a data url', 'data:video/mp4;base64,AAAA'],
+    ['a file of the disk', 'file:///home/someone/clip.mp4'],
+    ['an address the browser has not resolved', ''],
+    ['something that is not an address at all', 'clip.mp4'],
+  ])('says nothing about %s', async (_name, currentSrc) => {
+    const watcher = await startWatcher()
+    stand(fakeVideo({ src: currentSrc, currentSrc }))
+
+    tick(13)
+
+    expect(watcher.plain).toEqual([])
+  })
+
+  it('does not repeat itself while the page knows nothing new', async () => {
+    const watcher = await startWatcher()
+    stand(plainVideo({ buffered: ranges([0, 9.48]) }))
+
+    tick(40)
+
+    // The poll runs twice a second for as long as the page is open. A report per poll would be a
+    // message a second per plain video on the page, saying the same thing every time.
+    expect(watcher.plain).toHaveLength(1)
+  })
+
+  it('says it again when the metadata finally arrives', async () => {
+    const watcher = await startWatcher()
+    const video = stand(plainVideo({ duration: NaN }))
+
+    tick()
+    expect(watcher.plain[0]?.durationSeconds, 'an unmeasured length is no length').toBe(0)
+
+    video.duration = 9.48
+    tick()
+
+    expect(watcher.plain).toHaveLength(2)
+    expect(watcher.plain[1]?.durationSeconds).toBe(9.48)
+  })
+
+  it('says it again when the download makes headway', async () => {
+    const watcher = await startWatcher()
+    const video = stand(plainVideo({ buffered: ranges([0, 2]) }))
+
+    tick()
+    video.buffered = ranges([0, 5.5])
+    tick()
+    video.buffered = ranges([0, 5.5], [7, 9.48])
+    tick()
+
+    expect(watcher.plain.map((source) => source.buffered)).toEqual([
+      [[0, 2]],
+      [[0, 5.5]],
+      [
+        [0, 5.5],
+        [7, 9.48],
+      ],
+    ])
+  })
+
+  it('treats a live stream of no stated end as a length it does not know', async () => {
+    const watcher = await startWatcher()
+    stand(plainVideo({ duration: Infinity }))
+
+    tick()
+
+    expect(watcher.plain[0]?.durationSeconds).toBe(0)
+  })
+
+  it('gives two elements playing one file one identity', async () => {
+    const watcher = await startWatcher()
+    stand(plainVideo())
+    stand(plainVideo())
+
+    tick(13)
+
+    // One file is one piece of material however many elements the page hangs it on, and the
+    // fetch that reads it must not be made twice.
+    expect(watcher.plain).toHaveLength(1)
+    expect(watcher.seen).toEqual([{ sourceId: CLIP_ID, verdict: 'promote' }])
+  })
+
+  it('refuses the file an element has moved on from', async () => {
+    const watcher = await startWatcher()
+    const video = stand(plainVideo())
+    tick(13)
+
+    const next = 'https://cdn.example/next.mp4'
+    video.src = next
+    video.currentSrc = next
+    tick()
+
+    // The feed moved to the next clip. Nothing plays the first file any more, so nothing about it
+    // can be measured — and a source nobody can measure is refused rather than kept on trust.
+    expect(watcher.seen).toEqual([
+      { sourceId: CLIP_ID, verdict: 'promote' },
+      { sourceId: `plain:${next}`, verdict: 'promote' },
+      { sourceId: CLIP_ID, verdict: 'reject' },
+    ])
+  })
+
+  it('finds a file playing inside an open shadow root', async () => {
+    const watcher = await startWatcher()
+    stand(plainVideo(), attachShadow())
+
+    tick(13)
+
+    expect(watcher.plain).toHaveLength(1)
+    expect(watcher.seen).toEqual([{ sourceId: CLIP_ID, verdict: 'promote' }])
   })
 })

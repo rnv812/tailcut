@@ -1,4 +1,5 @@
 import { triage, BALANCED, type TriageVerdict, type VideoSignals } from '../core/triage'
+import type { PlainSource } from '../shared/protocol'
 
 /** Как часто пересматриваются сигналы каждого <video>. */
 const POLL_INTERVAL_MS = 500
@@ -45,6 +46,63 @@ const UNNAMED_POLLS = 2
  * which is a verdict of its own (see startWatching).
  */
 const told = new Map<string, TriageVerdict>()
+/**
+ * What has already been said about each ordinary file: see plainSourceOf.
+ *
+ * A plain source is re-read on every poll, twice a second for as long as the page is open, and
+ * almost every reading is the same reading. What is kept here is the last one that went out, so
+ * that only a change travels — the metadata arriving and turning a length of NaN into a number,
+ * the download making headway and widening what the element holds.
+ */
+const plainTold = new Map<string, string>()
+
+/** How a file is identified: its address, marked off from the identifiers the hook hands out. */
+const PLAIN_PREFIX = 'plain:'
+
+/**
+ * The ordinary file this element is playing, or null when it is playing something else.
+ *
+ * "Something else" is a MediaSource, whose material is captured as it is appended and must never
+ * be fetched a second time over the network; the address of one is a blob address and is refused
+ * here on that ground alone. So are the addresses no ranged fetch can be made against: a data
+ * url carries the material inline, a file url belongs to the disk of the person browsing, and an
+ * empty one is an element the browser has not resolved an address for yet.
+ *
+ * Everything else — an http or https address in `currentSrc` — is a file, which is how eighteen
+ * of the twenty-one live pages that delivered any video at all delivered it.
+ */
+function plainSourceOf(element: HTMLVideoElement): PlainSource | null {
+  const url = element.currentSrc
+  if (!url) return null
+
+  try {
+    const scheme = new URL(url).protocol
+    if (scheme !== 'http:' && scheme !== 'https:') return null
+  } catch {
+    // Not an address at all: `currentSrc` is resolved by the browser and should never be
+    // relative, but it is read off a page and is not ours to trust.
+    return null
+  }
+
+  const buffered: Array<[number, number]> = []
+  const ranges = element.buffered
+  for (let i = 0; i < ranges.length; i++) buffered.push([ranges.start(i), ranges.end(i)])
+
+  const seconds = element.duration
+  return {
+    sourceId: `${PLAIN_PREFIX}${url}`,
+    url,
+    // NaN before the metadata has arrived, Infinity on a stream with no stated end: neither is a
+    // length, and both mean the same as saying nothing.
+    durationSeconds: Number.isFinite(seconds) && seconds > 0 ? seconds : 0,
+    buffered,
+  }
+}
+
+/** Everything about a plain source that a report would carry, as one string to compare. */
+function plainSignature(source: PlainSource): string {
+  return `${source.durationSeconds}|${source.buffered.map((pair) => pair.join('-')).join(',')}`
+}
 
 /**
  * The hook has opened a MediaSource and named the address it handed the page for it.
@@ -181,6 +239,19 @@ export function startWatching(
    * a stream in a container it does not read, or one whose bytes travel a road of their own.
    */
   onEncrypted: () => void = () => {},
+  /**
+   * A media element of this page is playing an ordinary file, and here is everything the page
+   * knows about it: where it is, how long it is, and how much of it the browser holds.
+   *
+   * Said whenever any of the three changes and silent while none does. Nothing of the material
+   * travels with it — there is none to travel: the browser fetched the file itself and the
+   * extension never saw a byte. What is done with the address afterwards is the registry's
+   * business (src/bridge/session-store.ts), and it does nothing at all until triage has promoted
+   * the source: ten of the eighteen measured pages that deliver a plain file hold nothing but
+   * muted looping previews, and a fetch for each of those would be the whole cost of recording
+   * paid for material nobody would ever save.
+   */
+  onPlain: (source: PlainSource) => void = () => {},
 ): void {
   /** Whether the page has already been declared unrecordable. */
   let saidUnreachable = false
@@ -279,12 +350,36 @@ export function startWatching(
       }
 
       const sourceId = sourceIdOf(element)
-      // Адреса может ещё не быть: сообщение хука с адресом из createObjectURL и опрос
-      // наблюдателя ничем не связаны. Сказать вердикт пока некому — скажем, как появится.
-      if (!sourceId) continue
+      if (sourceId) {
+        claimed.add(sourceId)
+        tell(sourceId, triage(signals, BALANCED))
+        continue
+      }
 
-      claimed.add(sourceId)
-      tell(sourceId, triage(signals, BALANCED))
+      // No stream of a MediaSource behind this element. Either it is playing an ordinary file —
+      // the common case off the video platforms — or the address from createObjectURL has not
+      // reached this world yet, in which case there is nobody to say a verdict to and it will be
+      // said as soon as there is.
+      const plain = plainSourceOf(element)
+      if (!plain) continue
+
+      // The second element playing one file adds nothing: one file is one piece of material
+      // whatever it is hung on, and the fetch that reads it must not be made twice. It still
+      // claims the source, or the loop below would refuse a file that is playing.
+      if (claimed.has(plain.sourceId)) continue
+      claimed.add(plain.sourceId)
+      announced.add(plain.sourceId)
+
+      // The source before the verdict about it, always: the two are one thing said in two
+      // messages, and a rejection that arrives first is a rejection of something the other side
+      // has never heard of.
+      const signature = plainSignature(plain)
+      if (plainTold.get(plain.sourceId) !== signature) {
+        plainTold.set(plain.sourceId, signature)
+        onPlain(plain)
+      }
+
+      tell(plain.sourceId, triage(signals, BALANCED))
     }
 
     // A stream no element of the page is playing. The address from createObjectURL was announced,

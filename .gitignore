@@ -153,4 +153,7 @@ test-results/
 # исходные mp4 и манифесты DASH тесты не читают (tools/make-fixtures.sh)
 tests/fixtures/**/*.mp4
 tests/fixtures/**/*.mpd
+# Кроме набора plain: там сам файл целиком и есть фикстура — обычный mp4,
+# каким его отдаёт сайт, а не промежуточный продукт ffmpeg
+!tests/fixtures/plain/*.mp4
 tests/tmp/
