@@ -63,11 +63,30 @@ export type Omission = 'track' | 'rendition' | 'gap'
  *
  * Every number here describes the file that "Save all" would write and not the material the
  * session holds — the two differ, and the popup is the place a difference becomes a promise.
+ *
+ * The address and the title are the frame's own, even when that frame is an embed inside somebody
+ * else's page, and the title of the top page is not borrowed for it. Three reasons, in the order
+ * they were weighed. The file is named after this title in the bridge, so a borrowed one would be
+ * a name the popup promises and the file does not carry. A page with three embeds has one top
+ * title and three players, and three rows reading "Some article — a blog" is a list the user
+ * cannot pick out of. And the address of the frame is where the material actually came from: for
+ * an embedded player it names the site the video is from, which is the thing worth recognising
+ * about it. The cost is a frame that never titled itself, which the popup shows as "Untitled"
+ * over the host it came from — thin, but true.
  */
 export interface SessionSummary {
   key: string
   url: string
   title: string
+  /**
+   * When material last arrived in this session, by the clock of the page (Date.now()).
+   *
+   * A registry answers newest first on its own, but a tab holds a registry per frame and the
+   * popup shows one list. Without a clock the frames could only be merged in the order they were
+   * asked in, and the session at the top — the one the popup opens on and calls the one being
+   * watched right now — would be whichever frame the page happened to declare first.
+   */
+  lastAt: number
   /** Length of the clip a save would write, in seconds. */
   duration: number
   /** Weight of the media data that would go into it. */
@@ -157,6 +176,9 @@ export const EXTENSION_ORIGIN_PREFIX = 'chrome-extension://'
  * `chrome.tabs.sendMessage`. The session registry lives in the bridge frame, which an extension
  * message does not reach on its own — the content script passes the request on and returns the
  * answer.
+ *
+ * A tab holds one of each per frame, so a request is addressed to a frame and a tab is asked by
+ * asking all of them; see src/shared/frames.ts.
  */
 export type ExtensionToTab = { type: 'tc:list' } | { type: 'tc:save'; key: string }
 
@@ -185,15 +207,6 @@ export interface SaveResult {
   /** What Chrome answered when it refused; absent when it said nothing, and on the other two. */
   detail?: string
 }
-
-/**
- * Addressee of the extension's requests — the main frame of the tab. Without it the message goes
- * to every frame at once (content scripts are declared with all_frames), each answers with its
- * own registry, and the popup gets the answer of whoever was first: on a page with advertising
- * frames that is anybody's empty list. A player embedded in a frame is invisible to the popup at
- * this stage — its sessions live in the registry of its own frame.
- */
-export const TOP_FRAME = { frameId: 0 } as const
 
 export function isPageToBridge(value: unknown): value is PageToBridge {
   if (typeof value !== 'object' || value === null) return false

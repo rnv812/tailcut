@@ -39,6 +39,7 @@ const bridgeToPage: [string, BridgeToPage][] = [
           title: 'Clip',
           duration: 6,
           bytes: 1543,
+          lastAt: 1_700_000_000_000,
           omits: 'gap',
         },
       ],

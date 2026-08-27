@@ -12,6 +12,7 @@ const fresh: SessionSummary = {
   title: 'Clip — site.example',
   duration: 6,
   bytes: 1_543_210,
+  lastAt: 1_700_000_000_000,
 }
 
 /**
@@ -25,6 +26,7 @@ const older: SessionSummary = {
   title: 'Older session',
   duration: 300,
   bytes: 90_000_000,
+  lastAt: 1_699_999_000_000,
 }
 
 type Sent = { tabId: number; message: unknown }

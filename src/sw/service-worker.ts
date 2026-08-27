@@ -1,4 +1,4 @@
-import { TOP_FRAME, type ExtensionToTab, type SessionList } from '../shared/protocol'
+import { listTabSessions } from '../shared/frames'
 
 /**
  * Как часто пересчитывается бейдж активной вкладки. Через будильник, а не через setInterval:
@@ -25,17 +25,18 @@ export function formatBadge(seconds: number): string {
   return `${Math.round(total / 3600)}h`
 }
 
-/** Спрашивает вкладку о накопленном тем же каналом, что и попап. */
+/**
+ * Asks the tab what it has gathered, by the same road the popup takes: every frame of it, and the
+ * freshest session of them all at the head of the answer.
+ *
+ * Every frame and not the top one, because the badge is the only sign that anything is being
+ * recorded at all. On a page carrying an embedded player the recording lives in the frame of the
+ * embed, and a badge that stayed empty over it would leave the user with no reason to open the
+ * popup that now has something to show.
+ */
 async function badgeTextFor(tabId: number): Promise<string> {
-  const request: ExtensionToTab = { type: 'tc:list' }
-
-  try {
-    const answer: SessionList | undefined = await chrome.tabs.sendMessage(tabId, request, TOP_FRAME)
-    return formatBadge(answer?.sessions[0]?.duration ?? 0)
-  } catch {
-    // Страница без content script: chrome://, магазин расширений, вкладка старше установки.
-    return ''
-  }
+  const answer = await listTabSessions(tabId)
+  return formatBadge(answer.sessions[0]?.duration ?? 0)
 }
 
 chrome.runtime.onInstalled.addListener(() => {

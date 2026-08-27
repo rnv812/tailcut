@@ -7,7 +7,12 @@ const summary = (duration: number): SessionSummary => ({
   title: 'Clip',
   duration,
   bytes: 1_543_210,
+  lastAt: 1_700_000_000_000,
 })
+
+/** The main frame of a tab, and a frame holding an embedded player. */
+const TOP = 0
+const EMBED = 4
 
 type Alarm = { name: string; options: unknown }
 type BadgeText = { tabId?: number; text: string }
@@ -35,8 +40,18 @@ type QueryInfo = { active?: boolean; currentWindow?: boolean }
  *
  * The tabs are given as a list: these are the active tabs of the current window. Beside them live
  * a neighbouring window and a background tab — the query has to sift those out itself.
+ *
+ * A tab answers per frame, not as a whole: both content scripts are declared with all_frames and
+ * each frame keeps a registry of its own.
  */
-function installChrome(options: { tabs?: Array<{ id?: number }>; reply?: unknown } = {}) {
+function installChrome(
+  options: {
+    tabs?: Array<{ id?: number }>
+    reply?: unknown
+    /** What each frame of the tab answers, by frame number; the reply above is the main frame's. */
+    frames?: Record<number, unknown>
+  } = {},
+) {
   const alarms: Alarm[] = []
   const badgeText: BadgeText[] = []
   const badgeColor: unknown[] = []
@@ -46,11 +61,16 @@ function installChrome(options: { tabs?: Array<{ id?: number }>; reply?: unknown
 
   const tabs = options.tabs ?? [{ id: 7 }]
   const reply: unknown = 'reply' in options ? options.reply : { sessions: [summary(6)] }
+  const frames: Record<number, unknown> = options.frames ?? { [TOP]: reply }
   let failure: Error | null = null
   let badgeFailure: Error | null = null
 
   vi.stubGlobal('chrome', {
     runtime: { onInstalled: { addListener: (fn: () => void) => installed.push(fn) } },
+    scripting: {
+      executeScript: async () =>
+        Object.keys(frames).map((id) => ({ frameId: Number(id), result: true })),
+    },
     alarms: {
       create: (name: string, opts: unknown) => alarms.push({ name, options: opts }),
       onAlarm: {
@@ -70,10 +90,10 @@ function installChrome(options: { tabs?: Array<{ id?: number }>; reply?: unknown
         ...(info.active ? [] : [BACKGROUND_TAB]),
         ...tabs,
       ],
-      sendMessage: async (tabId: number, message: unknown, opts: unknown) => {
+      sendMessage: async (tabId: number, message: unknown, opts: { frameId?: number } = {}) => {
         sent.push({ tabId, message, options: opts })
         if (failure) throw failure
-        return reply
+        return frames[opts.frameId ?? TOP]
       },
     },
   })
@@ -225,6 +245,20 @@ describe('recounting the badge', () => {
     // The tab manages to close while the poll is running: setBadgeText refuses with a promise,
     // and an unhandled rejection would wake the worker with an error message.
     await expect(chrome.fire()).resolves.toBeUndefined()
+  })
+
+  it('counts a recording that lives in a frame the page only embeds', async () => {
+    const chrome = installChrome({
+      frames: { [TOP]: { sessions: [] }, [EMBED]: { sessions: [summary(12)] } },
+    })
+    await importWorker()
+
+    await chrome.fire()
+
+    // The badge is the only sign that anything is being recorded at all. On a page carrying an
+    // embedded player the recording lives in the frame of the embed, and a badge counted off the
+    // top frame alone stayed empty over a tab that had four megabytes of video in it.
+    expect(chrome.badgeText).toEqual([{ tabId: 7, text: '12s' }])
   })
 
   it('takes the freshest session of the tab', async () => {

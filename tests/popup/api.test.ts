@@ -9,10 +9,38 @@ const summary: SessionSummary = {
   title: 'Clip — site.example',
   duration: 6,
   bytes: 1_543_210,
+  lastAt: 1_700_000_000_000,
 }
+
+/**
+ * The material of an embedded player: a session of the frame the embed stands in, not of the page
+ * around it. Its address is the frame's own — the site the video is really coming from — and the
+ * title of the page that embedded it is nowhere in it.
+ */
+const embedded: SessionSummary = {
+  key: 'https://player.example/embed/xyz|vp09|inf',
+  url: 'https://player.example/embed/xyz',
+  title: 'A clip inside an article',
+  duration: 27,
+  bytes: 4_014_954,
+  lastAt: 1_700_000_060_000,
+}
+
+/** The main frame of a tab. Chrome numbers it zero and numbers no other frame that. */
+const TOP = 0
+
+/** A frame holding an embedded player. Chrome hands out the numbers; nothing predicts them. */
+const EMBED = 4
+
+/** The summary as the popup keeps it: with the frame whose registry it came out of. */
+const inFrame = (session: SessionSummary, frameId: number) => ({ ...session, frameId })
 
 /** What the popup sent the tab: the message and its addressee inside it. */
 type Sent = { tabId: number; message: unknown; options: unknown }
+
+/** The save requests among everything the popup sent the tab, the list requests sifted out. */
+const savesIn = (sent: Sent[]): Sent[] =>
+  sent.filter((item) => (item.message as { type?: string }).type === 'tc:save')
 
 /**
  * The active tab of a neighbouring window. A user has several windows open, and Chrome lists
@@ -30,39 +58,78 @@ const BACKGROUND_TAB = { id: 5 }
 /** What the tab query is narrowed by: exactly the fields the extension uses. */
 type QueryInfo = { active?: boolean; currentWindow?: boolean }
 
+/** What the popup asked chrome.scripting for: the tab to enumerate, and on what terms. */
+type Injected = { tabId?: number; allFrames?: boolean }
+
 /**
  * Replaces chrome for the popup. The tabs are given as a list: these are the active tabs of the
  * current window, and the first of them is what chrome.tabs.query gives back. Beside them live a
- * neighbouring window and a background tab — the query has to sift those out itself. The answers
- * of the tab are set separately, one per request type: a tab may not answer at all (no content
- * script), and then sendMessage rejects.
+ * neighbouring window and a background tab — the query has to sift those out itself.
+ *
+ * A tab is not one addressee but one per frame: both content scripts are declared with
+ * all_frames, every frame keeps a registry of its own, and the answers are given here per frame.
+ * A frame may also be unreachable (no content script in it — about:blank, a sandboxed frame) or
+ * silent (it hears the request and never answers), and the two are not the same thing.
  */
 function installChrome(
-  options: { tabs?: Array<{ id?: number }>; listReply?: unknown; saveReply?: unknown } = {},
+  options: {
+    tabs?: Array<{ id?: number }>
+    /** What each frame of the tab answers a list request with, by frame number. */
+    frames?: Record<number, unknown>
+    /** Frames that hear the request and never answer it. */
+    silent?: number[]
+    /** Shorthand for a tab of one frame: what the main frame answers. */
+    listReply?: unknown
+    saveReply?: unknown
+    /** The frames of a tab that cannot be enumerated at all: chrome.scripting refuses. */
+    blindToFrames?: boolean
+  } = {},
 ) {
   const sent: Sent[] = []
+  const injected: Injected[] = []
   let tabs = options.tabs ?? [{ id: 7 }]
-  let listReply: unknown = 'listReply' in options ? options.listReply : { sessions: [summary] }
+  let frames: Record<number, unknown> =
+    options.frames ??
+    ({ [TOP]: 'listReply' in options ? options.listReply : { sessions: [summary] } })
+  const silent = new Set(options.silent ?? [])
   let saveReply: unknown = 'saveReply' in options ? options.saveReply : { ok: true }
   let failure: Error | null = null
 
   vi.stubGlobal('chrome', {
+    scripting: {
+      executeScript: async (details: { target?: { tabId?: number; allFrames?: boolean } }) => {
+        injected.push({ tabId: details.target?.tabId, allFrames: details.target?.allFrames })
+        if (options.blindToFrames) throw new Error('Cannot access contents of the page.')
+        // Backwards, because Chrome answers in the order the injections happened to finish and
+        // the popup may not inherit that order: a list that came out differently on two openings
+        // would move the session under the user's finger.
+        return Object.keys(frames)
+          .map((id) => ({ frameId: Number(id), result: true }))
+          .sort((a, b) => b.frameId - a.frameId)
+      },
+    },
     tabs: {
       query: async (info: QueryInfo = {}) => [
         ...(info.currentWindow ? [] : [OTHER_WINDOW_TAB]),
         ...(info.active ? [] : [BACKGROUND_TAB]),
         ...tabs,
       ],
-      sendMessage: async (tabId: number, message: unknown, opts: unknown) => {
+      sendMessage: async (tabId: number, message: unknown, opts: { frameId?: number } = {}) => {
         sent.push({ tabId, message, options: opts })
         if (failure) throw failure
-        return (message as { type?: string }).type === 'tc:save' ? saveReply : listReply
+        if (silent.has(opts.frameId ?? TOP)) return new Promise(() => {})
+        if ((message as { type?: string }).type === 'tc:save') return saveReply
+        const reply = frames[opts.frameId ?? TOP]
+        // A frame with no content script in it: Chrome finds nobody to deliver to and rejects.
+        if (reply === undefined) throw new Error('Could not establish connection.')
+        return reply
       },
     },
   })
 
   return {
     sent,
+    injected,
     /** The user switched tabs while the popup was open. */
     switchTo: (id: number | undefined) => {
       tabs = [{ id }]
@@ -72,7 +139,7 @@ function installChrome(
       failure = new Error('Could not establish connection. Receiving end does not exist.')
     },
     setListReply: (value: unknown) => {
-      listReply = value
+      frames = { [TOP]: value }
     },
     setSaveReply: (value: unknown) => {
       saveReply = value
@@ -88,6 +155,7 @@ async function importApi() {
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.useRealTimers()
 })
 
 describe('listSessions', () => {
@@ -95,7 +163,9 @@ describe('listSessions', () => {
     installChrome()
     const { listSessions } = await importApi()
 
-    expect(await listSessions()).toEqual({ sessions: [summary] })
+    // With the frame it came out of beside it: the material of a session never leaves the frame
+    // that gathered it, and a save has to find its way back to that same registry.
+    expect(await listSessions()).toEqual({ sessions: [inFrame(summary, TOP)] })
   })
 
   it('carries back what the tab said about a page it cannot reach', async () => {
@@ -108,15 +178,121 @@ describe('listSessions', () => {
     expect(await listSessions()).toEqual({ sessions: [], unreachable: true })
   })
 
-  it('asks the active tab and only its top frame', async () => {
-    const chrome = installChrome()
+  it('asks every frame of the active tab, each addressed', async () => {
+    const chrome = installChrome({
+      frames: { [TOP]: { sessions: [] }, 9: { sessions: [] }, [EMBED]: { sessions: [embedded] } },
+    })
     const { listSessions } = await importApi()
 
     await listSessions()
 
-    // Without frameId Chrome sends the request round every frame of the page, and whoever is
-    // first answers: on a page with advertising frames that is a stranger's empty list.
-    expect(chrome.sent).toEqual([{ tabId: 7, message: { type: 'tc:list' }, options: { frameId: 0 } }])
+    // Addressed, one frame at a time. A request with no frame in it goes round every frame at
+    // once and Chrome hands back whichever answer arrived first: on a page carrying advertising
+    // frames that is a stranger's empty list — which is why the top frame used to be asked alone,
+    // and why a player inside an embed was invisible to the popup.
+    expect(chrome.sent).toEqual([
+      { tabId: 7, message: { type: 'tc:list' }, options: { frameId: TOP } },
+      { tabId: 7, message: { type: 'tc:list' }, options: { frameId: EMBED } },
+      { tabId: 7, message: { type: 'tc:list' }, options: { frameId: 9 } },
+    ])
+    // And the frames are enumerated by injecting into all of them: chrome.scripting is a
+    // permission the extension already holds, where chrome.webNavigation would add a second
+    // consent screen at installation for nothing but a list of numbers.
+    expect(chrome.injected).toEqual([{ tabId: 7, allFrames: true }])
+  })
+
+  it('lists the recording of a player the page only embeds', async () => {
+    // The whole class of ordinary pages: an article, a documentation page, a landing page that
+    // carries somebody else's player rather than one of its own. The capture works there and
+    // always did — the registry it fills is the one inside the embed — and the popup, asking the
+    // top frame alone, answered "Nothing recorded on this page yet".
+    installChrome({ frames: { [TOP]: { sessions: [] }, [EMBED]: { sessions: [embedded] } } })
+    const { listSessions } = await importApi()
+
+    expect(await listSessions()).toEqual({ sessions: [inFrame(embedded, EMBED)] })
+  })
+
+  it('puts the sessions of every frame in one list, freshest first', async () => {
+    const older = { ...summary, lastAt: embedded.lastAt - 60_000 }
+    const chrome = installChrome({
+      frames: { [TOP]: { sessions: [older] }, [EMBED]: { sessions: [embedded] } },
+    })
+    const { listSessions } = await importApi()
+
+    // Each registry sorts its own and knows of no other, so the merge is the popup's to make. By
+    // frame it would be by nothing at all: the popup opens on the head of the list and calls it
+    // the recording being watched right now, and the top frame's session here is a minute stale.
+    expect((await listSessions()).sessions).toEqual([
+      inFrame(embedded, EMBED),
+      inFrame(older, TOP),
+    ])
+    expect(chrome.sent).toHaveLength(2)
+  })
+
+  it('draws the list a frame with no content script in it cannot answer', async () => {
+    // about:blank, a sandboxed frame, a data: document. Measured on a page of 52 frames: three
+    // such, each refusing in 6 ms. One refusal may not take the tab's whole list down with it.
+    const chrome = installChrome({
+      frames: { [TOP]: undefined, [EMBED]: { sessions: [embedded] } },
+    })
+    const { listSessions } = await importApi()
+
+    expect(await listSessions()).toEqual({ sessions: [inFrame(embedded, EMBED)] })
+    expect(chrome.sent).toHaveLength(2)
+  })
+
+  it('says what one frame said about a page that may not be recorded', async () => {
+    installChrome({
+      frames: { [TOP]: { sessions: [] }, [EMBED]: { sessions: [], encrypted: true } },
+    })
+    const { listSessions } = await importApi()
+
+    // A protected player inside an embed refuses exactly as one on the top page does, and the
+    // popup owes the user the reason there is nothing to show. Merged away, the refusal would
+    // reach the user as the silence of a page with no video on it.
+    expect(await listSessions()).toEqual({ sessions: [], encrypted: true })
+  })
+
+  it('shows one row when two frames answer under the same key', async () => {
+    const twice = { ...embedded, lastAt: embedded.lastAt + 1_000, duration: 30 }
+    installChrome({
+      frames: { [TOP]: { sessions: [embedded] }, [EMBED]: { sessions: [twice] } },
+    })
+    const { listSessions } = await importApi()
+
+    // The same clip embedded twice on one page. A key addresses one session and the popup has
+    // nothing else to address one by: two rows the user cannot tell apart, of which "Save all"
+    // would reach whichever came first, are worse than one — and the freshest is kept.
+    expect((await listSessions()).sessions).toEqual([inFrame(twice, EMBED)])
+  })
+
+  it('does not wait on a frame that never answers', async () => {
+    vi.useFakeTimers()
+    installChrome({
+      frames: { [TOP]: { sessions: [] }, 9: { sessions: [] }, [EMBED]: { sessions: [embedded] } },
+      silent: [9],
+    })
+    const { listSessions } = await importApi()
+
+    const pending = listSessions()
+    await vi.runAllTimersAsync()
+
+    // The content script answers through its bridge, and a frame whose bridge never loads leaves
+    // the reply channel open with nobody on it. One such frame used to hold the popup on
+    // "Loading…" for good; a tab has as many chances at that as it has frames.
+    expect(await pending).toEqual({ sessions: [inFrame(embedded, EMBED)] })
+  })
+
+  it('asks the main frame when the frames of the tab cannot be enumerated', async () => {
+    const chrome = installChrome({ blindToFrames: true })
+    const { listSessions } = await importApi()
+
+    // A tab no extension may touch, or one that closed under the popup. There is still one frame
+    // that is certainly there, and asking it is no worse than what came before.
+    expect(await listSessions()).toEqual({ sessions: [inFrame(summary, TOP)] })
+    expect(chrome.sent).toEqual([
+      { tabId: 7, message: { type: 'tc:list' }, options: { frameId: TOP } },
+    ])
   })
 
   it('takes the active tab of the current window, not of a neighbouring one', async () => {
@@ -175,8 +351,52 @@ describe('saveAll', () => {
 
     await saveAll(summary.key)
 
+    // A key the popup never listed can only be asked of the main frame: it is the one frame
+    // certainly there, and it will answer that it knows of no such session — which is the truth.
     expect(chrome.sent).toEqual([
-      { tabId: 7, message: { type: 'tc:save', key: summary.key }, options: { frameId: 0 } },
+      { tabId: 7, message: { type: 'tc:save', key: summary.key }, options: { frameId: TOP } },
+    ])
+  })
+
+  it('sends the save to the frame the session was listed from', async () => {
+    const chrome = installChrome({
+      frames: { [TOP]: { sessions: [summary] }, [EMBED]: { sessions: [embedded] } },
+    })
+    const { listSessions, saveAll } = await importApi()
+
+    await listSessions()
+    expect(await saveAll(embedded.key)).toEqual({ ok: true })
+
+    // The bytes are in the registry of the embed and nowhere else. Sent to the top frame, this
+    // save would come back "gone" — the session is no more lost than the popup showing it is,
+    // it is simply somewhere else.
+    expect(savesIn(chrome.sent)).toEqual([
+      { tabId: 7, message: { type: 'tc:save', key: embedded.key }, options: { frameId: EMBED } },
+    ])
+  })
+
+  it('sends each save to its own frame when two embeds are recording', async () => {
+    const second = {
+      ...embedded,
+      key: 'https://player.example/embed/two|vp09|inf',
+      lastAt: embedded.lastAt - 1,
+    }
+    const chrome = installChrome({
+      frames: {
+        [TOP]: { sessions: [] },
+        [EMBED]: { sessions: [embedded] },
+        9: { sessions: [second] },
+      },
+    })
+    const { listSessions, saveAll } = await importApi()
+
+    await listSessions()
+    await saveAll(second.key)
+    await saveAll(embedded.key)
+
+    expect(savesIn(chrome.sent).map((item) => item.options)).toEqual([
+      { frameId: 9 },
+      { frameId: EMBED },
     ])
   })
 

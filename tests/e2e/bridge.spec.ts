@@ -100,6 +100,8 @@ type Summary = {
   key: string
   url: string
   title: string
+  /** When material last reached the session: the clock the popup merges the frames of a tab by. */
+  lastAt: number
   duration: number
   bytes: number
   omits?: string
@@ -181,6 +183,9 @@ async function playerSession(url: string): Promise<Summary> {
     // and the referrer carries the address alone. An empty string here would mean the context
     // never arrived.
     title: 'test player',
+    // A real clock: the moment the last fragment arrived. What it means is pinned in
+    // tests/bridge/bridge.test.ts; here it only has to be a number and not a hole in the summary.
+    lastAt: expect.any(Number) as unknown as number,
     duration: 6,
     bytes: await chunkBytes(),
   }
@@ -461,10 +466,13 @@ test('a second source of the same video fills in the session instead of opening 
   })
 
   expect(detached, `the buffer did not travel by transfer; page console: ${log()}`).toBe(true)
+  // Everything about the file the session promises stays as it was — the repeated fragment is
+  // already on its map — but the session was fed again, and the clock that says when material
+  // last reached it moves with the feeding.
   expect(
     await listSessions(page),
     `the material of one clip scattered across sessions; console: ${log()}`,
-  ).toEqual(before)
+  ).toEqual(before!.map((session) => ({ ...session, lastAt: expect.any(Number) })))
 
   await context.close()
 })

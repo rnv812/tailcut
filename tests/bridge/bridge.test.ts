@@ -106,12 +106,14 @@ const OMISSIONS = ['track', 'rendition', 'gap']
 function isSummary(value: unknown): value is SessionSummary {
   if (typeof value !== 'object' || value === null) return false
   const summary = value as Record<string, unknown>
-  const known = ['key', 'url', 'title', 'duration', 'bytes', 'omits']
+  const known = ['key', 'url', 'title', 'lastAt', 'duration', 'bytes', 'omits']
   return (
     Object.keys(summary).every((field) => known.includes(field)) &&
     typeof summary.key === 'string' &&
     typeof summary.url === 'string' &&
     typeof summary.title === 'string' &&
+    // The clock the popup merges the registries of every frame of the tab by.
+    typeof summary.lastAt === 'number' &&
     typeof summary.duration === 'number' &&
     typeof summary.bytes === 'number' &&
     // Absent on a session the file will hold whole; one of the declared reasons otherwise.
@@ -358,6 +360,7 @@ describe('the bridge puts segments into the session registry', () => {
         key: keyFor(PAGE_URL),
         url: PAGE_URL,
         title: PAGE_TITLE,
+        lastAt: expect.any(Number),
         duration: 0,
         bytes: 0,
       },
@@ -380,6 +383,29 @@ describe('the bridge puts segments into the session registry', () => {
     expect(win.list()[0]!.omits).toBeUndefined()
   })
 
+  it('signs a summary with the moment material last reached it', async () => {
+    const win = await loadBridge()
+    win.context()
+
+    win.append(initBytes)
+    win.append(seg1Bytes)
+    const afterFirst = win.list()[0]!.lastAt
+
+    const before = Date.now()
+    win.append(seg2Bytes)
+    const after = Date.now()
+
+    // The registry of one frame sorts its own sessions and knows of no other; a tab holds one
+    // registry per frame and the popup shows a single list. This is the only thing the sessions
+    // of two frames can be put in order by, so it has to mean the arrival of material and not
+    // the opening of the session — the popup calls the head of the list the recording being
+    // watched right now.
+    const lastAt = win.list()[0]!.lastAt
+    expect(lastAt).toBeGreaterThanOrEqual(before)
+    expect(lastAt).toBeLessThanOrEqual(after)
+    expect(lastAt).toBeGreaterThanOrEqual(afterFirst)
+  })
+
   it('promises the piece a gapped buffer can be saved as, and says a piece was left out', async () => {
     const win = await loadBridge()
     win.context()
@@ -398,6 +424,7 @@ describe('the bridge puts segments into the session registry', () => {
         key: keyFor(PAGE_URL),
         url: PAGE_URL,
         title: PAGE_TITLE,
+        lastAt: expect.any(Number),
         duration: 2,
         bytes: seg1Bytes.byteLength,
         omits: 'gap',
@@ -1336,6 +1363,7 @@ describe('the bridge tells apart the buffers of one media source', () => {
         key: keyFor(PAGE_URL, ['avc1', 'mp4a']),
         url: PAGE_URL,
         title: PAGE_TITLE,
+        lastAt: expect.any(Number),
         duration: 6,
         bytes: allBytes,
       },

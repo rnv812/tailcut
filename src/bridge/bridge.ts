@@ -147,6 +147,10 @@ function summaries(): SessionSummary[] {
     key: session.key,
     url: session.url,
     title: session.title,
+    // The moment material last arrived here. The popup merges the registries of every frame of
+    // the tab into one list, and this is the only thing the sessions of two frames can be put in
+    // order by: each registry sorts its own, and neither knows of the other.
+    lastAt: session.lastSeenAt,
     ...summarize(session),
   }))
 }

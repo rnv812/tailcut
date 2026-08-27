@@ -1,11 +1,15 @@
 import {
-  TOP_FRAME,
-  type ExtensionToTab,
-  type Omission,
-  type SaveFailure,
-  type SaveResult,
-  type SessionList,
-  type SessionSummary,
+  MAIN_FRAME,
+  listTabSessions,
+  saveInFrame,
+  type FramedSession,
+} from '../shared/frames'
+import type {
+  Omission,
+  SaveFailure,
+  SaveResult,
+  SessionList,
+  SessionSummary,
 } from '../shared/protocol'
 
 // The answer is described by the protocol and not by the popup: let the two descriptions drift
@@ -40,6 +44,16 @@ const NOTHING: SessionList = { sessions: [] }
  */
 let boundTabId: number | undefined
 
+/**
+ * The sessions of the last list, each with the frame it came out of.
+ *
+ * A session is material, and material never leaves the frame it was gathered in: the registry of
+ * an embedded player is inside the embed. The popup asks every frame for its list and has to
+ * remember which answered what, or "Save all" would go knocking at the top frame for a session
+ * that was never there.
+ */
+let listed: FramedSession[] = []
+
 async function targetTabId(): Promise<number | undefined> {
   if (boundTabId !== undefined) return boundTabId
 
@@ -51,21 +65,24 @@ async function targetTabId(): Promise<number | undefined> {
 /**
  * Asks the tab what it has gathered, and what it could not. The popup only shows the answer:
  * there is no parsing and no assembly here — it is obliged to open instantly.
+ *
+ * Every frame of the tab is asked, not the top one alone. A page that carries an embedded player
+ * rather than one of its own — an article, a documentation page, a landing page — records into
+ * the registry of the frame that holds the player, and the top frame knows nothing about it.
  */
 export async function listSessions(): Promise<SessionList> {
   const tabId = await targetTabId()
   if (tabId === undefined) return NOTHING
 
-  const request: ExtensionToTab = { type: 'tc:list' }
-  try {
-    const reply: SessionList | undefined = await chrome.tabs.sendMessage(tabId, request, TOP_FRAME)
-    return reply ?? NOTHING
-  } catch {
-    // A page with no content script: chrome://, the extension store, a tab older than the
-    // installation. An empty answer is honester here than an error — there is nothing to record,
-    // and nothing is known about the page either.
-    return NOTHING
-  }
+  // A tab with no content script in any frame — chrome://, the extension store, a tab older than
+  // the installation — comes back as an empty answer rather than as an error: there is nothing to
+  // record there, and nothing is known about the page either.
+  const answer = await listTabSessions(tabId)
+
+  // Which frame answered what. The popup shows the sessions and addresses them by key; the save
+  // has to find the registry the bytes are actually in.
+  listed = answer.sessions
+  return answer
 }
 
 /**
@@ -82,9 +99,13 @@ export async function saveAll(key: string): Promise<SaveResult> {
   const tabId = await targetTabId()
   if (tabId === undefined) return { ok: false }
 
-  const request: ExtensionToTab = { type: 'tc:save', key }
+  // Back to the frame the session was listed from: its bytes are there and nowhere else. A key
+  // the popup never listed can only be asked of the main frame, which will answer that it knows
+  // of no such session — which is the truth about it.
+  const frameId = listed.find((session) => session.key === key)?.frameId ?? MAIN_FRAME
+
   try {
-    const result: SaveResult | undefined = await chrome.tabs.sendMessage(tabId, request, TOP_FRAME)
+    const result = await saveInFrame(tabId, frameId, key)
     // Chrome answers undefined when the channel closed with nobody answering: the tab was closed
     // or taken off the page while the file was being built. Nothing was saved.
     return result?.ok === true ? { ok: true } : refusalOf(result)

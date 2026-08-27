@@ -56,6 +56,8 @@ type Summary = {
   key: string
   url: string
   title: string
+  /** When material last reached the session: the clock the popup merges the frames of a tab by. */
+  lastAt: number
   duration: number
   bytes: number
   omits?: string
@@ -234,6 +236,9 @@ async function playerSession(url: string, title: string): Promise<Summary> {
     key: sessionKey({ url, codecs: ['avc1'], durationSeconds: Infinity }),
     url,
     title,
+    // A real clock: the moment the last fragment arrived. What it means is pinned in
+    // tests/bridge/bridge.test.ts; here it only has to be a number and not a hole in the summary.
+    lastAt: expect.any(Number) as unknown as number,
     duration: 6,
     bytes: await chunkBytes(),
   }
