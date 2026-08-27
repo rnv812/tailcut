@@ -128,6 +128,12 @@ export function trafDuration(data: Uint8Array, traf: Box, movieDefault = 0): num
  * of a parsed `InitInfo`. Left out, a fragment that states nothing of its own has no length, which
  * is the honest answer when the movie header is not to hand.
  *
+ * **One moof of the segment, the first one it holds**, on the same terms as `samplesInSegment`
+ * next door: a segment packing several fragments is measured by its first alone, and the length
+ * that comes back then covers a part of the segment rather than the whole of it. Every packager
+ * measured feeds MSE one fragment per media segment, and the registry lays one chunk on the map
+ * for each — a second moof is material the map has nowhere to put.
+ *
  * **One traf of the moof, the first one it states.** `FragmentInfo` names a single track, and a
  * muxed buffer hands over a moof with a traf per track; what comes back then describes the leading
  * one and says so in `trackId`. That is enough for what asks: the registry lays one chunk per

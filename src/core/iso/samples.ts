@@ -150,6 +150,15 @@ interface FragmentHeader {
  * Total by design: the bytes come from a page nobody vouches for, and a segment that cannot be
  * read is an empty list, not an exception thrown into the middle of an editor building a clip.
  * A truncated box costs its traf and no more.
+ *
+ * **One fragment of the segment, the first one it holds.** A media segment may carry several
+ * moof/mdat pairs, and a segment that does has the fragments behind its first silently left out
+ * of the index — with no mark of it here or in what comes back. That is a contract and not an
+ * oversight: MSE is fed one fragment per media segment by every packager measured, and the
+ * capture registry lays one chunk on the map per segment, so a second moof would be material the
+ * map has nowhere to put either. The muxer is the one reader that does walk them all
+ * (`fragmentsOf` in core/mux.ts), because a save copies bytes rather than placing samples.
+ * Should a site turn up that packs fragments together, this is the loop to open first.
  */
 export function samplesInSegment(
   segment: Uint8Array,

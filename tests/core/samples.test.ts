@@ -641,6 +641,87 @@ describe('samplesInSegment', () => {
     ])
   })
 
+  it('carries on from the end of one run into the next where that one states no offset', () => {
+    // data_offset is optional (14496-12 §8.8.8), and a run that leaves it out says its samples
+    // begin where the run in front of it ended — or, for the first run of a traf, at the base the
+    // tfhd states. Every fixture in this repository writes the field in every trun, so the branch
+    // that carries the cursor over has never been walked by a test, while the branch beside it is
+    // covered five times. Left at the base instead of carried, the second run here reads the
+    // first run's bytes back a second time: four samples come out, the sizes add up, and the
+    // decoder is handed the same two frames twice.
+    const runs = (dataOffset: number): Uint8Array =>
+      moofOf([
+        ...raw('traf', [
+          // default-base-is-moof: the samples are addressed from the first byte of the moof.
+          ...raw('tfhd', [...be32(0x020000), ...be32(1)]),
+          ...raw('tfdt', [...be32(0x01000000), ...be64(0)]),
+          ...raw('trun', [...be32(0x000201), ...be32(2, dataOffset), ...be32(4, 4)]),
+          // The same two flags less the data offset: a count, and a size per sample.
+          ...raw('trun', [...be32(0x000200), ...be32(2), ...be32(5, 6)]),
+        ]),
+      ])
+
+    const payload = runs(0).byteLength + 8
+    const [carried] = samplesInSegment(segmentOf(runs(payload), 19), NO_DEFAULTS)
+    expect(carried!.samples.map((s) => s.at)).toEqual([
+      payload,
+      payload + 4,
+      payload + 8, // where the first run stopped, and not the base the traf is addressed from
+      payload + 13,
+    ])
+
+    // The other end of the same branch: the leading run of a traf states no offset either, so it
+    // starts at the base itself — here an explicit base_data_offset rather than the moof.
+    const lone = (base: number): Uint8Array =>
+      moofOf([
+        ...raw('traf', [
+          ...raw('tfhd', [...be32(0x000001), ...be32(1), ...be64(base)]),
+          ...raw('tfdt', [...be32(0x01000000), ...be64(0)]),
+          ...raw('trun', [...be32(0x000200), ...be32(3), ...be32(7, 7, 7)]),
+        ]),
+      ])
+
+    const base = lone(0).byteLength + 8
+    const [fromBase] = samplesInSegment(segmentOf(lone(base), 21), NO_DEFAULTS)
+    expect(fromBase!.samples.map((s) => s.at)).toEqual([base, base + 7, base + 14])
+  })
+
+  it('reads the first fragment of a segment that packs two, and leaves the rest', () => {
+    // The contract both readers of a media segment hold to, written down here because it is a
+    // choice and not an accident. Every packager measured feeds MSE one moof per media segment,
+    // and the capture registry lays one chunk on the map for each segment it sees; samples out of
+    // a second fragment would be material the map has nowhere to put, and a reader that quietly
+    // indexed them would file a second chunk's worth of frames under the times of the first.
+    //
+    // The muxer is the one reader that does walk them all — a save copies bytes rather than
+    // placing samples — and tests/core/mux.test.ts puts a packed segment through it.
+    const packed = (base: number, offset: number): Uint8Array =>
+      segmentOf(
+        moofOf([
+          ...raw('traf', [
+            ...raw('tfhd', [
+              ...be32(0x020000 | 0x000008 | 0x000010),
+              ...be32(1),
+              ...be32(512),
+              ...be32(4),
+            ]),
+            ...raw('tfdt', [...be32(0), ...be32(base)]),
+            ...raw('trun', [...be32(0x000001), ...be32(2), ...int32(offset)]),
+          ]),
+        ]),
+        8,
+      )
+
+    const first = packed(0, 100)
+    const both = new Uint8Array(first.byteLength * 2)
+    both.set(first, 0)
+    both.set(packed(1024, 100), first.byteLength)
+
+    const [track] = samplesInSegment(both, NO_DEFAULTS)
+    expect(track!.samples.map((s) => s.dts)).toEqual([0, 512])
+    expect(parseFragment(both)).toEqual({ trackId: 1, baseMediaDecodeTime: 0, duration: 1024 })
+  })
+
   it('gives an empty list for an init segment and for junk', () => {
     expect(samplesInSegment(h264Video, defaults)).toEqual([])
     expect(samplesInSegment(new Uint8Array(0), defaults)).toEqual([])

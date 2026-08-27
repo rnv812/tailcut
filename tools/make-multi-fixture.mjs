@@ -118,7 +118,14 @@ function secondEntry(first, kind) {
     // stronger fixture would state, and ffmpeg's own demuxer answers it with "multiple fourcc not
     // supported" — the same first-entry-only rule this program holds to, said out loud. It is a
     // warning and not an error and the frames come out identical either way, but a fixture that
-    // has to be checked against an allowed complaint is a fixture nobody trusts.
+    // has to be checked against an allowed complaint is a fixture nobody trusts. (Measured, not
+    // assumed: renaming this entry avc3 leaves ffprobe silent and makes `ffmpeg -v warning` print
+    // that line, so the whole `multi` set would stop decoding without a word.)
+    //
+    // What the differing name would have pinned — that the codec string comes out of the same
+    // entry as the rest of the description, and not out of whichever one is left — is pinned in
+    // tests/core/multi-track.test.ts instead, on a copy of this init with those four bytes
+    // changed. Four bytes, every length still true, and no complaint to read the fixture against.
     copy.writeUInt16BE(128, 32) // width
     copy.writeUInt16BE(72, 34) // height
   } else {

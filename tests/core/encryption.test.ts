@@ -39,14 +39,27 @@ const box = (type: string, ...body: number[]): number[] => [
 
 const buffer = (...parts: number[][]): Uint8Array => Uint8Array.from(parts.flat())
 
-/** A media segment of the usual shape, with whatever boxes the test puts in its traf. */
-const fragment = (...trafChildren: number[][]): Uint8Array =>
+/** One track fragment numbered `trackId`, holding whatever boxes the test puts in it. */
+const traf = (trackId: number, children: number[][]): number[] =>
+  box('traf', ...box('tfhd', ...uint32(0), ...uint32(trackId)), ...children.flat())
+
+/**
+ * A media segment carrying a track fragment for each of two tracks — the shape a page gets when
+ * it hands one SourceBuffer both the picture and the sound.
+ *
+ * Two of them and not one, because the mark of protection may be in either: a stream sends the
+ * picture in the clear and licenses the sound, or the other way round, and the moof is walked to
+ * the end for that reason. With one traf in the segment "the traf that carries the senc" and "the
+ * first traf there is" are the same box and a walk that stopped at it could not be told apart.
+ */
+const fragment = (first: number[][] = [], second: number[][] = []): Uint8Array =>
   buffer(
     box('styp', ...ascii('msdh'), ...uint32(0)),
     box(
       'moof',
       ...box('mfhd', ...uint32(0), ...uint32(1)),
-      ...box('traf', ...box('tfhd', ...uint32(0), ...uint32(1)), ...trafChildren.flat()),
+      ...traf(1, first),
+      ...traf(2, second),
     ),
     box('mdat', 1, 2, 3, 4),
   )
@@ -129,7 +142,13 @@ describe('recognising encrypted media in the bytes of the stream', () => {
   it('reads protection out of the senc of a media segment', () => {
     // Where recording started in the middle of a stream and the init went past unseen, the
     // fragments still carry the per-sample initialisation vectors, and nothing else does.
-    expect(media(fragment(box('senc', ...uint32(0), ...uint32(0))))).toBe(true)
+    const senc = box('senc', ...uint32(0), ...uint32(0))
+    expect(media(fragment([senc]))).toBe(true)
+
+    // And in the fragment of the track standing second, which is the same claim from the other
+    // end: the picture of this segment is in the clear and its sound is not. A walk that stopped
+    // at the first traf calls the segment clear and the page goes on being recorded.
+    expect(media(fragment([], [senc]))).toBe(true)
   })
 
   it('reads protection out of the pair of saiz and saio', () => {
@@ -138,13 +157,20 @@ describe('recognising encrypted media in the bytes of the stream', () => {
     const saiz = box('saiz', ...uint32(0), 0, ...uint32(0))
     const saio = box('saio', ...uint32(0), ...uint32(0))
 
-    expect(media(fragment(saiz, saio))).toBe(true)
+    expect(media(fragment([saiz, saio]))).toBe(true)
+    expect(media(fragment([], [saiz, saio]))).toBe(true)
   })
 
   it('does not call a lone saio protection', () => {
     // Auxiliary information has uses besides encryption. One box of the pair is not the shape a
     // protected fragment has, and the cost of being wrong here is the whole page's recording.
-    expect(media(fragment(box('saio', ...uint32(0), ...uint32(0))))).toBe(false)
+    const saio = box('saio', ...uint32(0), ...uint32(0))
+    expect(media(fragment([saio]))).toBe(false)
+
+    // The pair has to be found inside one and the same traf. One half of it in each of the two
+    // is two ordinary fragments, and calling that protection would refuse the page over boxes
+    // neither of its tracks carries.
+    expect(media(fragment([saio], [box('saiz', ...uint32(0), 0, ...uint32(0))]))).toBe(false)
   })
 
   it('reads protection out of a pssh box beside the fragment', () => {

@@ -18,7 +18,7 @@ import {
 } from '../../src/core/iso/samples'
 import { muxFragmentedMp4 } from '../../src/core/mux'
 import { assembleMp4 } from '../../src/core/export/assemble'
-import { planClip, planPreview } from '../../src/core/export/plan'
+import { AUDIO_WARMUP_PACKETS, planClip, planPreview } from '../../src/core/export/plan'
 import { ByteMap, clipSourceOf, sourceTrackOf } from '../../src/core/export/source'
 import { framesOf } from '../../src/core/timeline/frames'
 import { decodeWarnings, probeFile, writeTemp } from '../support/media'
@@ -172,6 +172,22 @@ describe('a sample description that holds two entries', () => {
     return boxesIn(INIT, stsd.start + stsd.headerSize + 8, stsd.start + stsd.size)
   }
 
+  /**
+   * The same init with the four letters over one stsd entry changed and no other byte touched.
+   *
+   * Four bytes: every length in the file stays true, every child box of the entry stays where it
+   * was, and the file goes on decoding. That is the whole point of the derivation — the question
+   * "which entry did this answer come out of" has one honest answer only when the entries differ,
+   * and the fixture itself cannot carry the difference: two fourccs in one stsd make ffmpeg's own
+   * demuxer say "multiple fourcc not supported", and a fixture that has to be read against an
+   * allowed complaint is a fixture nobody trusts (see tools/make-multi-fixture.mjs).
+   */
+  function withEntryType(trackId: number, index: number, type: string): Uint8Array {
+    const changed = new Uint8Array(INIT)
+    changed.set(new TextEncoder().encode(type), entriesOf(trackId)[index]!.start + 4)
+    return changed
+  }
+
   it('holds two of them, and the second says something else than the first', () => {
     // Without this the rest of the block proves nothing: two identical entries would let a reader
     // that took the last one come out right.
@@ -213,22 +229,59 @@ describe('a sample description that holds two entries', () => {
     expect(sampleEntryOf(INIT, AUDIO_TRACK)!.format).toBe('mp4a')
   })
 
+  it('names the codec after the entry it read the rest of the description out of', () => {
+    // The choice of entry is pinned above; the four letters taken alongside it are not, because
+    // both entries of the fixture are avc1 and both are mp4a. Renamed, the second entry of each
+    // track is a stream that changed its codec configuration part way through — `avc3` carries
+    // its parameter sets in the bitstream instead of the avcC, `ec-3` is Dolby Digital Plus —
+    // and the file goes on being described by the first.
+    //
+    // A codec name out of the second entry is a decoder configured for a codec the frames are not
+    // in: nothing further along would question it, because the name and the avcC beside it both
+    // come out of the same init and look consistent.
+    const renamedPicture = withEntryType(VIDEO_TRACK, 1, 'avc3')
+    expect(parseInit(renamedPicture)!.tracks.map((track) => track.codec)).toEqual(['avc1', 'mp4a'])
+    expect(sampleEntryOf(renamedPicture, VIDEO_TRACK)!.format).toBe('avc1')
+
+    const renamedSound = withEntryType(AUDIO_TRACK, 1, 'ec-3')
+    expect(parseInit(renamedSound)!.tracks.map((track) => track.codec)).toEqual(['avc1', 'mp4a'])
+    expect(sampleEntryOf(renamedSound, AUDIO_TRACK)!.format).toBe('mp4a')
+
+    // And the four bytes went where they were aimed: read as the entries of the stsd rather than
+    // through the reader under test, the second of each pair carries the new name.
+    expect(String.fromCharCode(...renamedPicture.subarray(
+      entriesOf(VIDEO_TRACK)[1]!.start + 4,
+      entriesOf(VIDEO_TRACK)[1]!.start + 8,
+    ))).toBe('avc3')
+  })
+
   it('is searched to the end for the mark of encryption', () => {
     expect(isoEncrypted(INIT)).toBe(false)
 
     // The same init with the second entry of the picture renamed `encv` — four bytes, and every
     // length in the file still true. A reader that looked at the first entry alone would call
     // this stream clear and start recording a protected page.
-    const protectedInit = new Uint8Array(INIT)
-    const stsd = findBox(protectedInit, ['moov', 'trak', 'mdia', 'minf', 'stbl', 'stsd'])!
-    const entries = boxesIn(
-      protectedInit,
-      stsd.start + stsd.headerSize + 8,
-      stsd.start + stsd.size,
-    )
-    protectedInit.set(new TextEncoder().encode('encv'), entries[1]!.start + 4)
+    expect(isoEncrypted(withEntryType(VIDEO_TRACK, 1, 'encv'))).toBe(true)
 
-    expect(isoEncrypted(protectedInit)).toBe(true)
+    // And the first of the two, which is the other half of the same walk: a reader that started
+    // one entry in — or that took only the last — reads this init as clear.
+    expect(isoEncrypted(withEntryType(VIDEO_TRACK, 0, 'encv'))).toBe(true)
+  })
+
+  it('is searched past the first trak as well', () => {
+    // Protection declared on the sound alone, which is a shape a page really serves: a free
+    // picture with a licensed commentary track. The walk over the traks of the moov is what has
+    // to find it — stopped at the first, this init reads as clear in both entries of it, and the
+    // extension starts recording a protected page.
+    const protectedSound = withEntryType(AUDIO_TRACK, 0, 'enca')
+    expect(isoEncrypted(protectedSound)).toBe(true)
+    expect(isoEncrypted(withEntryType(AUDIO_TRACK, 1, 'enca'))).toBe(true)
+
+    // So that the two claims above are about the walk and not about four bytes that broke the
+    // file: the moov still reads as two tracks, and the picture beside the protected sound is
+    // still the clear avc1 it was.
+    expect(parseInit(protectedSound)!.tracks.map((track) => track.codec)).toEqual(['avc1', 'enca'])
+    expect(findBox(protectedSound, ['moov', 'trak', 'mdia', 'minf', 'stbl', 'stsd'])).not.toBeNull()
   })
 })
 
@@ -456,6 +509,56 @@ describe('a recording read out of one muxed buffer', () => {
     expect(video!.nb_read_frames).toBe('22')
     expect(Number(video!.duration)).toBeCloseTo(2.3, 3)
     expect(audio!.codec_name).toBe('aac')
+  })
+
+  it('cuts the sound by the edit list of the sound and not by the edit list of the picture', () => {
+    // The two tracks hide different amounts at their heads — 6000 ticks of 30000 against 1024 of
+    // 22050 — and this is the only material in the repository where they do. Everywhere else both
+    // are 1024 of their own scale, so a plan that took the picture's offset for the sound's comes
+    // out at the same packet and the confusion is a no-op.
+    const { segments } = placed()
+    const source = clipSourceOf([
+      { kind: 'video', initBytes: INIT, segments },
+      { kind: 'audio', initBytes: INIT, segments },
+    ])!
+
+    const request = { in: 1, out: 3, sound: true }
+    const plan = planClip(source, request)
+    const audio = plan.tracks.find((track) => track.kind === 'audio')!
+    const packets = source.audio!.samples
+
+    // The packet the clip opens with: the one holding the in point, less the four of run-up a
+    // decoder needs to be warm. Packet 22 holds 1.0 s of a sound offset by its 1024 of priming.
+    const head = packets.findIndex((packet) => packet.source.at === audio.samples[0]!.source.at)
+    expect(head).toBe(22 - AUDIO_WARMUP_PACKETS)
+    expect(packets[head]!.dts).toBe(18_432)
+    // 23074 ticks — a second of sound plus its priming — less the 18432 the head packet decodes
+    // at: what the edit list of the clip hides at the front.
+    expect(audio.skipTicks).toBe(4642)
+
+    // The invariant the pair stands on, on material where the two tracks disagree: whatever each
+    // hides, what is left of it starts at the instant that was asked for. The difference between
+    // the two numbers is what a viewer hears as lip-sync.
+    const entries = plan.tracks.map((track) => {
+      const from = track.kind === 'video' ? source.video : source.audio!
+      const first = from.samples.find((s) => s.source.at === track.samples[0]!.source.at)!
+      return (first.dts + track.skipTicks - from.editOffset) / track.timescale
+    })
+    expect(entries).toEqual([1, 1])
+
+    // What the confusion costs, and why nothing else caught it. Given the picture's 6000 ticks,
+    // the sound enters five packets later and hides 144 ticks less — and the clip still holds
+    // exactly 48 packets, still opens, and still reads back as aac.
+    const confused = planClip(
+      { ...source, audio: { ...source.audio!, editOffset: source.video.editOffset } },
+      request,
+    )
+    const moved = confused.tracks.find((track) => track.kind === 'audio')!
+    expect(moved.samples).toHaveLength(audio.samples.length)
+
+    const movedHead = packets.findIndex((p) => p.source.at === moved.samples[0]!.source.at)
+    expect(movedHead).toBe(head + 5)
+    expect(((movedHead - head) * 1024) / AUDIO_TIMESCALE).toBeCloseTo(0.232, 3)
   })
 
   it('muxes back into a fragmented file a decoder reads whole', () => {

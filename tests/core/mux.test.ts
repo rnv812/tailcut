@@ -360,6 +360,22 @@ const video = { initBytes: videoInit, segments: videoSegments }
 const audio = { initBytes: audioInit, segments: audioSegments }
 
 /**
+ * Two media segments joined into one that carries both fragments.
+ *
+ * The moof and the mdat of the second appended to the whole of the first, with the styp and the
+ * sidx that described it as a standalone delivery left off — a segment holding two moof/mdat
+ * pairs, which the format allows and no packager measured writes. The readers of a segment take
+ * its first fragment and say so (`samplesInSegment` in core/iso/samples.ts); the muxer is the one
+ * that walks them all, and the walk has no material of its own without this.
+ */
+function packedSegment(first: Uint8Array, second: Uint8Array): Uint8Array {
+  const boxes = topLevelBoxes(second)
+  const moof = typeIn(boxes, 'moof')!
+  const last = boxes[boxes.length - 1]!
+  return concatBytes([first, second.subarray(moof.start, last.start + last.size)])
+}
+
+/**
  * Length of the fixture, from the first tick of either track to the last one of them.
  *
  * The picture runs to exactly six seconds. The sound runs 23 milliseconds past it: its last
@@ -493,6 +509,31 @@ describe('muxFragmentedMp4', () => {
     const seconds = Number(probe('mux-late.mp4', tail).format.duration)
     expect(seconds).toBeGreaterThan(1.9)
     expect(seconds).toBeLessThan(2.1)
+  })
+
+  it('takes every fragment of a segment that packs more than one', () => {
+    // A media segment is one moof and one mdat everywhere it has been measured, so the loop over
+    // the moofs of a segment has never turned twice. It is live code all the same: the format
+    // puts no limit on how many fragments a segment holds, and the boundary it works out — from
+    // one moof to the next, and from the last one to the end of the readable bytes — decides
+    // which bytes move with which fragment.
+    const packed = packedSegment(videoSegments[0]!, videoSegments[1]!)
+    const file = muxFragmentedMp4([{ initBytes: videoInit, segments: [packed, videoSegments[2]!] }])
+
+    // Both fragments of the packed segment came across, and each was placed on the timeline by
+    // its own decode time: 0, 2 and 4 seconds, numbered along the file.
+    expect(fragmentsOf(file).map((f) => f.time)).toEqual([0, 2, 4])
+    expect(fragmentsOf(file).map((f) => f.sequence)).toEqual([1, 2, 3])
+    expect(probe('mux-packed.mp4', file).streams.map((s) => Number(s.nb_read_frames))).toEqual([
+      VIDEO_FRAMES,
+    ])
+
+    // Every byte of media once and in order. A fragment given the rest of the segment instead of
+    // the stretch up to the next moof would carry its neighbour's mdat inside itself and the file
+    // would hold that material twice.
+    expect(digest(...mediaOf(file))).toBe(
+      digest(...videoSegments.flatMap((segment) => mediaOf(segment))),
+    )
   })
 
   it('makes a playable file out of a single track too', () => {
