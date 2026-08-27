@@ -308,9 +308,23 @@ function lastSample(track: SourceTrack, first: number, outTicks: number): number
   return last
 }
 
+/**
+ * How much of the timeline is taken out inside one hole of one track, in seconds.
+ *
+ * Every seam that opens inside the hole, added up, and not the first of them. A seam is measured
+ * across a hole of the picture, so a hole of the picture holds exactly one — the seams are those
+ * holes. A hole of the sound is under no such rule: the sound can be away for one unbroken
+ * stretch while the picture comes and goes twice inside it, and then the clip takes a piece out
+ * at each seam and the sound has to give up all of them. Answered with the first, the sound keeps
+ * what the picture has already lost and plays that much late for the rest of the clip.
+ *
+ * Touching is not overlapping, at either edge: a hole that ends exactly where a seam begins
+ * shares no instant with it and gives up nothing, which is why both comparisons are strict.
+ */
 function pullAcross(seams: Seam[], from: number, to: number): number {
+  let pull = 0
   for (const seam of seams) {
-    if (seam.from < to && seam.to > from) return seam.pull
+    if (seam.from < to && seam.to > from) pull += seam.pull
   }
-  return 0
+  return pull
 }

@@ -118,14 +118,32 @@ function initWithEditList(trackId: number, elst: Uint8Array): Uint8Array {
   return boxOf('moov', boxOf('trak', tkhd, boxOf('edts', elst)))
 }
 
+/** One entry of an edit list: how long the stretch lasts and where in the media it starts. */
+interface Edit {
+  duration: number
+  media: number
+}
+
 /** elst version 1: segment_duration and media_time eight bytes each. */
-function elstV1(segmentDuration: number, mediaTime: number): Uint8Array {
-  return fullBoxOf('elst', 1, 0, u32(1), u64(segmentDuration), i64(mediaTime), u16(1, 0))
+function elstV1(...entries: Edit[]): Uint8Array {
+  return fullBoxOf(
+    'elst',
+    1,
+    0,
+    u32(entries.length),
+    ...entries.flatMap((edit) => [u64(edit.duration), i64(edit.media), u16(1, 0)]),
+  )
 }
 
 /** elst version 0: the same two fields four bytes each, media_time still signed. */
-function elstV0(segmentDuration: number, mediaTime: number): Uint8Array {
-  return fullBoxOf('elst', 0, 0, u32(1), u32(segmentDuration), i32(mediaTime), u16(1, 0))
+function elstV0(...entries: Edit[]): Uint8Array {
+  return fullBoxOf(
+    'elst',
+    0,
+    0,
+    u32(entries.length),
+    ...entries.flatMap((edit) => [u32(edit.duration), i32(edit.media), u16(1, 0)]),
+  )
 }
 
 /** A signed 32-bit field. The writer has no i32: no box this program writes needs one. */
@@ -154,23 +172,63 @@ describe('editOffset', () => {
   it('reads a media_time the version-1 box states in 64 bits', () => {
     // Read at the version-0 offset, a version-1 box hands back the low half of segment_duration:
     // a number that has nothing to do with the edit, and one that looks entirely plausible.
-    expect(editOffset(initWithEditList(1, elstV1(600_000, 1_024)), 1)).toBe(1_024)
+    expect(editOffset(initWithEditList(1, elstV1({ duration: 600_000, media: 1_024 })), 1)).toBe(
+      1_024,
+    )
 
     // And the field is eight bytes because it has to be: 3.3 billion ticks of 48 kHz is a
     // recording of nineteen hours, and its media_time does not fit in what version 0 has.
-    expect(editOffset(initWithEditList(1, elstV1(1_000, 3_300_000_000)), 1)).toBe(3_300_000_000)
+    expect(
+      editOffset(initWithEditList(1, elstV1({ duration: 1_000, media: 3_300_000_000 })), 1),
+    ).toBe(3_300_000_000)
   })
 
   it('takes an empty edit as no offset at all, in either version', () => {
     // The handcrafted list is read at all: a positive media_time comes back as it was written.
-    expect(editOffset(initWithEditList(1, elstV0(600_000, 512)), 1)).toBe(512)
+    expect(editOffset(initWithEditList(1, elstV0({ duration: 600_000, media: 512 })), 1)).toBe(512)
 
     // −1 is the one negative media_time the format allows, and it is not an offset into the
     // material: it is an empty edit, a hole held at the head before the media starts. Added to a
     // pts the way a real offset is subtracted from one, it would shift every frame of the table
     // the wrong way by a tick — and the table is what the cut, the readout and the grid read.
-    expect(editOffset(initWithEditList(1, elstV0(600_000, -1)), 1)).toBe(0)
-    expect(editOffset(initWithEditList(1, elstV1(600_000, -1)), 1)).toBe(0)
+    expect(editOffset(initWithEditList(1, elstV0({ duration: 600_000, media: -1 })), 1)).toBe(0)
+    expect(editOffset(initWithEditList(1, elstV1({ duration: 600_000, media: -1 })), 1)).toBe(0)
+  })
+
+  it('reads past an empty edit to the entry that names a place in the material', () => {
+    // The ordinary way a container states a delayed start: an empty edit holding the head of the
+    // presentation, and behind it the entry that says where the media begins. QuickTime writes
+    // it, MP4Box writes it, and a track whose first packets are to be shown late arrives in no
+    // other shape — 14496-12 §8.6.6 gives an entry one media_time, so a hole at the head and an
+    // offset into the material cannot be one entry.
+    //
+    // Read as the list's first entry alone, the −1 answers for the whole box and the priming of
+    // the track goes with it: 1024 ticks of 22050 is 46 ms the sound then plays out of step with
+    // a picture whose own list happened to hold one entry.
+    const empty = { duration: 45_000, media: -1 }
+    expect(editOffset(initWithEditList(1, elstV0(empty, { duration: 600_000, media: 1_024 })), 1))
+      .toBe(1_024)
+    expect(editOffset(initWithEditList(1, elstV1(empty, { duration: 600_000, media: 6_000 })), 1))
+      .toBe(6_000)
+
+    // The entry behind it is read at its own offset and not at the first one's: a list of three
+    // whose real edit stands last states it 24 bytes into the box in version 0 and 40 in
+    // version 1, and a reader that stepped by the wrong width lands inside a segment_duration.
+    const three = [empty, empty, { duration: 600_000, media: 512 }] as const
+    expect(editOffset(initWithEditList(1, elstV0(...three)), 1)).toBe(512)
+    expect(editOffset(initWithEditList(1, elstV1(...three)), 1)).toBe(512)
+
+    // A list that is nothing but empty edits still hides nothing: there is no place in the
+    // material named anywhere in it.
+    expect(editOffset(initWithEditList(1, elstV0(empty, empty)), 1)).toBe(0)
+  })
+
+  it('stops at the end of an edit list that promises more entries than it holds', () => {
+    // entry_count comes out of a foreign file. Walked on the count alone, a box holding one
+    // entry and promising four is read three entries past its own body — and whatever lies
+    // behind it in the moov comes back as a media_time.
+    const short = fullBoxOf('elst', 0, 0, u32(4), u32(600_000), i32(-1), u16(1, 0))
+    expect(editOffset(initWithEditList(1, short), 1)).toBe(0)
   })
 
   it('is zero for a track with no edit list, an unknown track and junk', () => {

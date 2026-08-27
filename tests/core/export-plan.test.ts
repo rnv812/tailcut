@@ -817,6 +817,56 @@ describe('planClip', () => {
     ])
   })
 
+  it('pulls a gap that lies under two seams by the whole of both', () => {
+    // The picture drops out twice with a stretch of picture between the two; the sound is away
+    // for one unbroken stretch covering both. Every seam is measured across a hole of the
+    // picture, so there are two of them here and one hole of the sound under them, and what the
+    // clip takes out of the timeline is the pair — a second at each seam.
+    //
+    // Answered with the first seam alone, the packet in front of the sound's hole keeps a second
+    // that the picture no longer has, and everything behind it plays a whole second late against
+    // a picture that moved by two. Nothing about the file looks wrong: the durations are all
+    // positive, the frames are all there, and ffprobe reads it without a word.
+    const video = madeTrack('video', 12_288, 512, [
+      { at: 0, count: 24 }, // a second of picture, then a second of none
+      { at: 24_576, count: 24 }, // a second back, from 2 s to 3 s
+      { at: 49_152, count: 24 }, // and away again until 4 s
+    ])
+    const audio = madeTrack('audio', 44_100, 1024, [
+      { at: 0, count: 38 }, // stops at 0.88 s, before the first seam opens
+      { at: 180_224, count: 40 }, // and comes back at 4.09 s, after the second one closes
+    ])
+    const source = { video, audio }
+
+    // One hole of the sound lying under both seams, and each of them pulls by its own second.
+    expect(seamsOf(source).map((seam) => [seam.from, seam.to, seam.pull])).toEqual([
+      [1, 2, 1],
+      [3, 4, 1],
+    ])
+
+    const plan = planClip(source, { in: 0, out: 5, sound: true })
+    const frames = trackByKind(plan.tracks, 'video')
+    const packets = trackByKind(plan.tracks, 'audio')
+
+    // The picture's two holes are closed whole: nothing of either is left on the frame in front.
+    expect(frames.samples.every((sample) => sample.duration === 512)).toBe(true)
+    // The sound's hole is 141312 ticks wide and two seconds of it go: 88200 ticks off, and the
+    // 53112 that are left ride on the packet in front of it.
+    expect(packets.samples.filter((s) => s.duration !== 1024).map((s) => s.duration)).toEqual([
+      1024 + 53_112,
+    ])
+
+    // What the whole scheme stands on: the two tracks come out of the gap having lost the same
+    // stretch of real time, so the sound behind it sits on the picture it was recorded with.
+    const lands = (track: PlannedTrack, index: number): number =>
+      track.samples.slice(0, index).reduce((total, s) => total + s.duration, 0) / track.timescale
+    const recorded = (track: SourceTrack, index: number): number =>
+      track.samples[index]!.dts / track.timescale
+
+    expect(recorded(video, 48) - lands(frames, 48)).toBeCloseTo(2, 9)
+    expect(recorded(audio, 38) - lands(packets, 38)).toBeCloseTo(2, 9)
+  })
+
   it('drops the sound when the clip asks for none', () => {
     const plan = planClip(whole, { in: 0, out: 2, sound: false })
     expect(plan.tracks.map((t) => t.kind)).toEqual(['video'])

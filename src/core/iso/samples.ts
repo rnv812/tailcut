@@ -35,13 +35,27 @@ export function trackDefaults(init: Uint8Array): Map<number, SampleDefaults> {
 }
 
 /**
- * The media_time of the first edit of a track, in its own ticks.
+ * Where in the material the presentation of a track begins, in its own ticks.
  *
  * It is not noise to be thrown away and not a number to be recomputed: a picture track carries
  * the composition delay of its B-frames there, an AAC track its encoder priming, an Opus track
  * its pre-skip. Every time this program states an entry point it adds to this, never replaces
  * it — a media_time worked out from zero moved a cut by 61 ms and put the sound out of step by
  * 17 ms when it was measured.
+ *
+ * The first entry of the edit list that names a place in the material, and not simply the first
+ * entry. An entry states one media_time (14496-12 §8.6.6), so a track that both holds its head
+ * empty for a while and then starts part way into its material needs two of them, and the
+ * ordinary shape of that is `[media_time −1, the real one]`. Stopping at entry zero reads the
+ * −1, calls the track unoffset and loses exactly the priming or the reordering delay this
+ * function exists to carry.
+ *
+ * What is not read is the length of the empty edit itself — a stretch of presentation with no
+ * material under it, counted in ticks of the movie rather than of the track. This program has no
+ * place to put one: its timeline is `(pts − editOffset) / timescale` throughout, so a leading
+ * blank moves every frame of a track by the same amount and cancels out of every cut made in
+ * those seconds. It would not cancel between two tracks whose empty edits differ, and no material
+ * measured on any site so far writes one at all.
  */
 export function editOffset(init: Uint8Array, trackId: number): number {
   const moov = topLevelBoxes(init).find((b) => b.type === 'moov')
@@ -57,14 +71,28 @@ export function editOffset(init: Uint8Array, trackId: number): number {
     if (!elst) return 0
 
     const view = viewOf(init, elst)
-    if (view.byteLength < 12 || view.getUint32(4) < 1) return 0
+    if (view.byteLength < 8) return 0
 
-    // Version 1 states the times in 64 bits; both versions state media_time signed, and −1 is a
-    // legal value meaning an empty edit — a hole at the head, not an offset into the material.
-    const media = view.getUint8(0) === 1
-      ? Number(view.getBigInt64(16))
-      : view.getInt32(12)
-    return media > 0 ? media : 0
+    // Version 1 states segment_duration and media_time in 64 bits apiece; version 0 in 32. Both
+    // put a media_rate of four bytes behind the pair.
+    const wide = view.getUint8(0) === 1
+    const width = wide ? 20 : 12
+    const count = view.getUint32(4)
+
+    for (let i = 0; i < count; i++) {
+      const at = 8 + i * width
+      // entry_count is four bytes of a foreign file and may promise more than the box holds.
+      if (at + width > view.byteLength) break
+
+      const media = wide ? Number(view.getBigInt64(at + 8)) : view.getInt32(at + 4)
+      // −1 is the negative media_time the format allows, and it is not a place in the material:
+      // it is an empty edit, a hole held at the head before the media starts. Taken as an offset
+      // it would shift every frame of the table the wrong way by a tick — and the table is what
+      // the cut, the readout and the grid read. The entry behind it is the one to answer with.
+      if (media >= 0) return media
+    }
+
+    return 0
   }
 
   return 0
