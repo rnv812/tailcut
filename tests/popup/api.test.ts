@@ -42,6 +42,13 @@ type Sent = { tabId: number; message: unknown; options: unknown }
 const savesIn = (sent: Sent[]): Sent[] =>
   sent.filter((item) => (item.message as { type?: string }).type === 'tc:save')
 
+/** The same sieve for the other request that has to find a particular frame: the freeze. */
+const editsIn = (sent: Sent[]): Sent[] =>
+  sent.filter((item) => (item.message as { type?: string }).type === 'tc:edit')
+
+/** A snapshot name in the shape the bridge mints them: a randomUUID and nothing else. */
+const SNAPSHOT = '0f2c7d1e-4b0a-4a3f-9c2e-9b5a1d6f8c31'
+
 /**
  * The active tab of a neighbouring window. A user has several windows open, and Chrome lists
  * tabs by window: answering a query without `currentWindow`, the neighbouring window comes
@@ -81,6 +88,7 @@ function installChrome(
     /** Shorthand for a tab of one frame: what the main frame answers. */
     listReply?: unknown
     saveReply?: unknown
+    editReply?: unknown
     /** The frames of a tab that cannot be enumerated at all: chrome.scripting refuses. */
     blindToFrames?: boolean
   } = {},
@@ -93,6 +101,8 @@ function installChrome(
     ({ [TOP]: 'listReply' in options ? options.listReply : { sessions: [summary] } })
   const silent = new Set(options.silent ?? [])
   let saveReply: unknown = 'saveReply' in options ? options.saveReply : { ok: true }
+  let editReply: unknown =
+    'editReply' in options ? options.editReply : { ok: true, snapshotId: SNAPSHOT }
   let failure: Error | null = null
 
   vi.stubGlobal('chrome', {
@@ -119,6 +129,7 @@ function installChrome(
         if (failure) throw failure
         if (silent.has(opts.frameId ?? TOP)) return new Promise(() => {})
         if ((message as { type?: string }).type === 'tc:save') return saveReply
+        if ((message as { type?: string }).type === 'tc:edit') return editReply
         const reply = frames[opts.frameId ?? TOP]
         // A frame with no content script in it: Chrome finds nobody to deliver to and rejects.
         if (reply === undefined) throw new Error('Could not establish connection.')
@@ -143,6 +154,9 @@ function installChrome(
     },
     setSaveReply: (value: unknown) => {
       saveReply = value
+    },
+    setEditReply: (value: unknown) => {
+      editReply = value
     },
   }
 }
@@ -497,6 +511,120 @@ describe('saveAll', () => {
     const { saveAll } = await importApi()
 
     expect(await saveAll(summary.key)).toEqual({ ok: false })
+    expect(chrome.sent).toEqual([])
+  })
+})
+
+/**
+ * The freeze travels the same road as the save and has to be addressed the same way.
+ *
+ * It is a road with a fork in it: the material of a session never leaves the frame it was
+ * gathered in, so the frame the session was listed from is the only registry that holds it. The
+ * save has been held to that since embedded players were first recorded; the freeze was written
+ * beside it and never checked, and swapping its addressee for the main frame left the whole set
+ * green — a player inside an embed could not be frozen at all, and the popup blamed the session
+ * for being gone.
+ */
+describe('editSession', () => {
+  it('asks the tab to freeze the session by its key', async () => {
+    const chrome = installChrome()
+    const { editSession } = await importApi()
+
+    expect(await editSession(summary.key)).toEqual({ ok: true, snapshotId: SNAPSHOT })
+
+    // A key the popup never listed can only be asked of the main frame: the one frame certainly
+    // there, and the one that will answer that it knows of no such session.
+    expect(chrome.sent).toEqual([
+      { tabId: 7, message: { type: 'tc:edit', key: summary.key }, options: { frameId: TOP } },
+    ])
+  })
+
+  it('sends the freeze to the frame the session was listed from', async () => {
+    const chrome = installChrome({
+      frames: { [TOP]: { sessions: [summary] }, [EMBED]: { sessions: [embedded] } },
+    })
+    const { listSessions, editSession } = await importApi()
+
+    await listSessions()
+    expect(await editSession(embedded.key)).toEqual({ ok: true, snapshotId: SNAPSHOT })
+
+    // The bytes are in the registry of the embed and nowhere else. Sent to the top frame, this
+    // freeze comes back "gone" about a session that is recording on, and no editor ever opens
+    // over a player inside an embed.
+    expect(editsIn(chrome.sent)).toEqual([
+      { tabId: 7, message: { type: 'tc:edit', key: embedded.key }, options: { frameId: EMBED } },
+    ])
+  })
+
+  it('sends each freeze to its own frame when two embeds are recording', async () => {
+    const second = {
+      ...embedded,
+      key: 'https://player.example/embed/two|vp09|inf',
+      lastAt: embedded.lastAt - 1,
+    }
+    const chrome = installChrome({
+      frames: {
+        [TOP]: { sessions: [] },
+        [EMBED]: { sessions: [embedded] },
+        9: { sessions: [second] },
+      },
+    })
+    const { listSessions, editSession } = await importApi()
+
+    await listSessions()
+    await editSession(second.key)
+    await editSession(embedded.key)
+
+    expect(editsIn(chrome.sent).map((item) => item.options)).toEqual([
+      { frameId: 9 },
+      { frameId: EMBED },
+    ])
+  })
+
+  it('goes to the tab the popup took the list from', async () => {
+    const chrome = installChrome()
+    const { listSessions, editSession } = await importApi()
+
+    await listSessions()
+    // The active tab does change under an open popup, and a freeze asked of whatever is in front
+    // now would snapshot a session the popup is not showing.
+    chrome.switchTo(9)
+    await editSession(summary.key)
+
+    expect(chrome.sent.map((item) => item.tabId)).toEqual([7, 7])
+  })
+
+  it('carries the reason of a refusal instead of inventing one', async () => {
+    const chrome = installChrome()
+    chrome.setEditReply({ ok: false, reason: 'empty' })
+    const { editSession } = await importApi()
+
+    expect(await editSession(summary.key)).toEqual({ ok: false, reason: 'empty' })
+  })
+
+  it('counts an answer with no snapshot in it as a refusal', async () => {
+    const chrome = installChrome()
+    // A bridge of another version, or a tab that closed with the channel open: an "ok" with
+    // nothing to open would send the user to an editor tab addressed to nothing.
+    chrome.setEditReply({ ok: true })
+    const { editSession } = await importApi()
+
+    expect(await editSession(summary.key)).toEqual({ ok: false, reason: 'gone' })
+  })
+
+  it('does not throw on a tab with no content script and calls the session gone', async () => {
+    const chrome = installChrome()
+    chrome.breakTab()
+    const { editSession } = await importApi()
+
+    await expect(editSession(summary.key)).resolves.toEqual({ ok: false, reason: 'gone' })
+  })
+
+  it('troubles nobody when there is no active tab', async () => {
+    const chrome = installChrome({ tabs: [] })
+    const { editSession } = await importApi()
+
+    expect(await editSession(summary.key)).toEqual({ ok: false, reason: 'gone' })
     expect(chrome.sent).toEqual([])
   })
 })

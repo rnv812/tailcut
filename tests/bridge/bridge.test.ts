@@ -3,7 +3,9 @@ import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { sessionKey } from '../../src/core/session-key'
 import { boxBody, childBoxes, topLevelBoxes } from '../../src/core/iso/reader'
-import type { BridgeToPage, SessionList, SessionSummary } from '../../src/shared/protocol'
+import { isSnapshotId, snapshotPath } from '../../src/shared/protocol'
+import { decodeFooter, decodeIndex, FOOTER_BYTES } from '../../src/core/snapshot/format'
+import type { BridgeToPage, EditResult, SessionList, SessionSummary } from '../../src/shared/protocol'
 
 /** An ordinary complete file, the shape a page delivers when it uses no MediaSource at all. */
 const plainBytes = new Uint8Array(readFileSync('tests/fixtures/plain/whole.mp4'))
@@ -214,12 +216,50 @@ function installWindow(referrer = REFERRER) {
   let lastError: { message: string } | undefined
   let lastErrorRead = false
 
+  /**
+   * The snapshot writer, standing in for the worker the bridge really writes through.
+   *
+   * Only a dedicated worker may open a synchronous access handle, so the frame hands the whole
+   * snapshot to one and waits for a word back (src/bridge/snapshot-worker.ts). What is recorded
+   * here is that word's request — the path and the bytes — and what is answered is whatever the
+   * test wants the storage to say: OPFS refuses a write for reasons no page controls, and a
+   * refusal has to reach the popup as a refusal rather than as a tab opened over nothing.
+   */
+  const writes: Array<{ path: string; bytes: Uint8Array }> = []
+  /** What the storage answers: the bytes it took, or a refusal. */
+  let storageTakes = true
+
+  class TestWorker {
+    onmessage: ((event: MessageEvent) => void) | null = null
+    onerror: ((event: unknown) => void) | null = null
+
+    constructor(readonly url: string) {}
+
+    postMessage(request: { type: string; path: string; bytes: ArrayBuffer }): void {
+      const bytes = new Uint8Array(request.bytes)
+      writes.push({ path: request.path, bytes })
+
+      // The worker answers in a turn of its own, as a worker does.
+      queueMicrotask(() => {
+        const answer = storageTakes
+          ? { type: 'written', bytes: bytes.byteLength }
+          : { type: 'failed', error: 'QuotaExceededError' }
+        this.onmessage?.({ data: answer } as MessageEvent)
+      })
+    }
+
+    terminate(): void {}
+  }
+  vi.stubGlobal('Worker', TestWorker)
+
   vi.stubGlobal('chrome', {
     runtime: {
       get lastError() {
         lastErrorRead = true
         return lastError
       },
+      getURL: (path: string) => `chrome-extension://tailcut/${path}`,
+      getManifest: () => ({ version: '0.1.0' }),
     },
     downloads: {
       download(options: Download, done: (id?: number) => void) {
@@ -287,6 +327,24 @@ function installWindow(referrer = REFERRER) {
       await Promise.resolve()
       await Promise.resolve()
       return reply
+    },
+    /**
+     * Asks the bridge to freeze a session, the way the popup does through the content script.
+     *
+     * Awaited past the write: the layout of the snapshot is one synchronous turn, and the worker
+     * that puts it on disk answers in a turn of its own. Nothing here touches a clock either.
+     */
+    async edit(key: string): Promise<ReturnType<typeof port>> {
+      const reply = port()
+      deliver({ type: 'tc:edit', key }, { ports: [reply] })
+      for (let turn = 0; turn < 8; turn++) await Promise.resolve()
+      return reply
+    },
+    /** Snapshots that reached the storage, in the order they were written. */
+    writes,
+    /** The storage refuses the write: no quota left, a handle it would not open. */
+    refuseStorage(): void {
+      storageTakes = false
     },
     downloads,
     revoked,
@@ -1390,6 +1448,120 @@ describe('the bridge saves what it collected as a file', () => {
     // An answer into the window would tell any page that the extension has something on it.
     expect(sender.posts, 'the save answer went into the page window').toEqual([])
     expect(reply.received).toEqual([{ ok: true }])
+  })
+})
+
+/**
+ * The other button, and the refusals nobody was reading.
+ *
+ * A freeze answers three different noes — the session is gone, it holds nothing to cut, the
+ * storage would not take the file — and the popup has a sentence for each. Not one of the three
+ * was executed by any test: the branches could all be deleted and the set stayed green, while
+ * the user would be shown the wrong sentence about a session that is recording on.
+ */
+describe('the bridge freezes a session into a snapshot', () => {
+  /** The index of the snapshot the bridge wrote: the footer read back, then the index behind it. */
+  const indexOf = (file: Uint8Array) => {
+    const footer = decodeFooter(file.subarray(file.byteLength - FOOTER_BYTES), file.byteLength)
+    expect(footer, 'the snapshot has no sound footer: the write was cut off').not.toBeNull()
+    const at = footer!.index
+    const index = decodeIndex(file.subarray(at.at, at.at + at.length))
+    expect(index, 'the index of the snapshot does not parse').not.toBeNull()
+    return index!
+  }
+
+  it('writes the material out and answers with the name of the file', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+    win.append(seg2Bytes)
+
+    const reply = await win.edit(keyFor(PAGE_URL))
+    const answer = reply.received[0] as EditResult
+
+    expect(answer.ok, 'the freeze was refused over material a save writes a file from').toBe(true)
+    expect(isSnapshotId(answer.snapshotId ?? ''), 'the name is not one the extension mints').toBe(
+      true,
+    )
+
+    // One file, under the name the answer gave: the editor opens by that name and nothing else.
+    expect(win.writes.map((write) => write.path)).toEqual([snapshotPath(answer.snapshotId!)])
+
+    const index = indexOf(win.writes[0]!.bytes)
+    expect(index.id).toBe(answer.snapshotId)
+    expect(index.page.url).toBe(PAGE_URL)
+    expect(index.page.title).toBe(PAGE_TITLE)
+    // The two fragments the page poured in, in the order the map holds them.
+    expect(index.tracks).toHaveLength(1)
+    expect(index.tracks[0]!.chunks).toHaveLength(2)
+  })
+
+  it('refuses an unknown key as a session that is gone, and writes nothing', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+
+    // Triage evicted it, or the page reloaded under the open popup: the key points at nothing.
+    const reply = await win.edit('no such session')
+
+    expect(reply.received).toEqual([{ ok: false, reason: 'gone' }])
+    expect(win.writes, 'a snapshot of a session that does not exist reached the storage').toEqual(
+      [],
+    )
+  })
+
+  it('refuses a session of one init segment as empty, and writes nothing', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+
+    // The player opened the stream and loaded nothing. The session is right there in the
+    // registry, so "it may be gone from the page" would be a lie; and a snapshot of it would
+    // open the editor on an empty timeline.
+    const reply = await win.edit(keyFor(PAGE_URL))
+
+    expect(reply.received).toEqual([{ ok: false, reason: 'empty' }])
+    expect(win.writes, 'a snapshot with nothing in it reached the storage').toEqual([])
+  })
+
+  it('says the storage refused when the write did not land', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+    win.refuseStorage()
+
+    // OPFS is best-effort and refuses for reasons no page controls: no quota left, a handle it
+    // would not open, a worker that died. Answered as anything else, the popup would send the
+    // user to a tab addressed to a file that was never written.
+    const reply = await win.edit(keyFor(PAGE_URL))
+
+    expect(reply.received).toEqual([{ ok: false, reason: 'storage' }])
+    // The attempt was made: this is a refusal by the storage and not a refusal to try.
+    expect(win.writes).toHaveLength(1)
+  })
+
+  it('leaves the recording running, and the material behind it whole', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+
+    await win.edit(keyFor(PAGE_URL))
+    win.append(seg2Bytes)
+    await win.save(keyFor(PAGE_URL))
+
+    // The snapshot is copied out of the map and the copy is what the worker gets. Hand over the
+    // captured segments themselves and the transfer neuters them: the page goes on recording
+    // into buffers of zero length, and the next Save all writes a file of nothing.
+    const saved = await win.savedBytes()
+    const media = mediaOf(saved)
+    expect(media.length, 'the material was carried off by the freeze').toBe(2)
+    expect(digest(...media), 'the saved file is not the two fragments the page poured in').toBe(
+      digest(mediaOf(seg1Bytes)[0]!, mediaOf(seg2Bytes)[0]!),
+    )
   })
 })
 
