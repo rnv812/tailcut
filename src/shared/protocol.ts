@@ -1,6 +1,52 @@
 /** Path to the bridge page inside the extension package. */
 export const BRIDGE_PATH = 'bridge/bridge.html'
 
+/** Path to the editor page inside the extension package. */
+export const EDITOR_PATH = 'editor/editor.html'
+
+/** Directory of OPFS the snapshots live in. Stage 3 adds `sessions/` beside it. */
+export const SNAPSHOT_DIR = 'snapshots'
+
+/**
+ * Name of a snapshot file. Never derived from the session key: that key is
+ * `url|codecs|duration` and carries '/', ':' and '|', none of which belong in a file name.
+ */
+export function snapshotFileName(id: string): string {
+  return `${id}.tcs`
+}
+
+export function snapshotPath(id: string): string {
+  return `${SNAPSHOT_DIR}/${snapshotFileName(id)}`
+}
+
+/** Address of the editor for one snapshot, relative to the root of the extension. */
+export function editorUrl(id: string): string {
+  return `${EDITOR_PATH}?s=${encodeURIComponent(id)}`
+}
+
+/**
+ * Is this a name the extension itself minted?
+ *
+ * The identifier travels through the address bar of the editor tab, and from there straight into
+ * a file name in OPFS. Anything but the shape of a randomUUID is refused before it gets there:
+ * a name with a slash in it would address a directory of its own, and one with dots a directory
+ * upwards.
+ */
+export function isSnapshotId(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)
+}
+
+/**
+ * What the bridge answers tc:edit with. A refusal says which of the three it is, because they
+ * ask three different things of the user: `gone` — the session is no longer on the page,
+ * `empty` — it holds nothing to cut yet, `storage` — the browser would not take the file.
+ */
+export interface EditResult {
+  ok: boolean
+  snapshotId?: string
+  reason?: 'gone' | 'empty' | 'storage'
+}
+
 export type PageToBridge =
   | { type: 'tc:append'; sourceId: string; bufferId: string; mime: string; bytes: ArrayBuffer }
   /** objectUrl ties a MediaSource to a particular <video> on the page */
@@ -271,7 +317,10 @@ export const EXTENSION_ORIGIN_PREFIX = 'chrome-extension://'
  * them; the badge asks the main one and whichever have said they hold a recording (see
  * FrameRecording). Both roads are in src/shared/frames.ts.
  */
-export type ExtensionToTab = { type: 'tc:list' } | { type: 'tc:save'; key: string }
+export type ExtensionToTab =
+  | { type: 'tc:list' }
+  | { type: 'tc:save'; key: string }
+  | { type: 'tc:edit'; key: string }
 
 /**
  * What the content script of a tab sends the service worker of its own accord.
@@ -330,5 +379,6 @@ export function isExtensionToTab(value: unknown): value is ExtensionToTab {
   if (typeof value !== 'object' || value === null) return false
   const message = value as { type?: unknown; key?: unknown }
   if (message.type === 'tc:list') return true
-  return message.type === 'tc:save' && typeof message.key === 'string'
+  if (typeof message.key !== 'string') return false
+  return message.type === 'tc:save' || message.type === 'tc:edit'
 }

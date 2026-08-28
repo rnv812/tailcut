@@ -1,8 +1,12 @@
 import { describe, it, expect } from 'vitest'
 import {
+  editorUrl,
   isExtensionToTab,
   isPageToBridge,
+  isSnapshotId,
   isTabToExtension,
+  snapshotFileName,
+  snapshotPath,
   type BridgeToPage,
   type ExtensionToTab,
   type PageToBridge,
@@ -204,5 +208,37 @@ describe('isTabToExtension', () => {
     const value: unknown = { type: 'tc:recording' }
     if (!isTabToExtension(value)) throw new Error('expected tc:recording')
     expect(value.type).toBe('tc:recording')
+  })
+})
+
+describe('addresses of the snapshot and the editor', () => {
+  it('names a snapshot file after the identifier and never after the session key', () => {
+    // The key carries '/', ':' and '|': no file name can be made of it.
+    expect(snapshotFileName('0f2c7d1e-4b0a-4a3f-9c2e-9b5a1d6f8c31')).toBe(
+      '0f2c7d1e-4b0a-4a3f-9c2e-9b5a1d6f8c31.tcs',
+    )
+    expect(snapshotPath('0f2c7d1e-4b0a-4a3f-9c2e-9b5a1d6f8c31')).toBe(
+      'snapshots/0f2c7d1e-4b0a-4a3f-9c2e-9b5a1d6f8c31.tcs',
+    )
+  })
+
+  it('opens the editor by the name of the snapshot', () => {
+    expect(editorUrl('0f2c7d1e-4b0a-4a3f-9c2e-9b5a1d6f8c31')).toBe(
+      'editor/editor.html?s=0f2c7d1e-4b0a-4a3f-9c2e-9b5a1d6f8c31',
+    )
+  })
+
+  it('accepts as an identifier only what the extension minted itself', () => {
+    expect(isSnapshotId('0f2c7d1e-4b0a-4a3f-9c2e-9b5a1d6f8c31')).toBe(true)
+    expect(isSnapshotId('../../../etc/passwd')).toBe(false)
+    expect(isSnapshotId('0f2c7d1e-4b0a-4a3f-9c2e-9b5a1d6f8c3')).toBe(false)
+    expect(isSnapshotId('0F2C7D1E-4B0A-4A3F-9C2E-9B5A1D6F8C31')).toBe(false)
+    expect(isSnapshotId('')).toBe(false)
+  })
+
+  it('takes tc:edit as a message to the tab, and tc:edit without a key as nothing', () => {
+    expect(isExtensionToTab({ type: 'tc:edit', key: 'k' })).toBe(true)
+    expect(isExtensionToTab({ type: 'tc:edit' })).toBe(false)
+    expect(isExtensionToTab({ type: 'tc:something', key: 'k' })).toBe(false)
   })
 })

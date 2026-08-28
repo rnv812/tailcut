@@ -13,6 +13,7 @@ import type { ExportPlan } from '../core/export/plan'
 import type { RangeReader } from '../core/iso/locate'
 import type { MuxTrack } from '../core/mux'
 import type { Omission } from '../shared/protocol'
+import type { SnapshotSource } from '../core/snapshot/build'
 import type { Chunk, InitInfo, TrackKind } from '../shared/types'
 
 /**
@@ -1703,4 +1704,39 @@ function absorb(target: StoredSession, absorbed: StoredSession): void {
   // A track refused on either visit is a track missing from the file either way.
   target.refusedTracks = target.refusedTracks || absorbed.refusedTracks
   for (const sourceId of absorbed.sources) target.sources.add(sourceId)
+}
+
+/**
+ * The session as the snapshot format wants it.
+ *
+ * The chunks come off `map.runs()` and not out of a field of their own, because runs() is the one
+ * place the order and the de-duplication of the map are decided. A second traversal written here
+ * would agree with the popup by convention, and the convention has broken before.
+ *
+ * The traversal is synchronous from end to end and has to stay that way: eviction goes on while
+ * the popup is open, and a source read on one side of an await would name bytes the map has
+ * already let go of.
+ */
+export function snapshotSourceOf(session: Session): SnapshotSource {
+  return {
+    page: {
+      sessionKey: session.key,
+      url: session.url,
+      title: session.title,
+      createdAt: session.createdAt,
+      lastSeenAt: session.lastSeenAt,
+      refusedTracks: session.refusedTracks,
+    },
+    tracks: session.tracks.map((track, at) => ({
+      // A name of its own inside the snapshot: bufferId is unique in its media source and not in
+      // the file, and two sources of one page do give out the same one.
+      id: `t${at}`,
+      bufferId: track.bufferId,
+      representation: track.representation,
+      kinds: track.kinds,
+      info: track.info,
+      initBytes: track.initBytes,
+      chunks: track.map.runs().flatMap((run) => run.chunks),
+    })),
+  }
 }
