@@ -275,31 +275,63 @@ export function reduce(project: Project, action: Action, ctx: EditContext): Proj
   }
 }
 
-/** Actions that make a step of history. Everything not named here is a movement or a look. */
-const STEPS: ReadonlySet<Action['type']> = new Set([
-  'setIn',
-  'setOut',
-  'addClip',
-  'removeClip',
-  'splitClip',
-  'toggleSound',
-  'addMarker',
-  'removeMarker',
-  'removeMarkerAt',
-])
+/** The two modes that carry no data, shared by the table below. */
+const STEP: UndoMode = { kind: 'step' }
+const SKIP: UndoMode = { kind: 'skip' }
+
+/** A mode, or a mode computed from the action when it needs a key of its own. */
+type ModeFor<T extends Action['type']> =
+  | UndoMode
+  | ((action: Extract<Action, { type: T }>) => UndoMode)
 
 /**
- * What an action does to the history — computed from the action alone.
+ * What every command does to the history — one entry per member of the union, and no default.
  *
- * This is what lets a drag of hundreds of events undo in one press without a timer and without
- * anybody telling the history that a gesture began or ended: the key comes out of the action.
+ * A `Record` and not a set of the names that count. A set answers "no step" for a name it has
+ * never heard of, so a command added later would be undoable by nobody and nothing would say so:
+ * it compiles, it runs, it edits the document, and Ctrl+Z does nothing. Here the compiler refuses
+ * a member of `Action` that is missing from the table, and `tests/core/undo.test.ts` refuses an
+ * entry whose mode disagrees with what the command actually does to the document.
  */
+const MODES: { [T in Action['type']]: ModeFor<T> } = {
+  // Movement and looking. The present moves, no step is written: coming back to the zoom of two
+  // gestures ago is not the undoing of an edit, it is the loss of one's place.
+  seek: SKIP,
+  step: SKIP,
+  skip: SKIP,
+  selectClip: SKIP,
+  zoom: SKIP,
+  zoomStep: SKIP,
+  zoomToSelection: SKIP,
+  fitAll: SKIP,
+  pan: SKIP,
+  resize: SKIP,
+  setSnapping: SKIP,
+  toggleSnapping: SKIP,
+
+  // Edits, one press one step.
+  setIn: STEP,
+  setOut: STEP,
+  addClip: STEP,
+  removeClip: STEP,
+  splitClip: STEP,
+  toggleSound: STEP,
+  addMarker: STEP,
+  removeMarker: STEP,
+  removeMarkerAt: STEP,
+
+  // Edits that arrive in floods and have to become one step each. The key comes out of the action
+  // itself, which is what lets a drag of hundreds of events undo in one press without a timer and
+  // without anybody telling the history that a gesture began or ended.
+  trim: (action) =>
+    action.typed ? STEP : { kind: 'merge', key: `trim:${action.id}:${action.edge}` },
+  renameClip: (action) => ({ kind: 'merge', key: `rename:${action.id}` }),
+}
+
+/** Every command there is, taken off the table so that the two cannot drift apart. */
+export const ACTION_TYPES = Object.keys(MODES) as ReadonlyArray<Action['type']>
+
 export function undoModeOf(action: Action): UndoMode {
-  // A typed value is one act and one step; a dragged one is hundreds of events that have to
-  // become a single step, and they are told apart by the action itself and by nothing else.
-  if (action.type === 'trim') {
-    return action.typed ? { kind: 'step' } : { kind: 'merge', key: `trim:${action.id}:${action.edge}` }
-  }
-  if (action.type === 'renameClip') return { kind: 'merge', key: `rename:${action.id}` }
-  return STEPS.has(action.type) ? { kind: 'step' } : { kind: 'skip' }
+  const mode = MODES[action.type] as UndoMode | ((action: Action) => UndoMode)
+  return typeof mode === 'function' ? mode(action) : mode
 }
