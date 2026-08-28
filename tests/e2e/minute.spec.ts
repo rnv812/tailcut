@@ -5,11 +5,16 @@ const PLAYER_URL = 'https://tailcut.test/minute'
 
 /**
  * A minute of the fixture: ten segments of picture of six seconds each and twelve of sound of
- * 5.016. The sound runs 46 milliseconds past the picture, so the clip lasts as long as the sound.
+ * 5.016. The sound runs 46 milliseconds past the picture, and the clip is measured by the picture
+ * (§8.2), so the file lasts a round minute.
+ *
+ * One packet of sound short of the 1293 that arrived: the first of them is the priming of the
+ * encoder, and the edit list the writer states hides it. Before the move to that writer the file
+ * carried it, ffmpeg counted it, and the sound of this very fixture began at −0.046440.
  */
 const VIDEO_FRAMES = 600
-const AUDIO_FRAMES = 1293
-const CLIP_SECONDS = 60.046
+const AUDIO_FRAMES = 1292
+const CLIP_SECONDS = 60.0
 
 /** A minute of playback is a minute of wall clock, and the save comes after it. */
 const TIMEOUT_MS = 180_000

@@ -1,10 +1,11 @@
 import { test, expect } from '@playwright/test'
+import { readFile } from 'node:fs/promises'
+import { audioSampleEntry, videoSampleEntry } from '../../src/core/iso/entry'
 import {
   decodeFile,
   launchWithExtension,
   openPopupOn,
   playInBrowser,
-  playThroughMse,
   probeFile,
   saveAll,
   seekingLandsRight,
@@ -113,18 +114,23 @@ test('a clip whose picture came in WebM saves as one file that plays', async () 
   expect([played.frameWidth, played.frameHeight]).toEqual([256, 144])
   expect(played.frameColours, 'the browser drew a blank frame').toBeGreaterThan(1)
 
-  // And back in through the door it came out of. A file a browser will play is not yet a file a
-  // browser will parse: MSE reads the boxes and refuses a vp09 sample entry that does not carry
-  // the vpcC describing it, where the ordinary playback path above reads the frames instead and
-  // never notices. This is the check that the description written here is a real one.
-  const remuxed = await playThroughMse(file, 'video/mp4; codecs="vp09.00.10.08,opus"')
+  // MSE is no longer the door this file comes back in through: a byte stream wants an mvex and
+  // moofs, and a progressive file has neither by design (Task 2). What MSE was guarding is
+  // guarded here directly — the sample entry of each track has to carry the box that describes
+  // its codec, which is exactly what a decoder configuration is read out of. The ordinary
+  // playback path above reads the frames instead and never notices a description that is missing.
+  const saved = new Uint8Array(await readFile(file))
 
-  expect(remuxed.error).toBeNull()
-  expect(remuxed.supported, 'the browser does not offer VP9 and Opus in mp4 at all').toBe(true)
-  expect(remuxed.appended, 'Media Source Extensions refused the saved file').toBe(true)
-  expect(remuxed.ended, 'the saved file did not play through as a media source').toBe(true)
-  expect([remuxed.width, remuxed.height]).toEqual([256, 144])
-  expect(remuxed.duration).toBeGreaterThan(5.9)
+  const picture = videoSampleEntry(saved)
+  expect(picture, 'the saved file has no picture sample entry at all').not.toBeNull()
+  expect(picture!.format).toBe('vp09')
+  expect([...picture!.children.keys()], 'the vp09 entry does not carry its vpcC').toContain('vpcC')
+  expect([picture!.codedWidth, picture!.codedHeight]).toEqual([256, 144])
+
+  const sound = audioSampleEntry(saved)
+  expect(sound, 'the saved file has no sound sample entry at all').not.toBeNull()
+  expect(sound!.format).toBe('Opus')
+  expect([...sound!.children.keys()], 'the Opus entry does not carry its dOps').toContain('dOps')
 
   await context.close()
 })

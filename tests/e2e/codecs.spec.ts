@@ -1,10 +1,11 @@
 import { test, expect } from '@playwright/test'
+import { readFile } from 'node:fs/promises'
+import { audioSampleEntry, videoSampleEntry, type SampleEntry } from '../../src/core/iso/entry'
 import {
   inspectFile,
   launchWithExtension,
   openPopupOn,
   playInBrowser,
-  playThroughMse,
   routeLocal,
   saveAll,
   type FileFacts,
@@ -108,8 +109,38 @@ interface Case {
   audioTracks: number
   /** Frame size a browser must find; null for a file with no picture in it. */
   frameSize: [number, number] | null
-  /** The type the file is offered back to Media Source Extensions under. */
-  mseType: string
+}
+
+/** The box a decoder is configured from, by the four letters of the sample entry. */
+const CODEC_BOX: Record<string, string> = {
+  avc1: 'avcC',
+  avc3: 'avcC',
+  hev1: 'hvcC',
+  hvc1: 'hvcC',
+  vp09: 'vpcC',
+  av01: 'av1C',
+  mp4a: 'esds',
+  Opus: 'dOps',
+}
+
+/**
+ * Every track of the saved file states the box its codec is described by.
+ *
+ * What Media Source Extensions used to guard here, guarded by reading the file instead: a byte
+ * stream wants an mvex and moofs, and a progressive file has neither by design (Task 2). MSE
+ * refused a vp09 sample entry carrying no vpcC and an mp4a carrying no esds, where the ordinary
+ * playback path reads what it needs out of the frames and never notices.
+ */
+function describesCodec(bytes: Uint8Array): boolean {
+  const entries = [videoSampleEntry(bytes), audioSampleEntry(bytes)].filter(
+    (entry): entry is SampleEntry => entry !== null,
+  )
+  if (!entries.length) return false
+
+  return entries.every((entry) => {
+    const want = CODEC_BOX[entry.format]
+    return want !== undefined && entry.children.has(want)
+  })
 }
 
 /**
@@ -131,13 +162,16 @@ const CASES: Case[] = [
       ['video', 'h264'],
       ['audio', 'aac'],
     ],
-    // 144 frames of picture at 24 a second, and 260 frames of sound of 1024 samples at 44100.
-    frames: [144, 260],
+    // 144 frames of picture at 24 a second, and 260 frames of sound of 1024 samples at 44100 —
+    // less the first of them, which is the priming of the encoder and is hidden by the edit list
+    // the progressive writer states. ffmpeg reads that list and drops what it covers, which is
+    // the whole point of writing one: on the fragmented file the same packet reached the user as
+    // 23 ms of noise before the picture began.
+    frames: [144, 259],
     offered: '0:06',
     seconds: [5.9, 6.1],
     audioTracks: 1,
     frameSize: [320, 240],
-    mseType: 'video/mp4; codecs="avc1.4d401e,mp4a.40.2"',
   },
   {
     name: 'av1 (mp4) + opus (webm)',
@@ -152,7 +186,6 @@ const CASES: Case[] = [
     seconds: [5.9, 6.1],
     audioTracks: 1,
     frameSize: [256, 144],
-    mseType: 'video/mp4; codecs="av01.0.00M.08,opus"',
   },
   {
     name: 'vp9 (webm) + opus (webm)',
@@ -166,7 +199,6 @@ const CASES: Case[] = [
     seconds: [5.9, 6.1],
     audioTracks: 1,
     frameSize: [256, 144],
-    mseType: 'video/mp4; codecs="vp09.00.10.08,opus"',
   },
   {
     name: 'vp9 (webm) + aac (mp4)',
@@ -175,14 +207,15 @@ const CASES: Case[] = [
       ['video', 'vp9'],
       ['audio', 'aac'],
     ],
-    frames: [60, 260],
+    // The priming packet of the AAC is hidden by the edit list here too; see the first row.
+    frames: [60, 259],
     offered: '0:06',
-    // The picture starts a hundredth of a second in and the sound a hundredth before it runs out:
-    // whole segments reach the file, so it is a shade longer than the stretch they were cut over.
-    seconds: [5.9, 6.2],
+    // The picture starts a hundredth of a second in and the sound a hundredth before it runs out.
+    // Whole segments used to reach the file, so it came out a shade longer than the stretch they
+    // were cut over; the file is measured by the picture now and lands on the second.
+    seconds: [5.9, 6.1],
     audioTracks: 1,
     frameSize: [256, 144],
-    mseType: 'video/mp4; codecs="vp09.00.10.08,mp4a.40.2"',
   },
   {
     name: 'h264 (mp4), no sound',
@@ -193,7 +226,6 @@ const CASES: Case[] = [
     seconds: [5.9, 6.1],
     audioTracks: 0,
     frameSize: [320, 240],
-    mseType: 'video/mp4; codecs="avc1.4d401e"',
   },
   {
     name: 'aac (mp4), no picture',
@@ -204,7 +236,6 @@ const CASES: Case[] = [
     seconds: [5.9, 6.1],
     audioTracks: 1,
     frameSize: null,
-    mseType: 'audio/mp4; codecs="mp4a.40.2"',
   },
   {
     name: 'vp9 (webm), no sound',
@@ -215,7 +246,6 @@ const CASES: Case[] = [
     seconds: [5.9, 6.1],
     audioTracks: 0,
     frameSize: [256, 144],
-    mseType: 'video/mp4; codecs="vp09.00.10.08"',
   },
   {
     name: 'opus (webm), no picture',
@@ -226,7 +256,6 @@ const CASES: Case[] = [
     seconds: [5.9, 6.1],
     audioTracks: 1,
     frameSize: null,
-    mseType: 'audio/mp4; codecs="opus"',
   },
 ]
 
@@ -237,7 +266,7 @@ interface Row {
   playedToEnd: boolean
   playbackError: string | null
   audioTracks: number | null
-  mseAccepted: boolean
+  describesCodec: boolean
 }
 
 const rows: Row[] = []
@@ -286,10 +315,10 @@ for (const scenario of CASES) {
 
     // A browser of its own, without the extension: what is under test is the file.
     const played = await playInBrowser(file)
-    // And back in through the door it came out of. A file a browser will play is not yet a file a
-    // browser will parse: MSE reads the boxes and refuses a sample entry that does not describe
-    // its track, where the ordinary playback path reads the frames instead and never notices.
-    const remuxed = await playThroughMse(file, scenario.mseType)
+    // And the boxes read back out of it. A file a browser will play is not yet a file that says
+    // what is in it: a sample entry with no description of its codec gets past the headers, past
+    // a frame count and past playback, because the decoder takes what it needs from the frames.
+    const describes = describesCodec(new Uint8Array(await readFile(file)))
 
     rows.push({
       name: scenario.name,
@@ -297,7 +326,7 @@ for (const scenario of CASES) {
       playedToEnd: played.ended,
       playbackError: played.error,
       audioTracks: played.audioTracks,
-      mseAccepted: remuxed.appended && remuxed.ended,
+      describesCodec: describes,
     })
 
     await context.close()
@@ -336,11 +365,7 @@ for (const scenario of CASES) {
       expect(played.frameWidth, 'a file with no picture reported a frame size').toBe(0)
     }
 
-    expect(remuxed.error).toBeNull()
-    expect(remuxed.supported, `the browser does not offer ${scenario.mseType} at all`).toBe(true)
-    expect(remuxed.appended, 'Media Source Extensions refused the saved file').toBe(true)
-    expect(remuxed.ended, 'the saved file did not play through as a media source').toBe(true)
-    if (scenario.frameSize) expect([remuxed.width, remuxed.height]).toEqual(scenario.frameSize)
+    expect(describes, 'a sample entry of the saved file does not describe its codec').toBe(true)
   })
 }
 
@@ -367,14 +392,14 @@ test.afterAll(() => {
       row.facts.duration.toFixed(3),
       complaints,
       row.playedToEnd ? `yes (${row.audioTracks} audio)` : `no (${row.playbackError})`,
-      row.mseAccepted ? 'yes' : 'no',
+      row.describesCodec ? 'yes' : 'no',
     ].join(' | ')
   }
 
   console.log(
     [
       '',
-      'case | size | streams | duration | ffprobe / ffmpeg | plays to end | MSE',
+      'case | size | streams | duration | ffprobe / ffmpeg | plays to end | describes codec',
       '--- | --- | --- | --- | --- | --- | ---',
       ...rows.map(line),
       '',

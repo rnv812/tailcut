@@ -409,11 +409,11 @@ export function seekingLandsRight(file: string, times: number[]): void {
  * gets past the headers and past a frame count, and only a decoder run over the whole thing turns
  * it into words on stderr — which is why what ffmpeg said is the assertion here.
  *
- * Not the whole of what it said. A correct file does draw one complaint out of ffmpeg — a
- * fragment carrying its own sample-dependency table, which rutube's packager writes and our muxer
- * copies whole — and a suite that insisted on silence would fail over a box that is telling the
- * truth. What is benign is named one line at a time, with the reason, in `unexpectedWarnings`;
- * everything else is a defect.
+ * Not the whole of what it said. What is benign is named one line at a time, with the reason, in
+ * `unexpectedWarnings`; everything else is a defect. The line that list exists for — a fragment
+ * carrying its own sample-dependency table — no longer reaches a saved file, because the writer
+ * behind a save states its own tables and carries none of the site's boxes through; sdtp.spec.ts
+ * saves that very material and insists on silence.
  */
 export function decodeFile(file: string): void {
   const run = runDecode(file)
@@ -550,73 +550,6 @@ export async function playInBrowser(file: string): Promise<Playback> {
     )
 
     return await page.evaluate(() => (window as unknown as { tc: Playback }).tc)
-  } finally {
-    await browser.close()
-  }
-}
-
-const REMUX_URL = `${PLAYBACK_ORIGIN}/remux`
-
-/** What Media Source Extensions made of a saved file: see tests/e2e/page/remux.html. */
-export interface Remuxed {
-  supported: boolean
-  error: string | null
-  appended: boolean
-  duration: number
-  reached: number
-  ended: boolean
-  width: number
-  height: number
-}
-
-/**
- * Feeds a saved file back through Media Source Extensions and reports what happened.
- *
- * The reason for a second trip through a browser is that the two readings are not the same
- * reading. `<video src>` hands the file to a full demuxer, which takes what it needs out of the
- * coded frames and forgives a container that describes them badly; MSE parses the boxes and
- * refuses what it cannot make sense of. An init segment missing the box that describes its codec
- * gets past the first and not past the second — so this is where a sample entry written wrongly
- * turns into a failure instead of into a file that happens to work in one player.
- *
- * `type` is offered to the page through the fragment of the address, which is not sent to the
- * network and needs no escaping beyond the encoding.
- */
-export async function playThroughMse(file: string, type: string): Promise<Remuxed> {
-  // Away from the sound device for the same reason as in playInBrowser: this one waits for `ended`
-  // too, and a host with no audio output makes the play head crawl whatever is being played.
-  const browser = await chromium.launch({
-    headless: HEADLESS,
-    channel: CHANNEL,
-    args: ['--disable-audio-output'],
-  })
-
-  try {
-    const page = await browser.newPage()
-    const bytes = await fs.readFile(file)
-
-    await page.route(`${PLAYBACK_ORIGIN}/saved.mp4`, async (route) => {
-      await route.fulfill({ body: bytes, contentType: 'video/mp4' })
-    })
-    await page.route(REMUX_URL, async (route) => {
-      await route.fulfill({
-        body: await fs.readFile(path.resolve('tests/e2e/page/remux.html'), 'utf8'),
-        contentType: 'text/html',
-      })
-    })
-
-    await page.goto(`${REMUX_URL}#${encodeURIComponent(type)}`)
-
-    await page.waitForFunction(
-      () => {
-        const state = (window as unknown as { tc: Remuxed }).tc
-        return state.ended || state.error != null
-      },
-      undefined,
-      { timeout: PLAYBACK_TIMEOUT_MS },
-    )
-
-    return await page.evaluate(() => (window as unknown as { tc: Remuxed }).tc)
   } finally {
     await browser.close()
   }

@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { fileNameOf, sanitizeFileName, uniqueNames } from '../../src/core/export/naming'
+import {
+  MAX_NAME_BYTES,
+  fileNameOf,
+  sanitizeFileName,
+  uniqueNames,
+} from '../../src/core/export/naming'
 import type { Clip } from '../../src/core/edit/clip'
 
 const clip = (name: string): Clip => ({
@@ -24,6 +29,36 @@ describe('sanitizeFileName', () => {
     // with a file DC.mp4 in it. Windows refuses a star or a colon outright and the download is
     // rejected with nothing said. Control characters come from the same place — a page title.
     expect(sanitizeFileName('A/B: "C" <D> | E? AC\\DC * F\u0001G')).toBe('A B C D E AC DC F G')
+    // C1 as well as C0 — the range above DEL arrives from pages served in a legacy encoding, and
+    // Chrome refuses a name carrying one exactly as it refuses a name carrying the other.
+    expect(sanitizeFileName('Se\u0001rie\u007fs\u0085 o\u009fne')).toBe('Se rie s o ne')
+  })
+
+  it('takes out the characters that show nothing and break everything', () => {
+    // Measured on a real title: U+200E LEFT-TO-RIGHT MARK is neither whitespace nor forbidden, it
+    // survived every other step, Chrome refused the name, and the popup blamed the session for
+    // being gone. Removed outright rather than turned into a space — they stand inside a word as
+    // readily as between two, and a gap where the eye sees none is a name nobody asked for.
+    expect(sanitizeFileName('\u200eНовости\u200f — \u202bэфир\u202c')).toBe('Новости — эфир')
+    expect(sanitizeFileName('A\u200bB\u200cC\u200dD\ufeffE')).toBe('ABCDE')
+    expect(sanitizeFileName('\u200e\u200b\u202a\u202c\ufeff')).toBe('tailcut')
+  })
+
+  it('counts the limit in bytes besides, and never cuts a character in half', () => {
+    // A file system counts its limit in bytes and a page title is counted in characters: one
+    // character of this title is three bytes, so a hundred of them are three hundred, past what
+    // ext4 and NTFS take for one name.
+    const cjk = sanitizeFileName('語'.repeat(300))
+    expect(new TextEncoder().encode(cjk).byteLength).toBeLessThanOrEqual(MAX_NAME_BYTES)
+    expect(cjk.length, 'the title was thrown away instead of being cut').toBeGreaterThan(10)
+
+    // And a title of emoji is a string of surrogate pairs: a cut between the halves of one leaves
+    // a lone surrogate behind, which is not valid Unicode and which Chrome refuses exactly as it
+    // refuses a control character.
+    const emoji = sanitizeFileName(`a${'🎬'.repeat(200)}`)
+    expect(emoji, `a lone surrogate in the name: ${JSON.stringify(emoji)}`).not.toMatch(
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
+    )
   })
 
   it('does not let a title of dots become a hidden file or a path upwards', () => {

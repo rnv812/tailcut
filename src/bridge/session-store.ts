@@ -437,9 +437,11 @@ function omissionsOf(losses: {
  * The two kinds of material meet here and nowhere else above it: the popup, the badge, the frame
  * addressing and the protocol all read the three numbers beside this and never look inside it.
  *
- * - `captured` — segments already in this frame's memory, copied into a fragmented file whole.
+ * - `captured` — segments already in this frame's memory, indexed and assembled where they lie.
  * - `plain` — a cut planned over a file that is still on somebody's server, to be assembled once
  *   the ranges it names have been read (src/bridge/write.ts).
+ *
+ * Both end in the same writer; where the bytes are is the whole of the difference.
  */
 export type SaveSource =
   | { kind: 'captured'; tracks: MuxTrack[] }

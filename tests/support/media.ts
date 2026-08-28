@@ -99,10 +99,16 @@ export function decodeWarnings(file: string): string {
  * this list exists for.
  *
  * `Duplicated SDTP atom` — a sample-dependency table in the traf of a fragment. It is legal
- * there (14496-12 §8.6.4), rutube's packager writes one into every fragment it sends, and our
- * muxer copies fragments whole and byte for byte. ffmpeg keeps one such table per stream and
- * says this when a second arrives; the samples are described by the trun either way, the file
- * decodes from end to end, and every frame comes out. Measured on every rutube save.
+ * there (14496-12 §8.6.4), rutube's packager writes one into every fragment it sends, and the
+ * fragmented writer copies fragments whole and byte for byte. ffmpeg keeps one such table per
+ * stream and says this when a second arrives; the samples are described by the trun either way,
+ * the file decodes from end to end, and every frame comes out. Measured on every rutube save.
+ *
+ * No file the program writes draws it any more: since Task 17 a save is assembled by the
+ * progressive writer, which reads the samples out and states tables of its own, and the whole
+ * paragraph below about the cost of dropping the box is why that writer exists rather than a
+ * surgery on somebody else's fragments. The line stays named here because the fragmented writer
+ * stays in the tree as the bench the new one is measured against (tests/core/mux.test.ts).
  *
  * The alternative was to drop the box while repacking. It was weighed and refused. A fragment
  * moves through the muxer untouched, which is the property the whole design rests on — nothing

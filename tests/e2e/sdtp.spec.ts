@@ -10,6 +10,7 @@ import {
   saveAll,
 } from './helpers'
 import { decodeWarnings } from '../support/media'
+import { findBox } from '../../src/core/iso/reader'
 import { withSdtp } from '../support/fragments'
 
 const PLAYER_URL = 'https://tailcut.test/player'
@@ -26,14 +27,15 @@ type PageState = { allAppended?: boolean }
  * A site whose fragments carry their own sample-dependency tables.
  *
  * rutube's packager writes an `sdtp` into every fragment it sends. It is legal there
- * (14496-12 §8.6.4), it says nothing the trun beside it contradicts, and our muxer copies
- * fragments whole and byte for byte — so it reaches the saved file, and ffmpeg, which keeps one
- * such table per stream, says "Duplicated SDTP atom" over every one after the first.
+ * (14496-12 §8.6.4) and it says nothing the trun beside it contradicts, but it is a box a reader
+ * has to walk past to reach the trun behind it — and a save of such a page is the shape the
+ * whole path is least often run over.
  *
- * The file is right and every frame of it decodes. What was wrong was the suite: `decodeFile`
- * demanded an empty stderr, so this whole shape of material — a real site's, on every save — was
- * a shape no end-to-end test could be written over. The warnings that a correct file draws are
- * now named one at a time, with the reason, and this is the material that draws one.
+ * The fragmented writer copied fragments whole and byte for byte, so every one of those tables
+ * reached the saved file and ffmpeg, which keeps one per stream, said "Duplicated SDTP atom" over
+ * each after the first. The progressive writer reads the samples out and states tables of its own,
+ * so it carries none of the site's boxes through and the file it writes draws nothing at all —
+ * which is what is asserted below, against material that provably still has the box in it.
  *
  * The segments are the ordinary h264 fixtures with the box put in, rather than a set of their
  * own: the frames, the timing and the codec are the ones every other test uses, and the one thing
@@ -46,11 +48,17 @@ test('saves a recording whose fragments brought their own sdtp, and the file dec
   const page = await context.newPage()
 
   await routeLocal(page, 'player.html', PLAYER_URL)
+
+  /** Every fragment the page was actually served, so the test can prove what it was made of. */
+  const served: Uint8Array[] = []
+
   // Registered after routeLocal, so it wins: Playwright tries its handlers newest first.
   await page.route('**/fixtures/h264/chunk-stream0-*.m4s', async (route) => {
     const rel = new URL(route.request().url()).pathname.replace('/fixtures/', '')
     const bytes = new Uint8Array(await fs.readFile(path.resolve('tests/fixtures', rel)))
-    await route.fulfill({ body: Buffer.from(withSdtp(bytes)), contentType: 'video/mp4' })
+    const shaped = withSdtp(bytes)
+    served.push(shaped)
+    await route.fulfill({ body: Buffer.from(shaped), contentType: 'video/mp4' })
   })
   await page.goto(PLAYER_URL)
 
@@ -74,14 +82,26 @@ test('saves a recording whose fragments brought their own sdtp, and the file dec
   expect(probed.streams.map((stream) => stream.codec_type)).toEqual(['video'])
   expect(probed.streams.map((stream) => Number(stream.nb_read_frames))).toEqual([144])
 
-  // The saved file really carries what this is about. Without it the test would pass over a file
-  // shaped like every other one in the suite and prove nothing at all.
-  expect(
-    decodeWarnings(file),
-    'the saved file no longer carries the box this test is about',
-  ).toContain('Duplicated SDTP atom')
+  // The material really was what this is about. Without this the test would run over fragments
+  // shaped like every other one in the suite and prove nothing at all — and it would go on
+  // passing if `withSdtp` ever stopped putting the box in.
+  expect(served.length, 'the page fetched none of the fragments this test shapes').toBe(3)
+  for (const fragment of served) {
+    expect(
+      findBox(fragment, ['moof', 'traf', 'sdtp']),
+      'a fragment the page was served carries no sdtp',
+    ).not.toBeNull()
+  }
 
-  // And that is the whole of what ffmpeg has to say about it.
+  // And the file that came out of them says nothing at all. The writer reads the samples and
+  // states tables of its own, so none of the site's boxes travels into the file: where the
+  // fragmented writer left one "Duplicated SDTP atom" per fragment after the first, there is now
+  // not a word. Asserted as silence rather than through `decodeFile`, which tolerates that line
+  // by name for the sake of the writer this one replaced.
+  expect(decodeWarnings(file), 'the saved file draws a complaint out of ffmpeg').toBe('')
+
+  // And it decoded, which the line above does not say: silence is also what a decode that never
+  // started sounds like.
   decodeFile(file)
 
   await context.close()

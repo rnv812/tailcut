@@ -31,6 +31,32 @@ const audioBytes = [1, 2, 3, 4].map(
 )
 
 /**
+ * One buffer carrying both kinds: two traks in the moov, two trafs in every segment.
+ *
+ * Used for the one shape where a session is full of material the writer can make nothing of —
+ * see the refusal below.
+ */
+const muxedInitBytes = new Uint8Array(readFileSync('tests/fixtures/muxed/init-stream0.m4s'))
+const muxedBytes = [1, 2, 3].map(
+  (n) => new Uint8Array(readFileSync(`tests/fixtures/muxed/chunk-stream0-0000${n}.m4s`)),
+)
+
+/** The same segment with every traf in it calling the track something the moov never declared. */
+function trafsRenumbered(segment: Uint8Array, trackId: number): Uint8Array {
+  const copy = new Uint8Array(segment)
+  const view = new DataView(copy.buffer, copy.byteOffset, copy.byteLength)
+  const moof = topLevelBoxes(copy).find((box) => box.type === 'moof')!
+
+  for (const traf of childBoxes(copy, moof).filter((box) => box.type === 'traf')) {
+    const tfhd = childBoxes(copy, traf).find((box) => box.type === 'tfhd')!
+    // The header of the box, then its version and flags, then the number of the track.
+    view.setUint32(tfhd.start + tfhd.headerSize + 4, trackId)
+  }
+
+  return copy
+}
+
+/**
  * Media data of a file: the bodies of its mdat boxes in the order they lie there. The muxer
  * rewrites the boxes around the material and never the material itself, so this is what says
  * which segments went into a file and in what order — the boxes around them differ from the
@@ -1343,6 +1369,25 @@ describe('the bridge saves what it collected as a file', () => {
     expect(win.downloads).toEqual([])
   })
 
+  it('refuses a session it can make no file of instead of downloading nothing', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(muxedInitBytes)
+    for (const segment of muxedBytes) win.append(trafsRenumbered(segment, 9))
+
+    // Material the parser can make nothing of: every fragment names a track the init never
+    // declared, so not one sample can be placed. The map knows nothing of that — it reads the
+    // times out of the moof and reports sixteen kilobytes to save — and the writer answers with
+    // no bytes at all. Handed on, that is a file of zero length: no player opens it and nothing
+    // is said. It is not the empty session either, so it is owed the other word of the two.
+    const reply = await win.save(keyFor(PAGE_URL, ['avc1', 'mp4a']))
+
+    expect(reply.received).toEqual([
+      { ok: false, reason: 'refused', detail: 'the recorded material could not be read' },
+    ])
+    expect(win.downloads, 'the bridge downloaded a file of nothing').toEqual([])
+  })
+
   it('carries a refusal by Chrome to the popup as a refusal by Chrome', async () => {
     const win = await loadBridge()
     win.context()
@@ -1558,8 +1603,11 @@ describe('the bridge freezes a session into a snapshot', () => {
     // captured segments themselves and the transfer neuters them: the page goes on recording
     // into buffers of zero length, and the next Save all writes a file of nothing.
     const saved = await win.savedBytes()
+    // One mdat and not one per fragment: the progressive writer lays every sample of a track down
+    // in a single chunk. What the digest watches is that the coded bytes are still there at all —
+    // a neutered buffer comes back as a fragment of nothing, and the file is short by its length.
     const media = mediaOf(saved)
-    expect(media.length, 'the material was carried off by the freeze').toBe(2)
+    expect(media).toHaveLength(1)
     expect(digest(...media), 'the saved file is not the two fragments the page poured in').toBe(
       digest(mediaOf(seg1Bytes)[0]!, mediaOf(seg2Bytes)[0]!),
     )
@@ -1622,7 +1670,7 @@ describe('the bridge tells apart the buffers of one media source', () => {
     expect(win.list()[0]!.bytes).toBe(allBytes)
   })
 
-  it('saves both tracks of a two-track session, interleaved by time', async () => {
+  it('saves both tracks of a two-track session, described by one moov', async () => {
     const win = await loadBridge()
     win.context()
     feedBothTracks(win)
@@ -1632,20 +1680,23 @@ describe('the bridge tells apart the buffers of one media source', () => {
     const file = await win.savedBytes()
     const moov = topLevelBoxes(file).find((box) => box.type === 'moov')!
 
-    // The moov of one track with the fragments of both is what made the decoder fall over on the
+    // The moov of one track with the material of both is what made the decoder fall over on the
     // first mdat of the sound: the file has to describe every track it carries.
     expect(childBoxes(file, moov).filter((box) => box.type === 'trak')).toHaveLength(2)
 
-    // Picture at 0, 2, 4 seconds and sound at 0, 1.95, 3.95, 5.97, laid out in one order of time
-    // the way any multiplexed stream is.
-    expect(digest(...mediaOf(file))).toBe(
+    // One mdat and not one per fragment, and the writer gives each track a chunk of its own:
+    // the picture whole, then the sound whole. On a file opened from disk this costs nothing —
+    // a player reads it by range — and every coded byte is still there, in decode order.
+    const media = mediaOf(file)
+    expect(media).toHaveLength(1)
+    expect(digest(...media)).toBe(
       digest(
         ...mediaOf(seg1Bytes),
+        ...mediaOf(seg2Bytes),
+        ...mediaOf(seg3Bytes),
         ...mediaOf(audioBytes[0]!),
         ...mediaOf(audioBytes[1]!),
-        ...mediaOf(seg2Bytes),
         ...mediaOf(audioBytes[2]!),
-        ...mediaOf(seg3Bytes),
         ...mediaOf(audioBytes[3]!),
       ),
     )

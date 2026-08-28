@@ -47,8 +47,10 @@ test('the saved file carries both tracks of the page', async () => {
     ['audio', 'aac'],
   ])
   // Everything the page loaded, both tracks whole: 144 frames of picture at 24 a second and 260
-  // frames of sound of 1024 samples each at 44100.
-  expect(probed.streams.map((stream) => Number(stream.nb_read_frames))).toEqual([144, 260])
+  // frames of sound of 1024 samples each at 44100, less the first of the sound — the priming of
+  // the encoder, hidden by the edit list the writer states rather than played as 23 ms of noise
+  // before the picture starts.
+  expect(probed.streams.map((stream) => Number(stream.nb_read_frames))).toEqual([144, 259])
 
   const seconds = Number(probed.format.duration)
   expect(seconds).toBeGreaterThan(5.9)

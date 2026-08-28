@@ -1,7 +1,7 @@
 import { assembleMp4 } from '../core/export/assemble'
 import { planRanges, readsFor } from '../core/export/ranges'
+import { saveAllMp4 } from '../core/export/save'
 import { bytesFrom } from '../core/export/source'
-import { muxFragmentedMp4 } from '../core/mux'
 import type { SaveSource } from './session-store'
 
 /**
@@ -12,13 +12,20 @@ import type { SaveSource } from './session-store'
  * material of a plain source is still on somebody's server. Everything above this — the popup,
  * the badge, the frame addressing, the summary — asks neither which it is looking at.
  *
- * Null when nothing could be written. For a captured session that is settled before we get here
- * (the plan holds no material); for a plain one it is a read that was refused, and that can only
- * be known by trying.
+ * One writer for both, and for the clips the editor exports besides: the captured path used to
+ * copy its fragments into a fragmented file whole, which no edit list survives (§8.2) and which
+ * carries no sample tables to seek by. Both roads now end in `buildProgressiveMp4`.
+ *
+ * Null when nothing could be written. A captured session may hold no material at all, and it may
+ * hold material the parser can make nothing of — an init whose sample entry it does not know,
+ * segments it could not read — and the writer answers both with no bytes. A download of zero
+ * bytes would be worse than a refusal: the user gets a file no player opens and no word about it.
+ * For a plain source it is a read that was refused, and that can only be known by trying.
  */
 export async function writeSaveFile(source: SaveSource): Promise<Uint8Array | null> {
   if (source.kind === 'captured') {
-    return source.tracks.length > 0 ? muxFragmentedMp4(source.tracks) : null
+    const file = saveAllMp4(source.tracks)
+    return file.byteLength > 0 ? file : null
   }
 
   const plan = source.plan

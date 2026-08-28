@@ -97,8 +97,9 @@ test('two players on one page save as two files, neither holding the other', asy
   ])
 
   // Every frame the page fed that player, and not one frame more: 144 of picture at 24 a second
-  // over six seconds, and 260 of sound of 1024 samples each at 44100.
-  expect(framesOf(alpha)).toEqual([144, 260])
+  // over six seconds, and 260 of sound of 1024 samples each at 44100 — less the first packet of
+  // the sound, which is the priming of the encoder and is hidden by the edit list.
+  expect(framesOf(alpha)).toEqual([144, 259])
 
   // The vp9 track runs four seconds against six of Opus, so four is what the two cover at once —
   // 96 frames of picture, and the sound that lies inside those four seconds: 199 packets of 20

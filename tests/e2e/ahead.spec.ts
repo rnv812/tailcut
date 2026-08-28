@@ -96,8 +96,10 @@ test('a clip is not given a tail of sound over a picture that has run out', asyn
   ])
   // Two segments of picture at ten frames a second, and two of the three of sound: 108 frames of
   // 1024 samples at 22050 apiece. The third would have added another 108 and three seconds of
-  // nothing to look at.
-  expect(facts.streams.map((s) => Number(s.nb_read_frames))).toEqual([120, 216])
+  // nothing to look at. One packet short of the 216 that arrived: the first of them is the
+  // priming of the encoder, and the edit list the writer states hides it — which is why the sound
+  // of this file starts at zero instead of 46 ms before it.
+  expect(facts.streams.map((s) => Number(s.nb_read_frames))).toEqual([120, 215])
 
   // The whole file, not the promise: it runs as long as the picture does and no longer.
   expect(facts.duration).toBeGreaterThan(11.9)
