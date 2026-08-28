@@ -6,6 +6,7 @@ import { planSnapshot, type SnapshotSource } from '../../src/core/snapshot/build
 import { SnapshotReader } from '../../src/core/snapshot/read'
 import { materialOf } from '../../src/core/snapshot/material'
 import { FrameTable } from '../../src/core/timeline/frames'
+import { METRICS, rowTop } from '../../src/core/timeline/layout'
 import { concatBytes } from '../../src/core/iso/writer'
 
 const page = {
@@ -66,6 +67,52 @@ async function ready(): Promise<Extract<EditorState, { status: 'ready' }>> {
 
 const show = (state: EditorState) => render(<Shell state={state} />, document.body)
 const text = (testId: string) => document.querySelector(`[data-testid="${testId}"]`)?.textContent ?? ''
+
+/**
+ * Two frames and two turns of the queue.
+ *
+ * Preact queues a rerender rather than doing it in the handler, so a press read back in the same
+ * turn answers about the screen before it. Two rounds and not one, because the panels are two
+ * deep: the workbench rerenders on the first, and the box inside a `TimecodeField` follows the
+ * value it was handed from an effect, which preact runs after that render. Waiting one round
+ * reads a timecode field that is still showing the number before the press.
+ */
+const turn = () => new Promise<void>((done) => requestAnimationFrame(() => setTimeout(done, 0)))
+const settled = async () => {
+  await turn()
+  await turn()
+}
+
+/** Five frames at 25 fps: enough grid for a step, a fit and a clip. */
+const previewOf = () => ({
+  url: 'blob:preview',
+  bytes: 10,
+  frames: FrameTable.of(
+    Array.from({ length: 5 }, (_, at) => ({
+      pts: at / 25,
+      out: at / 25,
+      duration: 1 / 25,
+      sync: at === 0,
+      source: { at, length: 1 },
+    })),
+  ),
+  release: () => {},
+})
+
+const press = (key: string, init: KeyboardEventInit = {}) =>
+  window.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...init }))
+
+/**
+ * Puts the editor up and waits until it is listening.
+ *
+ * The listener on the window goes on in an effect, and preact runs effects after the render
+ * rather than during it. A press sent in the same turn as the mount reaches nothing at all —
+ * which looks exactly like a keyboard that does not work, and is not what these tests are about.
+ */
+const mount = async (state: EditorState) => {
+  show(state)
+  await settled()
+}
 
 afterEach(() => {
   render(null, document.body)
@@ -158,19 +205,7 @@ describe('the editor shell', () => {
   })
 
   it('puts the element and the frame readout in the player pane once there is a preview', async () => {
-    const frames = Array.from({ length: 5 }, (_, at) => ({
-      pts: at / 25,
-      out: at / 25,
-      duration: 1 / 25,
-      sync: at === 0,
-      source: { at, length: 1 },
-    }))
-    const preview = {
-      url: 'blob:preview',
-      bytes: 10,
-      frames: FrameTable.of(frames),
-      release: () => {},
-    }
+    const preview = previewOf()
 
     show({ ...(await ready()), preview } as EditorState)
 
@@ -180,5 +215,304 @@ describe('the editor shell', () => {
     expect(text('frame')).toBe('1')
     expect(text('frame-count')).toBe('5')
     expect(text('timecode')).toBe('00:00:00:00')
+    // And the box the frame under the pointer is drawn in, mounted with the strip and hidden
+    // until the pointer is over it — mounted, so that the cache of pictures outlives a hover.
+    expect(document.querySelector<HTMLElement>('[data-testid="thumb"]')!.hidden).toBe(true)
+  })
+
+  it('answers the keyboard from the tab and not from the player', async () => {
+    await mount({ ...(await ready()), preview: previewOf() } as EditorState)
+    press('ArrowRight')
+    await settled()
+
+    // One listener, one step. Two — the player's own and the tab's — would move two frames.
+    expect(text('frame')).toBe('2')
+  })
+
+  it('shows the clip panel, and says how a clip is made', async () => {
+    show({ ...(await ready()), preview: null } as EditorState)
+
+    expect(document.querySelector('[data-testid="clips"]')).not.toBeNull()
+    expect(document.body.textContent).toContain('I marks')
+  })
+
+  it('sends what the keyboard says to the same model the inspector reads', async () => {
+    // The whole point of the assembly: I is a press, and the clip it makes shows up in the panel
+    // with its In already typed into a box that the panel took off the document.
+    await mount({ ...(await ready()), preview: previewOf() } as EditorState)
+
+    press('ArrowRight')
+    press('i')
+    await settled()
+
+    expect(document.querySelectorAll('[data-testid="clip"]')).toHaveLength(1)
+    // The clip a press made is the selected one, and the panel is told which that is.
+    expect(document.querySelector('[data-testid="clip"]')!.className).toContain('selected')
+    expect(document.querySelector<HTMLInputElement>('[data-testid="in-c1"]')!.value)
+      .toBe('00:00:00:01')
+    expect(document.querySelector<HTMLInputElement>('[data-testid="playhead-field"]')!.value)
+      .toBe('00:00:00:01')
+  })
+
+  it('undoes a press of the keyboard', async () => {
+    await mount({ ...(await ready()), preview: previewOf() } as EditorState)
+
+    press('i')
+    await settled()
+    expect(document.querySelectorAll('[data-testid="clip"]')).toHaveLength(1)
+
+    press('z', { ctrlKey: true })
+    await settled()
+    expect(document.querySelectorAll('[data-testid="clip"]')).toHaveLength(0)
+  })
+
+  it('puts the whole keyboard on the screen on ? and takes it off on Escape', async () => {
+    await mount({ ...(await ready()), preview: null } as EditorState)
+
+    press('?')
+    await settled()
+    expect(document.querySelector('[data-testid="help"]')).not.toBeNull()
+    expect(document.body.textContent).toContain('Shuttle back, stop, shuttle forward')
+
+    press('Escape')
+    await settled()
+    expect(document.querySelector('[data-testid="help"]')).toBeNull()
+
+    // And the button on the sheet, for the hand that reached for the mouse instead.
+    press('?')
+    await settled()
+    document.querySelector<HTMLButtonElement>('[data-testid="help-close"]')!.click()
+    await settled()
+    expect(document.querySelector('[data-testid="help"]')).toBeNull()
+  })
+
+  it('says how fast the shuttle is going, and stops saying it on K', async () => {
+    await mount({ ...(await ready()), preview: previewOf() } as EditorState)
+
+    press('l')
+    press('l')
+    await settled()
+    expect(text('rate')).toContain('2×')
+    // Forwards is the element's own doing, so it is running.
+    expect(text('play')).toBe('Pause')
+
+    press('k')
+    await settled()
+    expect(document.querySelector('[data-testid="rate"]')).toBeNull()
+    expect(text('play')).toBe('Play')
+
+    // Backwards the element cannot do at all: the playhead is walked and the picture is stopped.
+    press('j')
+    await settled()
+    expect(text('rate')).toContain('1× back')
+    expect(text('play')).toBe('Play')
+
+    // And the play button clears the shuttle rather than leaving a speed nothing is going at.
+    document.querySelector<HTMLButtonElement>('[data-testid="play"]')!.click()
+    await settled()
+    expect(document.querySelector('[data-testid="rate"]')).toBeNull()
+  })
+
+  it('sends what the inspector is clicked for back into the same model', async () => {
+    // The other direction of the assembly. M drops a marker from the keyboard, and Remove in the
+    // panel takes it away again — a panel wired to nothing would show the row and never lose it.
+    await mount({ ...(await ready()), preview: previewOf() } as EditorState)
+
+    press('m')
+    await settled()
+    expect(document.querySelectorAll('[data-testid="marker"]')).toHaveLength(1)
+
+    document.querySelector<HTMLButtonElement>('[data-testid="drop-m1"]')!.click()
+    await settled()
+    expect(document.querySelectorAll('[data-testid="marker"]')).toHaveLength(0)
+    expect(document.querySelector('[data-testid="no-markers"]')).not.toBeNull()
+  })
+
+  it('sends what the canvas is dragged for back into the same model', async () => {
+    // The third of the three roads into the reducer. happy-dom measures every element as zero,
+    // so the strip is given a box to report — without one the viewport is a nought pixels wide
+    // and a press on the ruler is a press on no instant at all.
+    const measured = HTMLElement.prototype.getBoundingClientRect
+    HTMLElement.prototype.getBoundingClientRect = () =>
+      ({ width: 800, height: 0, x: 0, y: 0, top: 0, left: 0, right: 800, bottom: 0, toJSON: () => ({}) }) as DOMRect
+
+    try {
+      // No preview, so the frame grid is empty and a seek lands where it was asked to rather
+      // than on the nearest of five frames — the arithmetic under test is the viewport's.
+      await mount({ ...(await ready()), preview: null } as EditorState)
+
+      // F fits the whole recording to the width the strip reported, which is how the width
+      // gets into the arithmetic at all: laid out over the 1200 px the project opens with, the
+      // same press of the same pixel would answer 00:00:03:08.
+      press('f')
+      await settled()
+
+      const canvas = document.querySelector('canvas')!
+      const spot = { clientX: 300, clientY: METRICS.rulerHeight - 2, button: 0, bubbles: true }
+      canvas.dispatchEvent(new MouseEvent('pointerdown', spot))
+      window.dispatchEvent(new MouseEvent('pointerup', spot))
+      await settled()
+
+      // Ten seconds of material across 800 px: 300 px in is 3.75 s, which is frame 18 of a
+      // second — a landing off a whole second on purpose, so that the rate the panel counts in
+      // is part of the answer and a frame rate of nought would read 00:00:03:00.
+      expect(document.querySelector<HTMLInputElement>('[data-testid="playhead-field"]')!.value)
+        .toBe('00:00:03:18')
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = measured
+    }
+  })
+
+  it('draws the clips of the document, and knows which one was clicked on', async () => {
+    // The document reaches the canvas as well as the panel: hit-testing a band is done against
+    // the clips the strip was handed, so a strip handed none selects nothing wherever it is hit.
+    const measured = HTMLElement.prototype.getBoundingClientRect
+    HTMLElement.prototype.getBoundingClientRect = () =>
+      ({ width: 800, height: 0, x: 0, y: 0, top: 0, left: 0, right: 800, bottom: 0, toJSON: () => ({}) }) as DOMRect
+
+    try {
+      await mount({ ...(await ready()), preview: null } as EditorState)
+      press('f')
+      press('i')
+      await settled()
+
+      const canvas = document.querySelector('canvas')!
+      // Two lanes below the ruler, then the first row of clips. A clip begun at nought runs to
+      // the end of its run, so 100 px in is inside the band.
+      const onBand = {
+        clientY: rowTop(METRICS, 2, 0) + METRICS.clipHeight / 2,
+        button: 0,
+        bubbles: true,
+      }
+      const away = { clientY: rowTop(METRICS, 2, 3), button: 0, bubbles: true }
+
+      for (const spot of [{ clientX: 700, ...away }, { clientX: 100, ...onBand }]) {
+        canvas.dispatchEvent(new MouseEvent('pointerdown', spot))
+        window.dispatchEvent(new MouseEvent('pointerup', spot))
+        await settled()
+      }
+
+      expect(document.querySelector('[data-testid="clip"]')!.className).toContain('selected')
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = measured
+    }
+  })
+
+  it('counts one break of the recording once, however many lanes stopped for it', async () => {
+    // The picture and the sound never stop at the same instant, so the lane the cut follows is
+    // the one that counts. Added up over both lanes this recording has two holes and one break.
+    const staggered: SnapshotSource = {
+      page,
+      tracks: [
+        { ...source.tracks[0]!, chunks: [
+          { start: 0, end: 4, bytes: new Uint8Array(1_000) },
+          { start: 8, end: 10, bytes: new Uint8Array(1_000) },
+        ] },
+        { ...source.tracks[1]!, chunks: [
+          { start: 0, end: 4.1, bytes: new Uint8Array(500) },
+          { start: 7.9, end: 10, bytes: new Uint8Array(500) },
+        ] },
+      ],
+    }
+    const plan = planSnapshot(staggered, { id: 'y', capturedAt: 1, producer: 'tailcut test' })
+    const file = concatBytes(plan.parts)
+    const reader = (await SnapshotReader.open(
+      async (at, length) => file.subarray(at, at + length),
+      file.byteLength,
+    ))!
+
+    show({ status: 'ready', reader, material: materialOf(reader.index), preview: null })
+    expect(text('gaps')).toBe('1 gap')
+  })
+
+  it('says out loud that the sound of this recording cannot be drawn', async () => {
+    // There is sound in the snapshot and no AudioDecoder in this environment, which is exactly
+    // the state the note exists for: the timeline shows a flat audio lane, and without a word
+    // beside it that reads as a recording with no sound in it.
+    await mount({ ...(await ready()), preview: null } as EditorState)
+
+    expect(text('no-wave')).toContain('cannot be decoded')
+  })
+
+  it('says nothing about the sound of a recording that has none', async () => {
+    const silent: SnapshotSource = { page, tracks: [source.tracks[0]!] }
+    const plan = planSnapshot(silent, { id: 'z', capturedAt: 1, producer: 'tailcut test' })
+    const file = concatBytes(plan.parts)
+    const reader = (await SnapshotReader.open(
+      async (at, length) => file.subarray(at, at + length),
+      file.byteLength,
+    ))!
+
+    await mount({ status: 'ready', reader, material: materialOf(reader.index), preview: null })
+    expect(document.querySelector('[data-testid="no-wave"]')).toBeNull()
+  })
+
+  it('runs and stops on the space bar and on the button alike', async () => {
+    await mount({ ...(await ready()), preview: previewOf() } as EditorState)
+    const video = document.querySelector<HTMLVideoElement>('[data-testid="preview"]')!
+
+    press(' ')
+    await settled()
+    expect(text('play')).toBe('Pause')
+    expect(video.paused, 'the button says Pause and the element was never started').toBe(false)
+
+    // The same key again, not a second start: a transport that only ever ran would say Pause
+    // for ever and the space bar would be a one-way switch.
+    press(' ')
+    await settled()
+    expect(text('play')).toBe('Play')
+    expect(video.paused).toBe(true)
+
+    // And the button, which reports the state it is going to rather than the one it is in.
+    document.querySelector<HTMLButtonElement>('[data-testid="play"]')!.click()
+    await settled()
+    expect(text('play')).toBe('Pause')
+  })
+
+  it('takes what playback reports as a frame number and not as an instant', async () => {
+    // The element reports the time of the frame on screen in the file's own clock; the model is
+    // told a time in the session's. Between them stands the frame table, and handing the index
+    // straight to the model would put the playhead at frame two seconds in.
+    await mount({ ...(await ready()), preview: previewOf() } as EditorState)
+    const video = document.querySelector<HTMLVideoElement>('[data-testid="preview"]')!
+
+    press(' ')
+    await settled()
+
+    // happy-dom has no requestVideoFrameCallback, so the player is listening on timeupdate.
+    video.currentTime = 0.09
+    video.dispatchEvent(new Event('timeupdate'))
+    await settled()
+
+    expect(text('frame')).toBe('3')
+  })
+
+  it('stops the picture when a frame is stepped by the button', async () => {
+    // The transport and the playhead pull in two directions otherwise: the element goes on
+    // decoding forwards while the number under it is being walked by hand.
+    await mount({ ...(await ready()), preview: previewOf() } as EditorState)
+
+    press(' ')
+    await settled()
+    expect(text('play')).toBe('Pause')
+
+    document.querySelector<HTMLButtonElement>('[data-testid="next"]')!.click()
+    await settled()
+    expect(text('play')).toBe('Play')
+  })
+
+  it('leaves a text box its own letters, mounted in the tab as it is', async () => {
+    // The rule that makes the rest of the layout usable, checked where the field really is: the
+    // name of a clip is typed into the inspector while the same letters are commands outside it.
+    await mount({ ...(await ready()), preview: previewOf() } as EditorState)
+    press('i')
+    await settled()
+
+    const name = document.querySelector<HTMLInputElement>('[data-testid="name-c1"]')!
+    name.dispatchEvent(new KeyboardEvent('keydown', { key: 's', bubbles: true, cancelable: true }))
+    await settled()
+
+    // S outside the box splits; inside it, it is a letter and the clip count does not move.
+    expect(document.querySelectorAll('[data-testid="clip"]')).toHaveLength(1)
   })
 })

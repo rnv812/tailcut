@@ -41,6 +41,50 @@
   /* The picture is behind the request: a held arrow outruns the decoder, and the number below
      the player is already the frame that was asked for. */
   .catching-up { color: #d8ab63; }
+  /* The strip is the box the frame under the pointer is positioned against. */
+  .timeline { position: relative; }
+
+  .tc-clips h2 { margin: 16px 0 6px; }
+  .tc-clip-list { list-style: none; margin: 0; padding: 0; }
+  .tc-clip { padding: 8px; margin-bottom: 6px; border: 1px solid #22262c; border-radius: 6px;
+             cursor: pointer; }
+  .tc-clip.selected { border-color: #e0a33c; }
+  .tc-clip-name { width: 100%; margin-bottom: 6px; background: none; border: none;
+                  color: #e8eaed; font: inherit; }
+  .tc-clip-times { display: flex; gap: 8px; align-items: center; }
+  .tc-clip-length { color: #9aa0a6; font-variant-numeric: tabular-nums; }
+  .tc-clip-options { display: flex; gap: 10px; align-items: center; margin-top: 6px; }
+  .tc-clip-options button { padding: 2px 8px; border: 1px solid #3a3f47; border-radius: 5px;
+                            background: none; color: #e8eaed; font: inherit; cursor: pointer; }
+  /* §8.3: a line where the eye already is, saying why the handle stopped. Amber because it is a
+     boundary and not a failure — nothing has gone wrong, and there is nothing to press. */
+  .tc-clip-note { margin: 6px 0 0; color: #e0a33c; font-size: 11px; }
+
+  .tc-marker-list { list-style: none; margin: 0; padding: 0; }
+  .tc-marker { display: flex; gap: 8px; align-items: center; padding: 2px 0; }
+  .tc-marker button { padding: 1px 6px; border: 1px solid #3a3f47; border-radius: 5px;
+                      background: none; color: #e8eaed; font: inherit; cursor: pointer; }
+  .tc-marker-go { font-variant-numeric: tabular-nums; }
+
+  .tc-field { display: flex; gap: 6px; align-items: center; }
+  .tc-field-label { color: #9aa0a6; font-size: 11px; }
+  .tc-field-input { width: 96px; padding: 2px 4px; border: 1px solid #3a3f47; border-radius: 4px;
+                    background: #0f1114; color: #e8eaed; font: inherit;
+                    font-variant-numeric: tabular-nums; }
+  /* A refused entry keeps its text and says so: retyping it from memory is the worse of two. */
+  .tc-field-input.invalid { border-color: #ff6b6b; color: #ffb3b3; }
+
+  .tc-thumb { background: #0b0d10; border: 1px solid #3a3f47; border-radius: 6px; padding: 4px;
+              z-index: 3; }
+  .tc-thumb-time { text-align: center; font-variant-numeric: tabular-nums; color: #cdd5df; }
+
+  .tc-help { position: fixed; inset: 0; background: rgba(8, 10, 12, 0.72);
+             display: flex; align-items: center; justify-content: center; z-index: 10; }
+  .tc-help-sheet { background: #14161a; border: 1px solid #2b3038; border-radius: 10px;
+                   padding: 20px 24px; max-height: 80vh; overflow-y: auto; }
+  .tc-help-sheet th { text-align: left; padding: 3px 18px 3px 0; white-space: nowrap;
+                      font-weight: 500; color: #e0a33c; }
+  .tc-help-sheet td { padding: 3px 0; color: #cdd5df; }
 </style>
 <body></body>
 <script type="module" src="main.js"></script>

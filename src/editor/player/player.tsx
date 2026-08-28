@@ -3,19 +3,6 @@ import { formatTimecode } from '../../core/timeline/timecode'
 import { frameSeeker, type FrameSeeker } from './seek'
 import type { Preview } from '../source/preview'
 
-/**
- * How far the arrows move the playhead: a frame, and a second with Shift (§9.3).
- *
- * The full keymap of the design belongs to the editing model, which arrives with the clips. Until
- * then these two live here, because a frame stepper without keys is not one.
- */
-export function stepFor(press: { key: string; shift: boolean }, fps: number): number | null {
-  const size = press.shift ? Math.max(1, Math.round(fps)) : 1
-  if (press.key === 'ArrowRight') return size
-  if (press.key === 'ArrowLeft') return -size
-  return null
-}
-
 /** A `<video>` that can say which frame it is showing. Chromium can; the type does not know it. */
 type FrameCallbackVideo = HTMLVideoElement & {
   requestVideoFrameCallback?(
@@ -26,18 +13,23 @@ type FrameCallbackVideo = HTMLVideoElement & {
 
 export interface PlayerProps {
   preview: Preview
-  /** The frame the transport is on. Owned above, so the timeline can move it too. */
+  /** The frame the transport is on, owned above: the timeline moves it too. */
   index: number
+  playing: boolean
+  /** Playback rate while running — the forward half of the shuttle. */
+  rate: number
+  /** What the transport is doing, in words: '', '4×', '8× back'. */
+  note: string
   /** Move by a number of frames. Relative, so a burst of key repeats composes instead of racing. */
   onStep: (delta: number) => void
   /** Go to a frame outright: this is what playback reports. */
   onSeek: (index: number) => void
+  onPlaying: (playing: boolean) => void
 }
 
-export function Player({ preview, index, onStep, onSeek }: PlayerProps) {
+export function Player({ preview, index, playing, rate, note, onStep, onSeek, onPlaying }: PlayerProps) {
   const element = useRef<HTMLVideoElement | null>(null)
   const seeker = useRef<FrameSeeker | null>(null)
-  const [playing, setPlaying] = useState(false)
   const [catchingUp, setCatchingUp] = useState(false)
   const [ready, setReady] = useState(false)
 
@@ -77,9 +69,16 @@ export function Player({ preview, index, onStep, onSeek }: PlayerProps) {
     const video = element.current
     if (!video) return
 
-    if (playing) void video.play().catch(() => setPlaying(false))
+    if (playing) void video.play().catch(() => onPlaying(false))
     else video.pause()
-  }, [playing])
+  }, [playing, onPlaying])
+
+  // The forward half of the shuttle is the element's own doing: it decodes ahead and keeps the
+  // sound with it up to about four times, which nothing we could write would do better.
+  useEffect(() => {
+    const video = element.current
+    if (video) video.playbackRate = rate
+  }, [rate, playing])
 
   useEffect(() => {
     const video = element.current as FrameCallbackVideo | null
@@ -116,56 +115,18 @@ export function Player({ preview, index, onStep, onSeek }: PlayerProps) {
     return () => video.removeEventListener('timeupdate', onTime)
   }, [playing, table, onSeek])
 
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent): void => {
-      const target = event.target as HTMLElement | null
-      // A timecode field wants its own arrows.
-      if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return
-
-      if (event.key === ' ') {
-        event.preventDefault()
-        setPlaying((was) => !was)
-        return
-      }
-
-      const step = stepFor({ key: event.key, shift: event.shiftKey }, fps)
-      if (step === null) return
-
-      event.preventDefault()
-      setPlaying(false)
-      onStep(step)
-    }
-
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [fps, onStep])
-
   return (
     <section class="player" data-testid="player">
       <video ref={element} src={preview.url} preload="auto" data-testid="preview" />
 
       <div class="transport">
-        <button
-          data-testid="prev"
-          disabled={index <= 0}
-          onClick={() => {
-            setPlaying(false)
-            onStep(-1)
-          }}
-        >
+        <button data-testid="prev" disabled={index <= 0} onClick={() => onStep(-1)}>
           ◀ frame
         </button>
-        <button data-testid="play" onClick={() => setPlaying((was) => !was)}>
+        <button data-testid="play" onClick={() => onPlaying(!playing)}>
           {playing ? 'Pause' : 'Play'}
         </button>
-        <button
-          data-testid="next"
-          disabled={index >= table.count() - 1}
-          onClick={() => {
-            setPlaying(false)
-            onStep(1)
-          }}
-        >
+        <button data-testid="next" disabled={index >= table.count() - 1} onClick={() => onStep(1)}>
           frame ▶
         </button>
       </div>
@@ -176,6 +137,7 @@ export function Player({ preview, index, onStep, onSeek }: PlayerProps) {
         <span data-testid="frame">{index + 1}</span>
         {' of '}
         <span data-testid="frame-count">{table.count()}</span>
+        {note && <span data-testid="rate"> · {note}</span>}
         {catchingUp && <span data-testid="stale"> · catching up</span>}
       </div>
     </section>
