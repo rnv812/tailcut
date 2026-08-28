@@ -1633,6 +1633,19 @@ describe('the word that this frame is recording', () => {
     expect(notices(win)).toEqual([])
   })
 
+  it('stays unsaid on the clock as well, in a frame that holds nothing', async () => {
+    vi.useFakeTimers()
+    const win = await loadBridge()
+    win.context()
+
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    // 153 of the 154 frames of that news page. A clock that spoke out of every one of them would
+    // wake the service worker six times a minute per frame — the very cost this mechanism was
+    // put in to remove, paid again from the other end.
+    expect(notices(win)).toEqual([])
+  })
+
   it('is not repeated for every segment of a page that is playing', async () => {
     const win = await loadBridge()
     win.context()
@@ -1655,6 +1668,31 @@ describe('the word that this frame is recording', () => {
     // Everything gathered is dropped and nothing more is taken in (§5.4): there is no session
     // here, and a frame the badge asked would answer with the refusal and nothing to count.
     expect(notices(win)).toEqual([])
+  })
+
+  it('is said again while nothing arrives, for the worker that has forgotten it', async () => {
+    vi.useFakeTimers()
+    const win = await loadBridge()
+    win.context()
+
+    win.append(initBytes)
+    expect(notices(win)).toHaveLength(1)
+
+    // Nothing more arrives here: the clip is buffered to its end, or the user has paused it. That
+    // is the ordinary state of a page somebody is about to save from, and it used to be the state
+    // in which the badge quietly lost the recording.
+    //
+    // The service worker keeps what it is told in memory and nowhere else. Chrome stops it after
+    // half a minute of idling and starts it again on the next alarm, and the instance that comes
+    // back has been told nothing: it asks the main frame, which on a page whose player sits in an
+    // embed has nothing to answer. So the word has to be repeated by the clock and not by the
+    // traffic — a frame that has gone quiet is exactly the frame that has to keep saying it.
+    await vi.advanceTimersByTimeAsync(30_000)
+
+    expect(
+      notices(win).length,
+      'a frame that has stopped appending never says again that it is recording',
+    ).toBeGreaterThan(1)
   })
 
   it('goes out when a file becomes a session after its tables have been read', async () => {

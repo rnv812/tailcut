@@ -163,6 +163,51 @@ test('the badge counts a recording that lives inside an embed', async () => {
   await context.close()
 })
 
+test('a frame that has stopped playing keeps saying it is recording', async () => {
+  test.setTimeout(90_000)
+
+  const { context, page } = await embedding('embed.html', EMBEDDER_URL, [PLAYER_URL])
+  const [sw] = context.serviceWorkers()
+
+  // Nothing more will arrive from this frame: the clip is buffered whole and the player is
+  // stopped. That is the state of a page while somebody decides whether to save from it.
+  const player = await frameAt(page, PLAYER_URL)
+  await player.evaluate(() => {
+    const video = document.querySelector('video')!
+    video.loop = false
+    video.pause()
+  })
+  await page.bringToFront()
+
+  // A listener beside the extension's own, counting what reaches the worker from the tab.
+  await sw!.evaluate(() => {
+    const said: number[] = []
+    Object.assign(globalThis, { said })
+    chrome.runtime.onMessage.addListener((message: unknown, sender) => {
+      if ((message as { type?: string } | null)?.type === 'tc:recording' && sender.frameId !== undefined) {
+        said.push(sender.frameId)
+      }
+      return false
+    })
+  })
+
+  const said = () => sw!.evaluate(() => (globalThis as unknown as { said: number[] }).said)
+
+  // What the service worker knows it knows in memory: Chrome stops it after half a minute of
+  // idling and the instance that comes back has been told nothing. It asks the main frame — which
+  // on this page has no player in it — and the recording would be off the badge for good, because
+  // said on the traffic alone the word is repeated exactly when there is no need to repeat it.
+  await expect.poll(async () => (await said()).length, { timeout: 40_000 }).toBeGreaterThanOrEqual(2)
+
+  // And it is the frame of the embed speaking, which is the number the recount needs. Chrome puts
+  // it on the message itself, so no page can claim to be a frame it is not.
+  const frames = await said()
+  expect(new Set(frames).size, 'more than one frame of this page claims to be recording').toBe(1)
+  expect(frames[0], 'the word came from the top frame, which holds no player here').not.toBe(0)
+
+  await context.close()
+})
+
 test('the badge counts a crowded page without a round trip over every frame of it', async () => {
   test.setTimeout(90_000)
 

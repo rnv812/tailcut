@@ -133,7 +133,7 @@ let unreachable = false
 let refusalTold = false
 
 /**
- * How often this frame repeats that it has something recorded in it; see tellRecording.
+ * How often this frame repeats that it has something recorded in it; see announceRecording.
  *
  * The badge is recounted every ten seconds, so a word more often than that would be a word
  * nobody acts on. Less often and a service worker that restarted would go a whole period longer
@@ -151,26 +151,54 @@ let announcedAt = 0
  * those as it has frames. Enumerating them all and asking every one, every ten seconds, cost 154
  * injections and 154 messages on a news page that held no video at all — so the frames that have
  * something say so, and the badge asks those and the main frame (see FrameRecording).
- *
- * Said again and again rather than once, at most this often: the service worker keeps what it is
- * told in memory and has no memory across a restart, and a frame gone quiet after one would be
- * left out of the count for as long as the tab stayed open.
- *
- * Cheap on the path it stands in: the store answers whether it holds anything without walking
- * anything, and on a frame with nothing recorded in it this is one comparison per segment.
  */
-function tellRecording(): void {
+function announceRecording(): void {
   if (!store.recording) return
 
-  const now = Date.now()
-  if (now - announcedAt < ANNOUNCE_INTERVAL_MS) return
-  announcedAt = now
+  announcedAt = Date.now()
 
   // To the window that inserted this frame, as the handshake is, and for the same reason: the
   // bridge stands up in every frame of the page, and the content script that can carry this to
   // the service worker is the one of that very frame.
   const notice: BridgeToPage = { type: 'tc:recording' }
   window.parent.postMessage(notice, '*')
+}
+
+/**
+ * The word by the clock, and not by the traffic alone.
+ *
+ * What the service worker holds it holds in memory: Chrome stops it after half a minute of
+ * idling and the instance that comes back has been told nothing. It asks the main frame anyway —
+ * that is what the main frame is asked unconditionally for — but on a page whose player sits in
+ * an embed the main frame has nothing to answer, and the recording would be off the badge until
+ * something arrived to prompt this frame again.
+ *
+ * Nothing need ever arrive. A clip buffered to its end, a paused player, a file already
+ * downloaded whole: the page has said everything it is going to say, and that is precisely the
+ * state a page is in while somebody decides to save from it. Said on the traffic alone, the word
+ * came only while material was flowing — which is the one stretch of a page's life in which the
+ * badge is in no danger of losing it.
+ *
+ * It costs a timer per frame and one comparison per tick on the frames that hold nothing, which
+ * is 153 frames out of that news page's 154. The content script of every one of those frames
+ * already polls twice a second (CONTEXT_POLL_MS); this adds one tick per ten seconds beside it.
+ */
+setInterval(announceRecording, ANNOUNCE_INTERVAL_MS)
+
+/**
+ * The same word on the arrival of something, at most once per period.
+ *
+ * The clock above would carry it within ten seconds anyway; this is for the ten seconds. A
+ * recording that has just begun is the news the badge exists for, and a period of nothing over a
+ * page that is recording is a period the user has no reason to open the popup in. The throttle is
+ * what keeps a page appending every half-second from saying it twenty times per recount.
+ *
+ * Cheap on the path it stands in: the store answers whether it holds anything without walking
+ * anything, and on a frame with nothing recorded in it this is one comparison per segment.
+ */
+function tellRecording(): void {
+  if (Date.now() - announcedAt < ANNOUNCE_INTERVAL_MS) return
+  announceRecording()
 }
 
 /**
