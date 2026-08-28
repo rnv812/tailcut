@@ -200,6 +200,12 @@ describe('сборка', () => {
     expect(existsSync('dist/bridge/snapshot-worker.js')).toBe(true)
   })
 
+  it('builds the waveform worker as a classic script', async () => {
+    const worker = await optionsFor('editor/waveform-worker')
+    expect(worker.format).toBe('iife')
+    expect(existsSync('dist/editor/waveform-worker.js')).toBe(true)
+  })
+
   it('в собранных скриптах не осталось импортов голых спецификаторов', () => {
     const scripts = distScripts()
     expect(scripts).toContain('popup/popup.js')

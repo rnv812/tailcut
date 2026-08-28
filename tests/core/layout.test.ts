@@ -13,6 +13,7 @@ import {
   type ClipBand,
   type Rect,
   type SceneInput,
+  type WaveformInput,
 } from '../../src/core/timeline/layout'
 import type { Viewport } from '../../src/core/timeline/view'
 
@@ -298,5 +299,63 @@ describe('layoutScene', () => {
 
   it('draws no snap line when nothing is caught', () => {
     expect(of(layoutScene(view, METRICS, input()).rects, 'snap')).toHaveLength(0)
+  })
+})
+
+describe('layoutScene: the wave', () => {
+  const sound = (values: number[], start = 0): WaveformInput => ({
+    peaks: [{ start, min: Int8Array.from(values, (v) => -v), max: Int8Array.from(values) }],
+    covered: start + values.length / 100,
+  })
+
+  const lanes: Lane[] = [
+    { kind: 'video', runs: [{ start: 0, end: 10 }], gaps: [], zones: [] },
+    { kind: 'audio', runs: [{ start: 0, end: 10 }], gaps: [], zones: [] },
+  ]
+
+  const view: Viewport = { start: 0, scale: 0.01, widthPx: 1000 }
+
+  it('puts the wave over the audio lane and nowhere else', () => {
+    const scene = layoutScene(view, METRICS, {
+      lanes,
+      clips: [],
+      markers: [],
+      playhead: 0,
+      fps: 25,
+      peaks: sound(Array.from({ length: 1000 }, () => 100)),
+    })
+
+    const band = scene.waveform!
+    expect(band.y).toBe(laneTop(METRICS, 1))
+    expect(band.height).toBe(METRICS.laneHeight - METRICS.zoneHeight)
+    expect(band.mid).toBe(band.y + band.height / 2)
+    expect(band.min.length).toBe(1000)
+    expect(band.max[0]).toBe(100)
+  })
+
+  it('says in pixels where the reading has got to', () => {
+    // Four seconds of ten read: at a hundredth of a second a pixel that is 400 px in.
+    const scene = layoutScene(view, METRICS, {
+      lanes,
+      clips: [],
+      markers: [],
+      playhead: 0,
+      fps: 25,
+      peaks: sound(Array.from({ length: 400 }, () => 60)),
+    })
+
+    expect(scene.waveform!.pendingFromPx).toBe(400)
+    expect(scene.waveform!.max[399]).toBe(60)
+    expect(scene.waveform!.max[400]).toBe(0)
+  })
+
+  it('has no wave when the recording has no sound and none when none was asked for', () => {
+    const picture = [lanes[0]!]
+    const withSound = { lanes: picture, clips: [], markers: [], playhead: 0, fps: 25, peaks: sound([50]) }
+
+    expect(layoutScene(view, METRICS, withSound).waveform).toBeNull()
+    expect(
+      layoutScene(view, METRICS, { lanes, clips: [], markers: [], playhead: 0, fps: 25 }).waveform,
+    ).toBeNull()
   })
 })

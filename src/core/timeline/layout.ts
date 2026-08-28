@@ -1,3 +1,4 @@
+import { peakColumns, type Peaks } from '../audio/peaks'
 import type { Lane, Span, Zone } from './lanes'
 import { continuesRun } from './map'
 import type { SnapTarget } from './snap'
@@ -82,6 +83,26 @@ export interface MarkerPin {
   label: string
 }
 
+export interface WaveformInput {
+  peaks: readonly Peaks[]
+  /** Media time the reading has got to; past it the lane is drawn as not yet known. */
+  covered: number
+}
+
+export interface WaveformBand {
+  x: number
+  y: number
+  width: number
+  height: number
+  /** The line of silence: the middle of the band. */
+  mid: number
+  /** One column a pixel, already folded to the width of the strip. */
+  min: Int8Array
+  max: Int8Array
+  /** Where the stretch that has not been read yet begins, in pixels. */
+  pendingFromPx: number
+}
+
 export interface SceneInput {
   lanes: readonly Lane[]
   clips: readonly ClipBand[]
@@ -92,6 +113,8 @@ export interface SceneInput {
   active?: { id: string; edge: 'in' | 'out' } | null
   /** What that handle is caught on: a line and a word beside it. */
   snap?: SnapTarget | null
+  /** Peaks of the sound, as far as they have been computed. Absent while there are none. */
+  peaks?: WaveformInput
 }
 
 /** Everything to be painted, in pixels, in painting order. */
@@ -103,6 +126,8 @@ export interface Scene {
   rows: number
   rects: Rect[]
   ticks: TickMark[]
+  /** The wave over the audio lane; null when there is no sound lane or no peaks yet. */
+  waveform?: WaveformBand | null
 }
 
 export function laneTop(m: Metrics, index: number): number {
@@ -189,6 +214,24 @@ function forEachVisible<T extends Span>(
     const span = spans[i]!
     if (span.start >= to) break
     fn(span, i)
+  }
+}
+
+function waveformBand(v: Viewport, m: Metrics, top: number, input: WaveformInput): WaveformBand {
+  const height = m.laneHeight - m.zoneHeight
+  const width = Math.max(0, Math.round(v.widthPx))
+  const { min, max } = peakColumns(input.peaks, v.start, viewEnd(v), width)
+  const pending = Math.round(timeToX(v, input.covered))
+
+  return {
+    x: 0,
+    y: top,
+    width,
+    height,
+    mid: top + height / 2,
+    min,
+    max,
+    pendingFromPx: pending < 0 ? 0 : pending > width ? width : pending,
   }
 }
 
@@ -306,5 +349,9 @@ export function layoutScene(v: Viewport, m: Metrics, input: SceneInput): Scene {
     label: tick.major ? tickLabel(tick.time, major, input.fps) : undefined,
   }))
 
-  return { width: v.widthPx, height, rulerHeight: m.rulerHeight, rows: rowCount, rects, ticks: marks }
+  const soundLane = input.lanes.findIndex((lane) => lane.kind === 'audio')
+  const waveform =
+    input.peaks && soundLane >= 0 ? waveformBand(v, m, laneTop(m, soundLane), input.peaks) : null
+
+  return { width: v.widthPx, height, rulerHeight: m.rulerHeight, rows: rowCount, rects, ticks: marks, waveform }
 }

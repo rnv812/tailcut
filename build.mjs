@@ -21,6 +21,7 @@ export const ENTRIES = [
   { entryPoints: { 'bridge/snapshot-worker': 'src/bridge/snapshot-worker.ts' }, format: 'iife' },
   { entryPoints: { 'popup/popup': 'src/popup/popup.tsx' }, format: 'esm' },
   { entryPoints: { 'editor/main': 'src/editor/main.tsx' }, format: 'esm' },
+  { entryPoints: { 'editor/waveform-worker': 'src/editor/source/waveform-worker.ts' }, format: 'iife' },
 ]
 
 /** Полные опции esbuild по одной на точку входа. */

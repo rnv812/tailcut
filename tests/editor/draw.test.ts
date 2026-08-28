@@ -1,36 +1,42 @@
 import { describe, it, expect } from 'vitest'
 import { PALETTE, paintScene, truncate, type Painter } from '../../src/editor/timeline/draw'
-import type { Scene } from '../../src/core/timeline/layout'
+import type { Scene, WaveformBand } from '../../src/core/timeline/layout'
 
 interface Call {
-  op: 'fillRect' | 'fillText'
-  style: string
   args: number[]
+  style: string
   text?: string
 }
 
 /**
- * A painter that writes down what it was asked to do. `Painter` is six members of the real
- * context and nothing more, which is what lets the whole of the drawing be checked without a
- * browser: what a canvas would show is decided here, and whether a canvas shows it is decided
- * by the Playwright spec.
+ * Paints a scene into a recording context and hands back what was asked of the canvas.
+ *
+ * `Painter` is six members of the real context and nothing more, which is what lets the whole of
+ * the drawing be checked without a browser: what a canvas would show is decided here, and whether
+ * a canvas shows it is decided by the Playwright specs.
  */
-function recorder(): { painter: Painter; calls: Call[] } {
+const paint = (scene: Scene): { calls: Call[] } => {
   const calls: Call[] = []
-  const painter: Painter = {
+  const context = {
     fillStyle: '',
     font: '',
-    textBaseline: 'alphabetic',
-    fillRect(x: number, y: number, w: number, h: number) {
-      calls.push({ op: 'fillRect', style: String(painter.fillStyle), args: [x, y, w, h] })
-    },
-    fillText(text: string, x: number, y: number) {
-      calls.push({ op: 'fillText', style: String(painter.fillStyle), args: [x, y], text })
-    },
-    clearRect() {},
+    textBaseline: 'alphabetic' as CanvasTextBaseline,
+    fillRect: (...args: number[]) => calls.push({ args, style: String(context.fillStyle) }),
+    fillText: (text: string, ...args: number[]) =>
+      calls.push({ args, text, style: String(context.fillStyle) }),
+    clearRect: () => {},
   }
-  return { painter, calls }
+
+  paintScene(context as unknown as Painter, scene)
+  return { calls }
 }
+
+/**
+ * A call that carries a text is a `fillText` and one that does not is a `fillRect`; these two say
+ * which is meant, rather than leaving `text === undefined` in every assertion that wants one kind.
+ */
+const boxes = (calls: Call[]): Call[] => calls.filter((call) => call.text === undefined)
+const labels = (calls: Call[]): Call[] => calls.filter((call) => call.text !== undefined)
 
 const scene = (overrides: Partial<Scene> = {}): Scene => ({
   width: 200,
@@ -44,18 +50,15 @@ const scene = (overrides: Partial<Scene> = {}): Scene => ({
 
 describe('paintScene', () => {
   it('paints the background and the ruler before anything else', () => {
-    const { painter, calls } = recorder()
-    paintScene(painter, scene({ rects: [{ kind: 'gap', x: 0, y: 30, width: 10, height: 10 }] }))
+    const { calls } = paint(scene({ rects: [{ kind: 'gap', x: 0, y: 30, width: 10, height: 10 }] }))
 
-    expect(calls[0]).toEqual({ op: 'fillRect', style: PALETTE.background, args: [0, 0, 200, 100] })
-    expect(calls[1]).toEqual({ op: 'fillRect', style: PALETTE.ruler, args: [0, 0, 200, 24] })
+    expect(calls[0]).toEqual({ style: PALETTE.background, args: [0, 0, 200, 100] })
+    expect(calls[1]).toEqual({ style: PALETTE.ruler, args: [0, 0, 200, 24] })
     expect(calls[2]!.style).toBe(PALETTE.fill.gap)
   })
 
   it('paints every rect in the colour of its kind', () => {
-    const { painter, calls } = recorder()
-    paintScene(
-      painter,
+    const { calls } = paint(
       scene({
         rects: [
           { kind: 'run-video', x: 0, y: 24, width: 100, height: 40 },
@@ -65,8 +68,7 @@ describe('paintScene', () => {
       }),
     )
 
-    const painted = calls.filter((call) => call.op === 'fillRect').map((call) => call.style)
-    expect(painted).toEqual([
+    expect(boxes(calls).map((call) => call.style)).toEqual([
       PALETTE.background,
       PALETTE.ruler,
       PALETTE.fill['run-video'],
@@ -76,10 +78,11 @@ describe('paintScene', () => {
   })
 
   it('paints a major tick taller than a minor one', () => {
-    const { painter, calls } = recorder()
-    paintScene(painter, scene({ ticks: [{ x: 10, major: false }, { x: 20, major: true, label: '0:10' }] }))
+    const { calls } = paint(
+      scene({ ticks: [{ x: 10, major: false }, { x: 20, major: true, label: '0:10' }] }),
+    )
 
-    const rects = calls.filter((call) => call.op === 'fillRect')
+    const rects = boxes(calls)
     const minor = rects[2]!
     const major = rects[3]!
     expect(minor.args[3]).toBeLessThan(major.args[3]!)
@@ -88,38 +91,32 @@ describe('paintScene', () => {
   })
 
   it('paints the labels after every rect, so nothing is painted over them', () => {
-    const { painter, calls } = recorder()
-    paintScene(
-      painter,
+    const { calls } = paint(
       scene({
         ticks: [{ x: 20, major: true, label: '0:10' }],
         rects: [{ kind: 'clip', x: 0, y: 60, width: 120, height: 18, label: 'Clip one' }],
       }),
     )
 
-    const firstText = calls.findIndex((call) => call.op === 'fillText')
-    const lastRect = calls.map((call) => call.op).lastIndexOf('fillRect')
+    const firstText = calls.findIndex((call) => call.text !== undefined)
+    const lastRect = calls.map((call) => call.text === undefined).lastIndexOf(true)
     expect(firstText).toBeGreaterThan(lastRect)
-    expect(calls.filter((call) => call.op === 'fillText').map((call) => call.text)).toEqual([
-      '0:10',
-      'Clip one',
-    ])
+    expect(labels(calls).map((call) => call.text)).toEqual(['0:10', 'Clip one'])
   })
 
   it('says nothing on a rect too narrow for a name', () => {
-    const { painter, calls } = recorder()
-    paintScene(painter, scene({ rects: [{ kind: 'clip', x: 0, y: 60, width: 20, height: 18, label: 'Clip one' }] }))
+    const { calls } = paint(
+      scene({ rects: [{ kind: 'clip', x: 0, y: 60, width: 20, height: 18, label: 'Clip one' }] }),
+    )
 
-    expect(calls.some((call) => call.op === 'fillText')).toBe(false)
+    expect(labels(calls)).toEqual([])
   })
 
   it('writes the caption of a snap although its line is one pixel wide', () => {
-    const { painter, calls } = recorder()
-    paintScene(
-      painter,
+    const { calls } = paint(
       scene({ rects: [{ kind: 'snap', x: 120, y: 0, width: 1, height: 100, label: 'keyframe' }] }),
     )
-    const text = calls.find((call) => call.op === 'fillText')!
+    const text = labels(calls)[0]!
 
     expect(text.text).toBe('keyframe')
     expect(text.style).toBe(PALETTE.snapLabel)
@@ -133,9 +130,7 @@ describe('paintScene', () => {
   it('still says nothing beside a clip too narrow, and says it in the clip colour', () => {
     // The caption of a snap is the one label that ignores the width; a narrow clip stays quiet,
     // and a wide one is written in its own colour and not in the colour of a caught target.
-    const { painter, calls } = recorder()
-    paintScene(
-      painter,
+    const { calls } = paint(
       scene({
         rects: [
           { kind: 'clip', x: 0, y: 60, width: 20, height: 18, label: 'Narrow' },
@@ -143,10 +138,75 @@ describe('paintScene', () => {
         ],
       }),
     )
-    const texts = calls.filter((call) => call.op === 'fillText')
+    const texts = labels(calls)
 
     expect(texts.map((call) => call.text)).toEqual(['Wide'])
     expect(texts[0]!.style).toBe(PALETTE.clipLabel)
+  })
+})
+
+describe('paintScene: the wave', () => {
+  const band = (over: Partial<WaveformBand> = {}): WaveformBand => ({
+    x: 0,
+    y: 100,
+    width: 4,
+    height: 40,
+    mid: 120,
+    min: Int8Array.from([-127, -64, 0, 0]),
+    max: Int8Array.from([127, 64, 0, 0]),
+    pendingFromPx: 2,
+    ...over,
+  })
+
+  const scene = (waveform: WaveformBand | null): Scene => ({
+    width: 4,
+    height: 200,
+    rulerHeight: 24,
+    rows: 1,
+    rects: [{ kind: 'run-audio', x: 0, y: 100, width: 4, height: 40 }],
+    ticks: [],
+    waveform,
+  })
+
+  it('draws a column a pixel from the middle of the band outwards', () => {
+    const { calls } = paint(scene(band()))
+    const columns = calls.filter((call) => call.style === PALETTE.wave)
+
+    expect(columns).toHaveLength(2)
+    // Half the band less a pixel is 19, so full scale runs 101…139 around a middle of 120.
+    expect(columns[0]!.args).toEqual([0, 101, 1, 38])
+    // Half of full scale: 120 − 19 · 64/127 = 110.43, and a height of 19 either side of it.
+    expect(columns[1]!.args).toEqual([1, 110, 1, 19])
+  })
+
+  it('draws the stretch that has not been read yet as a quiet line', () => {
+    const { calls } = paint(scene(band()))
+    const pending = calls.filter((call) => call.style === PALETTE.wavePending)
+
+    // Two columns past the reading, each a line of silence a pixel high: the lane reads as sound
+    // not yet counted rather than as sound that is not there.
+    expect(pending.map((call) => call.args)).toEqual([
+      [2, 120, 1, 1],
+      [3, 120, 1, 1],
+    ])
+  })
+
+  it('draws the wave over the lane and under the playhead', () => {
+    const withPlayhead = scene(band())
+    withPlayhead.rects.push({ kind: 'playhead', x: 2, y: 0, width: 1, height: 200 })
+    const { calls } = paint(withPlayhead)
+
+    const lane = calls.findIndex((call) => call.style === PALETTE.fill['run-audio'])
+    const wave = calls.findIndex((call) => call.style === PALETTE.wave)
+    const playhead = calls.findIndex((call) => call.style === PALETTE.fill.playhead)
+
+    expect(lane).toBeLessThan(wave)
+    expect(wave).toBeLessThan(playhead)
+  })
+
+  it('paints nothing extra when there is no wave', () => {
+    const { calls } = paint(scene(null))
+    expect(calls.some((call) => call.style === PALETTE.wave)).toBe(false)
   })
 })
 

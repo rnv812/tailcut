@@ -17,6 +17,7 @@ import {
   type ClipBand,
   type MarkerPin,
   type Metrics,
+  type WaveformInput,
 } from '../../core/timeline/layout'
 import type { SnapSet, SnapTarget } from '../../core/timeline/snap'
 import type { Viewport } from '../../core/timeline/view'
@@ -33,6 +34,8 @@ export interface TimelineProps {
   frames: Float64Array
   snap: SnapSet
   snapping: boolean
+  /** Peaks of the sound as far as they are known; the wave grows while the editor is open. */
+  peaks?: WaveformInput
   metrics?: Metrics
   /** The width of the drawing area, in CSS pixels: the viewport is stored, so the owner keeps it. */
   onResize: (widthPx: number) => void
@@ -70,6 +73,7 @@ export function Timeline(props: TimelineProps) {
       fps: current.fps,
       snap: hint.current,
       active: active.current,
+      peaks: current.peaks,
     })
 
     const ratio = globalThis.devicePixelRatio || 1

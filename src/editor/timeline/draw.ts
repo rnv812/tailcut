@@ -1,4 +1,4 @@
-import { MIN_LABEL_WIDTH_PX, type RectKind, type Scene } from '../../core/timeline/layout'
+import { MIN_LABEL_WIDTH_PX, type RectKind, type Scene, type WaveformBand } from '../../core/timeline/layout'
 
 /**
  * As much of a canvas context as the drawing uses.
@@ -20,6 +20,9 @@ export interface Palette {
   tickLabel: string
   clipLabel: string
   snapLabel: string
+  /** The wave itself, and the base line under the stretch that has not been read yet. */
+  wave: string
+  wavePending: string
   fill: Record<RectKind, string>
 }
 
@@ -31,6 +34,8 @@ export const PALETTE: Palette = {
   tickLabel: '#98a2ae',
   clipLabel: '#f2f5f8',
   snapLabel: '#ffd479',
+  wave: '#7fd6b5',
+  wavePending: '#2b4a42',
   fill: {
     'run-video': '#2f6f9f',
     'run-audio': '#2f8f6f',
@@ -66,6 +71,39 @@ export function truncate(text: string, widthPx: number): string {
 const MINOR_TICK_PX = 4
 const TICK_LABEL_BASELINE = 12
 
+/**
+ * The envelope, a column a pixel, from the middle of the band outwards.
+ *
+ * A column of silence is still a line: a lane that goes blank where the sound is quiet reads as
+ * material that is missing. Past `pendingFromPx` there are no peaks yet, and the same line is
+ * drawn in the quieter colour — that is the whole of the progress indication, and the measurement
+ * says it is enough: the wave fills in left to right in under a second.
+ */
+export function paintWaveform(p: Painter, band: WaveformBand, palette: Palette): void {
+  const half = band.height / 2 - 1
+
+  const column = (at: number): void => {
+    const top = band.mid - ((band.max[at] ?? 0) / 127) * half
+    const bottom = band.mid - ((band.min[at] ?? 0) / 127) * half
+    p.fillRect(band.x + at, Math.round(top), 1, Math.max(1, Math.round(bottom - top)))
+  }
+
+  p.fillStyle = palette.wave
+  for (let at = 0; at < band.pendingFromPx && at < band.width; at++) column(at)
+
+  p.fillStyle = palette.wavePending
+  for (let at = Math.max(0, band.pendingFromPx); at < band.width; at++) column(at)
+}
+
+/** What belongs to a lane, and therefore goes under the wave rather than over it. */
+const LANE_KINDS: ReadonlySet<RectKind> = new Set([
+  'run-video',
+  'run-audio',
+  'gap',
+  'zone',
+  'zone-edge',
+])
+
 export function paintScene(p: Painter, scene: Scene, palette: Palette = PALETTE): void {
   p.fillStyle = palette.background
   p.fillRect(0, 0, scene.width, scene.height)
@@ -79,6 +117,17 @@ export function paintScene(p: Painter, scene: Scene, palette: Palette = PALETTE)
   }
 
   for (const rect of scene.rects) {
+    if (!LANE_KINDS.has(rect.kind)) continue
+    p.fillStyle = palette.fill[rect.kind]
+    p.fillRect(rect.x, rect.y, rect.width, rect.height)
+  }
+
+  // The wave lies inside the sound lane, so it is painted after the lane and before everything
+  // that has to stay readable across it: the playhead, the handles, the markers, the clips.
+  if (scene.waveform) paintWaveform(p, scene.waveform, palette)
+
+  for (const rect of scene.rects) {
+    if (LANE_KINDS.has(rect.kind)) continue
     p.fillStyle = palette.fill[rect.kind]
     p.fillRect(rect.x, rect.y, rect.width, rect.height)
   }
