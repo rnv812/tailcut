@@ -119,3 +119,103 @@ export function tickLabel(time: number, majorStep: number, fps: number): string 
 function clock(hours: number, minutes: number, seconds: number): string {
   return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`
 }
+
+/** What the viewport is allowed to show. */
+export interface ViewBounds {
+  /** End of the material, seconds. */
+  duration: number
+  /** Nominal frame rate of the picture; sets the deepest zoom. */
+  fps: number
+}
+
+/** Deepest zoom: one frame this many pixels wide. Below it there is nothing left to cut by. */
+export const FRAME_PX = 40
+/** Pixels of wheel travel that multiply the scale by e. */
+export const ZOOM_PX_PER_E = 320
+/** Air left on both sides when a range is fitted to the screen. */
+export const FIT_MARGIN_PX = 24
+
+const clamp = (value: number, low: number, high: number): number =>
+  value < low ? low : value > high ? high : value
+
+export function zoomLimits(bounds: ViewBounds, widthPx: number): { min: number; max: number } {
+  const frame = bounds.fps > 0 ? 1 / bounds.fps : 1 / 30
+  const min = frame / FRAME_PX
+  const whole = widthPx > 0 && bounds.duration > 0 ? bounds.duration / widthPx : min
+  return { min, max: Math.max(min, whole) }
+}
+
+/**
+ * The viewport inside its limits.
+ *
+ * Returns the very object it was given when nothing had to move: every action that touches the
+ * viewport ends here, and an unchanged object is how the reducer knows the state did not change.
+ */
+export function clampView(v: Viewport, bounds: ViewBounds): Viewport {
+  const limits = zoomLimits(bounds, v.widthPx)
+  const scale = clamp(v.scale, limits.min, limits.max)
+  const start = clamp(v.start, 0, Math.max(0, bounds.duration - scale * v.widthPx))
+  return scale === v.scale && start === v.start ? v : { ...v, scale, start }
+}
+
+/**
+ * Zoom holding the time under `xPx` in place.
+ *
+ * At the very edges of the material the anchor gives way to the clamp — the alternative is empty
+ * space beyond the last frame, which is worse than a pixel of drift.
+ */
+export function zoomAt(v: Viewport, xPx: number, factor: number, bounds: ViewBounds): Viewport {
+  const anchor = xToTime(v, xPx)
+  const limits = zoomLimits(bounds, v.widthPx)
+  const scale = clamp(v.scale * factor, limits.min, limits.max)
+  if (scale === v.scale) return clampView(v, bounds)
+  return clampView({ ...v, scale, start: anchor - xPx * scale }, bounds)
+}
+
+/** Zoom anchored on a time: the keyboard has no pointer, so it holds the playhead instead. */
+export function zoomToward(v: Viewport, time: number, factor: number, bounds: ViewBounds): Viewport {
+  const x = timeToX(v, time)
+  const at = x >= 0 && x <= v.widthPx ? x : v.widthPx / 2
+  return zoomAt(v, at, factor, bounds)
+}
+
+/** Drag right, see earlier time: the material follows the hand. */
+export function panBy(v: Viewport, dxPx: number, bounds: ViewBounds): Viewport {
+  return clampView({ ...v, start: v.start - dxPx * v.scale }, bounds)
+}
+
+export function fitRange(
+  v: Viewport,
+  range: { start: number; end: number },
+  bounds: ViewBounds,
+  marginPx = FIT_MARGIN_PX,
+): Viewport {
+  const usable = Math.max(1, v.widthPx - 2 * marginPx)
+  const limits = zoomLimits(bounds, v.widthPx)
+  const scale = clamp(Math.max(range.end - range.start, 0) / usable, limits.min, limits.max)
+  return clampView({ ...v, scale, start: range.start - marginPx * scale }, bounds)
+}
+
+export function fitAll(v: Viewport, bounds: ViewBounds): Viewport {
+  return fitRange(v, { start: 0, end: bounds.duration }, bounds, 0)
+}
+
+const LINE_PX = 16
+const PAGE_PX = 400
+
+/** A wheel speaks in pixels, lines or pages depending on the device; this settles it in pixels. */
+export function wheelPixels(delta: number, deltaMode: number): number {
+  if (deltaMode === 1) return delta * LINE_PX
+  if (deltaMode === 2) return delta * PAGE_PX
+  return delta
+}
+
+/**
+ * Wheel travel as a multiplier of the scale.
+ *
+ * Exponential, so that a notch one way and a notch the other cancel to the last bit: a viewport
+ * that drifts on a rocked wheel loses the place the user was looking at.
+ */
+export function zoomFactorOf(deltaPx: number): number {
+  return Math.exp(deltaPx / ZOOM_PX_PER_E)
+}
