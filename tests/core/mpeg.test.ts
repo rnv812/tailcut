@@ -7,6 +7,8 @@ import {
   mpegHeaderAt,
   walkMpegFrames,
 } from '../../src/core/mpeg/frames'
+import { beginsLikeMpegAudio, indexMpegStream } from '../../src/core/mpeg/whole'
+import type { RangeReader } from '../../src/core/iso/locate'
 
 const load = (path: string): Uint8Array => new Uint8Array(readFileSync(`tests/fixtures/${path}`))
 
@@ -325,5 +327,123 @@ describe('walkMpegFrames', () => {
     const walk = walkMpegFrames(stream, 0, 0)
 
     expect(walk.frames.map((found) => found.source.length)).toEqual([104, 417, 208])
+  })
+})
+
+/** A file behind ranged reads, keeping the tally of what was asked of it. */
+function serve(file: Uint8Array) {
+  const asked: Array<[number, number]> = []
+
+  const read: RangeReader = async (at, length) => {
+    asked.push([at, length])
+    return {
+      bytes: file.subarray(Math.min(at, file.byteLength), Math.min(at + length, file.byteLength)),
+      total: file.byteLength,
+    }
+  }
+
+  return { asked, read }
+}
+
+describe('beginsLikeMpegAudio', () => {
+  it('knows a real mp3 by the tag in front of it', () => {
+    expect(beginsLikeMpegAudio(load('plain/track.mp3'))).toBe(true)
+  })
+
+  it('knows one with no tag by two frames in a row', () => {
+    const bytes = load('plain/track.mp3')
+    expect(beginsLikeMpegAudio(bytes.subarray(id3Length(bytes)))).toBe(true)
+  })
+
+  it.each([
+    ['an mp4', 'plain/whole.mp4'],
+    ['a Matroska', 'plain/watched.webm'],
+  ])('refuses %s', (_name, path) => {
+    expect(beginsLikeMpegAudio(load(path))).toBe(false)
+  })
+
+  it('refuses two bytes that happen to carry the sync pattern', () => {
+    // One header is not evidence: 0xFFE0 turns up in any material often enough. What makes a
+    // stream is a second header exactly where the first one says the frame ends.
+    const bytes = new Uint8Array(4096)
+    bytes.set(header({}))
+    expect(beginsLikeMpegAudio(bytes)).toBe(false)
+  })
+})
+
+describe('indexMpegStream', () => {
+  it('reads the head of a track and stops there', async () => {
+    const bytes = load('plain/track.mp3')
+    const host = serve(bytes)
+    const walk = (await indexMpegStream(host.read, 3.5, { windowBytes: 64 * 1024 }))!
+
+    // Three and a half seconds of a twenty-four second track: one request of the front, and not
+    // one byte of the material behind what the clip can use.
+    expect(host.asked.length).toBe(1)
+    let samples = 0
+    for (const frame of walk.frames) samples += frame.samples
+    expect(samples / walk.sampleRate).toBeGreaterThanOrEqual(3.5)
+    expect(samples / walk.sampleRate).toBeLessThan(3.6)
+  })
+
+  it('carries a frame that straddles two windows across the seam', async () => {
+    const bytes = load('plain/track.mp3')
+    const whole = walkMpegFrames(bytes, id3Length(bytes), 0)
+    const host = serve(bytes)
+
+    // A window of four kilobytes puts a boundary in the middle of a frame some forty times over,
+    // which is exactly the case a reader gets wrong quietly: half a frame indexed as a whole one
+    // addresses bytes of its neighbour.
+    const walk = (await indexMpegStream(host.read, Infinity, { windowBytes: 4096 }))!
+
+    expect(host.asked.length).toBeGreaterThan(20)
+    expect(walk.frames.length).toBe(whole.frames.length)
+    expect(walk.frames.map((f) => f.source.at)).toEqual(whole.frames.map((f) => f.source.at))
+  })
+
+  it('reads the encoder delay out of the first window and nowhere else', async () => {
+    const bytes = load('plain/track.mp3')
+    const walk = (await indexMpegStream(serve(bytes).read, Infinity, { windowBytes: 4096 }))!
+
+    expect(walk.skipSamples).toBe(576 + DECODER_DELAY_SAMPLES)
+    // And the frame the tag stood in is not among the material, once and not once per window.
+    expect(walk.frames.length).toBe(939)
+  })
+
+  it('steps over a tag longer than the window rather than searching it', async () => {
+    const bytes = load('plain/track.mp3')
+    const material = bytes.subarray(id3Length(bytes))
+    const cover = new Uint8Array(10 + 65536 + material.byteLength)
+    // An ID3v2 tag of 65536 bytes: the size is written seven bits to a byte, so 0x04 0x00 0x00.
+    cover.set([0x49, 0x44, 0x33, 4, 0, 0, 0, 0x04, 0x00, 0x00])
+    cover.set(material, 10 + 65536)
+
+    const host = serve(cover)
+    const walk = (await indexMpegStream(host.read, 1, { windowBytes: 8192 }))!
+
+    expect(host.asked[1]?.[0]).toBe(10 + 65536)
+    expect(walk.frames[0]?.source.at).toBeGreaterThanOrEqual(10 + 65536)
+  })
+
+  it('refuses an address that holds no MPEG audio', async () => {
+    expect(await indexMpegStream(serve(load('plain/whole.mp4')).read, 1)).toBeNull()
+  })
+
+  it('refuses a file of nothing but a tag', async () => {
+    const tag = new Uint8Array(64)
+    tag.set([0x49, 0x44, 0x33, 4, 0, 0, 0, 0, 0, 54])
+    expect(await indexMpegStream(serve(tag).read, 1)).toBeNull()
+  })
+
+  it('stops at the ceiling rather than following a stream for ever', async () => {
+    const bytes = load('plain/track.mp3')
+    const host = serve(bytes)
+    const walk = (await indexMpegStream(host.read, Infinity, {
+      windowBytes: 4096,
+      maxBytes: 20_000,
+    }))!
+
+    expect(walk.at).toBeLessThanOrEqual(20_000 + 4096)
+    expect(walk.frames.length).toBeLessThan(939)
   })
 })

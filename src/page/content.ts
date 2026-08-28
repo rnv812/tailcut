@@ -297,6 +297,14 @@ startWatching(
     const iframe = await ensureBridge()
     iframe.contentWindow?.postMessage({ type: 'tc:plain', ...source }, '*')
   },
+  // An <audio> of this page is playing a soundtrack of its own (§5.6). It is not a recording and
+  // never becomes one: what it can be is the sound of a picture on the same page that has none,
+  // and the registry decides that. Like a plain source it carries no material — the browser
+  // fetched the track itself — so what crosses is the address and what the element knows of it.
+  async (source) => {
+    const iframe = await ensureBridge()
+    iframe.contentWindow?.postMessage({ type: 'tc:sound', ...source }, '*')
+  },
 )
 
 // Which stream an element is playing, when the stream comes out of a worker and has no address to

@@ -10,10 +10,19 @@ import {
 import { SegmentStream } from '../core/stream'
 import { PtsMap } from '../core/timeline/map'
 import { durationToken, normalizeUrl, sessionKey } from '../core/session-key'
-import { cutPlain, type OpenedFile, type PlainFile, type Span } from '../core/export/plain'
+import {
+  cutPlain,
+  pairedReader,
+  soundBaseOf,
+  type OpenedFile,
+  type PlainFile,
+  type Span,
+} from '../core/export/plain'
 import type { ExportPlan } from '../core/export/plan'
 import type { RangeReader } from '../core/iso/locate'
 import type { MuxTrack } from '../core/mux'
+import type { OpenedSound } from './loader'
+import type { SourceTrack } from '../core/export/plan'
 import type { Omission } from '../shared/protocol'
 import type { SnapshotPage } from '../core/snapshot/format'
 import type { SnapshotSource } from '../core/snapshot/build'
@@ -107,6 +116,30 @@ export interface PlainMaterial {
    * it is this and not the whole file.
    */
   buffered: Span[]
+  /**
+   * A soundtrack the page is playing beside this picture, read and ready to be laid under it.
+   *
+   * Only ever set where the picture has no sound of its own — see `SoundApart` in
+   * core/export/plain.ts for what a clip means on such a page, and why the sound is taken from
+   * the start of the track.
+   */
+  sound?: PairedSound
+  /**
+   * The page plays its sound apart and none could be used: unreadable, or more than one playing
+   * at once with nothing to say which belongs to the picture.
+   *
+   * The clip is then silent, and the popup says so in as many words. It is not the same as a
+   * picture that is simply silent — there the silence is the material, here it is a loss.
+   */
+  soundLost?: boolean
+}
+
+/** The soundtrack of a picture that has none of its own: the track, and where its bytes are. */
+export interface PairedSound {
+  url: string
+  /** The head of the track, addressed inside its own file; see `SoundApart`. */
+  track: SourceTrack
+  read: RangeReader
 }
 
 /** Bookkeeping of the registry itself: consumers of a session never need it. */
@@ -420,13 +453,21 @@ function omissionsOf(losses: {
   rendition: boolean
   alternate: boolean
   stretches: number
+  soundLost?: boolean
+  soundShort?: boolean
 }): Omission[] {
   const omitted: Omission[] = []
 
   if (losses.refusedTracks) omitted.push('track')
+  // Beside `track` and above the rest for the same reason: both are a file short of a whole kind
+  // of media, which is the loss that changes a clip most.
+  if (losses.soundLost) omitted.push('sound')
   if (losses.rendition) omitted.push('rendition')
   if (losses.alternate) omitted.push('alternate')
   if (losses.stretches > 1) omitted.push('gap')
+  // Last of the list: the clip has its sound and it runs out early, which is the mildest of
+  // these and the only one that is about the tail rather than about what was left behind.
+  if (losses.soundShort) omitted.push('soundShort')
 
   return omitted
 }
@@ -461,6 +502,11 @@ export interface SavePlan {
   bytes: number
   /** What the file will not hold of what the session has; empty when it holds all of it. */
   omitted: Omission[]
+  /**
+   * The sound of this clip comes from a track the page was playing beside the picture, rather
+   * than from the video's own material. See `SoundApart`; the popup says so in as many words.
+   */
+  pairedSound: boolean
 }
 
 /**
@@ -489,18 +535,30 @@ export function planSave(session: Session): SavePlan {
  * about it is where the bytes come from, and that is a reader handed to the writer.
  */
 function planPlainSave(session: Session, material: PlainMaterial): SavePlan {
-  const cut = cutPlain(material.file, material.buffered)
+  const cut = cutPlain(
+    material.file,
+    material.buffered,
+    material.sound ? { track: material.sound.track } : undefined,
+  )
   const nothing: SavePlan = {
     source: { kind: 'plain', read: material.read, plan: { tracks: [], duration: 0, bytes: 0 } },
     duration: 0,
     bytes: 0,
     omitted: [],
+    pairedSound: false,
   }
 
   if (!cut) return nothing
 
+  // Two files in one clip are two files in one address space, and the reader over them has to
+  // agree with the plan about where the seam is: both come from the one module that decides it.
+  const read =
+    cut.paired && material.sound
+      ? pairedReader(material.read, material.sound.read, soundBaseOf(material.file))
+      : material.read
+
   return {
-    source: { kind: 'plain', read: material.read, plan: cut.plan },
+    source: { kind: 'plain', read, plan: cut.plan },
     duration: cut.plan.duration,
     bytes: cut.plan.bytes,
     omitted: omissionsOf({
@@ -510,7 +568,10 @@ function planPlainSave(session: Session, material: PlainMaterial): SavePlan {
       rendition: false,
       alternate: cut.alternate,
       stretches: cut.stretches,
+      soundLost: material.soundLost === true && !cut.paired,
+      soundShort: cut.soundShort,
     }),
+    pairedSound: cut.paired,
   }
 }
 
@@ -547,6 +608,9 @@ function planCapturedSave(session: Session): SavePlan {
       alternate: false,
       stretches: stretches.length,
     }),
+    // A capture holds the page's own tracks and never borrows one from an element beside it: the
+    // pairing is a property of material that was never intercepted (§5.6).
+    pairedSound: false,
   }
 }
 
@@ -590,9 +654,10 @@ export function summarize(session: Session): {
   duration: number
   bytes: number
   omits?: Omission
+  pairedSound?: boolean
 } {
   const plan = planSave(session)
-  const summary: { duration: number; bytes: number; omits?: Omission } = {
+  const summary: { duration: number; bytes: number; omits?: Omission; pairedSound?: boolean } = {
     duration: plan.duration,
     bytes: plan.bytes,
   }
@@ -601,6 +666,9 @@ export function summarize(session: Session): {
   // popup, and a key that is always there says less than one that appears when there is a loss.
   const [heaviest] = plan.omitted
   if (heaviest) summary.omits = heaviest
+  // The same rule, and this one is not a loss at all: it appears when the sound of the clip came
+  // from somewhere the user would not otherwise know about.
+  if (plan.pairedSound) summary.pairedSound = true
 
   return summary
 }
@@ -657,6 +725,31 @@ function convertedChunk(convert: SegmentConverter, bytes: Uint8Array): Chunk | n
   return { start: converted.start, end: converted.end, bytes: converted.bytes }
 }
 
+/** What the page has said about one `<audio>` of its own; see SoundSource in the protocol. */
+export interface SoundInput {
+  sourceId: string
+  url: string
+  durationSeconds: number
+  buffered: Array<[number, number]>
+  playing: boolean
+}
+
+/** Everything the registry keeps about one soundtrack the page is playing. */
+interface SoundState {
+  sourceId: string
+  url: string
+  buffered: Span[]
+  playing: boolean
+  /** The head of the track, once it has been read. */
+  opened?: OpenedSound
+  /** A read of the head is on its way. */
+  reading: boolean
+  /** It could not be read at all, and no later poll will change that. */
+  unreadable: boolean
+  /** How many seconds of it were asked for, so that a longer picture can ask for more. */
+  seconds: number
+}
+
 /** What the page has said about one ordinary file, and what came back when it was opened. */
 export interface PlainInput {
   sourceId: string
@@ -680,8 +773,18 @@ export interface PlainInput {
  */
 export type PlainOpener = (url: string) => Promise<OpenedFile | null>
 
+/**
+ * Reads the head of a soundtrack playing beside a picture that has none (§5.6).
+ *
+ * `seconds` is the length of that picture and bounds both what is indexed and what is fetched:
+ * a clip cannot outrun the material of its picture, so the rest of the track is never read. See
+ * `SoundApart` for the whole of what a clip means on such a page.
+ */
+export type SoundOpener = (url: string, seconds: number) => Promise<OpenedSound | null>
+
 export interface StoreOptions {
   openPlain?: PlainOpener
+  openSound?: SoundOpener
   /**
    * Called when a read of a file's tables has finished, whatever it found.
    *
@@ -728,6 +831,23 @@ interface PlainState {
   unreadable: boolean
   /** Key of the session this file currently feeds; empty while it feeds none. */
   key: string
+  /**
+   * The page plays its sound apart from this picture and none of it could be used; see
+   * `PlainMaterial.soundLost`. Undefined until the question has been asked at all.
+   */
+  soundLost?: boolean
+}
+
+/**
+ * How far an element holds a track from its very start, in seconds; zero when it holds no such
+ * stretch.
+ *
+ * The clip takes the head of the soundtrack and nothing else (see `SoundApart`), so this is the
+ * only part of `buffered` that says anything. A track being played on a loop has always got it.
+ */
+function heldFromStart(spans: readonly Span[]): number {
+  for (const span of spans) if (span.start <= 0) return span.end
+  return 0
 }
 
 export class SessionStore {
@@ -756,13 +876,17 @@ export class SessionStore {
   private encryptedSeen = false
   /** sourceId → the ordinary file that source is playing; see plain(). */
   private plainSources = new Map<string, PlainState>()
+  /** sourceId → a soundtrack an `<audio>` of the page is playing; see sound(). */
+  private soundSources = new Map<string, SoundState>()
   /** Reads of the tables now in flight: what settled() waits on. */
   private reads = new Set<Promise<void>>()
   private readonly openPlain?: PlainOpener
+  private readonly openSound?: SoundOpener
   private readonly onFileRead?: () => void
 
   constructor(options: StoreOptions = {}) {
     this.openPlain = options.openPlain
+    this.openSound = options.openSound
     this.onFileRead = options.onFileRead
   }
 
@@ -895,6 +1019,123 @@ export class SessionStore {
   }
 
   /**
+   * An `<audio>` of the page is playing a soundtrack of its own (§5.6).
+   *
+   * It is never a session and never a saved file: a soundtrack alone is not a clip of anything,
+   * and offering one would make this a music downloader. What it can be is the sound of a picture
+   * on the same page that has none of its own, and that is settled in `pairSound` below.
+   *
+   * Nothing is read here either. A soundtrack is fetched only once a picture has asked for it,
+   * which means only once triage has promoted that picture — the same rule, and for the same
+   * reason, as an ordinary file.
+   */
+  sound(input: SoundInput): void {
+    if (this.encryptedSeen) return
+
+    let state = this.soundSources.get(input.sourceId)
+    if (!state) {
+      state = {
+        sourceId: input.sourceId,
+        url: input.url,
+        buffered: [],
+        playing: false,
+        reading: false,
+        unreadable: false,
+        seconds: 0,
+      }
+      this.soundSources.set(input.sourceId, state)
+    }
+
+    state.buffered = spansOf(input.buffered, 0)
+    state.playing = input.playing
+
+    // A soundtrack that has just started playing is news for every picture on the page: one that
+    // was refused as a banner a moment ago may be half of a work now.
+    for (const plain of this.plainSources.values()) this.syncPlain(plain)
+  }
+
+  /**
+   * The soundtrack to lay under this picture, if the page is playing one and it can be read.
+   *
+   * Refused outright unless the picture has no sound of its own: a track from outside is an
+   * answer to a silent picture, and a second one beside a file's own would be composing rather
+   * than clipping.
+   *
+   * Exactly one playing track, or none. Two at once — a page with music behind it and a video
+   * player beside that — cannot be resolved by anything this can see, and guessing which belongs
+   * to the picture would put a stranger's sound into somebody's clip. Then the clip is silent and
+   * the popup says why.
+   */
+  private pairSound(state: PlainState): PairedSound | undefined {
+    const file = state.opened?.file
+    if (!file || file.tracks.some((track) => track.kind === 'audio')) return undefined
+
+    const playing = [...this.soundSources.values()].filter((sound) => sound.playing)
+    if (playing.length !== 1) {
+      // Nothing playing at all is not a loss: a silent picture on a page with no sound on it is
+      // simply a silent picture, and there is nothing to tell the user about.
+      state.soundLost = playing.length > 1
+      return undefined
+    }
+
+    const sound = playing[0]!
+    // How much of the track can ever be used: a clip cannot outrun the picture's own material.
+    // Clamped to the stretch the element actually holds from its start, so that what is offered
+    // is what really passed through the player — the same promise the picture is held to.
+    const seconds = Math.min(file.durationSeconds, heldFromStart(sound.buffered))
+
+    if (!(seconds > 0)) {
+      state.soundLost = false
+      return undefined
+    }
+
+    if (sound.opened && sound.seconds >= seconds) {
+      state.soundLost = false
+      return { url: sound.url, track: sound.opened.track, read: sound.opened.read }
+    }
+
+    this.readSound(sound, seconds)
+    state.soundLost = sound.unreadable
+    return undefined
+  }
+
+  /** Reads the head of one soundtrack, once, and only as far as a picture has asked for. */
+  private readSound(sound: SoundState, seconds: number): void {
+    if (!this.openSound || sound.reading || sound.unreadable) return
+    if (sound.opened && sound.seconds >= seconds) return
+
+    sound.reading = true
+    sound.seconds = seconds
+
+    const read = this.openSound(sound.url, seconds)
+      .then((opened) => {
+        sound.reading = false
+        if (this.encryptedSeen) return
+
+        // A track that could not be read at all: an address that is gone, a host that will not
+        // range, bytes in no container this reads. Refused for good rather than retried twice a
+        // second — nothing about the file will be different on the next poll.
+        if (!opened) {
+          sound.unreadable = true
+        } else {
+          sound.opened = opened
+        }
+
+        for (const plain of this.plainSources.values()) this.syncPlain(plain)
+      })
+      .catch(() => {
+        sound.reading = false
+        sound.unreadable = true
+      })
+      .finally(() => {
+        this.reads.delete(read)
+        this.onFileRead?.()
+      })
+
+    this.reads.add(read)
+  }
+
+  /**
    * Reads the tables of a file, once, and only for a source that has earned it.
    *
    * The whole cost of a plain source is here: two ranged requests of a few kilobytes, made after
@@ -978,11 +1219,14 @@ export class SessionStore {
 
     state.signature ??= state.page
     const session = standing ?? this.createSession(key, state.signature)
+    const sound = this.pairSound(state)
     session.plain = {
       url: state.url,
       file: opened.file,
       read: opened.read,
       buffered: state.buffered,
+      ...(sound ? { sound } : {}),
+      ...(state.soundLost ? { soundLost: true } : {}),
     }
     session.sources.add(state.sourceId)
     if (this.promoted.has(state.sourceId)) session.confirmed = true
@@ -1293,6 +1537,7 @@ export class SessionStore {
     // The files too, index and all. A read already on its way finds encryptedSeen set when it
     // lands and puts nothing back.
     this.plainSources.clear()
+    this.soundSources.clear()
     this.probation.clear()
     this.rejected.clear()
     this.promoted.clear()

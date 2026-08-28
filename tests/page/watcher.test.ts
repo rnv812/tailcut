@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import type { TriageVerdict } from '../../src/core/triage'
-import type { PlainSource } from '../../src/shared/protocol'
+import type { PlainSource, SoundSource } from '../../src/shared/protocol'
 
 /** Шаг опроса наблюдателя: столько модельного времени проходит за один tick(). */
 const POLL_MS = 500
@@ -34,6 +34,9 @@ function ranges(...pairs: Array<[number, number]>) {
  */
 function fakeVideo(overrides: Record<string, unknown> = {}) {
   return {
+    // What tells a picture from a soundtrack: the watcher takes both under watch and judges only
+    // the first of them.
+    localName: 'video',
     src: 'blob:player',
     currentSrc: 'blob:player',
     muted: false,
@@ -87,6 +90,8 @@ const bannerVideo = () =>
  */
 interface FakeRoot {
   videos: FakeVideo[]
+  /** `<audio>` of this tree: watched like a picture and never judged like one. */
+  sounds: FakeVideo[]
   /** Elements of this tree, each with the shadow root it hosts; null — closed or none at all. */
   elements: Array<{ shadowRoot: FakeRoot | null }>
   querySelectorAll(selector: string): unknown[]
@@ -94,12 +99,15 @@ interface FakeRoot {
 
 function fakeRoot(): FakeRoot {
   const videos: FakeVideo[] = []
+  const sounds: FakeVideo[] = []
   const elements: Array<{ shadowRoot: FakeRoot | null }> = []
 
   return {
     videos,
+    sounds,
     elements,
-    querySelectorAll: (selector: string) => (selector === 'video' ? videos : elements),
+    querySelectorAll: (selector: string) =>
+      selector === 'video,audio' ? [...videos, ...sounds] : elements,
   }
 }
 
@@ -172,6 +180,8 @@ async function startWatcher() {
   const encrypted = { times: 0 }
   /** Every ordinary file the watcher has reported, in the order the reports went out. */
   const plain: PlainSource[] = []
+  /** Every soundtrack the watcher has reported, in the order the reports went out. */
+  const sounds: SoundSource[] = []
   /**
    * Both kinds of report in one list, tagged. A plain source and the verdict about it are two
    * messages about one thing, and the order they leave in is part of what is under test: a bridge
@@ -190,9 +200,13 @@ async function startWatcher() {
       plain.push(source)
       order.push(`plain ${source.sourceId}`)
     },
+    (source) => {
+      sounds.push(source)
+      order.push(`sound ${source.sourceId}`)
+    },
   )
 
-  return { ...watcher, seen, unreachable, encrypted, plain, order }
+  return { ...watcher, seen, unreachable, encrypted, plain, sounds, order }
 }
 
 /**
@@ -912,5 +926,180 @@ describe('the watcher and an ordinary file', () => {
 
     expect(watcher.plain).toHaveLength(1)
     expect(watcher.seen).toEqual([{ sourceId: CLIP_ID, verdict: 'promote' }])
+  })
+})
+
+/** The soundtrack the page plays beside the picture: seven times as long, on a cycle of its own. */
+const TRACK_URL = 'https://cdn.example/track.mp3'
+const TRACK_ID = `sound:${TRACK_URL}`
+
+/**
+ * An `<audio>` playing that soundtrack.
+ *
+ * No box on the screen, which is the whole reason a soundtrack can never be judged like a
+ * picture: triage weighs an element by how wide it is, and this is nought by nought.
+ */
+const soundElement = (overrides: Record<string, unknown> = {}) =>
+  fakeVideo({
+    localName: 'audio',
+    src: TRACK_URL,
+    currentSrc: TRACK_URL,
+    duration: 66.35,
+    loop: true,
+    box: box(0, 0),
+    buffered: ranges([0, 66.35]),
+    ...overrides,
+  })
+
+/** Puts a soundtrack on the page beside whatever pictures are already there. */
+function play(element: FakeVideo, root: FakeRoot = documentRoot): FakeVideo {
+  root.sounds.push(element)
+  return element
+}
+
+/** The picture half of such a page: short, silent, looping, and drawn by the site's own controls. */
+const loopingPicture = (overrides: Record<string, unknown> = {}) =>
+  plainVideo({ muted: true, loop: true, controls: false, duration: 9.48, ...overrides })
+
+describe('the watcher and a page that plays its sound apart from its picture', () => {
+  it('reports the soundtrack an <audio> is playing', async () => {
+    const watcher = await startWatcher()
+    play(soundElement())
+
+    tick()
+
+    expect(watcher.sounds).toEqual([
+      {
+        sourceId: TRACK_ID,
+        url: TRACK_URL,
+        durationSeconds: 66.35,
+        buffered: [[0, 66.35]],
+        playing: true,
+      },
+    ])
+  })
+
+  it('never judges it and never offers it as a recording of its own', async () => {
+    const watcher = await startWatcher()
+    play(soundElement())
+
+    tick(20)
+
+    // Ten seconds of playing and not one verdict, because there is nothing to judge: a file of
+    // somebody's music with no picture is not a clip of anything. It is also never a plain
+    // source, which is what would have made it a session.
+    expect(watcher.seen).toEqual([])
+    expect(watcher.plain).toEqual([])
+  })
+
+  it('says a track that is standing still is not playing', async () => {
+    const watcher = await startWatcher()
+    play(soundElement({ paused: true }))
+
+    tick()
+
+    // A page holds `<audio>` that never plays — a notification, a hover sound — and one of those
+    // says nothing at all about the picture beside it.
+    expect(watcher.sounds.at(-1)?.playing).toBe(false)
+  })
+
+  it('does not repeat itself while the page knows nothing new', async () => {
+    const watcher = await startWatcher()
+    play(soundElement())
+
+    tick(20)
+
+    expect(watcher.sounds).toHaveLength(1)
+  })
+
+  it('says it again when the track starts or stops', async () => {
+    const watcher = await startWatcher()
+    const sound = play(soundElement({ paused: true }))
+
+    tick()
+    sound.paused = false
+    tick()
+
+    expect(watcher.sounds.map((one) => one.playing)).toEqual([false, true])
+  })
+
+  it('records the looping silent picture beside it, which alone would be a banner', async () => {
+    const watcher = await startWatcher()
+    stand(loopingPicture())
+    play(soundElement())
+
+    tick(13)
+
+    // Muted, looping, no controls: the shape of a banner, and refused as one on every ordinary
+    // page. Here the sound of the page is simply in the other element, and the two together are
+    // the work (§5.6).
+    expect(watcher.seen).toEqual([{ sourceId: CLIP_ID, verdict: 'promote' }])
+  })
+
+  it('refuses that picture again once the sound has stopped', async () => {
+    const watcher = await startWatcher()
+    stand(loopingPicture())
+    const sound = play(soundElement())
+
+    tick(13)
+    sound.paused = true
+    tick()
+
+    // Nothing is playing sound on the page any more, so the looping silent picture is a banner
+    // again — which is what it is on the ten measured pages that hold nothing else.
+    expect(watcher.seen).toEqual([
+      { sourceId: CLIP_ID, verdict: 'promote' },
+      { sourceId: CLIP_ID, verdict: 'reject' },
+    ])
+  })
+
+  it('goes on refusing a banner on a page whose sound is standing still', async () => {
+    const watcher = await startWatcher()
+    stand(plainBanner())
+    play(soundElement({ paused: true }))
+
+    tick(13)
+
+    expect(watcher.seen).toEqual([{ sourceId: CLIP_ID, verdict: 'reject' }])
+  })
+
+  it('finds a soundtrack inside an open shadow root', async () => {
+    const watcher = await startWatcher()
+    stand(loopingPicture())
+    play(soundElement(), attachShadow())
+
+    tick(13)
+
+    expect(watcher.sounds).toHaveLength(1)
+    expect(watcher.seen).toEqual([{ sourceId: CLIP_ID, verdict: 'promote' }])
+  })
+
+  it('gives two elements playing one track one identity', async () => {
+    const watcher = await startWatcher()
+    play(soundElement())
+    play(soundElement({ paused: true }))
+
+    tick()
+
+    // One track is one track however many elements the page hangs it on, and the one that is
+    // playing speaks for it: a paused copy must not make the page look silent.
+    expect(watcher.sounds).toHaveLength(1)
+    expect(watcher.sounds[0]?.playing).toBe(true)
+  })
+
+  it('forgets a soundtrack whose element left the page', async () => {
+    const watcher = await startWatcher()
+    stand(loopingPicture())
+    const sound = play(soundElement())
+
+    tick(13)
+    sound.isConnected = false
+    documentRoot.sounds.length = 0
+    tick()
+
+    expect(watcher.seen).toEqual([
+      { sourceId: CLIP_ID, verdict: 'promote' },
+      { sourceId: CLIP_ID, verdict: 'reject' },
+    ])
   })
 })

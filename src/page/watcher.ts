@@ -1,16 +1,16 @@
 import { triage, BALANCED, type TriageVerdict, type VideoSignals } from '../core/triage'
-import type { PlainSource } from '../shared/protocol'
+import type { PlainSource, SoundSource } from '../shared/protocol'
 
 /** Как часто пересматриваются сигналы каждого <video>. */
 const POLL_INTERVAL_MS = 500
 
 interface Watched {
-  element: HTMLVideoElement
+  element: HTMLMediaElement
   playedSeconds: number
   lastTick: number
 }
 
-const watched = new Map<HTMLVideoElement, Watched>()
+const watched = new Map<HTMLMediaElement, Watched>()
 /** адрес из createObjectURL → идентификатор потока */
 const sourcesByUrl = new Map<string, string>()
 /**
@@ -60,6 +60,22 @@ const plainTold = new Map<string, string>()
 const PLAIN_PREFIX = 'plain:'
 
 /**
+ * The same for a soundtrack, and a prefix of its own so that the two can never be confused.
+ *
+ * A page may hang one address on a `<video>` and on an `<audio>` both — nothing forbids it — and
+ * the two are different offers: one is a recording, the other is sound for a recording beside it.
+ */
+const SOUND_PREFIX = 'sound:'
+
+/**
+ * What has already been said about each soundtrack; the counterpart of plainTold.
+ *
+ * A soundtrack is re-read on every poll like a file, and almost every reading is the same
+ * reading. Only a change travels.
+ */
+const soundTold = new Map<string, string>()
+
+/**
  * The ordinary file this element is playing, or null when it is playing something else.
  *
  * "Something else" is a MediaSource, whose material is captured as it is appended and must never
@@ -71,7 +87,7 @@ const PLAIN_PREFIX = 'plain:'
  * Everything else — an http or https address in `currentSrc` — is a file, which is how eighteen
  * of the twenty-one live pages that delivered any video at all delivered it.
  */
-function plainSourceOf(element: HTMLVideoElement): PlainSource | null {
+function plainSourceOf(element: HTMLMediaElement): PlainSource | null {
   const url = element.currentSrc
   if (!url) return null
 
@@ -102,6 +118,30 @@ function plainSourceOf(element: HTMLVideoElement): PlainSource | null {
 /** Everything about a plain source that a report would carry, as one string to compare. */
 function plainSignature(source: PlainSource): string {
   return `${source.durationSeconds}|${source.buffered.map((pair) => pair.join('-')).join(',')}`
+}
+
+/**
+ * The soundtrack an `<audio>` is playing, or null when it is playing something a fetch cannot
+ * reach — the same rules a picture is read by, and read by the very same function.
+ *
+ * What is added is `playing`, and it is the whole of what makes a soundtrack one: a page holds
+ * `<audio>` elements that never play, and a notification chime says nothing about the picture
+ * beside it.
+ */
+function soundSourceOf(element: HTMLMediaElement): SoundSource | null {
+  const plain = plainSourceOf(element)
+  if (!plain) return null
+
+  return {
+    ...plain,
+    sourceId: `${SOUND_PREFIX}${plain.url}`,
+    playing: !element.paused && !element.ended && element.readyState >= 2,
+  }
+}
+
+/** Everything about a soundtrack that a report would carry, as one string to compare. */
+function soundSignature(source: SoundSource): string {
+  return `${source.playing ? 1 : 0}|${plainSignature(source)}`
 }
 
 /** What one element has to say about the file it is playing. */
@@ -187,7 +227,7 @@ export function bindSource(element: object, sourceId: string): void {
  * Поток, чей адрес стоит у элемента. Связь односторонняя: хук в MAIN world знает только
  * адрес из createObjectURL, а какому <video> его присвоили — видно лишь отсюда.
  */
-function sourceIdOf(element: HTMLVideoElement): string | null {
+function sourceIdOf(element: HTMLMediaElement): string | null {
   return (
     boundSources.get(element) ??
     sourcesByUrl.get(element.currentSrc) ??
@@ -196,7 +236,7 @@ function sourceIdOf(element: HTMLVideoElement): string | null {
   )
 }
 
-function signalsOf(state: Watched): VideoSignals {
+function signalsOf(state: Watched, soundApart: boolean): VideoSignals {
   const element = state.element
   const rect = element.getBoundingClientRect()
   const onScreen =
@@ -215,6 +255,10 @@ function signalsOf(state: Watched): VideoSignals {
     visible: onScreen && document.visibilityState === 'visible',
     playing: !element.paused && !element.ended && element.readyState >= 2,
     playedSeconds: state.playedSeconds,
+    // Звук этой страницы играет в другом элементе, и значит беззвучность этого — не отсутствие
+    // звука, а разделение картинки и звука по двум элементам (§5.6). Единственный сигнал,
+    // который не про сам элемент; зачем он нужен — в VideoSignals.soundApart.
+    soundApart,
     // Ключи, выданные самому элементу: страница присоединила к нему CDM, и что бы он ни играл
     // дальше, писать это не нужно. Отказ здесь адресный — по элементу, а не по странице; отказ
     // по всей странице выносится по самому материалу, когда в нём находится шифрование
@@ -281,6 +325,16 @@ export function startWatching(
    * paid for material nobody would ever save.
    */
   onPlain: (source: PlainSource) => void = () => {},
+  /**
+   * An `<audio>` of this page is playing a soundtrack of its own (§5.6).
+   *
+   * Said on the same terms as onPlain — when what the element knows changes, never while it does
+   * not — and it is never a recording. Triage is not asked about it and cannot be: an `<audio>`
+   * has no width on the screen, which is the first thing the filter weighs. What a soundtrack can
+   * be is the sound of a picture on the same page that has none of its own, and that pairing is
+   * the registry's business.
+   */
+  onSound: (source: SoundSource) => void = () => {},
 ): void {
   /** Whether the page has already been declared unrecordable. */
   let saidUnreachable = false
@@ -291,7 +345,7 @@ export function startWatching(
   const observed = new WeakSet<ShadowRoot>()
 
   /** Puts one element under watch; one already watched keeps the time it has played. */
-  const take = (video: HTMLVideoElement) => {
+  const take = (video: HTMLMediaElement) => {
     if (watched.has(video)) return
     watched.set(video, { element: video, playedSeconds: 0, lastTick: performance.now() })
 
@@ -306,8 +360,12 @@ export function startWatching(
     })
   }
 
+  // `<audio>` as well as `<video>`, and the two are not treated alike past this point: an audio
+  // element is never judged, never a session and never a saved file of its own. It is watched
+  // because a page that plays its sound apart from its picture (§5.6) cannot be understood from
+  // the picture alone — the element beside it is the evidence that the silence is not silence.
   const takeTree = (root: ParentNode) => {
-    for (const video of root.querySelectorAll('video')) take(video)
+    for (const element of root.querySelectorAll('video,audio')) take(element as HTMLMediaElement)
   }
 
   /** The whole page: the document and every open shadow tree in it, however deep. */
@@ -337,7 +395,9 @@ export function startWatching(
     for (const record of records) {
       for (const node of record.addedNodes) {
         if (!(node instanceof Element)) continue
-        if (node.localName === 'video') take(node as HTMLVideoElement)
+        if (node.localName === 'video' || node.localName === 'audio') {
+          take(node as HTMLMediaElement)
+        }
         takeTree(node)
       }
     }
@@ -360,7 +420,43 @@ export function startWatching(
     /** For each ordinary file, the element that speaks for it this poll; see outranks. */
     const speaking = new Map<string, Speaker>()
 
+    // The soundtracks first, because the pictures are read differently in their presence: an
+    // `<audio>` playing beside a silent looping `<video>` is what tells the filter that the
+    // silence is not silence but a page keeping its sound in another element (§5.6).
+    //
+    // An `<audio>` is never judged and never claims a stream. One playing a MediaSource is left
+    // exactly where it was before this loop existed — unclaimed, and refused for it below —
+    // because triage weighs an element by its width on the screen and this kind has none.
+    const sounds = new Map<string, SoundSource>()
+
+    for (const [element] of watched) {
+      if (element.localName !== 'audio') continue
+      if (!element.isConnected) {
+        watched.delete(element)
+        continue
+      }
+
+      const sound = soundSourceOf(element)
+      if (!sound) continue
+
+      // One track on two elements is one track, and the one that is playing speaks for it.
+      const standing = sounds.get(sound.sourceId)
+      if (!standing || (sound.playing && !standing.playing)) sounds.set(sound.sourceId, sound)
+    }
+
+    /** Anything on this page is playing sound of its own; see VideoSignals.soundApart. */
+    let soundApart = false
+    for (const sound of sounds.values()) if (sound.playing) soundApart = true
+
+    for (const [sourceId, sound] of sounds) {
+      const signature = soundSignature(sound)
+      if (soundTold.get(sourceId) === signature) continue
+      soundTold.set(sourceId, signature)
+      onSound(sound)
+    }
+
     for (const [element, state] of watched) {
+      if (element.localName === 'audio') continue
       // Элемент, выброшенный со страницы, продолжал бы считаться живым: ссылка на него
       // держится здесь, и никакой другой уборки у наблюдателя нет.
       if (!element.isConnected) {
@@ -371,7 +467,7 @@ export function startWatching(
       const elapsed = (now - state.lastTick) / 1000
       state.lastTick = now
 
-      const signals = signalsOf(state)
+      const signals = signalsOf(state, soundApart)
       // Сыгранное с прошлого опроса — уже сыгранное, и в вердикт оно идёт сразу: начисли
       // его после, и порог пересекался бы опросом позже, чем на самом деле. Пауза, скрытая
       // вкладка и уход с экрана просто останавливают счётчик, не сбрасывая накопленное.

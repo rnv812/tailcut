@@ -44,10 +44,28 @@ const PROTECTED =
  */
 const OMITTED: Record<Omission, string> = {
   track: 'One track is in a format tailcut cannot save.',
+  // A page that plays its sound in an element of its own, where that element could not be used.
+  // Said out loud rather than left to be discovered in a player: the clip really is silent, and
+  // on this kind of page a silent clip looks like a defect in the saving rather than a page whose
+  // sound was somewhere tailcut could not follow.
+  sound: 'This page plays its sound in a separate track that tailcut could not read; the clip is silent.',
   rendition: 'Recorded at more than one quality; one is saved.',
   alternate: 'This file has more than one picture or sound track; one of each is saved.',
   gap: 'Recording has gaps: the longest piece is saved.',
+  // The same page, paired: the track ran out before the picture did, and nothing is looped round
+  // to cover the rest. The page played what it played.
+  soundShort: 'The separate soundtrack is shorter than the picture; the clip ends in silence.',
 }
+
+/**
+ * A clip whose sound came from a track playing beside the picture.
+ *
+ * Not a loss, so not an omission — the length above already counts it — but not the video's own
+ * sound either, and the difference is worth a line. On such a page the picture and the sound are
+ * two files of different lengths looping on cycles of their own (§5.6); what goes into the clip
+ * is the start of the track, which is where the page itself puts the two together when it loads.
+ */
+const PAIRED_SOUND = 'Sound here is a separate looping track on this page, taken from its start.'
 
 /** Why the editor did not open, in the words the user is shown. */
 const EDIT_FAILED: Record<NonNullable<EditResult['reason']>, string> = {
@@ -227,6 +245,11 @@ function Popup() {
         {omitted && (
           <div class="omits" data-testid="omits">
             {omitted}
+          </div>
+        )}
+        {current.pairedSound && (
+          <div class="omits" data-testid="paired-sound">
+            {PAIRED_SOUND}
           </div>
         )}
         {answer.unreachable && (

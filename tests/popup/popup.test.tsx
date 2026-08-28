@@ -285,6 +285,17 @@ describe('the popup', () => {
     // and two soundtracks the popup said the video had been recorded at more than one quality.
     ['alternate', 'This file has more than one picture or sound track; one of each is saved.'],
     ['gap', 'Recording has gaps: the longest piece is saved.'],
+    // A page that keeps its sound in an element of its own, where that element could not be used.
+    // The clip really is silent, and on such a page a silent clip reads as a defect in the saving
+    // rather than as a page whose sound was somewhere tailcut could not follow.
+    [
+      'sound',
+      'This page plays its sound in a separate track that tailcut could not read; the clip is silent.',
+    ],
+    [
+      'soundShort',
+      'The separate soundtrack is shorter than the picture; the clip ends in silence.',
+    ],
   ])('says what the file will be missing when part of it cannot be saved (%s)', async (
     omits,
     line,
@@ -319,6 +330,32 @@ describe('the popup', () => {
     await click(allAt('session')[0]!)
 
     expect(at('omits'), 'the notice of the previous session stayed on screen').toBeNull()
+  })
+
+  it('says where the sound came from when it came from a track beside the picture', async () => {
+    await mount({ sessions: [{ ...fresh, pairedSound: true }] })
+
+    // Not a loss — the length above already counts it — but not the video's own sound either.
+    // On such a page the picture and the track are two files of different lengths looping on
+    // cycles of their own, and the clip takes the track from its start (§5.6).
+    expect(textAt('paired-sound')).toBe(
+      'Sound here is a separate looping track on this page, taken from its start.',
+    )
+    expect(at('omits')).toBeNull()
+  })
+
+  it('says nothing of the sort about an ordinary video with its own sound', async () => {
+    await mount({ sessions: [fresh] })
+
+    expect(at('paired-sound')).toBeNull()
+  })
+
+  it('carries that line with the session it belongs to', async () => {
+    await mount({ sessions: [{ ...fresh, pairedSound: true }, older] })
+
+    await click(allAt('session')[0]!)
+
+    expect(at('paired-sound')).toBeNull()
   })
 
   it('saves the session it showed', async () => {

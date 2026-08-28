@@ -24,6 +24,22 @@ export interface VideoSignals {
   /** сколько секунд элемент реально воспроизводился */
   playedSeconds: number
   /**
+   * Something else on this page is playing the sound for this element.
+   *
+   * The one signal here that is not about the element itself, and it is here because the banner
+   * rule below cannot be right without it. That rule reads "muted, looping, no controls" as
+   * decoration, and it is correct about nearly everything on the web — but it is exactly the
+   * shape of one half of a work whose other half is an `<audio>` playing beside it (§5.6): a
+   * short silent loop of picture under a long soundtrack, which is what one site of the seven
+   * surveyed is made of. Such a picture is not silent at all; the sound is simply in another
+   * element, and the page is playing it.
+   *
+   * It says nothing about width or watching, and it removes none of the other refusals: a
+   * looping silent picture on a page with music behind it still has to be a real player of a real
+   * size, watched through the whole grace period, before anything is kept of it.
+   */
+  soundApart: boolean
+  /**
    * К элементу присоединён CDM: страница вызвала `setMediaKeys` с настоящими ключами.
    *
    * Признак адресный — про этот элемент и ничего больше. Отказ по всей странице выносится не
@@ -74,8 +90,10 @@ export function triage(signals: VideoSignals, config: TriageConfig): TriageVerdi
   if (Number.isNaN(signals.widthPx) || signals.widthPx < config.minWidthPx) return 'reject'
   if (!signals.visible) return 'reject'
 
-  // Беззвучное, зациклённое и без панели управления — это баннер, а не видео.
-  if (signals.muted && signals.loop && !signals.controls) return 'reject'
+  // Беззвучное, зациклённое и без панели управления — это баннер, а не видео. Если только звук
+  // не играет рядом: тогда беззвучность элемента — это не отсутствие звука на странице, а
+  // разделение картинки и звука по двум элементам, и перед нами половина работы, а не украшение.
+  if (signals.muted && signals.loop && !signals.controls && !signals.soundApart) return 'reject'
   if (signals.muted && !config.recordMuted) return 'reject'
 
   // Только накопленное время. Пауза уже учтена тем, что на ней playedSeconds

@@ -84,6 +84,15 @@ export type PageToBridge =
    * arrived, a buffered range that grows while the file downloads — and silent while it does not.
    */
   | ({ type: 'tc:plain' } & PlainSource)
+  /**
+   * An `<audio>` of the page is playing a soundtrack of its own: see SoundSource.
+   *
+   * Said on the same terms as tc:plain — when what the element knows changes, and never while it
+   * does not — and it is never a recording by itself. A soundtrack becomes anything at all only
+   * beside a picture that has no sound of its own, and what comes of the pairing is settled by
+   * the registry (src/bridge/session-store.ts) and described over `SoundApart`.
+   */
+  | ({ type: 'tc:sound' } & SoundSource)
 
 /**
  * A media element playing an ordinary file: `currentSrc` is an http(s) address rather than a blob
@@ -128,6 +137,41 @@ export interface PlainSource {
 }
 
 /**
+ * An `<audio>` element playing a soundtrack of its own, beside a picture that has none.
+ *
+ * The other half of the one page shape tailcut could not deliver (§5.6): the picture in a
+ * `<video src>` with no audio track in it, the sound in a separate `<audio src>` seven times as
+ * long, both looping on cycles of their own. Measured on coub, one site of the seven surveyed.
+ *
+ * It is reported and never judged. Triage weighs an element by how wide it is on the screen and
+ * how long it has been watched, and an `<audio>` has no width at all — so a soundtrack is never a
+ * session, never a row in the popup and never a saved file by itself. A file of somebody's music
+ * with no picture is not a clip of anything, and offering one would make tailcut a music
+ * downloader, which §2 puts out of scope. What it can be is the sound of a picture beside it, and
+ * that is the whole of what this message is for.
+ */
+export interface SoundSource {
+  /** Identity of the soundtrack inside the page: its address, marked off as a sound. */
+  sourceId: string
+  /** The address the element resolved, absolute, exactly as it will have to be fetched. */
+  url: string
+  /** How long the whole track is as the element states it; zero while it states nothing. */
+  durationSeconds: number
+  /** What the element holds right now, in seconds: the pairs of `HTMLMediaElement.buffered`. */
+  buffered: Array<[number, number]>
+  /**
+   * The element is playing right now.
+   *
+   * What makes a soundtrack a soundtrack rather than a sound effect waiting for a click. A page
+   * holds `<audio>` elements that never play — a notification, a hover sound — and one of those
+   * says nothing about the picture beside it. Only a track the page is actually playing is
+   * offered to a picture, and only a track that is playing tells the filter that a silent looping
+   * picture is not a banner (`VideoSignals.soundApart`).
+   */
+  playing: boolean
+}
+
+/**
  * How the main world tells the isolated one which stream an element is playing.
  *
  * Only for streams that come out of a worker: those have no address for the watcher to find them
@@ -152,6 +196,13 @@ export const SOURCE_EVENT = 'tailcut:source'
  *
  * - `track` — a stream the ingest boundary refused: its container or codec cannot be written
  *   out, nothing of it was ever collected, and the file is short of a whole kind of media.
+ * - `sound` — this page plays its sound in an element of its own beside a picture that has none
+ *   (§5.6), and that soundtrack could not be used: unreadable, or two of them playing at once
+ *   with nothing to say which belongs to the picture. The clip is silent, which is the one thing
+ *   the popup must not leave the user to discover in a player.
+ * - `soundShort` — the same page, paired: the soundtrack was taken and it runs out before the
+ *   picture does, so the end of the clip is silent. Nothing is looped round to cover it — the
+ *   page played what it played.
  * - `rendition` — the picture or the sound was recorded at more than one quality (§6.2), and
  *   one file carries one of them.
  * - `alternate` — the material holds more than one track of a kind, and one file carries one of
@@ -161,7 +212,7 @@ export const SOURCE_EVENT = 'tailcut:source'
  *   one picture and two soundtracks, which the popup called "recorded at more than one quality".
  * - `gap` — the material is not continuous, and a save takes the longest unbroken stretch.
  */
-export type Omission = 'track' | 'rendition' | 'alternate' | 'gap'
+export type Omission = 'track' | 'sound' | 'rendition' | 'alternate' | 'gap' | 'soundShort'
 
 /**
  * Summary of one session of the registry: this is what the bridge answers a list request with,
@@ -200,6 +251,16 @@ export interface SessionSummary {
   bytes: number
   /** What the file will not hold of what was recorded; absent when it holds all of it. */
   omits?: Omission
+  /**
+   * The sound of this clip comes from a separate track the page was playing beside the picture.
+   *
+   * Not an omission — nothing is missing, and the number above already counts it — but it is not
+   * silence either, and the user is owed the sentence. The file will carry a soundtrack that is
+   * not the video's own sound: it is a thing playing underneath on a cycle of its own, taken from
+   * its start, which is where the page itself pairs the two. See `SoundApart` for why that
+   * pairing and not another.
+   */
+  pairedSound?: boolean
 }
 
 /**
@@ -373,7 +434,8 @@ export function isPageToBridge(value: unknown): value is PageToBridge {
     type === 'tc:source' ||
     type === 'tc:worker' ||
     type === 'tc:duration' ||
-    type === 'tc:plain'
+    type === 'tc:plain' ||
+    type === 'tc:sound'
   )
 }
 

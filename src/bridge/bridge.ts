@@ -9,7 +9,7 @@ import {
   type SessionList,
   type SessionSummary,
 } from '../shared/protocol'
-import { openPlainFile } from './loader'
+import { openPlainFile, openSoundFile } from './loader'
 import {
   SessionStore,
   fileSnapshotSourceOf,
@@ -29,6 +29,10 @@ import { writeSaveFile } from './write'
  */
 const store = new SessionStore({
   openPlain: (url) => openPlainFile(url),
+  // The soundtrack of a page that plays its sound apart from its picture (§5.6). Read from here
+  // for the same reason the picture is — a ranged fetch of somebody's CDN is refused from the
+  // page — and only as far as the picture is long, so the whole of a music file is never fetched.
+  openSound: (url, seconds) => openSoundFile(url, seconds),
   // The read of a file's tables is the one thing here that finishes after the message that asked
   // for it: the session it makes appears with nothing else arriving to carry the word out. A file
   // watched to the end and fully downloaded would otherwise be recorded and never counted on the
@@ -460,6 +464,21 @@ window.addEventListener('message', (event: MessageEvent) => {
       now: Date.now(),
     })
     tellRecording()
+    return
+  }
+
+  // An <audio> of the page is playing a soundtrack of its own. It is not a recording and does not
+  // become one: what it can be is the sound of a picture on this page that has none, which the
+  // registry decides. Nothing of the material travels here either — the browser fetched the track
+  // and the hook never saw it.
+  if (data.type === 'tc:sound') {
+    store.sound({
+      sourceId: data.sourceId,
+      url: data.url,
+      durationSeconds: data.durationSeconds,
+      buffered: data.buffered,
+      playing: data.playing,
+    })
     return
   }
 

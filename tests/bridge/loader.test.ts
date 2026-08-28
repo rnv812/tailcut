@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import {
   ReadRefused,
   openPlainFile,
+  openSoundFile,
   rangeReaderFor,
   totalFromContentRange,
 } from '../../src/bridge/loader'
@@ -14,6 +15,8 @@ const whole = new Uint8Array(readFileSync('tests/fixtures/plain/whole.mp4'))
 const matroska = new Uint8Array(readFileSync('tests/fixtures/plain/watched.webm'))
 /** VP8 and Vorbis, which is what an imageboard hands over. */
 const older = new Uint8Array(readFileSync('tests/fixtures/plain/watched-vp8.webm'))
+/** A soundtrack playing beside a picture that has none: a bare MPEG audio stream. */
+const track = new Uint8Array(readFileSync('tests/fixtures/plain/track.mp3'))
 
 /** A Response takes a view over a plain ArrayBuffer and not one that might be shared memory. */
 const bodyOf = (bytes: Uint8Array): ArrayBuffer =>
@@ -233,5 +236,56 @@ describe('openPlainFile', () => {
     const failing = (async () => new Response('gone', { status: 404 })) as unknown as typeof fetch
 
     expect(await openPlainFile('https://cdn.example/clip', { fetch: failing })).toBeNull()
+  })
+})
+
+describe('openSoundFile', () => {
+  const open = (file: Uint8Array, seconds: number) => {
+    const host = server(file, 'ranges')
+    return { host, opened: openSoundFile('https://cdn.example/track', seconds, { fetch: host.call }) }
+  }
+
+  it('reads the head of a bare mp3 and no more of it than the picture can use', async () => {
+    const { host, opened } = open(track, 3.5)
+    const sound = (await opened)!
+
+    expect(sound.track.kind).toBe('audio')
+    expect(sound.track.timescale).toBe(44100)
+
+    // One request, and a small one: the whole track is 98 kB of somebody's music and a clip of
+    // three and a half seconds can use fourteen of them.
+    expect(host.asked.length).toBe(1)
+
+    let ticks = 0
+    for (const sample of sound.track.samples) ticks += sample.duration
+    expect(ticks / sound.track.timescale).toBeGreaterThanOrEqual(3.5)
+    expect(ticks / sound.track.timescale).toBeLessThan(3.6)
+  })
+
+  it('hands back the reader the frames were addressed with, ready for the save', async () => {
+    const { host, opened } = open(track, 1)
+    const sound = (await opened)!
+
+    const asked = host.asked.length
+    const answer = await sound.read(0, 4)
+
+    expect(answer.bytes).toEqual(track.subarray(0, 4))
+    expect(host.asked.length).toBe(asked + 1)
+  })
+
+  it('takes the sound out of a soundtrack that arrives in a container', async () => {
+    // An m4a beside a video is a soundtrack like any other, and it comes in through the very
+    // reader an ordinary file does. The picture this file also holds is not what was asked for.
+    const sound = (await open(whole, 3).opened)!
+
+    expect(sound.track.kind).toBe('audio')
+    expect(sound.track.samples.length).toBeGreaterThan(0)
+  })
+
+  it('gives nothing for an address that holds no sound at all', async () => {
+    const nonsense = new Uint8Array(4096)
+    nonsense.set(new TextEncoder().encode('not a soundtrack either'), 0)
+
+    expect(await open(nonsense, 3).opened).toBeNull()
   })
 })

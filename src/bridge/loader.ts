@@ -1,8 +1,11 @@
 import { PROBE_BYTES, locateMovie, type RangeRead, type RangeReader } from '../core/iso/locate'
 import { plainFileOf, type OpenedFile } from '../core/export/plain'
 import { matroskaFileOf } from '../core/export/matroska'
+import { mpegSoundOf } from '../core/export/mpeg'
+import { beginsLikeMpegAudio, indexMpegStream, FIRST_WINDOW_BYTES } from '../core/mpeg/whole'
 import { beginsLikeMatroska, locateSegment } from '../core/webm/locate'
 import { indexClusters } from '../core/webm/whole'
+import type { SourceTrack } from '../core/export/plan'
 
 /**
  * Reading pieces of somebody else's file, from the one place in the extension that is allowed to.
@@ -225,6 +228,59 @@ export async function openPlainFile(url: string, options: LoaderOptions = {}): P
   }
 }
 
+/** A soundtrack opened for reading: the track it holds, and the reader its material comes by. */
+export interface OpenedSound {
+  track: SourceTrack
+  read: RangeReader
+}
+
+/**
+ * Opens the soundtrack a page is playing beside a picture that has none (§5.6, `SoundApart`).
+ *
+ * `seconds` is how much of it can ever be used — the length of the picture it will be laid
+ * against — and it is the bound on what is read as well as on what is indexed. The whole of
+ * somebody's music file is never fetched: measured on the fixture, three and a half seconds of a
+ * twenty-four second track is one request of fourteen kilobytes.
+ *
+ * Three containers are tried in the order the front of the file settles: a bare MPEG audio stream,
+ * which is what the site the survey found this shape on serves; a Matroska; an mp4. The last two
+ * go through the very readers an ordinary file goes through, and what is taken out of them is the
+ * first sound track — an m4a beside a video is a soundtrack like any other, and there is nothing
+ * about this road that is particular to mp3.
+ *
+ * Null when there is no sound to be had: an address that has expired, a host that will not range,
+ * a file this cannot read, a protected one.
+ */
+export async function openSoundFile(
+  url: string,
+  seconds: number,
+  options: LoaderOptions = {},
+): Promise<OpenedSound | null> {
+  const read = rangeReaderFor(url, options)
+
+  try {
+    const front = await read(0, FIRST_WINDOW_BYTES)
+    const withFront = lending(read, front, FIRST_WINDOW_BYTES)
+
+    if (beginsLikeMpegAudio(front.bytes)) {
+      const walk = await indexMpegStream(withFront, seconds)
+      const track = walk && mpegSoundOf(walk)
+      return track ? { track, read } : null
+    }
+
+    const file = beginsLikeMatroska(front.bytes)
+      ? await openMatroska(withFront, front.total)
+      : await openMovie(withFront)
+
+    if (!file || file.encrypted) return null
+
+    const track = file.tracks.find((candidate) => candidate.kind === 'audio')
+    return track ? { track, read } : null
+  } catch {
+    return null
+  }
+}
+
 /** An mp4: the movie box, and the six tables of every track in it. */
 async function openMovie(read: RangeReader): Promise<OpenedFile['file'] | null> {
   const found = await locateMovie(read)
@@ -257,11 +313,12 @@ async function openMatroska(read: RangeReader, total: number): Promise<OpenedFil
  * Anything that lies inside what has been read is answered out of it; everything else goes to the
  * host. The one subtlety is a file shorter than the probe: the answer came back short because
  * there is no more of it, and a request past its end must be answered with what there is rather
- * than sent to the host to be answered the same way again.
+ * than sent to the host to be answered the same way again — which is why `asked` has to be the
+ * length that was actually asked for and not a constant.
  */
-function lending(read: RangeReader, front: RangeRead): RangeReader {
+function lending(read: RangeReader, front: RangeRead, asked = PROBE_BYTES): RangeReader {
   const held = front.bytes
-  const complete = held.byteLength < PROBE_BYTES
+  const complete = held.byteLength < asked
 
   return async (at, length) => {
     if (at >= 0 && (at + length <= held.byteLength || (complete && at <= held.byteLength))) {
