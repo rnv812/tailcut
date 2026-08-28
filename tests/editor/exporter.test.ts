@@ -34,6 +34,16 @@ const SEGMENTS = [1, 2, 3].map((n) => read(`h264/chunk-stream0-0000${n}.m4s`))
  */
 const WHOLE = read('plain/whole.mp4')
 
+/**
+ * One buffer carrying both kinds, as a page that muxes its own material sends them.
+ *
+ * Two traks in the init and two trafs in every segment, and each trak states an edit list of its
+ * own. There is no second stream anywhere: the sound of this recording exists only inside the
+ * segments the picture arrived in.
+ */
+const MUXED_INIT = read('muxed-edits/init-stream0.m4s')
+const MUXED_SEGMENTS = [1, 2, 3].map((n) => read(`muxed-edits/chunk-stream0-0000${n}.m4s`))
+
 const page = {
   sessionKey: 'https://site.example/watch|avc1|inf',
   url: 'https://site.example/watch?v=abc',
@@ -119,6 +129,23 @@ const fileSnapshot = (): Promise<SnapshotReader> => {
   })
 }
 
+/** That buffer as a snapshot: one captured track, both kinds, no file to fall back on. */
+const muxedSnapshot = (): Promise<SnapshotReader> =>
+  snapshotFrom({
+    page,
+    tracks: [
+      {
+        id: 't0',
+        bufferId: 'sb-1',
+        representation: 'muxed:avc1.4d401e+mp4a.40.2:320x240',
+        kinds: ['video', 'audio'],
+        info: parseInit(MUXED_INIT)!,
+        initBytes: MUXED_INIT,
+        chunks: MUXED_SEGMENTS.map((bytes, at) => ({ start: at * 2, end: at * 2 + 2, bytes })),
+      },
+    ],
+  })
+
 const clip = (over: Partial<Clip> = {}): Clip => ({
   id: 'c1',
   name: 'A page about cats 01.23',
@@ -159,6 +186,38 @@ describe('openClipSource', () => {
     expect(source.video.kind).toBe('video')
     expect(source.video.samples).toHaveLength(60)
     expect(source.audio, 'the sound of the file was left behind').toBeDefined()
+  })
+
+  it('takes the sound of a muxed buffer out of the picture\u2019s own segments', async () => {
+    // One SourceBuffer for both kinds, which is the shape where the material has no sound track
+    // to point at: the audio slot is empty and the sound is inside the picture's segments under
+    // a track number of its own. Read as picture alone the recording exports silent, and there
+    // is nothing on the screen to say so \u2014 the panel offers the clip and the file is mute.
+    const reader = await muxedSnapshot()
+    const material = materialOf(reader.index)
+
+    expect(material.audio, 'the fixture has a sound track of its own to find').toBeNull()
+    expect(material.video!.kinds).toEqual(['video', 'audio'])
+
+    const source = (await openClipSource(reader, material))!
+    expect(source.audio, 'the sound was left behind in the buffer it shares').toBeDefined()
+
+    const requests = requestsFor(source, [clip({ in: 1, out: 3 })])
+    expect(requests[0]!.plan.tracks.map((track) => track.kind)).toEqual(['video', 'audio'])
+
+    const saved: Uint8Array[] = []
+    const runner = createRunner({
+      read: (at) => reader.bytesOf(at),
+      save: async (file) => {
+        saved.push(file)
+      },
+    })
+    runner.enqueue(requests)
+    await runner.settled()
+
+    expect(runner.queue().jobs[0]!.state, runner.queue().jobs[0]!.error ?? '').toBe('done')
+    // And it is in the file at the end of it, not merely in the plan.
+    expect(parseInit(saved[0]!)!.tracks.map((track) => track.kind)).toEqual(['video', 'audio'])
   })
 
   it('cuts the same file out of a snapshot as it would out of the file standing alone', async () => {
@@ -232,6 +291,32 @@ describe('requestsFor', () => {
     expect(requests[0]!.plan.bytes).toBe(planOf(source, clip({ id: 'c1' })).bytes)
   })
 
+  it('carries the sound switch of every clip into the plan it is written from', async () => {
+    // The one setting of a clip that decides what goes into the file, and the estimate is made
+    // of the same plan (Task 8): built with the switch nailed down, the editor writes silent
+    // clips out of a recording that has sound in it and quotes the silent weight for both.
+    const reader = await fileSnapshot()
+    const source = (await openClipSource(reader, materialOf(reader.index)))!
+    expect(source.audio, 'the fixture has no sound to leave out').toBeDefined()
+
+    const loud = planOf(source, clip({ sound: true }))
+    const silent = planOf(source, clip({ sound: false }))
+
+    expect(loud.tracks.map((track) => track.kind)).toEqual(['video', 'audio'])
+    expect(silent.tracks.map((track) => track.kind)).toEqual(['video'])
+    expect(silent.bytes).toBeLessThan(loud.bytes)
+
+    // And it is that plan the runner is handed, clip by clip, rather than one built for the lot.
+    const requests = requestsFor(source, [
+      clip({ id: 'c1', name: 'Loud', sound: true }),
+      clip({ id: 'c2', name: 'Quiet', sound: false }),
+    ])
+    expect(requests.map((one) => one.plan.tracks.map((track) => track.kind))).toEqual([
+      ['video', 'audio'],
+      ['video'],
+    ])
+  })
+
   it('plans what the clip asks for and not what the recording holds', async () => {
     const reader = await capturedSnapshot()
     const source = (await openClipSource(reader, materialOf(reader.index)))!
@@ -271,6 +356,58 @@ describe('downloadIo', () => {
     expect(asked).toHaveLength(1)
     expect(asked[0]!.filename).toBe('Cats.mp4')
     expect(asked[0]!.url).toMatch(/^blob:/)
+  })
+
+  it('lets the address outlive the call, so the download is not cut off halfway', async () => {
+    // Chrome does not read the blob while `download` is running: it takes the address, answers
+    // with an id, and comes back for the bytes afterwards. Revoked as the call returns, the
+    // address is gone before the read \u2014 and what lands on disk is a part-written mp4 that no
+    // player will open, with the row in the panel reading "Saved" over it.
+    vi.useFakeTimers()
+    const revoked: string[] = []
+    const revoke = vi
+      .spyOn(URL, 'revokeObjectURL')
+      .mockImplementation((url: string) => void revoked.push(url))
+
+    try {
+      const asked = stubDownloads(11)
+      await downloadIo({} as SnapshotReader).save(new Uint8Array([1, 2, 3]), 'Cats.mp4')
+
+      expect(revoked, 'the address was let go as the call returned').toEqual([])
+      vi.advanceTimersByTime(10_000)
+      expect(revoked, 'the address was let go ten seconds into the download').toEqual([])
+
+      // And it is let go in the end: an address held for ever holds the whole file in memory
+      // for as long as the tab is open, and a session is exported clip after clip.
+      vi.advanceTimersByTime(60_000)
+      expect(revoked).toEqual([asked[0]!.url])
+    } finally {
+      revoke.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('lets go at once of an address no download ever took', async () => {
+    // The other side of the same wait. Nothing is reading this one, so there is nothing to cut
+    // off, and holding it for a minute would pin a refused file in memory for no reason at all.
+    vi.useFakeTimers()
+    const revoked: string[] = []
+    const revoke = vi
+      .spyOn(URL, 'revokeObjectURL')
+      .mockImplementation((url: string) => void revoked.push(url))
+
+    try {
+      const asked = stubDownloads(undefined)
+      await expect(
+        downloadIo({} as SnapshotReader).save(new Uint8Array([1, 2, 3]), 'Cats.mp4'),
+      ).rejects.toThrow(/refused to save/)
+
+      vi.advanceTimersByTime(0)
+      expect(revoked).toEqual([asked[0]!.url])
+    } finally {
+      revoke.mockRestore()
+      vi.useRealTimers()
+    }
   })
 
   it('fails the job when the browser refuses the download', async () => {

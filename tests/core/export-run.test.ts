@@ -190,6 +190,40 @@ describe('the export runner', () => {
     expect(runner.queue().jobs.map((job) => job.progress)).toEqual([1, 1])
   })
 
+  it('reports how much of the clip it has read, every slice of the way', async () => {
+    // The bar in the panel and the "N s left" beside it are drawn from this and from nothing
+    // else, so what has to hold is the fraction and not the fact that a report arrived. A run
+    // that said "all of it" on its first slice would fill the bar at once, leave the estimate
+    // with nothing to estimate from, and read on the screen as a clip that wrote itself.
+    const plan = planFor(0, 6)
+    const slices = planSlices(plan, 4_096)
+    expect(slices.length, 'the clip came out in too few slices to watch one move').toBeGreaterThan(4)
+
+    let read = 0
+    const total = slices.reduce((sum, slice) => sum + slice.length, 0)
+    const climbing = slices.map((slice) => {
+      read += slice.length
+      return read / total
+    })
+
+    const io = fakeIo()
+    const runner = createRunner(io, { parallel: 1, sliceBytes: 4_096 })
+
+    const seen: number[] = []
+    runner.subscribe((queue) => {
+      const job = queue.jobs[0]!
+      if (job.state === 'running') seen.push(job.progress)
+    })
+
+    runner.enqueue([request('c1', plan)])
+    await runner.settled()
+
+    // Nought where it starts, then the coded bytes behind it over the coded bytes there are —
+    // the same arithmetic the estimate divides by, one term of it per slice.
+    expect(seen).toEqual([0, ...climbing])
+    expect(io.saved.map((one) => one.fileName)).toEqual(['c1.mp4'])
+  })
+
   it('runs three at once and no more', async () => {
     const held: Array<() => void> = []
     const io = fakeIo({

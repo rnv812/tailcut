@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { render } from 'preact'
 import { Shell, type EditorState } from '../../src/editor/shell'
 import { planSnapshot, type SnapshotSource } from '../../src/core/snapshot/build'
@@ -8,6 +9,7 @@ import { materialOf } from '../../src/core/snapshot/material'
 import { FrameTable } from '../../src/core/timeline/frames'
 import { METRICS, rowTop } from '../../src/core/timeline/layout'
 import { concatBytes } from '../../src/core/iso/writer'
+import { parseInit } from '../../src/core/iso/init'
 
 const page = {
   sessionKey: 'https://site.example/watch|avc1|inf',
@@ -51,6 +53,45 @@ const source: SnapshotSource = {
       chunks: [{ start: 0, end: 4, bytes: new Uint8Array(500) }],
     },
   ],
+}
+
+/**
+ * Real frames, for the one test that asks the editor to write a file.
+ *
+ * The stub material above is enough for every layout question, and for none of the export ones:
+ * an init of sixty-four nought bytes indexes to nothing, so the Export button never leaves the
+ * state it opens in and a panel wired to nothing would look exactly the same.
+ */
+const CUT_INIT = new Uint8Array(readFileSync('tests/fixtures/h264/init-stream0.m4s'))
+const CUT_SEGMENTS = [1, 2, 3].map(
+  (n) => new Uint8Array(readFileSync(`tests/fixtures/h264/chunk-stream0-0000${n}.m4s`)),
+)
+
+async function cuttable(): Promise<Extract<EditorState, { status: 'ready' }>> {
+  const plan = planSnapshot(
+    {
+      page,
+      tracks: [
+        {
+          id: 't0',
+          bufferId: 'sb-1',
+          representation: 'video:avc1.4d401e:320x240',
+          kinds: ['video'],
+          info: parseInit(CUT_INIT)!,
+          initBytes: CUT_INIT,
+          chunks: CUT_SEGMENTS.map((bytes, at) => ({ start: at * 2, end: at * 2 + 2, bytes })),
+        },
+      ],
+    },
+    { id: 'cut', capturedAt: 1_756_022_400_000, producer: 'tailcut test' },
+  )
+  const file = concatBytes(plan.parts)
+  const reader = (await SnapshotReader.open(
+    async (at, length) => file.subarray(at, at + length),
+    file.byteLength,
+  ))!
+
+  return { status: 'ready', reader, material: materialOf(reader.index), preview: null }
 }
 
 /** The ready state, spelled out rather than as the union: the tests build on top of it. */
@@ -98,6 +139,18 @@ const previewOf = () => ({
   ),
   release: () => {},
 })
+
+/** Turns the wheel until the screen says what is being waited for, or gives up saying so. */
+const until = async (ready: () => boolean, what: string): Promise<void> => {
+  for (let round = 0; round < 50; round++) {
+    if (ready()) return
+    await settled()
+  }
+  throw new Error(what)
+}
+
+const button = (testId: string): HTMLButtonElement =>
+  document.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`)!
 
 const press = (key: string, init: KeyboardEventInit = {}) =>
   window.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...init }))
@@ -499,6 +552,66 @@ describe('the editor shell', () => {
     document.querySelector<HTMLButtonElement>('[data-testid="next"]')!.click()
     await settled()
     expect(text('play')).toBe('Play')
+  })
+
+  it('writes the clip the keyboard made, from the panel mounted in the inspector', async () => {
+    // The last of the roads out of the assembly, and the only one that leaves anything behind:
+    // press, click, file. Every piece below it is tested on its own — the panel draws a queue it
+    // is handed, the runner writes a plan it is given, the exporter turns clips into requests —
+    // and none of that says the three are joined to each other in the tab the user opens.
+    const asked: Array<{ url: string; filename: string }> = []
+    vi.stubGlobal('chrome', {
+      downloads: {
+        download: (
+          options: { url: string; filename: string },
+          done: (id: number | undefined) => void,
+        ) => {
+          asked.push(options)
+          done(11)
+        },
+      },
+      runtime: { lastError: undefined },
+    })
+
+    try {
+      show(await cuttable())
+
+      // The panel is up before the recording has been read, and says which of the two it is
+      // waiting on: there is no clip yet, and there is nothing indexed to cut one out of.
+      expect(document.querySelector('[data-testid="export-panel"]')).not.toBeNull()
+      expect(button('export').disabled).toBe(true)
+      expect(text('export-note')).toContain('Reading the recording')
+
+      // The note goes when the index is there; the button stays down, because a recording with
+      // no clip marked on it has nothing to write.
+      await until(
+        () => document.querySelector('[data-testid="export-note"]') === null,
+        'the recording was never indexed',
+      )
+      expect(button('export').textContent).toBe('Export 0 clips')
+      expect(button('export').disabled).toBe(true)
+
+      press('i')
+      await settled()
+      expect(button('export').disabled).toBe(false)
+
+      // The clip the press made reaches the panel, and its weight is quoted from the same plan
+      // the export is about to run.
+      expect(button('export').textContent).toBe('Export 1 clip')
+      expect(text('estimate')).toMatch(/about \d/)
+
+      button('export').click()
+      await until(
+        () => text('job-state') === 'Saved',
+        `the export never finished: ${text('job-state') || 'no row at all'}`,
+      )
+
+      expect(document.querySelectorAll('[data-testid="job"]')).toHaveLength(1)
+      expect(asked, 'no file was handed to the browser').toHaveLength(1)
+      expect(asked[0]!.filename).toMatch(/\.mp4$/)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('leaves a text box its own letters, mounted in the tab as it is', async () => {
