@@ -759,6 +759,21 @@ export class SessionStore {
   }
 
   /**
+   * Whether a file this page was watching turned out to be one the extension cannot read.
+   *
+   * Another silence the popup owes a sentence for. A file is opened only after triage has said
+   * somebody is really watching it, so this means exactly one thing: a video was watched and
+   * there is nothing to offer for it. Measured live on an imageboard thread, where the material
+   * is webm and has no movie box to walk to, and on addresses that had expired between the
+   * element fetching them and the save. Without it the popup answers such a page with "nothing
+   * recorded yet" — the words for a page that holds no video at all.
+   */
+  get unreadableFile(): boolean {
+    for (const state of this.plainSources.values()) if (state.unreadable) return true
+    return false
+  }
+
+  /**
    * Takes what a page appended to one of its SourceBuffers and works out for itself what it is.
    * The store is fed from a foreign page, so no parse here is allowed to throw: a piece it cannot
    * make sense of is dropped silently.

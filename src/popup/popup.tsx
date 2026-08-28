@@ -59,6 +59,21 @@ const UNREACHABLE = 'tailcut cannot reach the player on this page, so nothing of
 const UNREACHABLE_BESIDE = 'Another player on this page is out of reach and was not recorded.'
 
 /**
+ * A page whose file could not be read.
+ *
+ * The fourth silence, and it needs a sentence for the same reason the others do. A file is only
+ * ever opened after triage has said somebody is really watching it, so this means a video was
+ * watched and there is nothing to offer for it: the material is in a container with no movie box
+ * — webm, measured live on an imageboard thread — or the address has expired, or the host will
+ * not answer a ranged read. "Nothing recorded on this page yet" are the words for a page with no
+ * video at all, and over a file just watched to the end they read as a defect.
+ */
+const UNREADABLE = 'tailcut could not read the video file on this page, so nothing of it was saved.'
+
+/** The same page, with another file on it that was read: a thread holding an mp4 and a webm. */
+const UNREADABLE_BESIDE = 'Another file on this page could not be read and was not saved.'
+
+/**
  * Why no file appeared, in the words the user is shown.
  *
  * One sentence for each reason and not one for all three: answered as a single "could not save",
@@ -104,7 +119,13 @@ function Popup() {
     // recording on it, a page whose player never reached the extension at all, and a page that
     // may not be recorded. Protection comes first of the three because it is the reason for the
     // other two wherever it holds: a protected page keeps nothing, whatever else is true of it.
-    const nothing = answer.encrypted ? PROTECTED : answer.unreachable ? UNREACHABLE : NOTHING
+    const nothing = answer.encrypted
+      ? PROTECTED
+      : answer.unreachable
+        ? UNREACHABLE
+        : answer.unreadableFile
+          ? UNREADABLE
+          : NOTHING
     return <div class="pad muted">{nothing}</div>
   }
 
@@ -163,6 +184,11 @@ function Popup() {
         {answer.unreachable && (
           <div class="omits" data-testid="unreachable">
             {UNREACHABLE_BESIDE}
+          </div>
+        )}
+        {answer.unreadableFile && (
+          <div class="omits" data-testid="unreadable">
+            {UNREADABLE_BESIDE}
           </div>
         )}
         <button class="primary" data-testid="save" disabled={saving} onClick={() => void save()}>

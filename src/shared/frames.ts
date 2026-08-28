@@ -133,6 +133,7 @@ export async function listTabSessions(tabId: number): Promise<TabSessions> {
     // page does, and the popup owes the user the reason there is nothing to show.
     if (reply.encrypted) merged.encrypted = true
     if (reply.unreachable) merged.unreachable = true
+    if (reply.unreadableFile) merged.unreadableFile = true
 
     // A frame of an older build, or an answer that is not one at all: it may not take the rest of
     // the tab's list down with it.

@@ -10,6 +10,15 @@ import { decodeWarnings, probeFile, writeTemp } from '../support/media'
 
 const whole = new Uint8Array(readFileSync('tests/fixtures/plain/whole.mp4'))
 
+/** A whole webm: the init segment and its clusters laid end to end, as a server would hold them. */
+const webm = new Uint8Array(
+  Buffer.concat([
+    readFileSync('tests/fixtures/webm/init-stream0.webm'),
+    readFileSync('tests/fixtures/webm/chunk-stream0-00001.webm'),
+    readFileSync('tests/fixtures/webm/chunk-stream0-00002.webm'),
+  ]),
+)
+
 const PAGE = 'https://example.test/article'
 const TITLE = 'An article with a video in it'
 const CLIP = 'https://cdn.example/clip.mp4'
@@ -204,6 +213,60 @@ describe('an ordinary file in the registry', () => {
     // One attempt and no more: an address that answers 404 will answer 404 on the next poll too,
     // and the poll runs twice a second for as long as the page is open.
     expect(page.opens).toBe(1)
+  })
+
+  it('remembers that a file it was watching could not be read', async () => {
+    const page = registry({})
+
+    page.says()
+    page.store.promotePending(SOURCE)
+    await page.store.settled()
+
+    // Somebody watched a video and there is nothing to offer them. The two silences are not the
+    // same silence: a page with nothing worth recording on it never opened a file, and this one
+    // opened one and could not read it. Measured on an imageboard thread — the file is a webm,
+    // which has no movie box to walk to — and on an address that had expired.
+    expect(page.store.list()).toEqual([])
+    expect(page.store.unreadableFile, 'a file that could not be read passed unremarked').toBe(true)
+  })
+
+  it('says the same of a file in a container it cannot walk at all', async () => {
+    // The measured case behind the sentence above. An imageboard thread delivers webm — driven
+    // live on boards.4chan.org/wsg/, an 11-second VP8 file watched to the end — and a webm has no
+    // movie box: the walk of src/core/iso/locate.ts steps past the end of the file and finds
+    // nothing. Saving one is out of the question here, but going silent about it is not.
+    const page = registry({ [CLIP]: webm })
+
+    page.says()
+    page.store.promotePending(SOURCE)
+    await page.store.settled()
+
+    expect(page.store.list()).toEqual([])
+    expect(page.store.unreadableFile).toBe(true)
+    // And the walk gives up rather than stepping through the file eight bytes at a time.
+    expect(page.opens).toBeLessThanOrEqual(2)
+  })
+
+  it('says nothing of the sort about a file it read', async () => {
+    const page = registry()
+
+    page.says()
+    page.store.promotePending(SOURCE)
+    await page.store.settled()
+
+    expect(page.store.list()).toHaveLength(1)
+    expect(page.store.unreadableFile).toBe(false)
+  })
+
+  it('says nothing of the sort about a file nobody watched', async () => {
+    const page = registry({})
+
+    // Never promoted, so never opened: a page of muted previews must not be described as a page
+    // whose video could not be read.
+    page.says()
+    await page.store.settled()
+
+    expect(page.store.unreadableFile).toBe(false)
   })
 })
 

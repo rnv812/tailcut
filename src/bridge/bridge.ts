@@ -294,6 +294,9 @@ window.addEventListener('message', (event: MessageEvent) => {
     // video on it look the same in an empty list, and the two are owed different sentences.
     if (store.encrypted) list.encrypted = true
     if (unreachable) list.unreachable = true
+    // A file was watched and could not be read — a webm on an imageboard, an address that had
+    // expired. A fourth silence with a sentence of its own, for the same reason as the other two.
+    if (store.unreadableFile) list.unreadableFile = true
 
     const reply: BridgeToPage = list
     event.ports[0]?.postMessage(reply)

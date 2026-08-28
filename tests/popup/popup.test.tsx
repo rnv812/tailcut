@@ -36,6 +36,8 @@ type Reply = {
   sessions: SessionSummary[]
   /** The tab says this page holds a player the extension could not reach. */
   unreachable?: boolean
+  /** The tab says a file this page was watching could not be read. */
+  unreadableFile?: boolean
   /** The tab says this page plays media that is encrypted. */
   encrypted?: boolean
   save?: SaveResult
@@ -63,6 +65,7 @@ function installChrome(reply: Reply) {
         return Promise.resolve({
           sessions: reply.sessions,
           unreachable: reply.unreachable,
+          unreadableFile: reply.unreadableFile,
           encrypted: reply.encrypted,
         })
       },
@@ -184,6 +187,42 @@ describe('the popup', () => {
     await mount({ sessions: [fresh] })
 
     expect(at('unreachable')).toBeNull()
+  })
+
+  it('says a file it could not read was not saved, rather than showing nothing', async () => {
+    await mount({ sessions: [], unreadableFile: true })
+
+    // Somebody watched a video and there is nothing to offer for it: the file is a webm, or its
+    // address had expired, or its host will not answer a ranged read. Measured live on an
+    // imageboard thread, where "nothing recorded on this page yet" was the whole of the answer
+    // over a file that had just been watched to the end.
+    expect(bodyText()).toBe(
+      'tailcut could not read the video file on this page, so nothing of it was saved.',
+    )
+    expect(at('save'), 'there is nothing to save and no button to press').toBeNull()
+  })
+
+  it('says it beside the session it did read', async () => {
+    await mount({ sessions: [fresh], unreadableFile: true })
+
+    // A page holds two files and only one of them could be read — a thread with an mp4 and a webm
+    // in it. What was read is offered; what was not is said out loud beside it.
+    expect(textAt('title')).toBe(fresh.title)
+    expect(textAt('unreadable')).toBe(
+      'Another file on this page could not be read and was not saved.',
+    )
+  })
+
+  it('says nothing of the sort where every file was read', async () => {
+    await mount({ sessions: [fresh] })
+
+    expect(at('unreadable')).toBeNull()
+  })
+
+  it('names the protection first of all, whatever else is true of the page', async () => {
+    await mount({ sessions: [], encrypted: true, unreadableFile: true })
+
+    expect(bodyText()).toContain('protected video')
   })
 
   it('shows the freshest session of the tab', async () => {

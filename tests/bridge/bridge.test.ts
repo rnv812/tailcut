@@ -132,12 +132,13 @@ function variantOf(value: unknown): 'tc:ready' | 'tc:refused' | 'session list' |
   if (fields.type === 'tc:ready' && Object.keys(fields).length === 1) return 'tc:ready'
   if (fields.type === 'tc:refused' && Object.keys(fields).length === 1) return 'tc:refused'
 
-  const known = ['sessions', 'unreachable']
+  const known = ['sessions', 'unreachable', 'unreadableFile']
   const fits =
     Array.isArray(fields.sessions) &&
     fields.sessions.every(isSummary) &&
     Object.keys(fields).every((field) => known.includes(field)) &&
-    (fields.unreachable === undefined || typeof fields.unreachable === 'boolean')
+    (fields.unreachable === undefined || typeof fields.unreachable === 'boolean') &&
+    (fields.unreadableFile === undefined || typeof fields.unreadableFile === 'boolean')
   return fits ? 'session list' : null
 }
 
@@ -1504,6 +1505,36 @@ describe('the bridge and a page playing an ordinary file', () => {
     // eighteen measured pages that deliver a plain file hold nothing but muted looping previews.
     expect(host.asked).toEqual([])
     expect(win.list()).toEqual([])
+  })
+
+  it('says in the answer that a file it was watching could not be read', async () => {
+    const host = installHost()
+    const win = await loadBridge()
+    win.context()
+
+    host.refuse()
+    win.deliver(plain())
+    win.deliver({ type: 'tc:verdict', sourceId: SOURCE, verdict: 'promote' })
+    await settle()
+
+    // Somebody watched a video and there is nothing to offer for it. Answered with an empty list
+    // alone, the popup says "nothing recorded on this page yet" — the words for a page that holds
+    // no video at all — and the user waits for a recording that is never coming.
+    const answer = win.answer()
+    expect(answer.sessions).toEqual([])
+    expect(answer.unreadableFile).toBe(true)
+  })
+
+  it('says nothing of the sort while every file it opened could be read', async () => {
+    installHost()
+    const win = await loadBridge()
+    win.context()
+
+    win.deliver(plain())
+    win.deliver({ type: 'tc:verdict', sourceId: SOURCE, verdict: 'promote' })
+    await settle()
+
+    expect(win.answer().unreadableFile).toBe(undefined)
   })
 
   it('turns a promoted file into a session the popup can save', async () => {

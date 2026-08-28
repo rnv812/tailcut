@@ -174,6 +174,19 @@ export interface SessionList {
    * can have both, and then the popup shows what was recorded and says what was not.
    */
   unreachable?: boolean
+  /**
+   * A file this page was watching could not be read.
+   *
+   * Set when triage promoted an ordinary file — somebody really was watching it — and the tables
+   * of it could not be reached: a container with no movie box in it, an address that has expired,
+   * a host that will not answer a ranged read. Told apart from the emptiness of a page with no
+   * video, because here a video was watched and there is nothing to offer for it. Measured live
+   * on an imageboard thread, where the material is webm.
+   *
+   * Like `unreachable`, it says nothing about the sessions beside it: a page can hold one file
+   * that was read and another that was not.
+   */
+  unreadableFile?: boolean
 }
 
 /**
