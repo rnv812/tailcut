@@ -1,11 +1,14 @@
 import { render } from 'preact'
 import { useEffect, useState } from 'preact/hooks'
 import {
+  editSession,
   formatBytes,
   formatDuration,
   hostOf,
   listSessions,
+  openEditor,
   saveAll,
+  type EditResult,
   type Omission,
   type SaveFailure,
   type SaveResult,
@@ -44,6 +47,13 @@ const OMITTED: Record<Omission, string> = {
   rendition: 'Recorded at more than one quality; one is saved.',
   alternate: 'This file has more than one picture or sound track; one of each is saved.',
   gap: 'Recording has gaps: the longest piece is saved.',
+}
+
+/** Why the editor did not open, in the words the user is shown. */
+const EDIT_FAILED: Record<NonNullable<EditResult['reason']>, string> = {
+  gone: 'Could not open the editor. The session may be gone from the page.',
+  empty: 'There is nothing to edit in this session yet.',
+  storage: 'Could not write the snapshot: the browser refused the storage.',
 }
 
 /**
@@ -107,6 +117,8 @@ function Popup() {
   // The refusal of the last save, whole: the popup owes the user the reason and not only the
   // fact. null — nothing has been refused since the last time the complaint was cleared.
   const [failure, setFailure] = useState<SaveResult | null>(null)
+  const [editing, setEditing] = useState(false)
+  const [editFailed, setEditFailed] = useState<NonNullable<EditResult['reason']> | null>(null)
 
   useEffect(() => {
     listSessions().then(setAnswer)
@@ -169,6 +181,21 @@ function Popup() {
     setFailure(result.ok ? null : result)
   }
 
+  const edit = async () => {
+    setEditing(true)
+    setEditFailed(null)
+    const result = await editSession(current.key)
+    if (result.ok && result.snapshotId) {
+      await openEditor(result.snapshotId)
+      // The popup closes with the tab in front: leaving it open over a tab the user has just been
+      // sent to is a window nobody looks at again.
+      window.close()
+      return
+    }
+    setEditing(false)
+    setEditFailed(result.reason ?? 'gone')
+  }
+
   return (
     <div>
       <header class="top">
@@ -203,9 +230,29 @@ function Popup() {
             {UNREADABLE_BESIDE}
           </div>
         )}
-        <button class="primary" data-testid="save" disabled={saving} onClick={() => void save()}>
-          {saving ? 'Saving…' : 'Save all'}
-        </button>
+        <div class="buttons">
+          <button
+            class="primary"
+            data-testid="save"
+            disabled={saving || editing}
+            onClick={() => void save()}
+          >
+            {saving ? 'Saving…' : 'Save all'}
+          </button>
+          <button
+            class="secondary"
+            data-testid="edit"
+            disabled={saving || editing}
+            onClick={() => void edit()}
+          >
+            {editing ? 'Freezing…' : 'Edit'}
+          </button>
+        </div>
+        {editFailed && (
+          <div class="failed" data-testid="edit-error" role="alert">
+            {EDIT_FAILED[editFailed]}
+          </div>
+        )}
         {failure && (
           <div class="failed" data-testid="error" role="alert">
             {complaintFor(failure)}
@@ -221,7 +268,7 @@ function Popup() {
               key={session.key}
               class="row"
               data-testid="session"
-              disabled={saving}
+              disabled={saving || editing}
               onClick={() => pick(session.key)}
             >
               <span class="row-title">{session.title || UNTITLED}</span>

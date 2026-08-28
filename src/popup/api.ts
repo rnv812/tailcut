@@ -1,10 +1,13 @@
 import {
   MAIN_FRAME,
+  editInFrame,
   listTabSessions,
   saveInFrame,
   type FramedSession,
 } from '../shared/frames'
+import { editorUrl } from '../shared/protocol'
 import type {
+  EditResult,
   Omission,
   SaveFailure,
   SaveResult,
@@ -14,7 +17,7 @@ import type {
 
 // The answer is described by the protocol and not by the popup: let the two descriptions drift
 // apart and the popup would read fields the bridge does not send, showing undefined in silence.
-export type { Omission, SaveFailure, SaveResult, SessionList, SessionSummary }
+export type { EditResult, Omission, SaveFailure, SaveResult, SessionList, SessionSummary }
 
 /** The reasons the bridge may give; a reply naming anything else is a refusal without a reason. */
 const FAILURES: SaveFailure[] = ['gone', 'empty', 'refused']
@@ -114,6 +117,37 @@ export async function saveAll(key: string): Promise<SaveResult> {
     // further than the console of the popup.
     return { ok: false }
   }
+}
+
+/**
+ * Asks the tab to freeze the session and write it out. What comes back is the name of the
+ * snapshot; the editor is opened by the popup, because a tab is opened from the extension and
+ * the bridge lives on the page.
+ *
+ * Addressed to the frame the session was listed from, exactly as a save is: the material of an
+ * embedded player is inside the embed, and the freeze has to be made where the bytes are.
+ */
+export async function editSession(key: string): Promise<EditResult> {
+  const tabId = await targetTabId()
+  if (tabId === undefined) return { ok: false, reason: 'gone' }
+
+  const frameId = listed.find((session) => session.key === key)?.frameId ?? MAIN_FRAME
+
+  try {
+    const result = await editInFrame(tabId, frameId, key)
+    if (result?.ok !== true || typeof result.snapshotId !== 'string') {
+      return { ok: false, reason: result?.reason ?? 'gone' }
+    }
+    return result
+  } catch {
+    // A page with no content script, or a tab that has gone away under the open popup.
+    return { ok: false, reason: 'gone' }
+  }
+}
+
+/** Opens the editor over one snapshot in a tab of its own. */
+export async function openEditor(snapshotId: string): Promise<void> {
+  await chrome.tabs.create({ url: chrome.runtime.getURL(editorUrl(snapshotId)) })
 }
 
 export function formatDuration(seconds: number): string {

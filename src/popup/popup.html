@@ -16,6 +16,12 @@
              background: #4c8dff; color: #0b0d10; font-weight: 600; font-size: 12px;
              cursor: pointer; }
   .primary:disabled { opacity: 0.6; cursor: default; }
+  .buttons { display: flex; gap: 8px; }
+  .primary { flex: 1; }
+  .secondary { padding: 8px 14px; border: 1px solid #3a3f47; border-radius: 7px;
+               background: none; color: #e8eaed; font-weight: 600; font-size: 12px;
+               cursor: pointer; }
+  .secondary:disabled { opacity: 0.6; cursor: default; }
   /* What the file will be missing. A caveat and not a failure: the save will go through, and
      the length above it is already the length of the file. */
   .omits { margin: -4px 0 10px; font-size: 11px; color: #d8ab63; }

@@ -1,4 +1,10 @@
-import type { ExtensionToTab, SaveResult, SessionList, SessionSummary } from './protocol'
+import type {
+  EditResult,
+  ExtensionToTab,
+  SaveResult,
+  SessionList,
+  SessionSummary,
+} from './protocol'
 
 /**
  * The main frame of a tab: the one frame whose number is known without asking anybody.
@@ -186,5 +192,21 @@ export function saveInFrame(
   key: string,
 ): Promise<SaveResult | undefined> {
   const request: ExtensionToTab = { type: 'tc:save', key }
+  return chrome.tabs.sendMessage(tabId, request, { frameId })
+}
+
+/**
+ * Asks one frame of a tab to freeze a session of its own registry into a snapshot.
+ *
+ * The same road as a save, and for the same reason: the material never leaves the frame it was
+ * gathered in. A freeze addressed to the top frame of a page whose player sits in an embed would
+ * be answered "gone" about a session that is recording on.
+ */
+export function editInFrame(
+  tabId: number,
+  frameId: number,
+  key: string,
+): Promise<EditResult | undefined> {
+  const request: ExtensionToTab = { type: 'tc:edit', key }
   return chrome.tabs.sendMessage(tabId, request, { frameId })
 }

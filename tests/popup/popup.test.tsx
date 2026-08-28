@@ -49,16 +49,32 @@ type Reply = {
  */
 function installChrome(reply: Reply) {
   const sent: Sent[] = []
+  const created: Array<{ url: string }> = []
   // The save answer is mutable: the same popup saves more than once, and the second attempt may
   // well go through where the first did not.
   let saveReply: unknown = (reply === 'silent' ? undefined : reply.save) ?? { ok: true }
+  let editReply: unknown = { ok: false, reason: 'gone' }
+  let holdEdit = false
+  let closed = false
+
+  // window is the global object here, so this is the window.close() the popup calls.
+  vi.stubGlobal('close', () => {
+    closed = true
+  })
 
   vi.stubGlobal('chrome', {
+    runtime: { getURL: (path: string) => `chrome-extension://tailcut/${path}` },
     tabs: {
       query: async () => [{ id: 7 }],
+      create: async (options: { url: string }) => {
+        created.push(options)
+      },
       sendMessage: (tabId: number, message: unknown) => {
         sent.push({ tabId, message })
-        if ((message as { type?: string }).type === 'tc:save') return Promise.resolve(saveReply)
+        const type = (message as { type?: string }).type
+        if (type === 'tc:save') return Promise.resolve(saveReply)
+        // A freeze that never answers: the popup has to keep its buttons closed, not spin.
+        if (type === 'tc:edit') return holdEdit ? new Promise(() => {}) : Promise.resolve(editReply)
         // Silence from the tab is not a refusal: the promise simply never settles, and the popup
         // waits.
         if (reply === 'silent') return new Promise(() => {})
@@ -74,8 +90,18 @@ function installChrome(reply: Reply) {
 
   return {
     sent,
+    created,
+    get closed() {
+      return closed
+    },
     setSaveReply: (value: unknown) => {
       saveReply = value
+    },
+    setEditReply: (value: unknown) => {
+      editReply = value
+    },
+    holdEditReply: () => {
+      holdEdit = true
     },
   }
 }
@@ -466,5 +492,72 @@ describe('the popup and a save that failed', () => {
     // A complaint left on screen after a file has been saved would send the user looking for a
     // failure that is over.
     expect(at('error')).toBeNull()
+  })
+})
+
+describe('Edit', () => {
+  const SNAPSHOT = '0f2c7d1e-4b0a-4a3f-9c2e-9b5a1d6f8c31'
+  const editButton = () => document.body.querySelector<HTMLButtonElement>('[data-testid="edit"]')!
+
+  it('freezes the session and opens the editor over its snapshot', async () => {
+    const chrome = await mount({ sessions: [fresh] })
+    chrome.setEditReply({ ok: true, snapshotId: SNAPSHOT })
+
+    await click(editButton())
+
+    expect(chrome.sent.map((one) => one.message)).toContainEqual({
+      type: 'tc:edit',
+      key: fresh.key,
+    })
+    expect(chrome.created).toEqual([
+      { url: `chrome-extension://tailcut/editor/editor.html?s=${SNAPSHOT}` },
+    ])
+    // The popup gets out of the way of the tab it has just sent the user to.
+    expect(chrome.closed).toBe(true)
+  })
+
+  it('freezes exactly the session the popup is showing', async () => {
+    const chrome = await mount({ sessions: [fresh, older] })
+    chrome.setEditReply({ ok: true, snapshotId: SNAPSHOT })
+
+    await click(allAt('session')[0]!)
+    await click(editButton())
+
+    expect(chrome.sent.at(-1)!.message).toEqual({ type: 'tc:edit', key: older.key })
+  })
+
+  it('explains a session that has gone instead of opening an empty tab', async () => {
+    const chrome = await mount({ sessions: [fresh] })
+    chrome.setEditReply({ ok: false, reason: 'gone' })
+
+    await click(editButton())
+
+    expect(textAt('edit-error')).toContain('gone from the page')
+    expect(chrome.created, 'an editor tab opened over a refusal').toEqual([])
+    expect(chrome.closed).toBe(false)
+  })
+
+  it('has words of its own for every reason a freeze can fail', async () => {
+    for (const [reason, said] of [
+      ['empty', 'nothing to edit'],
+      ['storage', 'refused the storage'],
+    ] as const) {
+      const chrome = await mount({ sessions: [fresh] })
+      chrome.setEditReply({ ok: false, reason })
+
+      await click(editButton())
+
+      expect(textAt('edit-error'), `the ${reason} refusal`).toContain(said)
+    }
+  })
+
+  it('closes both buttons while the snapshot is being written', async () => {
+    const chrome = await mount({ sessions: [fresh] })
+    chrome.holdEditReply()
+
+    await click(editButton())
+
+    expect(editButton().disabled).toBe(true)
+    expect(saveButton().disabled).toBe(true)
   })
 })
