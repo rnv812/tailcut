@@ -165,8 +165,9 @@ function Popup() {
   // verdict on a session nobody tried to save.
   const pick = (key: string) => {
     setPickedKey(key)
-    // The complaint belongs to the session it was made about.
+    // The complaint belongs to the session it was made about — either complaint.
     setFailure(null)
+    setEditFailed(null)
   }
 
   // A code the popup has no words for shows nothing rather than an empty box: the bridge and the

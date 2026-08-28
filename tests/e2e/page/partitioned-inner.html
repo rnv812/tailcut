@@ -1,0 +1,36 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>partitioning canary frame</title>
+<div id="ready">ready</div>
+<script>
+  // One and the same origin under two different top-level sites. With storage partitioning
+  // those are two different storages, and a marker written under the first is not found under
+  // the second.
+  const NAME = 'canary.marker'
+
+  window.addEventListener('message', async (e) => {
+    // The extension stands its bridge in every frame of every page, this one included, and the
+    // bridge posts its handshake to the window that holds it. Anything but the two words of the
+    // canary is somebody else's message: taken for one, the handshake was answered as a read, and
+    // the write the test had asked for never happened.
+    if (e.data !== 'write' && e.data !== 'read') return
+
+    let answer = 'error'
+    try {
+      const root = await navigator.storage.getDirectory()
+      if (e.data === 'write') {
+        const handle = await root.getFileHandle(NAME, { create: true })
+        const writable = await handle.createWritable()
+        await writable.write('present')
+        await writable.close()
+        answer = 'written'
+      } else {
+        await root.getFileHandle(NAME)
+        answer = 'found'
+      }
+    } catch (cause) {
+      answer = cause && cause.name === 'NotFoundError' ? 'missing' : `error: ${cause}`
+    }
+    parent.postMessage(answer, '*')
+  })
+</script>

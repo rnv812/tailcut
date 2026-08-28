@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>partitioning canary</title>
+<!-- Named, because the extension stands a bridge frame of its own in every page. -->
+<iframe id="inner" src="https://shared.example/inner"></iframe>
+<script>
+  // The answer of the nested frame goes where the test will pick it up.
+  window.markerResult = ''
+  window.addEventListener('message', (e) => {
+    if (typeof e.data === 'string' && e.data !== 'write' && e.data !== 'read') {
+      window.markerResult = e.data
+    }
+  })
+</script>

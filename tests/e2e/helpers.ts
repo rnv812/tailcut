@@ -29,6 +29,59 @@ const HEADLESS = process.env.HEADED !== '1'
 const CHANNEL = 'chromium' as const
 
 /**
+ * Features Playwright turns off in every browser it launches, spelled out here word for word.
+ *
+ * It is copied out of `chromiumSwitches.ts` of the installed playwright-core, and it is copied
+ * because the argument can only be taken back whole: `ignoreDefaultArgs` drops a default argument
+ * by exact string, and `--disable-features=` is one argument carrying all of them. A version of
+ * Playwright that adds a feature to this list stops matching, the default lands after all, and
+ * the canary in `snapshot.spec.ts` is what says so.
+ */
+const DISABLED_BY_PLAYWRIGHT = [
+  'AvoidUnnecessaryBeforeUnloadCheckSync',
+  'BoundaryEventDispatchTracksNodeRemoval',
+  'DestroyProfileOnBrowserClose',
+  'DialMediaRouteProvider',
+  'GlobalMediaControls',
+  'HttpsUpgrades',
+  'LensOverlay',
+  'MediaRouter',
+  'PaintHolding',
+  'ThirdPartyStoragePartitioning',
+  'BlockOriginHeaderModificationOnRedirect',
+  'Translate',
+  'AutoDeElevate',
+  'OptimizationHints',
+  'msForceBrowserSignIn',
+  'msEdgeUpdateLaunchServicesPreferredVersion',
+]
+
+/** The feature the suite needs back, and the one thing that differs from the list above. */
+const PARTITIONING = 'ThirdPartyStoragePartitioning'
+
+/** The argument Playwright passes, exactly as it passes it: what `ignoreDefaultArgs` takes back. */
+const DISABLE_DEFAULT = `--disable-features=${DISABLED_BY_PLAYWRIGHT.join(',')}`
+
+/**
+ * Flags every launch of the suite gets, with or without the extension.
+ *
+ * ThirdPartyStoragePartitioning is on in Chrome from version 115 and off in Playwright, which
+ * disables it by default. Without turning it back on, a test of OPFS shared between the bridge
+ * frame and a tab of the extension is green in the suite and false in a browser.
+ *
+ * Enabling it is not enough, and that was measured rather than reasoned about: with
+ * `--enable-features=ThirdPartyStoragePartitioning` beside the default disable list, the canary
+ * in `snapshot.spec.ts` still found a third-party frame's own storage under a second site — a
+ * feature named in both lists is disabled, whichever comes first. So the default argument is
+ * taken back whole and passed again without that one name; everything else Playwright turns off
+ * stays off, because those switches are load-bearing for the rest of the suite.
+ */
+const SHARED_ARGS = [
+  `--enable-features=${PARTITIONING}`,
+  `--disable-features=${DISABLED_BY_PLAYWRIGHT.filter((name) => name !== PARTITIONING).join(',')}`,
+]
+
+/**
  * One launch for both modes. Everything apart from the two arguments that load the extension has
  * to match: the overhead measurement in `overhead.spec.ts` compares these two launches against
  * each other, and any other difference in the settings it would put down to the extension.
@@ -38,7 +91,8 @@ async function launch(args: string[]): Promise<BrowserContext> {
   const context = await chromium.launchPersistentContext(userDataDir, {
     headless: HEADLESS,
     channel: CHANNEL,
-    args,
+    args: [...SHARED_ARGS, ...args],
+    ignoreDefaultArgs: [DISABLE_DEFAULT],
     acceptDownloads: true,
   })
 
@@ -70,6 +124,17 @@ export async function launchWithExtension(): Promise<{
 /** The same browser without the extension — the baseline the overhead is measured against. */
 export async function launchWithoutExtension(): Promise<BrowserContext> {
   return launch([])
+}
+
+/** Opens a page of the extension in a tab of its own — a second document on the extension origin. */
+export async function openExtensionPage(
+  context: BrowserContext,
+  extensionId: string,
+  path: string,
+): Promise<Page> {
+  const page = await context.newPage()
+  await page.goto(`chrome-extension://${extensionId}/${path}`)
+  return page
 }
 
 /**

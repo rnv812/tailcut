@@ -551,6 +551,20 @@ describe('Edit', () => {
     }
   })
 
+  it('takes the complaint back with the session it was made about', async () => {
+    const chrome = await mount({ sessions: [fresh, older] })
+    chrome.setEditReply({ ok: false, reason: 'gone' })
+
+    await click(editButton())
+    expect(textAt('edit-error'), 'setup: the refusal was not shown').not.toBeNull()
+
+    await click(allAt('session')[0]!)
+
+    // A complaint about the session that was showing is not a complaint about the one now in its
+    // place, and the save complaint beside it has always been taken back this way.
+    expect(at('edit-error')).toBeNull()
+  })
+
   it('closes both buttons while the snapshot is being written', async () => {
     const chrome = await mount({ sessions: [fresh] })
     chrome.holdEditReply()
