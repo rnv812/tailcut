@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, beforeEach } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { Script } from 'node:vm'
-import { BRIDGE_PATH } from '../../src/shared/protocol'
+import { BRIDGE_PATH, EDITOR_PATH } from '../../src/shared/protocol'
 
 /**
  * Сборка идёт под собственным таймаутом, заведомо меньшим хукового: тогда и зависшая сборка
@@ -175,6 +175,29 @@ describe('сборка', () => {
   it('страницы попадают в сборку вместе со своими скриптами', () => {
     expect(existsSync('dist/popup/popup.js')).toBe(true)
     expect(existsSync('dist/bridge/bridge.js')).toBe(true)
+  })
+
+  it('ships the editor page and its script', () => {
+    // The popup opens the editor at EDITOR_PATH. A typo in the constant is invisible to the
+    // build and to the manifest alike: the tab simply opens on a blank page.
+    expect(existsSync(`dist/${EDITOR_PATH}`), `dist/${EDITOR_PATH} is missing`).toBe(true)
+    expect(existsSync('dist/editor/main.js')).toBe(true)
+  })
+
+  it('has the editor page load its script as a module', async () => {
+    const html = readFileSync(`dist/${EDITOR_PATH}`, 'utf8')
+    const editor = await optionsFor('editor/main')
+
+    // Preact is a static import in the bundle: a classic script would not load this file.
+    expect(editor.format).toBe('esm')
+    expect(html).toMatch(/<script\s+type="module"\s+src="main\.js"/)
+  })
+
+  it('builds the snapshot worker as a classic script', async () => {
+    // The bridge starts it with new Worker(url) and no { type: 'module' }.
+    const worker = await optionsFor('bridge/snapshot-worker')
+    expect(worker.format).toBe('iife')
+    expect(existsSync('dist/bridge/snapshot-worker.js')).toBe(true)
   })
 
   it('в собранных скриптах не осталось импортов голых спецификаторов', () => {

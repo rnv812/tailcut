@@ -20,6 +20,7 @@ export const ENTRIES = [
   { entryPoints: { 'bridge/bridge': 'src/bridge/bridge.ts' }, format: 'esm' },
   { entryPoints: { 'bridge/snapshot-worker': 'src/bridge/snapshot-worker.ts' }, format: 'iife' },
   { entryPoints: { 'popup/popup': 'src/popup/popup.tsx' }, format: 'esm' },
+  { entryPoints: { 'editor/main': 'src/editor/main.tsx' }, format: 'esm' },
 ]
 
 /** Полные опции esbuild по одной на точку входа. */
@@ -50,6 +51,7 @@ export async function build({ dev = false, watch = false } = {}) {
   await cp('manifest.json', 'dist/manifest.json')
   await cp('src/bridge/bridge.html', 'dist/bridge/bridge.html')
   await cp('src/popup/popup.html', 'dist/popup/popup.html')
+  await cp('src/editor/editor.html', 'dist/editor/editor.html')
 
   if (watch) {
     await Promise.all(contexts.map((c) => c.watch()))

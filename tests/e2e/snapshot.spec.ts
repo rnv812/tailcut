@@ -1,40 +1,9 @@
-import { test, expect, type BrowserContext, type Page } from '@playwright/test'
-import { launchWithExtension, openExtensionPage, routeLocal, serveLocal } from './helpers'
+import { test, expect, type Page } from '@playwright/test'
+import { clickEdit, openExtensionPage, recordPlayer, routeLocal, serveLocal, launchWithExtension } from './helpers'
 import { decodeFooter, decodeIndex, FOOTER_BYTES } from '../../src/core/snapshot/format'
 import { snapshotPath } from '../../src/shared/protocol'
 
 const PLAYER_URL = 'https://tailcut.test/player'
-
-/** Long enough for triage to let the player past its probation (six seconds) plus the poll. */
-const PLAY_MS = 7_000
-
-type PageState = { allAppended?: boolean }
-
-/**
- * The snapshots the extension has written, by name, read inside a page of its own origin.
- *
- * This is how a test learns the name of the snapshot a freeze made. The address the popup opens
- * the editor at carries it, but the editor page itself arrives with the next task, and Chrome
- * answers an extension resource that is not there with `chrome-error://chromewebdata/` — the tab
- * keeps no trace of the address it was opened at, in `page.url()`, in `location.href` or in
- * `chrome.tabs`. That the address is built out of the identifier the bridge answered with is
- * settled in tests/popup/popup.test.tsx, where the call is visible; what is settled here is the
- * file.
- */
-const snapshotsIn = async (page: Page): Promise<string[]> =>
-  page.evaluate(async () => {
-    const names: string[] = []
-    try {
-      const root = await navigator.storage.getDirectory()
-      const dir = await root.getDirectoryHandle('snapshots')
-      // The directory handle is iterable in Chrome; the DOM types of the build know nothing of it.
-      const keys = (dir as unknown as { keys(): AsyncIterable<string> }).keys()
-      for await (const name of keys) names.push(name)
-    } catch {
-      // No directory at all: nothing was ever frozen here.
-    }
-    return names
-  })
 
 /** Reads a whole file out of OPFS inside the page and hands the bytes back to the test. */
 const readOpfs = async (page: Page, file: string): Promise<number[] | null> =>
@@ -51,54 +20,12 @@ const readOpfs = async (page: Page, file: string): Promise<number[] | null> =>
     }
   }, file)
 
-async function recorded(): Promise<{ context: BrowserContext; player: Page; extensionId: string }> {
-  const { context, extensionId } = await launchWithExtension()
-  const player = await context.newPage()
-  await serveLocal(player, 'player.html', PLAYER_URL)
-
-  await player.waitForFunction(() => (window as unknown as PageState).allAppended === true, undefined, {
-    timeout: 15_000,
-  })
-  await player.evaluate(() => {
-    const video = document.querySelector('video')!
-    video.loop = true
-    return video.play()
-  })
-  await player.waitForTimeout(PLAY_MS)
-
-  return { context, player, extensionId }
-}
-
-/** Clicks Edit in the popup and gives back the identifier of the snapshot it wrote. */
-async function freeze(context: BrowserContext, player: Page, extensionId: string): Promise<string> {
-  const popup = await context.newPage()
-  await player.bringToFront()
-  await popup.goto(`chrome-extension://${extensionId}/popup/popup.html`)
-
-  const opened = context.waitForEvent('page')
-  // The popup only gets out of the way once the freeze went through and the editor tab is in
-  // front: over a refusal it stays where it is with its complaint, so this is the success of the
-  // freeze seen from the outside.
-  const gone = popup.waitForEvent('close')
-  await popup.getByRole('button', { name: 'Edit' }).click()
-
-  const editor = await opened
-  await gone
-  await editor.close()
-
-  const reader = await openExtensionPage(context, extensionId, 'popup/popup.html')
-  const names = await snapshotsIn(reader)
-  await reader.close()
-
-  expect(names, 'Edit opened the editor over no snapshot at all').toHaveLength(1)
-  return names[0]!.replace(/\.tcs$/, '')
-}
-
 test('the bridge writes the snapshot and a tab of the extension reads it', async () => {
-  const { context, player, extensionId } = await recorded()
+  const { context, player, extensionId } = await recordPlayer()
 
   try {
-    const id = await freeze(context, player, extensionId)
+    const { editor, snapshotId: id } = await clickEdit(context, player, extensionId)
+    await editor.close()
 
     const reader = await openExtensionPage(context, extensionId, 'popup/popup.html')
     const bytes = await readOpfs(reader, snapshotPath(id))
@@ -123,10 +50,11 @@ test('the bridge writes the snapshot and a tab of the extension reads it', async
 })
 
 test('the snapshot outlives the tab it was taken from', async () => {
-  const { context, player, extensionId } = await recorded()
+  const { context, player, extensionId } = await recordPlayer()
 
   try {
-    const id = await freeze(context, player, extensionId)
+    const { editor, snapshotId: id } = await clickEdit(context, player, extensionId)
+    await editor.close()
     await player.close()
 
     const reader = await openExtensionPage(context, extensionId, 'popup/popup.html')

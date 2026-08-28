@@ -195,6 +195,61 @@ export async function saveAll(player: Page, popup: Page): Promise<string> {
   return file!
 }
 
+/** Long enough for triage to let a player past its probation (six seconds), plus the poll. */
+const PROBATION_MS = 7_000
+
+type PageState = { allAppended?: boolean }
+
+/**
+ * Opens a test page with a player and lets it gather material. The looping is what carries the
+ * played counter past the probation: the fixture holds exactly six seconds.
+ */
+export async function recordPlayer(
+  htmlFile = 'player.html',
+  url = 'https://tailcut.test/player',
+): Promise<{ context: BrowserContext; player: Page; extensionId: string }> {
+  const { context, extensionId } = await launchWithExtension()
+  const player = await context.newPage()
+  await serveLocal(player, htmlFile, url)
+
+  await player.waitForFunction(
+    () => (window as unknown as PageState).allAppended === true,
+    undefined,
+    { timeout: 15_000 },
+  )
+  await player.evaluate(() => {
+    const video = document.querySelector('video')!
+    video.loop = true
+    return video.play()
+  })
+  await player.waitForTimeout(PROBATION_MS)
+
+  return { context, player, extensionId }
+}
+
+/** Presses Edit in the popup and gives back the editor tab it opened, with the snapshot's name. */
+export async function clickEdit(
+  context: BrowserContext,
+  player: Page,
+  extensionId: string,
+): Promise<{ editor: Page; snapshotId: string }> {
+  const popup = await context.newPage()
+  await player.bringToFront()
+  await popup.goto(`chrome-extension://${extensionId}/popup/popup.html`)
+
+  const opened = context.waitForEvent('page')
+  await popup.getByRole('button', { name: 'Edit' }).click()
+
+  const editor = await opened
+  await editor.waitForLoadState('domcontentloaded')
+  const snapshotId = new URL(editor.url()).searchParams.get('s')
+
+  expect(snapshotId, 'Edit did not open the editor with a snapshot').toBeTruthy()
+  await popup.close()
+
+  return { editor, snapshotId: snapshotId! }
+}
+
 export interface Probed {
   format: { duration: string }
   streams: Array<{
