@@ -67,28 +67,46 @@ test('the snapshot outlives the tab it was taken from', async () => {
   }
 })
 
-test('with no material Edit refuses and opens no tab', async () => {
+/**
+ * The refusal, over a session that is really there.
+ *
+ * It used to be measured on a banner page, and a banner is thrown out by triage before the popup
+ * ever hears of it: there was no session, so no Edit button was drawn, so nothing was clicked and
+ * the one assertion left — that no tab had opened — was true of a browser in which nothing had
+ * happened. The whole of the refusal could have been deleted and this stayed green.
+ *
+ * So the page is one triage keeps and the popup lists: a player that opened its stream and never
+ * got a fragment into it. The button is there, the click is real, and the answer to it is the
+ * "empty" refusal in as many words.
+ */
+test('with no material Edit refuses in words and opens no tab', async () => {
   const { context, extensionId } = await launchWithExtension()
 
   try {
     const player = await context.newPage()
-    await serveLocal(player, 'banner.html', 'https://tailcut.test/banner')
-    await player.waitForTimeout(3_000)
+    await serveLocal(player, 'no-material.html', 'https://tailcut.test/no-material')
+    await player.waitForFunction(() => (window as unknown as { headerOnly?: boolean }).headerOnly)
 
     const popup = await context.newPage()
     await player.bringToFront()
+    // Two polls of the watcher. Creating the second tab put the player in the background for a
+    // moment, and an unconfirmed session is taken out of the registry on sight of that; a hold
+    // puts it back whole, and this page can never earn a promotion — nothing in it ever plays.
+    await player.waitForTimeout(1_500)
     await popup.goto(`chrome-extension://${extensionId}/popup/popup.html`)
 
     const before = context.pages().length
     const edit = popup.getByRole('button', { name: 'Edit' })
-    // A clip triage threw out never reaches the popup at all: there is no button because there
-    // is no session.
-    if (await edit.count()) {
-      await edit.click()
-      await expect(popup.getByTestId('edit-error')).toBeVisible()
-    } else {
-      await expect(popup.getByText('Nothing recorded on this page yet.')).toBeVisible()
-    }
+    // The session is listed, and the buttons over it are the point of the test: a page that
+    // reached the popup as nothing at all would prove nothing about the refusal.
+    await expect(edit, 'the session was not listed: there is no refusal to measure here').toBeVisible()
+    await expect(popup.getByTestId('duration')).toHaveText('0:00')
+
+    await edit.click()
+
+    await expect(popup.getByTestId('edit-error')).toHaveText(
+      'There is nothing to edit in this session yet.',
+    )
     expect(context.pages().length, 'an editor tab opened over nothing to edit').toBe(before)
   } finally {
     await context.close()

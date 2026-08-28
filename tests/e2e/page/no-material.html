@@ -1,0 +1,41 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>a player that loaded nothing</title>
+<!--
+  A player that opened a stream and never got a fragment into it.
+
+  Everything triage asks for is here — a wide element, on the screen, unmuted, with controls — so
+  the session is opened and listed the moment the init segment arrives, and the popup draws its
+  buttons over it. What never arrives is material: `readyState` stays at zero, nothing plays, and
+  both buttons are looking at a session there is nothing to cut from. That is the state the
+  refusals of "Save all" and of "Edit" are written for, and the page a banner would not make: a
+  banner is thrown out by triage and reaches the popup as no session at all.
+
+  It is an ordinary state and not a contrived one. A stream that opened and stalled, a second
+  buffer still waiting on its first fragment, a player whose manifest resolved and whose media
+  did not: every one of them looks like this from here.
+-->
+<video id="v" controls width="640" style="background:#000"></video>
+<script>
+  const INIT = '/fixtures/h264/init-stream0.m4s'
+
+  const video = document.getElementById('v')
+  const mediaSource = new MediaSource()
+  video.src = URL.createObjectURL(mediaSource)
+
+  window.appended = 0
+
+  mediaSource.addEventListener('sourceopen', async () => {
+    const sb = mediaSource.addSourceBuffer('video/mp4; codecs="avc1.4d401e"')
+
+    await new Promise((resolve) => {
+      sb.addEventListener('updateend', resolve, { once: true })
+      fetch(INIT)
+        .then((answer) => answer.arrayBuffer())
+        .then((bytes) => sb.appendBuffer(bytes))
+    })
+
+    window.appended++
+    window.headerOnly = true
+  })
+</script>
