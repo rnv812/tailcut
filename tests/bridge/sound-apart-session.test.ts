@@ -346,3 +346,45 @@ describe('a page that plays its sound apart, paused', () => {
     expect(page.store.list()[0]?.plain?.sound?.url).toBe(TRACK)
   })
 })
+
+describe('a soundtrack the browser is still downloading', () => {
+  it('reaches further as the element holds more of the track', async () => {
+    const page = registry()
+
+    // One second held at first: the clip is the picture's length either way and its tail is
+    // silent, which the popup says.
+    page.plays({ buffered: [[0, 1]] })
+    page.shows()
+    page.store.promotePending(SOURCE)
+    await page.store.settled()
+    page.shows()
+    await page.store.settled()
+    expect(summarize(page.store.list()[0]!).omits).toBe('soundShort')
+
+    // The download makes headway and the sound now covers the whole picture.
+    page.plays({ buffered: [[0, 24.5]] })
+    await page.store.settled()
+
+    expect(summarize(page.store.list()[0]!).omits).toBeUndefined()
+    expect(summarize(page.store.list()[0]!).pairedSound).toBe(true)
+  })
+
+  it('keeps the sound it has while the longer read is on its way', async () => {
+    const page = registry()
+
+    page.plays({ buffered: [[0, 1]] })
+    page.shows()
+    page.store.promotePending(SOURCE)
+    await page.store.settled()
+    page.shows()
+    await page.store.settled()
+
+    // The report arrives and the read it sets going has not come back yet. Dropped in the
+    // meantime, the popup would lose the line about the sound and get it back a moment later —
+    // and a save made in between would come out silent.
+    page.plays({ buffered: [[0, 24.5]] })
+
+    expect(page.store.list()[0]?.plain?.sound?.url).toBe(TRACK)
+    expect(summarize(page.store.list()[0]!).pairedSound).toBe(true)
+  })
+})

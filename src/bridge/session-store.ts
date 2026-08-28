@@ -1108,12 +1108,17 @@ export class SessionStore {
       return undefined
     }
 
-    if (sound.opened && sound.seconds >= seconds) {
+    // A read may be wanted even with a track already in hand: the element has since buffered more
+    // of it and the clip can reach further. What was read stays on offer while the longer read is
+    // on its way — dropped, the popup would lose the line about the sound and get it back a
+    // moment later, and a save made in between would come out silent.
+    this.readSound(sound, seconds)
+
+    if (sound.opened) {
       state.soundLost = false
       return { url: sound.url, track: sound.opened.track, read: sound.opened.read }
     }
 
-    this.readSound(sound, seconds)
     state.soundLost = sound.unreadable
     return undefined
   }
