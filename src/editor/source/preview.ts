@@ -108,7 +108,7 @@ async function fileMaterialPreview(
   const file = assembleMp4(plan, bytesFrom([whole], [bytes]))
   if (!file.byteLength) return null
 
-  const shown = plan.tracks.find((track) => track.kind === 'video')
+  const shown = plan.tracks.find((one) => one.kind === 'video')
   return previewOf(file, shown ? retimeToPlan(framesOfTrack(source.video), shown) : [])
 }
 
