@@ -1,0 +1,64 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>A loop under a track</title>
+<!--
+  A page that plays its picture and its sound as two elements (§5.6).
+
+  Measured on coub, one site of the seven surveyed: <video src> of 9.48 s carrying H.264 and no
+  audio track at all, <audio src> of 66.35 s carrying mp3, both with loop set, each turning on a
+  cycle of its own and each served from a host of its own. The fixtures here keep the ratio — 3.5 s
+  of picture under 24.5 s of soundtrack, seven times as long — and shrink both so that the pair
+  costs a hundred kilobytes of repository.
+
+  The picture is muted, looping and has no controls, which is the exact shape of a banner: on any
+  other page it is refused as decoration, and the whole question this page puts is whether the
+  sound playing beside it is read as the evidence that it is not one.
+
+  Nothing here is a MediaSource. The browser fetches both files itself and the hook in the MAIN
+  world never sees a byte of either.
+-->
+<style>
+  body {
+    background: #111;
+    color: #eee;
+    font: 14px/1.5 system-ui, sans-serif;
+  }
+</style>
+<p>A short loop, and a long track playing underneath it.</p>
+<video id="v" muted loop width="640" src="__MEDIA__" style="background: #000"></video>
+<audio id="a" loop src="__SOUND__"></audio>
+
+<script>
+  const video = document.getElementById('v')
+  const sound = document.getElementById('a')
+
+  /**
+   * Starts both, the way the page's own play button does.
+   *
+   * The picture is muted and would start on its own; the soundtrack is not, and Chromium will not
+   * let an unmuted element begin without a gesture. The test clicks the page before calling this,
+   * which is what a viewer does.
+   */
+  window.tcPlay = async () => {
+    await video.play()
+    await sound.play()
+  }
+
+  window.tcPause = () => {
+    video.pause()
+    sound.pause()
+  }
+
+  /** What each element knows about the file it is playing. */
+  const stateOf = (element) => ({
+    currentTime: element.currentTime,
+    duration: element.duration,
+    paused: element.paused,
+    buffered: Array.from({ length: element.buffered.length }, (_, i) => [
+      element.buffered.start(i),
+      element.buffered.end(i),
+    ]),
+  })
+
+  window.tcState = () => ({ video: stateOf(video), sound: stateOf(sound) })
+</script>

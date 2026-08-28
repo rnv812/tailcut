@@ -340,6 +340,20 @@ export function startWatching(
   let saidUnreachable = false
   /** Whether the page has already been declared protected: the refusal never turns. */
   let saidEncrypted = false
+  /**
+   * Whether anything on this page has been playing sound of its own; see VideoSignals.soundApart.
+   *
+   * Remembered and not read afresh each poll, for the reason §5.5 gives about everything else
+   * here: a pause freezes a recording, it does not erase one. The user watches a looping picture
+   * under a track, pauses, and opens the popup — and read live, the page would be silent at that
+   * moment, the picture would go back to being a banner, and the session would be dropped from
+   * under the popup that was opened to save it.
+   *
+   * That a page keeps its sound in another element is a fact about the page and not about the
+   * instant. What it is not is a way past anything else: the picture still has to be a real player
+   * of a real size, watched through the whole grace period.
+   */
+  let soundHeard = false
 
   /** Shadow roots already under observation: a weak set, so a detached tree can still be freed. */
   const observed = new WeakSet<ShadowRoot>()
@@ -444,9 +458,7 @@ export function startWatching(
       if (!standing || (sound.playing && !standing.playing)) sounds.set(sound.sourceId, sound)
     }
 
-    /** Anything on this page is playing sound of its own; see VideoSignals.soundApart. */
-    let soundApart = false
-    for (const sound of sounds.values()) if (sound.playing) soundApart = true
+    for (const sound of sounds.values()) if (sound.playing) soundHeard = true
 
     for (const [sourceId, sound] of sounds) {
       const signature = soundSignature(sound)
@@ -467,7 +479,7 @@ export function startWatching(
       const elapsed = (now - state.lastTick) / 1000
       state.lastTick = now
 
-      const signals = signalsOf(state, soundApart)
+      const signals = signalsOf(state, soundHeard)
       // Сыгранное с прошлого опроса — уже сыгранное, и в вердикт оно идёт сразу: начисли
       // его после, и порог пересекался бы опросом позже, чем на самом деле. Пауза, скрытая
       // вкладка и уход с экрана просто останавливают счётчик, не сбрасывая накопленное.

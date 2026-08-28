@@ -396,4 +396,38 @@ ffmpeg -y -f lavfi -i "color=c=#202040:s=256x144:r=10:d=20" \
        -c:a libvorbis -q:a 0 -ar 22050 -ac 1 \
        -shortest "$out/plain/watched-vp8.webm"
 
+# The page that keeps its sound in an element of its own: a picture with no audio track at all,
+# and a soundtrack seven times as long playing underneath it (§5.6).
+#
+# Measured on coub, one site of the seven surveyed: <video src> of 9.48 s carrying H.264 and no
+# sound, <audio src> of 66.35 s carrying mp3 at 44.1 kHz in stereo, both with loop set and each
+# turning on a cycle of its own. The ratio is what the case is about and it is kept exactly; the
+# lengths are scaled down so that the pair costs a hundred kilobytes of repository rather than a
+# megabyte of it. Three and a half seconds of picture is also past the six the filter gives a
+# player only because the picture loops, which is the point — the sound written into a clip is the
+# head of the track and not wherever the track had got to by the time of the click.
+#
+# -an is the whole of what makes this file the case it is: with a sound track of its own there is
+# nothing to pair and the road under test is never taken. +faststart puts the movie box inside the
+# first probe, which is what a site that means its loop to start immediately serves.
+ffmpeg -y -f lavfi -i "color=c=#204020:s=256x144:r=10:d=3.5" \
+       -vf "drawbox=x='mod(t*60\,220)':y='60+40*sin(t)':w=30:h=30:color=orange:t=fill" \
+       -c:v libx264 -profile:v main -crf 30 -g 20 -keyint_min 20 -sc_threshold 0 \
+       -pix_fmt yuv420p -an -movflags +faststart "$out/plain/loop.mp4"
+
+# The soundtrack: MPEG-1 Layer III at 44.1 kHz in stereo, which is what the site serves. lame
+# writes an ID3v2 tag of 45 bytes in front of it and a Xing header frame at the head of the
+# material — both of them things the reader has to step over, and both of them the reason this is
+# a real encoder's file rather than four bytes written by hand. The LAME extension states 576
+# samples of encoder delay, which with the 529 of the format is the 25.1 ms the sound would sit
+# away from the picture if the edit list did not hide it.
+ffmpeg -y -f lavfi -i "sine=frequency=330:duration=24.5" \
+       -c:a libmp3lame -b:a 32k -ar 44100 -ac 2 "$out/plain/track.mp3"
+
+# The same in the low-sampling-frequency extension: half the rate, half the samples to a frame,
+# and a bitrate table of its own. A reader that took the MPEG-1 geometry for granted measures this
+# out at twice its length, and nothing else in the fixtures would catch it.
+ffmpeg -y -f lavfi -i "sine=frequency=220:duration=3" \
+       -c:a libmp3lame -b:a 32k -ar 22050 -ac 1 "$out/plain/track-lsf.mp3"
+
 ls -la "$out/h264" "$out/minute" "$out/vp9" "$out/av1" "$out/webm" "$out/webm-vp8" "$out/muxed" "$out/muxed-edits" "$out/multi" "$out/cenc" "$out/plain"

@@ -16,6 +16,17 @@ material of the clip in one more. It becomes a session like any other, under the
 same merge key, the same triage and the same button, and what is offered is the
 stretch that actually passed through the player rather than the whole file.
 
+One page shape in the survey delivered neither of those: coub puts the picture in a `<video src>`
+with no audio track in it and the sound in a separate `<audio src>` seven times as long, both
+looping, each turning on a cycle of its own. There is no single piece of media on such a page and
+no single clock, so a clip has to be defined rather than found. The picture is the clip and states
+its length; the soundtrack is laid under it from its start, which is the pairing the page itself
+makes when it loads and the only one that can be stated in media time; nothing is ever looped to
+fill a gap, and the popup says in as many words that the sound came from a track playing
+underneath rather than from the video. Where the pairing cannot be made — the track unreadable,
+or two of them playing with nothing to say which belongs to the picture — the clip is silent and
+the popup says that instead. Only as much of the track as the picture is long is ever fetched.
+
 Editing, disk history, re-encoding and extra sources land in later stages. See
 `docs/superpowers/specs/2026-08-22-tailcut-design.md`.
 

@@ -1,4 +1,5 @@
 import type { SampleEntry } from '../iso/entry'
+import { MPEG1_OBJECT_TYPE, MPEG2_OBJECT_TYPE } from '../mpeg/mp4'
 import { OPUS_SAMPLE_RATE } from '../opus/packets'
 import { VORBIS_OBJECT_TYPE } from '../vorbis/mp4'
 
@@ -149,7 +150,29 @@ export function audioDecoderConfig(entry: SampleEntry): AudioDecoderSetup | null
   if (entry.format === 'mp4a') {
     const esds = entry.children.get('esds')
     const declared = esds ? decoderConfigOf(esds) : null
-    if (!declared?.specific || !(entry.sampleRate > 0)) return null
+    if (!declared || !(entry.sampleRate > 0)) return null
+
+    // MPEG-1 or MPEG-2 audio — an mp3, which is how the soundtrack of a page that plays its sound
+    // apart arrives (§5.6, src/core/mpeg/frames.ts). It is the one codec here with nothing to set
+    // up: every field a decoder needs stands in the header of every frame, so the descriptor
+    // carries no DecoderSpecificInfo, and the refusal below would throw the track away for the
+    // absence of a thing it never has. Chromium names the codec `mp3` and decodes it.
+    //
+    // No consumer reaches this branch today, and it is here all the same because the question
+    // this function answers is what an AudioDecoder has to be told about a sample entry, and
+    // "nothing can be told about this one" is the wrong answer for an entry that describes itself
+    // completely. The one caller is the waveform worker, and it is handed the sound of a
+    // recording only where the sound sits in a track of its own (`materialOf`); a clip made of a
+    // complete file states both kinds in one movie box and reaches it as a picture. Should that
+    // change, this track draws its wave instead of the inspector saying it cannot be decoded.
+    if (
+      declared.objectType === MPEG1_OBJECT_TYPE ||
+      declared.objectType === MPEG2_OBJECT_TYPE
+    ) {
+      return { codec: 'mp3', numberOfChannels: entry.channels, sampleRate: entry.sampleRate }
+    }
+
+    if (!declared.specific) return null
 
     // Vorbis under an mp4a, which is the only place an mp4 has for it. The description is the
     // three setup headers exactly as the Matroska carried them, which is the form Chromium asks

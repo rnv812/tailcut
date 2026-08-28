@@ -1036,21 +1036,22 @@ describe('the watcher and a page that plays its sound apart from its picture', (
     expect(watcher.seen).toEqual([{ sourceId: CLIP_ID, verdict: 'promote' }])
   })
 
-  it('refuses that picture again once the sound has stopped', async () => {
+  it('keeps that picture when the sound is paused, rather than calling it a banner again', async () => {
     const watcher = await startWatcher()
     stand(loopingPicture())
     const sound = play(soundElement())
 
     tick(13)
     sound.paused = true
-    tick()
+    tick(4)
 
-    // Nothing is playing sound on the page any more, so the looping silent picture is a banner
-    // again — which is what it is on the ten measured pages that hold nothing else.
-    expect(watcher.seen).toEqual([
-      { sourceId: CLIP_ID, verdict: 'promote' },
-      { sourceId: CLIP_ID, verdict: 'reject' },
-    ])
+    // §5.5: a pause freezes a recording and does not erase one. Read live, a page whose viewer
+    // has just paused it to open the popup is a silent page, the looping picture is a banner
+    // again, and the session goes out from under the popup that was opened to save it.
+    expect(watcher.seen).toEqual([{ sourceId: CLIP_ID, verdict: 'promote' }])
+    // And the pause itself is reported, because the registry pairs on what is playing where it
+    // can and on what has played where it cannot.
+    expect(watcher.sounds.map((one) => one.playing)).toEqual([true, false])
   })
 
   it('goes on refusing a banner on a page whose sound is standing still', async () => {
@@ -1087,7 +1088,7 @@ describe('the watcher and a page that plays its sound apart from its picture', (
     expect(watcher.sounds[0]?.playing).toBe(true)
   })
 
-  it('forgets a soundtrack whose element left the page', async () => {
+  it('drops the element of a soundtrack that left the page', async () => {
     const watcher = await startWatcher()
     stand(loopingPicture())
     const sound = play(soundElement())
@@ -1095,11 +1096,11 @@ describe('the watcher and a page that plays its sound apart from its picture', (
     tick(13)
     sound.isConnected = false
     documentRoot.sounds.length = 0
-    tick()
+    tick(4)
 
-    expect(watcher.seen).toEqual([
-      { sourceId: CLIP_ID, verdict: 'promote' },
-      { sourceId: CLIP_ID, verdict: 'reject' },
-    ])
+    // The element is gone and nothing is reported for it any more. The picture keeps what it
+    // earned: the page did play its sound apart, and a torn-down element does not unmake that.
+    expect(watcher.sounds).toHaveLength(1)
+    expect(watcher.seen).toEqual([{ sourceId: CLIP_ID, verdict: 'promote' }])
   })
 })

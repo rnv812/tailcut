@@ -44,8 +44,17 @@ const close = (server: Server): Promise<void> =>
     server.close(() => resolve())
   })
 
-/** What a file is served as, by the extension it is named with. */
-const CONTENT_TYPES: Record<string, string> = { '.mp4': 'video/mp4', '.webm': 'video/webm' }
+/**
+ * What a file is served as, by the extension it is named with.
+ *
+ * It has to be right and not merely plausible: a `<video>` handed a Matroska under `video/mp4`
+ * refuses to play it, and an `<audio>` handed an mp3 under a video type does the same.
+ */
+const CONTENT_TYPES: Record<string, string> = {
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mp3': 'audio/mpeg',
+}
 
 /**
  * Serves the files of `tests/fixtures/plain` and answers ranged reads properly.
@@ -108,8 +117,19 @@ export async function serveMedia(): Promise<Host> {
   return host
 }
 
-/** Serves one page, under an origin of its own, with the address of the media written into it. */
-export async function servePage(html: string, mediaOrigin: string, file: string): Promise<Host> {
+/**
+ * Serves one page, under an origin of its own, with the address of the media written into it.
+ *
+ * `sound` is for the one page shape that plays two files at once — a picture in a `<video>` and a
+ * soundtrack in an `<audio>` beside it (§5.6). Both come off the same media host, which is what
+ * the survey found: the two files of coub sit on hosts of their own, and neither is the page's.
+ */
+export async function servePage(
+  html: string,
+  mediaOrigin: string,
+  file: string,
+  sound?: string,
+): Promise<Host> {
   const host: Host = { origin: '', asked: [], served: 0, close: async () => {} }
 
   const { server, origin } = await listen(async (request, response) => {
@@ -120,6 +140,7 @@ export async function servePage(html: string, mediaOrigin: string, file: string)
     // address twice, and half a substitution would leave the second element pointing at nothing.
     const body = page
       .replaceAll('__MEDIA__', `${mediaOrigin}/${file}`)
+      .replaceAll('__SOUND__', sound ? `${mediaOrigin}/${sound}` : '')
       .replaceAll('__NAME__', file)
 
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })

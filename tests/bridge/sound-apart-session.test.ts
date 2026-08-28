@@ -297,3 +297,52 @@ describe('a page that plays its sound apart from its picture', () => {
     expect(reads.every((one) => one.bytes > 0)).toBe(true)
   })
 })
+
+describe('a page that plays its sound apart, paused', () => {
+  it('keeps the pairing when the viewer pauses to open the popup', async () => {
+    const page = await paired()
+
+    // Which is what a viewer does before saving. §5.5: a pause freezes and does not erase, and
+    // read live the page is silent at exactly the moment somebody is deciding to save from it.
+    page.plays({ playing: false })
+    await page.store.settled()
+
+    expect(page.store.list()[0]?.plain?.sound?.url).toBe(TRACK)
+  })
+
+  it('will not guess between two tracks the page has played in turn', async () => {
+    const page = registry({ [CLIP]: picture, [TRACK]: soundtrack, [OTHER_TRACK]: soundtrack })
+
+    page.plays()
+    page.plays({ playing: false })
+    page.plays({ url: OTHER_TRACK })
+    page.shows()
+    page.store.promotePending(SOURCE)
+    await page.store.settled()
+    page.plays({ url: OTHER_TRACK, playing: false })
+    page.shows()
+    await page.store.settled()
+
+    // A feed or a playlist: two tracks have played and neither is playing now. Nothing here can
+    // say which one belonged to the picture, and a stranger's sound in somebody's clip is worse
+    // than a silent clip with a sentence beside it.
+    expect(page.store.list()[0]?.plain?.sound).toBeUndefined()
+    expect(summarize(page.store.list()[0]!).omits).toBe('sound')
+  })
+
+  it('prefers the track that is playing now over one that has stopped', async () => {
+    const page = registry({ [CLIP]: picture, [TRACK]: soundtrack, [OTHER_TRACK]: soundtrack })
+
+    page.plays({ url: OTHER_TRACK })
+    page.plays({ url: OTHER_TRACK, playing: false })
+    page.plays()
+    page.shows()
+    page.store.promotePending(SOURCE)
+    await page.store.settled()
+    page.shows()
+    await page.store.settled()
+
+    // One has played and stopped, one is playing: the page is answering the question itself.
+    expect(page.store.list()[0]?.plain?.sound?.url).toBe(TRACK)
+  })
+})

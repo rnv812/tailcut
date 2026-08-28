@@ -94,9 +94,14 @@ describe('mpegSampleEntry', () => {
 
     // Every field a decoder needs is in the header of every frame, so there is nothing to set it
     // up with — unlike AAC, whose AudioSpecificConfig is the difference between sound and rubbish.
-    // audioDecoderConfig refuses it for exactly that reason, which is the honest answer: the
-    // editor decodes the sound of a clip through WebCodecs, and this track is not one it can.
-    expect(audioDecoderConfig(read!)).toBeNull()
+    // What the decoder is told is the object type and the shape of the stream, and no more; a
+    // reader that insisted on setup bytes would refuse this track for the absence of a thing it
+    // never has, and the editor would draw no waveform under a clip that has sound.
+    expect(audioDecoderConfig(read!)).toEqual({
+      codec: 'mp3',
+      numberOfChannels: 2,
+      sampleRate: 44100,
+    })
   })
 })
 

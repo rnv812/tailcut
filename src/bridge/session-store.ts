@@ -740,6 +740,15 @@ interface SoundState {
   url: string
   buffered: Span[]
   playing: boolean
+  /**
+   * The page has played this track at some point, whether or not it is playing now.
+   *
+   * The pairing is decided on this and not on `playing`, for the reason §5.5 gives about
+   * everything else: a pause freezes and does not erase. A viewer watches a looping picture under
+   * a track, pauses it and opens the popup — and read live, the page is silent at that moment and
+   * the clip would come out without the sound the viewer had been listening to.
+   */
+  played: boolean
   /** The head of the track, once it has been read. */
   opened?: OpenedSound
   /** A read of the head is on its way. */
@@ -1039,6 +1048,7 @@ export class SessionStore {
         url: input.url,
         buffered: [],
         playing: false,
+        played: false,
         reading: false,
         unreadable: false,
         seconds: 0,
@@ -1048,6 +1058,7 @@ export class SessionStore {
 
     state.buffered = spansOf(input.buffered, 0)
     state.playing = input.playing
+    state.played ||= input.playing
 
     // A soundtrack that has just started playing is news for every picture on the page: one that
     // was refused as a banner a moment ago may be half of a work now.
@@ -1070,15 +1081,23 @@ export class SessionStore {
     const file = state.opened?.file
     if (!file || file.tracks.some((track) => track.kind === 'audio')) return undefined
 
+    // What is playing right now, and failing that what has played at all. The first answers a
+    // page as it stands; the second answers the same page paused, which is the state a page is in
+    // while somebody decides to save from it. A page that has played two tracks in turn — a feed,
+    // a playlist — falls through both and is left unpaired rather than guessed at: putting a
+    // stranger's sound into somebody's clip is worse than handing them a silent one and saying so.
     const playing = [...this.soundSources.values()].filter((sound) => sound.playing)
-    if (playing.length !== 1) {
-      // Nothing playing at all is not a loss: a silent picture on a page with no sound on it is
-      // simply a silent picture, and there is nothing to tell the user about.
-      state.soundLost = playing.length > 1
+    const heard = [...this.soundSources.values()].filter((sound) => sound.played)
+    const candidates = playing.length ? playing : heard
+
+    if (candidates.length !== 1) {
+      // Nothing has played at all is not a loss: a silent picture on a page with no sound on it
+      // is simply a silent picture, and there is nothing to tell the user about.
+      state.soundLost = candidates.length > 1
       return undefined
     }
 
-    const sound = playing[0]!
+    const sound = candidates[0]!
     // How much of the track can ever be used: a clip cannot outrun the picture's own material.
     // Clamped to the stretch the element actually holds from its start, so that what is offered
     // is what really passed through the player — the same promise the picture is held to.

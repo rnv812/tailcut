@@ -40,37 +40,6 @@ describe('triage — мгновенный отказ', () => {
   })
 })
 
-describe('triage — a page that plays its sound in another element', () => {
-  const half = { ...base, muted: true, loop: true, controls: false, playedSeconds: 60 }
-
-  it('records a looping silent picture when the page is playing sound beside it', () => {
-    // The banner rule reads this element as decoration, and on nearly every page it is right. On
-    // a page whose sound is in an <audio> of its own it is wrong: the picture is not silent, its
-    // sound is in the other element, and the two together are the work (§5.6).
-    expect(triage(half, BALANCED)).toBe('reject')
-    expect(triage({ ...half, soundApart: true }, BALANCED)).toBe('promote')
-  })
-
-  it('takes away no other refusal', () => {
-    // The signal answers one question — is this element silent, or is the page's sound elsewhere
-    // — and it must not become a way past the rest. A small element, a hidden one and a page that
-    // has attached keys to it are refused with sound beside them as readily as without.
-    expect(triage({ ...half, soundApart: true, widthPx: 180 }, BALANCED)).toBe('reject')
-    expect(triage({ ...half, soundApart: true, visible: false }, BALANCED)).toBe('reject')
-    expect(triage({ ...half, soundApart: true, hasDrm: true }, BALANCED)).toBe('reject')
-  })
-
-  it('still serves out the grace period', () => {
-    expect(triage({ ...half, soundApart: true, playedSeconds: 2 }, BALANCED)).toBe('hold')
-  })
-
-  it('is refused under a preset that does not record muted video at all', () => {
-    // `recordMuted: false` is the user saying they do not want silent pictures, and a picture
-    // whose sound is somebody else's element is a silent picture by every measure this has.
-    expect(triage({ ...half, soundApart: true }, STRICT)).toBe('reject')
-  })
-})
-
 describe('triage — испытательный срок', () => {
   it('превью под курсором не доживает до сессии', () => {
     expect(triage({ ...base, playedSeconds: 1.5 }, BALANCED)).toBe('hold')
@@ -270,5 +239,36 @@ describe('triage — неизмеренные числовые сигналы (N
   it('NaN в ширине отсекается раньше испытательного срока', () => {
     expect(triage({ ...base, widthPx: NaN, playedSeconds: 0 }, BALANCED)).toBe('reject')
     expect(triage({ ...base, widthPx: NaN, playedSeconds: NaN }, BALANCED)).toBe('reject')
+  })
+})
+
+describe('triage — a page that plays its sound in another element', () => {
+  const half = { ...base, muted: true, loop: true, controls: false, playedSeconds: 60 }
+
+  it('records a looping silent picture when the page is playing sound beside it', () => {
+    // The banner rule reads this element as decoration, and on nearly every page it is right. On
+    // a page whose sound is in an <audio> of its own it is wrong: the picture is not silent, its
+    // sound is in the other element, and the two together are the work (§5.6).
+    expect(triage(half, BALANCED)).toBe('reject')
+    expect(triage({ ...half, soundApart: true }, BALANCED)).toBe('promote')
+  })
+
+  it('takes away no other refusal', () => {
+    // The signal answers one question — is this element silent, or is the page's sound elsewhere
+    // — and it must not become a way past the rest. A small element, a hidden one and a page that
+    // has attached keys to it are refused with sound beside them as readily as without.
+    expect(triage({ ...half, soundApart: true, widthPx: 180 }, BALANCED)).toBe('reject')
+    expect(triage({ ...half, soundApart: true, visible: false }, BALANCED)).toBe('reject')
+    expect(triage({ ...half, soundApart: true, hasDrm: true }, BALANCED)).toBe('reject')
+  })
+
+  it('still serves out the grace period', () => {
+    expect(triage({ ...half, soundApart: true, playedSeconds: 2 }, BALANCED)).toBe('hold')
+  })
+
+  it('is refused under a preset that does not record muted video at all', () => {
+    // `recordMuted: false` is the user saying they do not want silent pictures, and a picture
+    // whose sound is somebody else's element is a silent picture by every measure this has.
+    expect(triage({ ...half, soundApart: true }, STRICT)).toBe('reject')
   })
 })
