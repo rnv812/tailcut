@@ -538,8 +538,15 @@ describe('Edit', () => {
   })
 
   it('has words of its own for every reason a freeze can fail', async () => {
+    const shown: string[] = []
+
     for (const [reason, said] of [
+      ['gone', 'gone from the page'],
       ['empty', 'nothing to edit'],
+      // The material of an ordinary file is not in the frame: the freeze fetches it, and that
+      // read can be refused by a host or an address that has expired. Nothing was lost from the
+      // page, so neither "gone" nor "empty" is the truth about it.
+      ['unread', 'Could not read the video file'],
       ['storage', 'refused the storage'],
     ] as const) {
       const chrome = await mount({ sessions: [fresh] })
@@ -547,8 +554,14 @@ describe('Edit', () => {
 
       await click(editButton())
 
-      expect(textAt('edit-error'), `the ${reason} refusal`).toContain(said)
+      const text = textAt('edit-error')
+      expect(text, `the ${reason} refusal`).toContain(said)
+      shown.push(text!)
     }
+
+    // Four reasons and four sentences: they ask four different things of the user, and two of
+    // them explained alike would send somebody looking for a loss that never happened.
+    expect(new Set(shown).size, 'two refusals are explained in the same words').toBe(4)
   })
 
   it('takes the complaint back with the session it was made about', async () => {

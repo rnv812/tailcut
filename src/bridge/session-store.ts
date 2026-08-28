@@ -1,4 +1,6 @@
 import { parseFragment } from '../core/iso/fragment'
+import { parseInit } from '../core/iso/init'
+import { topLevelBoxes } from '../core/iso/reader'
 import {
   encryptedMedia,
   ingestInit,
@@ -13,6 +15,7 @@ import type { ExportPlan } from '../core/export/plan'
 import type { RangeReader } from '../core/iso/locate'
 import type { MuxTrack } from '../core/mux'
 import type { Omission } from '../shared/protocol'
+import type { SnapshotPage } from '../core/snapshot/format'
 import type { SnapshotSource } from '../core/snapshot/build'
 import type { Chunk, InitInfo, TrackKind } from '../shared/types'
 
@@ -1719,14 +1722,7 @@ function absorb(target: StoredSession, absorbed: StoredSession): void {
  */
 export function snapshotSourceOf(session: Session): SnapshotSource {
   return {
-    page: {
-      sessionKey: session.key,
-      url: session.url,
-      title: session.title,
-      createdAt: session.createdAt,
-      lastSeenAt: session.lastSeenAt,
-      refusedTracks: session.refusedTracks,
-    },
+    page: snapshotPageOf(session),
     tracks: session.tracks.map((track, at) => ({
       // A name of its own inside the snapshot: bufferId is unique in its media source and not in
       // the file, and two sources of one page do give out the same one.
@@ -1738,5 +1734,77 @@ export function snapshotSourceOf(session: Session): SnapshotSource {
       initBytes: track.initBytes,
       chunks: track.map.runs().flatMap((run) => run.chunks),
     })),
+  }
+}
+
+/** Everything about a session that cannot be worked out of the material, whichever kind it is. */
+function snapshotPageOf(session: Session): SnapshotPage {
+  return {
+    sessionKey: session.key,
+    url: session.url,
+    title: session.title,
+    createdAt: session.createdAt,
+    lastSeenAt: session.lastSeenAt,
+    // A track the ingest refused on the captured path, or one the movie box declared and the
+    // index could not read on this one: either way the material is short of a kind of media.
+    refusedTracks: session.refusedTracks || session.plain?.file.refusedTracks === true,
+  }
+}
+
+/**
+ * The chunks of a whole file carry no bytes of their own: one `mdat` holds the samples of every
+ * stretch, and the file is laid out once. See `SnapshotSourceTrack.movie`.
+ */
+const NO_SEGMENT = new Uint8Array(0)
+
+/**
+ * The same session as a snapshot source, when its material is an ordinary complete file.
+ *
+ * `file` is that material already assembled — the very clip "Save all" would have written, cut
+ * over the stretch the element actually held (see planSave and src/bridge/write.ts). It goes into
+ * the snapshot whole and unopened, and what is described here is where its movie box lies inside
+ * it; the editor reads the sample tables out of that and never asks the network for anything.
+ *
+ * Copying the material rather than remembering where it came from is the point of a snapshot: the
+ * editor tab outlives the page it was opened from, and an address on somebody's CDN does not —
+ * signed URLs expire, sessions end, nodes go away. It costs one read of what the popup already
+ * promised to save, made once, on a click.
+ *
+ * One track and not one per stream: a file states its tracks in one movie box and its samples in
+ * one `mdat`, so the picture and the sound are the same material here — which is exactly the
+ * shape a muxed init has on the captured path, and the reader treats them alike.
+ *
+ * null when the assembled bytes hold no movie box or no readable track. Nothing but a defect in
+ * our own writer produces that, and it is answered rather than thrown: a freeze that cannot
+ * describe what it wrote must refuse instead of writing a snapshot no editor can open.
+ */
+export function fileSnapshotSourceOf(
+  session: Session,
+  file: Uint8Array,
+  duration: number,
+): SnapshotSource | null {
+  const moov = topLevelBoxes(file).find((box) => box.type === 'moov')
+  const info = parseInit(file)
+  if (!moov || !info) return null
+
+  return {
+    page: snapshotPageOf(session),
+    tracks: [
+      {
+        id: 't0',
+        // No SourceBuffer ever existed to name: the browser fetched this file itself and the
+        // extension saw not one byte of it go by.
+        bufferId: 'file',
+        representation: `file:${info.tracks.map((track) => track.codec).join('+')}`,
+        kinds: [...new Set(info.tracks.map((track) => track.kind))],
+        info,
+        initBytes: file,
+        movie: { at: moov.start, length: moov.size },
+        // One stretch, from zero: the cut that assembled this file took the longest run the
+        // element held and closed nothing, so what came out is continuous from end to end and
+        // its own clock starts at its first frame.
+        chunks: [{ start: 0, end: duration, bytes: NO_SEGMENT }],
+      },
+    ],
   }
 }

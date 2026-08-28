@@ -33,6 +33,20 @@ export interface SnapshotTrack {
   info: InitInfo
   /** Ascending by start, no duplicates: the PtsMap laid out across the file. */
   chunks: SnapshotChunkEntry[]
+  /**
+   * The material is an ordinary complete file, lying whole at this range of the snapshot.
+   *
+   * The other way material arrives (§5.6): the browser fetched the file itself and the extension
+   * intercepted nothing, so there is no init segment and there are no fragments — one `moov`
+   * describes every sample and one `mdat` holds them. `init` then names that movie box inside
+   * this range rather than an init segment of its own, and every chunk points at this same range,
+   * because the samples of every stretch lie in the one `mdat`.
+   *
+   * A reader tells the two apart by this field and by nothing else: absent, the chunks are media
+   * segments to be walked for their `moof`s; present, the sample tables have been in the snapshot
+   * all along and are read straight out of them (`movieTracksOf`).
+   */
+  whole?: Located
 }
 
 /** The Session minus its tracks: what cannot be worked out of the material itself. */
@@ -115,11 +129,14 @@ const isLocated = (value: unknown): boolean => {
 }
 
 const isTrack = (value: unknown): boolean => {
-  const track = value as { init?: unknown; chunks?: unknown; info?: unknown } | null
+  const track = value as { init?: unknown; chunks?: unknown; info?: unknown; whole?: unknown } | null
   if (typeof track !== 'object' || track === null) return false
   if (!isLocated(track.init)) return false
   if (typeof track.info !== 'object' || track.info === null) return false
   if (!Array.isArray(track.chunks)) return false
+  // Absent is the ordinary case and the only other legal value is a place in the file: a `whole`
+  // that is anything else would send the reader to read a movie box out of nowhere.
+  if (track.whole !== undefined && !isLocated(track.whole)) return false
 
   return track.chunks.every((chunk: unknown) => {
     const entry = chunk as { start?: unknown; end?: unknown; data?: unknown }

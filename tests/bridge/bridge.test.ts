@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { sessionKey } from '../../src/core/session-key'
 import { boxBody, childBoxes, topLevelBoxes } from '../../src/core/iso/reader'
+import { movieTracksOf } from '../../src/core/export/source'
 import { isSnapshotId, snapshotPath } from '../../src/shared/protocol'
 import { decodeFooter, decodeIndex, FOOTER_BYTES } from '../../src/core/snapshot/format'
 import type { BridgeToPage, EditResult, SessionList, SessionSummary } from '../../src/shared/protocol'
@@ -1459,17 +1460,17 @@ describe('the bridge saves what it collected as a file', () => {
  * was executed by any test: the branches could all be deleted and the set stayed green, while
  * the user would be shown the wrong sentence about a session that is recording on.
  */
-describe('the bridge freezes a session into a snapshot', () => {
-  /** The index of the snapshot the bridge wrote: the footer read back, then the index behind it. */
-  const indexOf = (file: Uint8Array) => {
-    const footer = decodeFooter(file.subarray(file.byteLength - FOOTER_BYTES), file.byteLength)
-    expect(footer, 'the snapshot has no sound footer: the write was cut off').not.toBeNull()
-    const at = footer!.index
-    const index = decodeIndex(file.subarray(at.at, at.at + at.length))
-    expect(index, 'the index of the snapshot does not parse').not.toBeNull()
-    return index!
-  }
+/** The index of a snapshot the bridge wrote: the footer read back, then the index behind it. */
+function indexOf(file: Uint8Array) {
+  const footer = decodeFooter(file.subarray(file.byteLength - FOOTER_BYTES), file.byteLength)
+  expect(footer, 'the snapshot has no sound footer: the write was cut off').not.toBeNull()
+  const at = footer!.index
+  const index = decodeIndex(file.subarray(at.at, at.at + at.length))
+  expect(index, 'the index of the snapshot does not parse').not.toBeNull()
+  return index!
+}
 
+describe('the bridge freezes a session into a snapshot', () => {
   it('writes the material out and answers with the name of the file', async () => {
     const win = await loadBridge()
     win.context()
@@ -1752,6 +1753,121 @@ describe('the bridge and a page playing an ordinary file', () => {
 
     const saved = await win.savedBytes()
     expect(topLevelBoxes(saved).map((box) => box.type)).toEqual(['ftyp', 'moov', 'mdat'])
+  })
+
+  /**
+   * Edit, on the kind of session eighteen of twenty-one measured pages actually deliver.
+   *
+   * It used to answer "there is nothing to edit in this session yet" over every one of them,
+   * beside a Save all button that saved the same file perfectly: a plain session keeps no tracks
+   * in the registry — the material was never intercepted — so the freeze laid out nothing and
+   * called the session empty. The material is fetched instead, exactly as a save fetches it, and
+   * the file goes into the snapshot whole.
+   */
+  describe('freezing one for the editor', () => {
+    /** Opens a page playing the file and lets triage promote it, as the tests above do. */
+    const watching = async () => {
+      const host = installHost()
+      const win = await loadBridge()
+      win.context()
+
+      win.deliver(plain())
+      win.deliver({ type: 'tc:verdict', sourceId: SOURCE, verdict: 'promote' })
+      await settle()
+
+      return { host, win, key: win.list()[0]!.key }
+    }
+
+    it('writes the file into the snapshot, with the tables the editor reads', async () => {
+      const { host, win, key } = await watching()
+
+      const reply = await win.edit(key)
+      await settle()
+      const answer = reply.received[0] as EditResult
+
+      expect(answer.ok, 'Edit refused a file that Save all writes perfectly').toBe(true)
+      expect(win.writes.map((write) => write.path)).toEqual([snapshotPath(answer.snapshotId!)])
+      // One read of the material on top of the two the tables cost, and no more: the freeze
+      // fetches what the popup already promised to save, once.
+      expect(host.asked).toHaveLength(3)
+
+      const index = indexOf(win.writes[0]!.bytes)
+      expect(index.tracks).toHaveLength(1)
+
+      const track = index.tracks[0]!
+      expect(track.kinds).toEqual(['video', 'audio'])
+      // One stretch of media time, on the clock of the file that was written: it is continuous
+      // from end to end, because the cut behind it took one unbroken run of the material.
+      expect(track.chunks).toHaveLength(1)
+      expect(track.chunks[0]!.start).toBe(0)
+      expect(track.chunks[0]!.end).toBeGreaterThan(5.5)
+
+      const whole = track.whole
+      expect(whole, 'the snapshot does not say it holds a whole file').toBeDefined()
+      expect(track.chunks[0]!.data).toEqual(whole)
+
+      const file = win.writes[0]!.bytes.subarray(whole!.at, whole!.at + whole!.length)
+      expect(topLevelBoxes(file).map((box) => box.type)).toEqual(['ftyp', 'moov', 'mdat'])
+
+      // And the tables are where the index says, and they describe the material where it lies in
+      // the snapshot. This is the whole of what the editor does with such a track.
+      const moov = win.writes[0]!.bytes.subarray(track.init.at, track.init.at + track.init.length)
+      const tracks = movieTracksOf(moov, whole!.length, whole!.at)
+      expect(tracks.map((one) => one.kind)).toEqual(['video', 'audio'])
+      expect(tracks[0]!.samples).toHaveLength(60)
+      for (const sample of tracks[0]!.samples) {
+        expect(sample.source.at).toBeGreaterThanOrEqual(whole!.at)
+        expect(sample.source.at + sample.source.length).toBeLessThanOrEqual(whole!.at + whole!.length)
+      }
+    })
+
+    it('says a file it could not read could not be read, and writes nothing', async () => {
+      const { host, win, key } = await watching()
+
+      // The host goes away between the listing and the button: an expired signed URL, a session
+      // that ended. Neither "gone" — the session is right there — nor "empty": the material
+      // exists and it was the fetching of it that failed.
+      host.refuse()
+      const reply = await win.edit(key)
+      await settle()
+
+      expect(reply.received).toEqual([{ ok: false, reason: 'unread' }])
+      expect(win.writes).toEqual([])
+    })
+
+    it('refuses a file the element holds not one frame of, as an empty session', async () => {
+      const host = installHost()
+      const win = await loadBridge()
+      win.context()
+
+      // The metadata arrived and the material has not: the tables are readable and there is no
+      // stretch of them the element actually holds.
+      win.deliver(plain([]))
+      win.deliver({ type: 'tc:verdict', sourceId: SOURCE, verdict: 'promote' })
+      await settle()
+
+      const key = win.list()[0]!.key
+      const before = host.asked.length
+      const reply = await win.edit(key)
+      await settle()
+
+      expect(reply.received).toEqual([{ ok: false, reason: 'empty' }])
+      expect(win.writes).toEqual([])
+      // Refused before anything was fetched: a freeze that cannot produce a file must not pay
+      // for the material first.
+      expect(host.asked).toHaveLength(before)
+    })
+
+    it('says the storage refused when the write did not land', async () => {
+      const { win, key } = await watching()
+      win.refuseStorage()
+
+      const reply = await win.edit(key)
+      await settle()
+
+      expect(reply.received).toEqual([{ ok: false, reason: 'storage' }])
+      expect(win.writes, 'the attempt was never made').toHaveLength(1)
+    })
   })
 
   it('answers a save it cannot read with a refusal and not with an empty session', async () => {

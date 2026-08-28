@@ -1,11 +1,19 @@
 import { assembleMp4 } from '../../core/export/assemble'
 import { planPreview } from '../../core/export/plan'
-import { bytesFrom, clipSourceOf, type SourceSegment, type SourceTrackInput }
-  from '../../core/export/source'
-import { framesOf, FrameTable, retimeToPlan } from '../../core/timeline/frames'
+import {
+  bytesFrom,
+  clipSourceFrom,
+  clipSourceOf,
+  movieTracksOf,
+  type SourceSegment,
+  type SourceTrackInput,
+} from '../../core/export/source'
+import { framesOf, framesOfTrack, FrameTable, retimeToPlan, type Frame }
+  from '../../core/timeline/frames'
+import type { SnapshotTrack } from '../../core/snapshot/format'
 import type { Material, MaterialTrack } from '../../core/snapshot/material'
 import type { SnapshotReader } from '../../core/snapshot/read'
-import type { TrackKind } from '../../shared/types'
+import type { Located, TrackKind } from '../../shared/types'
 
 export interface Preview {
   /** Object URL of the file the `<video>` plays. */
@@ -50,6 +58,60 @@ async function load(
   }
 }
 
+/** The assembled file and its frame table, wrapped as the thing the player is handed. */
+function previewOf(file: Uint8Array, frames: Frame[]): Preview {
+  const url = URL.createObjectURL(
+    new Blob([file as Uint8Array<ArrayBuffer>], { type: 'video/mp4' }),
+  )
+
+  return {
+    url,
+    bytes: file.byteLength,
+    frames: FrameTable.of(frames),
+    release: () => URL.revokeObjectURL(url),
+  }
+}
+
+/**
+ * The preview of material that arrived as an ordinary complete file.
+ *
+ * No init segment and no fragments to walk: the snapshot holds the file whole, its movie box
+ * describes every sample of every track, and the index is read straight out of it. From there on
+ * it is the same three steps as below — the export plan, the clip writer, the frame table retimed
+ * to what the plan laid down — because the point of doing it this way round is that a preview and
+ * a clip cannot come out differently.
+ *
+ * The whole of the material is read in one call. It is what the fragmented path does too, and for
+ * an ordinary file there is nothing else to be done: the samples of every stretch lie in the one
+ * `mdat`, and the file was copied into the snapshot precisely so that the editor would not have
+ * to go back to somebody's server for them.
+ */
+async function fileMaterialPreview(
+  reader: SnapshotReader,
+  track: SnapshotTrack,
+  whole: Located,
+): Promise<Preview | null> {
+  const bytes = await reader.bytesOf(whole)
+  // Short of the file: the snapshot was truncated under us. A plan over it would name samples
+  // that are not there, and the writer would throw halfway through a frame.
+  if (bytes.byteLength !== whole.length) return null
+
+  const from = track.init.at - whole.at
+  const moov = bytes.subarray(from, from + track.init.length)
+
+  // Addressed where the file actually lies, and not from its own first byte: the samples are
+  // read back out of the snapshot, which has the index and everything before it in front.
+  const source = clipSourceFrom(movieTracksOf(moov, whole.length, whole.at))
+  if (!source) return null
+
+  const plan = planPreview(source)
+  const file = assembleMp4(plan, bytesFrom([whole], [bytes]))
+  if (!file.byteLength) return null
+
+  const shown = plan.tracks.find((track) => track.kind === 'video')
+  return previewOf(file, shown ? retimeToPlan(framesOfTrack(source.video), shown) : [])
+}
+
 /**
  * The file the editor plays.
  *
@@ -68,6 +130,10 @@ export async function buildPreview(
 ): Promise<Preview | null> {
   const picture = material.video
   if (!picture?.span) return null
+
+  // Material that was never intercepted, held in the snapshot as the file it came in.
+  const whole = picture.track.whole
+  if (whole) return fileMaterialPreview(reader, picture.track, whole)
 
   const declared = picture.track.info.tracks.find((track) => track.kind === 'video')
   if (!declared || !(declared.timescale > 0)) return null
@@ -121,14 +187,5 @@ export async function buildPreview(
       )
     : []
 
-  const url = URL.createObjectURL(
-    new Blob([file as Uint8Array<ArrayBuffer>], { type: 'video/mp4' }),
-  )
-
-  return {
-    url,
-    bytes: file.byteLength,
-    frames: FrameTable.of(frames),
-    release: () => URL.revokeObjectURL(url),
-  }
+  return previewOf(file, frames)
 }

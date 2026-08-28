@@ -138,6 +138,18 @@ describe('the index', () => {
     delete broken.tracks[0].init
     expect(decodeIndex(new TextEncoder().encode(JSON.stringify(broken)))).toBeNull()
   })
+
+  it('carries a whole file through untouched, and refuses one placed nowhere', () => {
+    // The other shape of material (§5.6): the track is an ordinary file lying whole in the
+    // snapshot, and `init` names the movie box inside it. A reader tells the two shapes apart by
+    // this field alone, so it has to survive the round trip and it has to be a place.
+    const file = { ...index, tracks: [{ ...index.tracks[0]!, whole: { at: 0, length: 18_003 } }] }
+    expect(decodeIndex(encodeIndex(file))!.tracks[0]!.whole).toEqual({ at: 0, length: 18_003 })
+
+    const broken = JSON.parse(JSON.stringify(file))
+    broken.tracks[0].whole = true
+    expect(decodeIndex(new TextEncoder().encode(JSON.stringify(broken)))).toBeNull()
+  })
 })
 
 describe('the footer', () => {

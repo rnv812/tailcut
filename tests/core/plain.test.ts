@@ -141,6 +141,32 @@ describe('movieTracksOf', () => {
     }
   })
 
+  it('addresses the samples where the file lies, when it lies inside a larger one', async () => {
+    const { found } = await openPlain(whole)
+    const OFFSET = 1_234
+
+    const own = movieTracksOf(found.moov, found.total)
+    const moved = movieTracksOf(found.moov, found.total, OFFSET)
+
+    // A chunk offset means "so many bytes from the first byte of the file", and the file is not
+    // always the byte source: a snapshot holds an ordinary file copied whole into it, with the
+    // index and the footer behind it (`SnapshotTrack.whole`). Read at face value there, every
+    // sample would be looked for that much too early — the editor would decode the head of the
+    // snapshot as media.
+    expect(moved.map((track) => track.samples.map((sample) => sample.source.at))).toEqual(
+      own.map((track) => track.samples.map((sample) => sample.source.at + OFFSET)),
+    )
+    // Nothing else about them moves: the same lengths, the same times, the same edit offsets.
+    const shape = (tracks: typeof own) =>
+      tracks.map((track) => ({
+        kind: track.kind,
+        editOffset: track.editOffset,
+        times: track.samples.map((sample) => [sample.dts, sample.pts, sample.duration]),
+        sizes: track.samples.map((sample) => sample.source.length),
+      }))
+    expect(shape(moved)).toEqual(shape(own))
+  })
+
   it('gives nothing for a movie box that describes its tracks and holds no samples', () => {
     // A fragmented file has a movie box too and its tables are empty on purpose. Read as a source
     // to cut from it is nothing at all, which is the signal to go and read the fragments instead.

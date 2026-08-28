@@ -59,6 +59,63 @@ async function promised(popup: Page): Promise<{ text: string; seconds: number }>
 const boundedReads = (host: Host): string[] =>
   host.asked.filter((range): range is string => /^bytes=\d+-\d+$/.test(range ?? ''))
 
+/**
+ * The editor over the kind of material most of the web actually serves.
+ *
+ * Eighteen of the twenty-one live pages that delivered any video at all delivered it as an
+ * ordinary file, and Edit used to answer "there is nothing to edit in this session yet" over
+ * every one of them — beside a Save all button that saved the same file perfectly. Nothing of
+ * such a file was ever intercepted, so the freeze fetches it, exactly as the save does, and puts
+ * it in the snapshot whole for the editor to read the tables out of.
+ */
+test('Edit opens the editor over an ordinary file and counts its frames', async () => {
+  // Eight seconds of watching, a freeze that fetches the material, and a decoder that has to
+  // read the assembled clip before the player can step through it.
+  test.setTimeout(90_000)
+
+  const { context, page, popup, media, state } = await watchPartway('watched.mp4')
+  const held = state.buffered[0]![1]
+
+  try {
+    const opened = context.waitForEvent('page')
+    await popup.getByRole('button', { name: 'Edit' }).click()
+
+    const editor = await opened
+    await editor.waitForLoadState('domcontentloaded')
+
+    expect(
+      new URL(editor.url()).searchParams.get('s'),
+      'Edit did not open the editor over a snapshot',
+    ).toBeTruthy()
+
+    // No complaint on the screen: the four the editor knows are all about a snapshot it cannot
+    // read, and this one was written a moment ago.
+    await expect(editor.getByTestId('failure')).toHaveCount(0)
+
+    // The preview is assembled out of the file, so the count is a fact about the material and
+    // not about the index: the fixture runs at ten frames a second.
+    const count = editor.getByTestId('frame-count')
+    await expect(count).toBeVisible({ timeout: 30_000 })
+    const frames = Number(await count.textContent())
+    expect(frames).toBeGreaterThan(60)
+    expect(Math.abs(frames / 10 - held), 'the editor holds a different length than was watched')
+      .toBeLessThan(1.5)
+
+    // And it plays: the element reads the clip the plan and the writer produced, and a step
+    // moves the readout by exactly one frame.
+    await editor.waitForFunction(() => (document.querySelector('video')?.readyState ?? 0) >= 2)
+    await expect(editor.getByTestId('timecode')).toHaveText('00:00:00:00')
+    await editor.getByTestId('next').click()
+    await expect(editor.getByTestId('frame')).toHaveText('2')
+    await expect(editor.getByTestId('timecode')).toHaveText('00:00:00:01')
+  } finally {
+    await popup.close().catch(() => {})
+    await page.close().catch(() => {})
+    await context.close()
+    await media.close()
+  }
+})
+
 for (const [layout, file] of [
   ['at the end of the file', 'watched.mp4'],
   ['at the front of the file', 'watched-faststart.mp4'],

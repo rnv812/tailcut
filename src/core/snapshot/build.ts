@@ -7,7 +7,7 @@ import {
   type SnapshotPage,
   type SnapshotTrack,
 } from './format'
-import type { Chunk, InitInfo, TrackKind } from '../../shared/types'
+import type { Chunk, InitInfo, Located, TrackKind } from '../../shared/types'
 
 /**
  * One track of the session as the snapshot needs it. Structural on purpose: core knows nothing of
@@ -22,6 +22,15 @@ export interface SnapshotSourceTrack {
   initBytes: Uint8Array
   /** In time order, as the map holds them. */
   chunks: Chunk[]
+  /**
+   * `initBytes` is not an init segment but an ordinary complete file, and this is where its movie
+   * box lies inside it — see `SnapshotTrack.whole`.
+   *
+   * Such a track has no segments to place: one `mdat` holds the samples of every stretch, and the
+   * chunks below name the stretches of media time without carrying bytes of their own. So the
+   * file is laid out once, as any init would be, and every chunk is pointed at all of it.
+   */
+  movie?: Located
 }
 
 export interface SnapshotSource {
@@ -68,11 +77,17 @@ export function planSnapshot(source: SnapshotSource, meta: SnapshotMeta): Snapsh
   }
 
   for (const track of source.tracks) {
-    const init = place(track.initBytes)
+    const placed = place(track.initBytes)
+    // A whole file goes down in one piece and its movie box is named inside it, where it already
+    // lies; everything else is an init segment followed by the media segments of its map.
+    const whole = track.movie ? placed : undefined
+    const init = track.movie
+      ? { at: placed.at + track.movie.at, length: track.movie.length }
+      : placed
     const chunks = track.chunks.map((chunk) => ({
       start: chunk.start,
       end: chunk.end,
-      data: place(chunk.bytes),
+      data: whole ?? place(chunk.bytes),
     }))
 
     tracks.push({
@@ -83,6 +98,9 @@ export function planSnapshot(source: SnapshotSource, meta: SnapshotMeta): Snapsh
       init,
       info: track.info,
       chunks,
+      // Left off entirely on the ordinary path: an undefined field is dropped by JSON.stringify,
+      // and a snapshot of captured segments carries no trace of a shape it is not.
+      ...(whole ? { whole } : {}),
     })
   }
 

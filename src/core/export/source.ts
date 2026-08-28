@@ -82,8 +82,14 @@ export function sourceTrackOf(input: SourceTrackInput): SourceTrack | null {
  * The bytes handed in need only be the movie box — a few kilobytes fetched out of a file that was
  * deliberately not downloaded (src/core/iso/locate.ts). Every address that comes back is counted
  * from the first byte of the file all the same, because that is what a chunk offset means.
+ *
+ * `at` is where that first byte lies in the byte source the addresses will be asked of. Zero, and
+ * the source is the file itself: a reader of somebody's server, which is the plain save. It is
+ * not zero when the file has been copied into a larger one — a snapshot holding an ordinary file
+ * whole (src/core/snapshot/format.ts, `SnapshotTrack.whole`) — and then every sample has to be
+ * addressed where it actually lies, or the editor would read the head of the snapshot as media.
  */
-export function movieTracksOf(moov: Uint8Array, total: number): SourceTrack[] {
+export function movieTracksOf(moov: Uint8Array, total: number, at = 0): SourceTrack[] {
   const declared = parseInit(moov)?.tracks ?? []
   const tracks: SourceTrack[] = []
 
@@ -105,8 +111,8 @@ export function movieTracksOf(moov: Uint8Array, total: number): SourceTrack[] {
       height: entry.codedHeight,
       editOffset: editOffset(moov, indexed.trackId),
       // The offsets of a movie box are already counted from the first byte of the file, so the
-      // source they are placed in begins there.
-      samples: locateSamples(indexed.samples, { at: 0, length: total }),
+      // source they are placed in begins where that file does.
+      samples: locateSamples(indexed.samples, { at, length: total }),
       // A complete file states each sample once. There is no re-watch to overlap with: that is a
       // property of a recording assembled out of what a player happened to fetch twice.
       dropped: 0,

@@ -6,6 +6,8 @@ import { planSnapshot, type SnapshotSource } from '../../src/core/snapshot/build
 import { SnapshotReader } from '../../src/core/snapshot/read'
 import { materialOf } from '../../src/core/snapshot/material'
 import { concatBytes } from '../../src/core/iso/writer'
+import { topLevelBoxes } from '../../src/core/iso/reader'
+import { parseInit } from '../../src/core/iso/init'
 
 const read = (path: string): Uint8Array => new Uint8Array(readFileSync(`tests/fixtures/${path}`))
 
@@ -14,6 +16,16 @@ const INIT = read('h264/init-stream0.m4s')
 const SEGMENTS = [1, 2, 3].map((n) => read(`h264/chunk-stream0-0000${n}.m4s`))
 const FPS = 24
 const PER_SEGMENT = 48
+
+/**
+ * The other kind of material: one ordinary complete file, never intercepted by anything.
+ *
+ * Six seconds, sixty frames of picture at 256×144 with sound beside them, and — this is what
+ * makes it worth using here — its movie box at the very end, behind the media. A reader that
+ * looked for the tables at the front of the range would find an `ftyp` and give up.
+ */
+const WHOLE = read('plain/whole.mp4')
+const WHOLE_FRAMES = 60
 
 const page = {
   sessionKey: 'https://site.example/watch|avc1|inf',
@@ -30,6 +42,61 @@ const page = {
  * The chunks keep their real times, so leaving one out leaves a hole in the material — which is
  * the only shape that tells the two clocks of this module apart.
  */
+async function snapshotFrom(
+  source: SnapshotSource,
+  options: { short?: boolean } = {},
+): Promise<SnapshotReader> {
+  const plan = planSnapshot(source, {
+    id: 'x',
+    capturedAt: 1_756_022_400_000,
+    producer: 'tailcut test',
+  })
+  const file = concatBytes(plan.parts)
+
+  const read = async (at: number, length: number): Promise<Uint8Array> => {
+    const bytes = file.subarray(at, at + length)
+    // Storage reclaimed part of the file under the open tab: a read of the material comes back
+    // short of what the index promised, while the index and the footer are still there to read.
+    return options.short && length > 1024 ? bytes.subarray(0, bytes.byteLength - 1) : bytes
+  }
+
+  return (await SnapshotReader.open(read, file.byteLength))!
+}
+
+/**
+ * A snapshot of an ordinary file: the file whole, with its movie box named inside it.
+ *
+ * The shape the bridge writes for a session whose material was never intercepted — see
+ * `fileSnapshotSourceOf`. One track and not two: a file states its picture and its sound in one
+ * movie box and holds their samples in one `mdat`, so there is one piece of material here.
+ */
+async function snapshotOfFile(
+  file: Uint8Array,
+  options: { short?: boolean } = {},
+): Promise<SnapshotReader> {
+  const moov = topLevelBoxes(file).find((box) => box.type === 'moov')!
+  const info = parseInit(file)!
+
+  return snapshotFrom(
+    {
+      page,
+      tracks: [
+        {
+          id: 't0',
+          bufferId: 'file',
+          representation: 'file:avc1+mp4a',
+          kinds: ['video', 'audio'],
+          info,
+          initBytes: file,
+          movie: { at: moov.start, length: moov.size },
+          chunks: [{ start: 0, end: 6, bytes: new Uint8Array(0) }],
+        },
+      ],
+    },
+    options,
+  )
+}
+
 async function snapshotOf(indexes: number[]): Promise<SnapshotReader> {
   const source: SnapshotSource = {
     page,
@@ -61,17 +128,7 @@ async function snapshotOf(indexes: number[]): Promise<SnapshotReader> {
     ],
   }
 
-  const plan = planSnapshot(source, {
-    id: 'x',
-    capturedAt: 1_756_022_400_000,
-    producer: 'tailcut test',
-  })
-  const file = concatBytes(plan.parts)
-
-  return (await SnapshotReader.open(
-    async (at, length) => file.subarray(at, at + length),
-    file.byteLength,
-  ))!
+  return snapshotFrom(source)
 }
 
 const preview = async (indexes: number[]) => {
@@ -126,6 +183,71 @@ describe('buildPreview', () => {
     expect(frames.indexAtOut(PER_SEGMENT / FPS)).toBe(PER_SEGMENT)
 
     built.release()
+  })
+
+  /**
+   * The material that reaches the editor without ever having been captured.
+   *
+   * Eighteen of the twenty-one live pages that delivered any video at all deliver it as an
+   * ordinary file, so this is not a corner of the web. Edit used to answer "there is nothing to
+   * edit in this session yet" over every one of them — beside a Save all button that saved the
+   * same file perfectly — because a plain session keeps no tracks in the registry and the freeze
+   * found nothing to lay out.
+   */
+  describe('over an ordinary complete file', () => {
+    it('reads the tables out of the snapshot and counts every frame of the file', async () => {
+      const reader = await snapshotOfFile(WHOLE)
+      const built = await buildPreview(reader, materialOf(reader.index))
+
+      expect(built, 'the editor refused a file it has the tables of').not.toBeNull()
+      expect(built!.frames.count()).toBe(WHOLE_FRAMES)
+      expect(built!.bytes).toBeGreaterThan(0)
+      expect(built!.url).toMatch(/^blob:/)
+
+      built!.release()
+    })
+
+    it('lays the frames out on one continuous clock, first to last', async () => {
+      const reader = await snapshotOfFile(WHOLE)
+      const built = (await buildPreview(reader, materialOf(reader.index)))!
+      const frames = built.frames
+
+      // A complete file has no holes in it — nothing was ever not watched — so the two clocks
+      // agree everywhere and every frame follows the one before it by exactly one.
+      const fps = frames.fps()
+      for (const at of [0, 1, WHOLE_FRAMES - 1]) {
+        expect(frames.at(at)!.out, `frame ${at} sits elsewhere in the file`).toBeCloseTo(at / fps, 5)
+      }
+      expect(frames.at(0)!.pts).toBeCloseTo(0, 6)
+      expect(frames.indexAtOut(10 / fps)).toBe(10)
+
+      built.release()
+    })
+
+    it('carries the sound of the file into the preview', async () => {
+      const reader = await snapshotOfFile(WHOLE)
+      const material = materialOf(reader.index)
+      const built = (await buildPreview(reader, material))!
+
+      // One track holding both kinds, exactly as a muxed init does on the captured path: the
+      // audio slot of the material is empty and the sound is in the picture's own material.
+      expect(material.audio).toBeNull()
+      expect(material.video!.kinds).toEqual(['video', 'audio'])
+      // The written clip weighs about what the source did: dropping the sound would take a fifth
+      // of it away, and dropping the picture rather more.
+      expect(built.bytes).toBeGreaterThan(WHOLE.byteLength * 0.9)
+
+      built.release()
+    })
+
+    it('refuses a file the storage came back short of', async () => {
+      const reader = await snapshotOfFile(WHOLE, { short: true })
+
+      // The index promises a file of so many bytes and the storage hands over fewer: the browser
+      // reclaimed part of it under the open tab. A plan over it would name samples that are not
+      // there, and the writer would throw in the middle of a frame.
+      expect(await buildPreview(reader, materialOf(reader.index))).toBeNull()
+    })
   })
 
   it('has nothing to play when the snapshot holds no picture', async () => {

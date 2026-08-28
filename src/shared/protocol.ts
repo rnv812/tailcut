@@ -37,14 +37,21 @@ export function isSnapshotId(value: string): boolean {
 }
 
 /**
- * What the bridge answers tc:edit with. A refusal says which of the three it is, because they
- * ask three different things of the user: `gone` — the session is no longer on the page,
- * `empty` — it holds nothing to cut yet, `storage` — the browser would not take the file.
+ * What the bridge answers tc:edit with. A refusal says which of the four it is, because they ask
+ * four different things of the user: `gone` — the session is no longer on the page, `empty` — it
+ * holds nothing to cut yet, `unread` — its material is a file on somebody's server that could not
+ * be fetched, `storage` — the browser would not take the snapshot.
+ *
+ * `unread` belongs to the one kind of session whose material is not in the frame already. A
+ * capture holds its bytes; an ordinary file is copied into the snapshot at the moment of the
+ * freeze (src/bridge/write.ts), and that read can be refused by an address that has expired or a
+ * host that stopped answering. Told apart from `storage` because they blame different machines,
+ * and from `empty` because the recording is there and it was the fetching that failed.
  */
 export interface EditResult {
   ok: boolean
   snapshotId?: string
-  reason?: 'gone' | 'empty' | 'storage'
+  reason?: 'gone' | 'empty' | 'unread' | 'storage'
 }
 
 export type PageToBridge =

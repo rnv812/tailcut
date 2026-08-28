@@ -1,4 +1,4 @@
-import { planSnapshot } from '../core/snapshot/build'
+import { planSnapshot, type SnapshotMeta } from '../core/snapshot/build'
 import {
   isPageToBridge,
   snapshotPath,
@@ -9,7 +9,14 @@ import {
   type SessionSummary,
 } from '../shared/protocol'
 import { openPlainFile } from './loader'
-import { SessionStore, planSave, snapshotSourceOf, summarize } from './session-store'
+import {
+  SessionStore,
+  fileSnapshotSourceOf,
+  planSave,
+  snapshotSourceOf,
+  summarize,
+  type Session,
+} from './session-store'
 import { writeSnapshot } from './snapshot-writer'
 import { writeSaveFile } from './write'
 
@@ -357,27 +364,79 @@ async function save(key: string, port: MessagePort | undefined): Promise<void> {
  * page keeps appending, triage keeps evicting, and the editor works from the file, so the buffer
  * cannot move under the user while they are choosing.
  *
- * Everything up to the first await is one turn — reading the maps, laying the parts out, copying
- * them into the buffer that goes to the worker. Split across an await, the plan would describe
- * chunks an eviction had already dropped.
+ * Both kinds of session are frozen, and the difference is where the material has to be fetched
+ * from — the same difference, and the only one, that a save has (see writeSaveFile). The button
+ * used to be offered on both and to work on one: an ordinary file has no tracks in the registry
+ * at all, so the freeze found nothing to lay out and answered "there is nothing to edit in this
+ * session yet" beside a Save all button that was saving that very file perfectly.
  */
 async function freeze(key: string): Promise<EditResult> {
   const session = store.get(key)
   if (!session) return { ok: false, reason: 'gone' }
 
-  const id = crypto.randomUUID()
-  const plan = planSnapshot(snapshotSourceOf(session), {
-    id,
+  const meta: SnapshotMeta = {
+    id: crypto.randomUUID(),
     capturedAt: Date.now(),
     producer: `tailcut ${chrome.runtime.getManifest().version}`,
-  })
+  }
+
+  return session.plain ? freezeFile(session, meta) : freezeCaptured(session, meta)
+}
+
+/**
+ * The freeze of material this frame is holding.
+ *
+ * Everything up to the first await is one turn — reading the maps, laying the parts out, copying
+ * them into the buffer that goes to the worker. Split across an await, the plan would describe
+ * chunks an eviction had already dropped.
+ */
+async function freezeCaptured(session: Session, meta: SnapshotMeta): Promise<EditResult> {
+  const plan = planSnapshot(snapshotSourceOf(session), meta)
 
   // A session of init segments alone, or one whose buffers have not brought a fragment yet.
   // Nothing to edit, and a snapshot of it would open on an empty timeline.
   if (!plan.index.tracks.some((track) => track.chunks.length)) return { ok: false, reason: 'empty' }
 
-  const written = await writeSnapshot(plan, snapshotPath(id))
-  return written ? { ok: true, snapshotId: id } : { ok: false, reason: 'storage' }
+  const written = await writeSnapshot(plan, snapshotPath(meta.id))
+  return written ? { ok: true, snapshotId: meta.id } : { ok: false, reason: 'storage' }
+}
+
+/**
+ * The freeze of material that is still on somebody's server.
+ *
+ * There is nothing here to lay out: the extension never intercepted a byte of this file, and what
+ * it holds is an index of it and a reader (§5.6). So the material is fetched — the very clip
+ * "Save all" would have written, cut over the stretch the element actually held — and the
+ * snapshot is that file, whole, with its movie box named inside it. The editor reads the sample
+ * tables straight out of it and never goes back to the network.
+ *
+ * Fetching rather than remembering the address is what makes the snapshot a snapshot: the editor
+ * tab outlives the page, and a signed URL does not. It costs one read of exactly what the popup
+ * has already promised to save, made once, on a click — and the popup says "Freezing…" while it
+ * runs, as it does for the other kind.
+ *
+ * There is no synchronous turn to keep here and nothing an eviction could take away underneath:
+ * the file on the server does not move, and the plan is made of it before the first await.
+ */
+async function freezeFile(session: Session, meta: SnapshotMeta): Promise<EditResult> {
+  const cut = planSave(session)
+
+  // The element holds not one whole frame yet: no sample of the file lies inside what it has, and
+  // there is nothing to cut. The same emptiness a capture of init segments alone answers with.
+  if (cut.bytes === 0) return { ok: false, reason: 'empty' }
+
+  const file = await writeSaveFile(cut.source)
+  // An address that has expired, a host that stopped answering, a read that came back short. The
+  // recording is not lost — it was never here — so this is neither "gone" nor "empty".
+  if (!file) return { ok: false, reason: 'unread' }
+
+  // Nothing but a defect in our own writer produces bytes with no movie box in them; answered
+  // rather than written out, because a snapshot no editor can open is worse than a refusal.
+  const source = fileSnapshotSourceOf(session, file, cut.duration)
+  if (!source) return { ok: false, reason: 'unread' }
+
+  const written = await writeSnapshot(planSnapshot(source, meta), snapshotPath(meta.id))
+  return written ? { ok: true, snapshotId: meta.id } : { ok: false, reason: 'storage' }
 }
 
 window.addEventListener('message', (event: MessageEvent) => {

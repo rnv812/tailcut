@@ -53,6 +53,10 @@ const OMITTED: Record<Omission, string> = {
 const EDIT_FAILED: Record<NonNullable<EditResult['reason']>, string> = {
   gone: 'Could not open the editor. The session may be gone from the page.',
   empty: 'There is nothing to edit in this session yet.',
+  // The one refusal that belongs to a file rather than to a recording: the editor works from a
+  // copy of the material, and this material is on somebody's server. Said in the words of a read
+  // that failed, because the video really was watched and there is nothing lost from the page.
+  unread: 'Could not read the video file on this page, so there is nothing to edit.',
   storage: 'Could not write the snapshot: the browser refused the storage.',
 }
 

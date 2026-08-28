@@ -1,4 +1,10 @@
-import { editOffset, sampleRunOf, trackDefaults, type PlacedSegment } from '../iso/samples'
+import {
+  editOffset,
+  sampleRunOf,
+  trackDefaults,
+  type LocatedSample,
+  type PlacedSegment,
+} from '../iso/samples'
 import type { Located } from '../../shared/types'
 
 export interface Frame {
@@ -45,6 +51,52 @@ export interface PlannedTiming {
 }
 
 /**
+ * A track already indexed, stated structurally.
+ *
+ * `SourceTrack` from `core/export/plan.ts` satisfies it, and this module does not import it, for
+ * the same reason `PlannedTiming` below is written out here: the arrow between the frame table
+ * and the export has to point one way only.
+ */
+export interface IndexedTiming {
+  /** Ticks per second of the track. */
+  timescale: number
+  /** media_time of the first real edit, in those same ticks; see `editOffset`. */
+  editOffset: number
+  /** In decode order, as `sampleRunOf` and `movieTracksOf` hand them over. */
+  samples: readonly LocatedSample[]
+}
+
+/**
+ * The samples of one track as the frames they are shown as.
+ *
+ * The one place a sample becomes a frame, and both ways material reaches the editor come through
+ * it: fragments walked out of an init and its segments (`framesOf` below), and the tables of an
+ * ordinary complete file (`movieTracksOf`). Written twice, the two would each subtract the edit
+ * offset in their own way, and the second of them is where 83 ms of B-frame delay would go
+ * missing without a single test noticing.
+ */
+export function framesOfTrack(track: IndexedTiming): Frame[] {
+  if (!(track.timescale > 0)) return []
+
+  const frames: Frame[] = track.samples.map((sample) => {
+    const pts = (sample.pts - track.editOffset) / track.timescale
+    return {
+      pts,
+      out: pts,
+      duration: sample.duration / track.timescale,
+      sync: sample.sync,
+      source: sample.source,
+    }
+  })
+
+  // Decode order is not display order: composition offsets put B-frames out of it, and a table of
+  // frames is a table of what is shown and when.
+  frames.sort((a, b) => a.pts - b.pts)
+
+  return frames
+}
+
+/**
  * The frames of one representation, in the order they are shown.
  *
  * Built from the containers and not from the decoder: `<video>` can say which frame it landed on
@@ -64,35 +116,20 @@ export interface PlannedTiming {
  * it is kept (`SourceTrack.dropped`): a table of what is shown has nobody to tell.
  */
 export function framesOf(input: FrameInput): Frame[] {
-  const { timescale } = input
-  if (!(timescale > 0)) return []
-
-  // The edit list is not junk: it compensates the delay of B-frames, of AAC priming and of Opus
-  // pre-roll, the player takes it off every time, and a table built without subtracting it sits
-  // exactly that delay away from what <video> reports — 83 ms on our own fixture.
-  const edit = editOffset(input.init, input.trackId)
   const run = sampleRunOf({
     segments: input.segments,
     trackId: input.trackId,
     defaults: trackDefaults(input.init),
   })
 
-  const frames: Frame[] = run.samples.map((sample) => {
-    const pts = (sample.pts - edit) / timescale
-    return {
-      pts,
-      out: pts,
-      duration: sample.duration / timescale,
-      sync: sample.sync,
-      source: sample.source,
-    }
+  return framesOfTrack({
+    timescale: input.timescale,
+    // The edit list is not junk: it compensates the delay of B-frames, of AAC priming and of Opus
+    // pre-roll, the player takes it off every time, and a table built without subtracting it sits
+    // exactly that delay away from what <video> reports — 83 ms on our own fixture.
+    editOffset: editOffset(input.init, input.trackId),
+    samples: run.samples,
   })
-
-  // Decode order is not display order: composition offsets put B-frames out of it, and a table of
-  // frames is a table of what is shown and when.
-  frames.sort((a, b) => a.pts - b.pts)
-
-  return frames
 }
 
 /**
