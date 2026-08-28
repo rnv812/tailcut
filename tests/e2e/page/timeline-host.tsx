@@ -1,7 +1,9 @@
 import { render } from 'preact'
 import { useState } from 'preact/hooks'
 import type { Lane, Span, Zone } from '../../../src/core/timeline/lanes'
-import { METRICS, layoutScene, type ClipBand, type MarkerPin } from '../../../src/core/timeline/layout'
+import { METRICS, layoutScene, packRows, rowTop, type ClipBand, type MarkerPin } from '../../../src/core/timeline/layout'
+import { snapSet } from '../../../src/core/timeline/snap'
+import { frameGrid } from '../../../src/core/timeline/grid'
 import { fitAll, panBy, zoomAt, type ViewBounds, type Viewport } from '../../../src/core/timeline/view'
 import { PALETTE, paintScene } from '../../../src/editor/timeline/draw'
 import { Timeline } from '../../../src/editor/timeline/timeline'
@@ -60,6 +62,18 @@ const MARKERS: MarkerPin[] = Array.from({ length: 12 }, (_, i) => ({
 
 const BOUNDS: ViewBounds = { duration: DURATION, fps: 25 }
 
+/** Frames of 1/25 s inside the runs, and a keyframe every two seconds. */
+const FPS = 25
+const PTS = LANES[0]!.runs.flatMap((run) => {
+  const count = Math.round((run.end - run.start) * FPS)
+  return Array.from({ length: count }, (_, i) => run.start + i / FPS)
+})
+const FRAMES = frameGrid({
+  pts: Float64Array.from(PTS),
+  durations: Float64Array.from({ length: PTS.length }, () => 1 / FPS),
+})
+const KEYFRAMES = Float64Array.from({ length: Math.floor(DURATION / 2) }, (_, i) => i * 2)
+
 const SEGMENTS =
   LANES.reduce((total, lane) => total + lane.runs.length + lane.gaps.length + lane.zones.length, 0) +
   CLIPS.length +
@@ -67,6 +81,15 @@ const SEGMENTS =
 
 function Host() {
   const [view, setView] = useState<Viewport>({ start: 0, scale: DURATION / 1200, widthPx: 1200 })
+  const [clips, setClips] = useState<ClipBand[]>(CLIPS)
+  const set = snapSet({
+    keyframes: KEYFRAMES,
+    zones: LANES[0]!.zones,
+    gaps: LANES[0]!.gaps,
+    markers: MARKERS,
+    clips,
+    playhead: 61.2,
+  })
 
   const shared = globalThis as unknown as Record<string, unknown>
   shared.tcView = () => view
@@ -76,6 +99,16 @@ function Host() {
   shared.tcPalette = PALETTE
   shared.tcSegments = SEGMENTS
   shared.tcLanes = LANES
+  shared.tcClips = () => clips
+  shared.tcXAt = (time: number) => (time - view.start) / view.scale
+  shared.tcHandle = (id: string, edge: 'in' | 'out') => {
+    const clip = clips.find((candidate) => candidate.id === id)!
+    const row = packRows(clips).get(id) ?? 0
+    return {
+      x: ((edge === 'in' ? clip.in : clip.out) - view.start) / view.scale,
+      y: rowTop(METRICS, LANES.length, row) + METRICS.clipHeight / 2,
+    }
+  }
   /**
    * Times of laying the scene out and painting it, over a sweep of zoom. The component adds one
    * canvas and no other node, so these two calls are the whole per-frame cost of the timeline.
@@ -103,19 +136,35 @@ function Host() {
   return (
     <Timeline
       lanes={LANES}
-      clips={CLIPS}
+      clips={clips}
       markers={MARKERS}
       view={view}
       playhead={61.2}
       fps={25}
+      frames={FRAMES}
+      snap={set}
+      snapping
       onResize={(widthPx) => setView((current) => ({ ...current, widthPx }))}
-      onGesture={(gesture) =>
-        setView((current) => {
-          if (gesture.type === 'zoom') return zoomAt(current, gesture.atPx, gesture.factor, BOUNDS)
-          if (gesture.type === 'pan') return panBy(current, gesture.dxPx, BOUNDS)
-          return current
-        })
-      }
+      onGesture={(gesture) => {
+        if (gesture.type === 'zoom') {
+          setView((current) => zoomAt(current, gesture.atPx, gesture.factor, BOUNDS))
+        }
+        if (gesture.type === 'pan') setView((current) => panBy(current, gesture.dxPx, BOUNDS))
+        if (gesture.type === 'trim') {
+          setClips((current) =>
+            current.map((clip) =>
+              clip.id !== gesture.id
+                ? clip
+                : gesture.edge === 'in'
+                  ? { ...clip, in: gesture.time }
+                  : { ...clip, out: gesture.time },
+            ),
+          )
+        }
+        if (gesture.type === 'selectClip') {
+          setClips((current) => current.map((clip) => ({ ...clip, selected: clip.id === gesture.id })))
+        }
+      }}
     />
   )
 }

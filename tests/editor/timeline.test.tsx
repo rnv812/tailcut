@@ -3,7 +3,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render } from 'preact'
 import { Timeline } from '../../src/editor/timeline/timeline'
 import type { Lane } from '../../src/core/timeline/lanes'
-import { METRICS, sceneHeight } from '../../src/core/timeline/layout'
+import { METRICS, rowTop, sceneHeight } from '../../src/core/timeline/layout'
+import { snapSet } from '../../src/core/timeline/snap'
+import { PALETTE } from '../../src/editor/timeline/draw'
 
 const lanes: Lane[] = [
   { kind: 'video', runs: [{ start: 0, end: 60 }], gaps: [], zones: [] },
@@ -13,6 +15,7 @@ interface Call {
   op: string
   args: number[]
   text?: string
+  style?: string
 }
 
 let calls: Call[] = []
@@ -23,8 +26,9 @@ function installContext(): void {
     fillStyle: '',
     font: '',
     textBaseline: 'alphabetic',
-    fillRect: (...args: number[]) => calls.push({ op: 'fillRect', args }),
-    fillText: (text: string, ...args: number[]) => calls.push({ op: 'fillText', args, text }),
+    fillRect: (...args: number[]) => calls.push({ op: 'fillRect', args, style: String(context.fillStyle) }),
+    fillText: (text: string, ...args: number[]) =>
+      calls.push({ op: 'fillText', args, text, style: String(context.fillStyle) }),
     clearRect: (...args: number[]) => calls.push({ op: 'clearRect', args }),
     setTransform: (...args: number[]) => calls.push({ op: 'setTransform', args }),
   }
@@ -94,6 +98,9 @@ const props = () => ({
   view: { start: 0, scale: 0.05, widthPx: 900 },
   playhead: 3,
   fps: 25,
+  frames: new Float64Array(),
+  snap: { targets: [], keyframes: new Float64Array() },
+  snapping: true,
   onResize: () => {},
   onGesture: () => {},
 })
@@ -217,5 +224,53 @@ describe('Timeline', () => {
     window.dispatchEvent(at('pointerup', 400, 60))
 
     expect(gestures).toEqual([])
+  })
+
+  it('draws the snap line while a handle is being dragged', async () => {
+    const clips = [{ id: 'c1', name: 'One', in: 5, out: 10, selected: true }]
+    const frames = Float64Array.from({ length: 121 }, (_, i) => i * 0.5)
+    const snap = snapSet({
+      keyframes: Float64Array.from([8]),
+      zones: [],
+      gaps: [],
+      markers: [],
+      clips,
+      playhead: 0,
+    })
+    const gestures: unknown[] = []
+    render(
+      <Timeline
+        {...props()}
+        clips={clips}
+        frames={frames}
+        snap={snap}
+        onGesture={(gesture) => gestures.push(gesture)}
+      />,
+      host,
+    )
+    await nextFrame()
+    calls.length = 0
+
+    // The out handle sits at 10 s, that is 200 px at 0.05 s/px; 8 s is 160 px.
+    const canvas = host.querySelector('canvas')!
+    const y = rowTop(METRICS, 1, 0) + 9
+    canvas.dispatchEvent(press(200, y))
+    window.dispatchEvent(at('pointermove', 163, y))
+    await nextFrame()
+
+    // The keyframe caught it: the trim is at 8 s and not at the 8.15 s the pointer stands on.
+    expect(gestures).toEqual([
+      { type: 'selectClip', id: 'c1' },
+      { type: 'trim', id: 'c1', edge: 'out', time: 8 },
+    ])
+    expect(calls.some((call) => call.style === PALETTE.fill.snap)).toBe(true)
+
+    // And the line goes with the hand: a caption left on the canvas would name a target that
+    // nothing is being dragged onto any more.
+    calls.length = 0
+    window.dispatchEvent(at('pointerup', 163, y))
+    await nextFrame()
+
+    expect(calls.some((call) => call.style === PALETTE.fill.snap)).toBe(false)
   })
 })

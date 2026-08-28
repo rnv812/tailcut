@@ -19,6 +19,7 @@ export interface Palette {
   tickMajor: string
   tickLabel: string
   clipLabel: string
+  snapLabel: string
   fill: Record<RectKind, string>
 }
 
@@ -29,6 +30,7 @@ export const PALETTE: Palette = {
   tickMajor: '#66707c',
   tickLabel: '#98a2ae',
   clipLabel: '#f2f5f8',
+  snapLabel: '#ffd479',
   fill: {
     'run-video': '#2f6f9f',
     'run-audio': '#2f8f6f',
@@ -37,6 +39,9 @@ export const PALETTE: Palette = {
     'zone-edge': '#c8973a',
     clip: '#4a5563',
     'clip-selected': '#e0a33c',
+    handle: '#c9d3de',
+    'handle-snapped': '#ffd479',
+    snap: '#ffd479',
     marker: '#b06cd6',
     playhead: '#e8503a',
   },
@@ -87,9 +92,14 @@ export function paintScene(p: Painter, scene: Scene, palette: Palette = PALETTE)
     if (tick.label) p.fillText(tick.label, tick.x + 3, TICK_LABEL_BASELINE)
   }
 
-  p.fillStyle = palette.clipLabel
   for (const rect of scene.rects) {
-    if (!rect.label || rect.width < MIN_LABEL_WIDTH_PX) continue
-    p.fillText(truncate(rect.label, rect.width - 8), rect.x + 4, rect.y + rect.height - 5)
+    if (!rect.label) continue
+    // A snap line is a pixel wide and still has to say what it caught; a clip band that narrow
+    // has nothing to say that would fit.
+    const snap = rect.kind === 'snap'
+    if (!snap && rect.width < MIN_LABEL_WIDTH_PX) continue
+    p.fillStyle = snap ? palette.snapLabel : palette.clipLabel
+    const baseline = snap ? scene.rulerHeight + 13 : rect.y + rect.height - 5
+    p.fillText(snap ? rect.label : truncate(rect.label, rect.width - 8), rect.x + 5, baseline)
   }
 }

@@ -1,5 +1,6 @@
 import type { Lane, Span, Zone } from './lanes'
 import { continuesRun } from './map'
+import type { SnapTarget } from './snap'
 import { tickLabel, tickSteps, ticks, timeToX, viewEnd, type Viewport } from './view'
 
 /** Heights of the parts of the timeline, in CSS pixels. */
@@ -13,6 +14,8 @@ export interface Metrics {
   clipGap: number
   clipsTopGap: number
   markerHeight: number
+  /** Width of the grab tab at each end of a clip. */
+  handleWidth: number
 }
 
 export const METRICS: Metrics = {
@@ -24,6 +27,7 @@ export const METRICS: Metrics = {
   clipGap: 3,
   clipsTopGap: 8,
   markerHeight: 12,
+  handleWidth: 7,
 }
 
 /** A band that would round away to nothing is drawn a pixel wide instead. */
@@ -39,7 +43,10 @@ export type RectKind =
   | 'zone-edge'
   | 'clip'
   | 'clip-selected'
+  | 'handle'
+  | 'handle-snapped'
   | 'marker'
+  | 'snap'
   | 'playhead'
 
 export interface Rect {
@@ -81,6 +88,10 @@ export interface SceneInput {
   markers: readonly MarkerPin[]
   playhead: number
   fps: number
+  /** The handle under the pointer right now, drawn apart from the rest. */
+  active?: { id: string; edge: 'in' | 'out' } | null
+  /** What that handle is caught on: a line and a word beside it. */
+  snap?: SnapTarget | null
 }
 
 /** Everything to be painted, in pixels, in painting order. */
@@ -242,11 +253,40 @@ export function layoutScene(v: Viewport, m: Metrics, input: SceneInput): Scene {
     rects.push(rect)
   }
 
+  for (const clip of input.clips) {
+    if (clip.out <= from || clip.in >= to) continue
+    const row = rows.get(clip.id) ?? 0
+    const y = rowTop(m, laneCount, row)
+    for (const edge of ['in', 'out'] as const) {
+      const time = edge === 'in' ? clip.in : clip.out
+      const caught = input.snap && input.active?.id === clip.id && input.active.edge === edge
+      rects.push({
+        kind: caught ? 'handle-snapped' : 'handle',
+        x: Math.round(timeToX(v, time)) - Math.floor(m.handleWidth / 2),
+        y,
+        width: m.handleWidth,
+        height: m.clipHeight,
+        id: clip.id,
+      })
+    }
+  }
+
   for (const marker of input.markers) {
     if (marker.time < from || marker.time > to) continue
     const x = Math.round(timeToX(v, marker.time))
     rects.push({ kind: 'marker', x, y: 0, width: 3, height: m.markerHeight, id: marker.id, label: marker.label })
     rects.push({ kind: 'marker', x, y: m.markerHeight, width: 1, height: height - m.markerHeight, id: marker.id })
+  }
+
+  if (input.snap) {
+    rects.push({
+      kind: 'snap',
+      x: Math.round(timeToX(v, input.snap.time)),
+      y: 0,
+      width: 1,
+      height,
+      label: input.snap.label,
+    })
   }
 
   if (input.playhead >= from && input.playhead <= to) {

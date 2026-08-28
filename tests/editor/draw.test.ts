@@ -112,6 +112,42 @@ describe('paintScene', () => {
 
     expect(calls.some((call) => call.op === 'fillText')).toBe(false)
   })
+
+  it('writes the caption of a snap although its line is one pixel wide', () => {
+    const { painter, calls } = recorder()
+    paintScene(
+      painter,
+      scene({ rects: [{ kind: 'snap', x: 120, y: 0, width: 1, height: 100, label: 'keyframe' }] }),
+    )
+    const text = calls.find((call) => call.op === 'fillText')!
+
+    expect(text.text).toBe('keyframe')
+    expect(text.style).toBe(PALETTE.snapLabel)
+    // Beside the line and not over it, and just under the ruler rather than at the foot of the
+    // line: the caption belongs to the handle, which is what the eye is following.
+    expect(text.args[0]).toBeGreaterThan(120)
+    expect(text.args[1]).toBeGreaterThan(24)
+    expect(text.args[1]).toBeLessThan(50)
+  })
+
+  it('still says nothing beside a clip too narrow, and says it in the clip colour', () => {
+    // The caption of a snap is the one label that ignores the width; a narrow clip stays quiet,
+    // and a wide one is written in its own colour and not in the colour of a caught target.
+    const { painter, calls } = recorder()
+    paintScene(
+      painter,
+      scene({
+        rects: [
+          { kind: 'clip', x: 0, y: 60, width: 20, height: 18, label: 'Narrow' },
+          { kind: 'clip', x: 40, y: 60, width: 120, height: 18, label: 'Wide' },
+        ],
+      }),
+    )
+    const texts = calls.filter((call) => call.op === 'fillText')
+
+    expect(texts.map((call) => call.text)).toEqual(['Wide'])
+    expect(texts[0]!.style).toBe(PALETTE.clipLabel)
+  })
 })
 
 describe('truncate', () => {

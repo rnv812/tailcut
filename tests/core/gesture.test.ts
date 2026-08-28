@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { METRICS } from '../../src/core/timeline/layout'
+import { METRICS, packRows, rowTop } from '../../src/core/timeline/layout'
+import { snapSet } from '../../src/core/timeline/snap'
 import {
   DRAG_SLOP_PX,
   onPointerDown,
@@ -8,10 +9,19 @@ import {
   onWheel,
   type Surface,
 } from '../../src/core/timeline/gesture'
-import { zoomFactorOf, type Viewport } from '../../src/core/timeline/view'
+import { timeToX, zoomFactorOf, type Viewport } from '../../src/core/timeline/view'
 
 const view: Viewport = { start: 0, scale: 0.05, widthPx: 1200 }
-const surface: Surface = { view, metrics: METRICS, laneCount: 2 }
+const surface: Surface = {
+  view,
+  metrics: METRICS,
+  laneCount: 2,
+  clips: [],
+  rows: new Map(),
+  frames: new Float64Array(),
+  snap: { targets: [], keyframes: new Float64Array() },
+  snapping: true,
+}
 
 const wheel = (overrides: Partial<Parameters<typeof onWheel>[0]> = {}) =>
   onWheel({ x: 300, deltaX: 0, deltaY: 0, deltaMode: 0, shift: false, ...overrides })
@@ -121,5 +131,185 @@ describe('pointer', () => {
 
   it('never seeks before the material', () => {
     expect(onPointerDown(surface, { ...inRuler, x: -40 }).gesture).toEqual({ type: 'seek', time: 0 })
+  })
+})
+
+describe('handles', () => {
+  const clips = [
+    { id: 'c1', name: 'One', in: 10, out: 20, selected: true },
+    { id: 'c2', name: 'Two', in: 15, out: 30, selected: false },
+  ]
+  const rows = packRows(clips)
+  /** Quarter-second frames from 0 to 60; every fourth second carries a keyframe. */
+  const frames = Float64Array.from({ length: 241 }, (_, i) => i * 0.25)
+  const set = snapSet({
+    keyframes: Float64Array.from([0, 4, 8, 12, 16, 20, 24]),
+    zones: [],
+    gaps: [],
+    markers: [],
+    clips,
+    playhead: 0,
+  })
+  const withHandles: Surface = { ...surface, clips, rows, frames, snap: set, snapping: true }
+
+  /**
+   * The middle of the handle of a clip, in pixels of the surface it is drawn on.
+   *
+   * The viewport is a parameter because a handle is a place on the screen and not a time: at
+   * another zoom the same edge of the same clip is somewhere else entirely, and a press at the
+   * pixel of the opening zoom would land in the middle of nothing.
+   */
+  const handle = (id: string, edge: 'in' | 'out', v: Viewport = view) => {
+    const clip = clips.find((candidate) => candidate.id === id)!
+    const row = rows.get(id) ?? 0
+    return {
+      x: timeToX(v, edge === 'in' ? clip.in : clip.out),
+      y: rowTop(METRICS, 2, row) + METRICS.clipHeight / 2,
+      alt: false,
+    }
+  }
+
+  it('grabbing a handle selects its clip and holds it', () => {
+    const down = onPointerDown(withHandles, handle('c1', 'out'))
+
+    expect(down.gesture).toEqual({ type: 'selectClip', id: 'c1' })
+    expect(down.drag).toEqual({ kind: 'handle', id: 'c1', edge: 'out' })
+  })
+
+  it('grabs a handle from a few pixels off, and not from across the clip', () => {
+    // The tab is seven pixels wide and the hand is not that steady, so the grab reaches wider
+    // than the drawing. It does not reach the middle of the clip: that press means the body.
+    const out = handle('c1', 'out')
+
+    expect(onPointerDown(withHandles, { ...out, x: out.x - 4 }).drag).toMatchObject({
+      kind: 'handle',
+      edge: 'out',
+    })
+    expect(onPointerDown(withHandles, { ...out, x: out.x - 12 }).drag).toBeNull()
+  })
+
+  it('grabs the handle of the clip on the row that was pressed', () => {
+    const down = onPointerDown(withHandles, handle('c2', 'in'))
+
+    expect(down.drag).toEqual({ kind: 'handle', id: 'c2', edge: 'in' })
+  })
+
+  it('trims to the frame grid while it is dragged', () => {
+    const down = onPointerDown(withHandles, handle('c1', 'out'))
+    // 20.61 s: nothing to snap to nearby, so the grid alone decides — 0.25 s frames.
+    const move = onPointerMove(withHandles, down.drag, { x: 20.61 / view.scale, y: 0, alt: false })
+
+    expect(move.gesture).toEqual({ type: 'trim', id: 'c1', edge: 'out', time: 20.5 })
+    expect(move.hint).toBeNull()
+  })
+
+  it('catches a keyframe and says which one', () => {
+    const down = onPointerDown(withHandles, handle('c1', 'out'))
+    const move = onPointerMove(withHandles, down.drag, { x: 24.2 / view.scale, y: 0, alt: false })
+
+    expect(move.gesture).toEqual({ type: 'trim', id: 'c1', edge: 'out', time: 24 })
+    expect(move.hint).toMatchObject({ kind: 'keyframe', time: 24 })
+  })
+
+  it('drops the hint when the grid moves the handle off the target', () => {
+    // A keyframe in the middle of a hole is a keyframe no cut can stand on: the grid pulls the
+    // handle to the edge of the run, and a caption saying "keyframe" would name a place the
+    // handle is not.
+    const holed: Surface = {
+      ...withHandles,
+      frames: Float64Array.from([0, 20, 24, 24.25]),
+      snap: snapSet({
+        keyframes: Float64Array.from([22]),
+        zones: [],
+        gaps: [],
+        markers: [],
+        clips,
+        playhead: 0,
+      }),
+    }
+    const down = onPointerDown(holed, handle('c1', 'out'))
+    const move = onPointerMove(holed, down.drag, { x: 21.9 / view.scale, y: 0, alt: false })
+
+    expect(move.gesture).toMatchObject({ time: 20 })
+    expect(move.hint).toBeNull()
+  })
+
+  it('alt frees the handle from the targets but not from the frames', () => {
+    const down = onPointerDown(withHandles, handle('c1', 'out'))
+    const move = onPointerMove(withHandles, down.drag, { x: 24.2 / view.scale, y: 0, alt: true })
+
+    expect(move.gesture).toEqual({ type: 'trim', id: 'c1', edge: 'out', time: 24.25 })
+    expect(move.hint).toBeNull()
+  })
+
+  it('alt turns snapping back on when it was switched off', () => {
+    const off: Surface = { ...withHandles, snapping: false }
+    const down = onPointerDown(off, handle('c1', 'out'))
+
+    expect(onPointerMove(off, down.drag, { x: 24.2 / view.scale, y: 0, alt: false }).gesture).toMatchObject({
+      time: 24.25,
+    })
+    expect(onPointerMove(off, down.drag, { x: 24.2 / view.scale, y: 0, alt: true }).gesture).toMatchObject({
+      time: 24,
+    })
+  })
+
+  it('the tolerance is in pixels, so a deeper zoom stops catching from afar', () => {
+    const deep: Surface = { ...withHandles, view: { ...view, scale: 0.0005 } }
+    const down = onPointerDown(deep, handle('c1', 'out', deep.view))
+    const move = onPointerMove(deep, down.drag, { x: 24.2 / deep.view.scale, y: 0, alt: false })
+
+    // The same handle, a hundred times as wide a screen: it is still grabbed, and it is the
+    // catching that stops. Eight pixels are four thousandths of a second here, so 0.2 s is far.
+    expect(down.drag).toMatchObject({ kind: 'handle', id: 'c1', edge: 'out' })
+    expect(move.hint).toBeNull()
+  })
+
+  it('never offers a handle its own clip as a target', () => {
+    const down = onPointerDown(withHandles, handle('c1', 'in'))
+    const move = onPointerMove(withHandles, down.drag, { x: 19.9 / view.scale, y: 0, alt: false })
+
+    expect(move.hint).not.toMatchObject({ owner: 'c1' })
+
+    // And a nudge of the in handle where nothing else stands: the edge being dragged is the only
+    // target within reach, and offered it the handle would stick to the place it started from.
+    const nudge = onPointerMove(withHandles, down.drag, { x: 9.9 / view.scale, y: 0, alt: false })
+
+    expect(nudge.hint).toBeNull()
+  })
+
+  it('pressing the body of a clip selects it and starts no drag', () => {
+    // At 15 s, which is where the clip on the row below has its in handle: a handle belongs to
+    // the row it is drawn on, or the rows would grab each other's edges through the screen.
+    const body = { x: 15 / view.scale, y: rowTop(METRICS, 2, 0) + 9, alt: false }
+    const down = onPointerDown(withHandles, body)
+
+    expect(down.gesture).toEqual({ type: 'selectClip', id: 'c1' })
+    expect(down.drag).toBeNull()
+  })
+
+  it('pressing the empty space under the clips clears the selection', () => {
+    const beyond = { x: 50 / view.scale, y: rowTop(METRICS, 2, 0) + 9, alt: false }
+    // 25 s is empty on the first row and inside the clip of the second: a press picks what is
+    // drawn where it landed, not what is drawn at that time somewhere else.
+    const beside = { x: 25 / view.scale, y: rowTop(METRICS, 2, 0) + 9, alt: false }
+
+    expect(onPointerDown(withHandles, beyond).gesture).toEqual({ type: 'selectClip', id: null })
+    expect(onPointerDown(withHandles, beside).gesture).toEqual({ type: 'selectClip', id: null })
+  })
+
+  it('pressing between two rows of clips is not a press on either', () => {
+    // The gap between the rows belongs to nobody: a press there clears the selection rather
+    // than picking whichever clip happens to be drawn nearest.
+    const between = { x: 17 / view.scale, y: rowTop(METRICS, 2, 1) - 1, alt: false }
+
+    expect(onPointerDown(withHandles, between).gesture).toEqual({ type: 'selectClip', id: null })
+  })
+
+  it('releasing a handle clears the drag and the hint', () => {
+    const down = onPointerDown(withHandles, handle('c1', 'out'))
+    const up = onPointerUp(withHandles, down.drag, handle('c1', 'out'))
+
+    expect(up).toEqual({ drag: null, gesture: null, hint: null })
   })
 })

@@ -13,10 +13,12 @@ import type { Lane } from '../../core/timeline/lanes'
 import {
   METRICS,
   layoutScene,
+  packRows,
   type ClipBand,
   type MarkerPin,
   type Metrics,
 } from '../../core/timeline/layout'
+import type { SnapSet, SnapTarget } from '../../core/timeline/snap'
 import type { Viewport } from '../../core/timeline/view'
 import { PALETTE, paintScene } from './draw'
 
@@ -27,6 +29,10 @@ export interface TimelineProps {
   view: Viewport
   playhead: number
   fps: number
+  /** Frame boundaries of the picture; handles and the playhead land on them. */
+  frames: Float64Array
+  snap: SnapSet
+  snapping: boolean
   metrics?: Metrics
   /** The width of the drawing area, in CSS pixels: the viewport is stored, so the owner keeps it. */
   onResize: (widthPx: number) => void
@@ -43,6 +49,10 @@ export function Timeline(props: TimelineProps) {
   // over would be stale; it reads the latest ones instead.
   const latest = useRef(props)
   latest.current = props
+  // Neither of these goes into the document: they live exactly as long as the button is held,
+  // and everything that lives in the state is a selector and a repaint of the panels beside it.
+  const hint = useRef<SnapTarget | null>(null)
+  const active = useRef<{ id: string; edge: 'in' | 'out' } | null>(null)
 
   const paint = (): void => {
     frame.current = 0
@@ -58,6 +68,8 @@ export function Timeline(props: TimelineProps) {
       markers: current.markers,
       playhead: current.playhead,
       fps: current.fps,
+      snap: hint.current,
+      active: active.current,
     })
 
     const ratio = globalThis.devicePixelRatio || 1
@@ -115,6 +127,11 @@ export function Timeline(props: TimelineProps) {
     view: latest.current.view,
     metrics: latest.current.metrics ?? METRICS,
     laneCount: latest.current.lanes.length,
+    clips: latest.current.clips,
+    rows: packRows(latest.current.clips),
+    frames: latest.current.frames,
+    snap: latest.current.snap,
+    snapping: latest.current.snapping,
   })
 
   // The listeners are put on by hand rather than through JSX for two reasons: the wheel has to be
@@ -133,7 +150,11 @@ export function Timeline(props: TimelineProps) {
 
     const apply = (result: GestureResult): void => {
       drag.current = result.drag
+      if (result.hint !== undefined) hint.current = result.hint
+      active.current = result.drag?.kind === 'handle' ? { id: result.drag.id, edge: result.drag.edge } : null
       if (result.gesture) latest.current.onGesture(result.gesture)
+      // The hint is not a prop, so a change of it would otherwise never reach the canvas.
+      schedule()
     }
 
     const move = (event: MouseEvent): void => apply(onPointerMove(surface(), drag.current, pointerAt(event)))

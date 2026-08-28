@@ -218,4 +218,79 @@ describe('layoutScene', () => {
     expect(scene.ticks.filter((tick) => tick.major).every((tick) => Boolean(tick.label))).toBe(true)
     expect(scene.ticks.filter((tick) => !tick.major).every((tick) => tick.label === undefined)).toBe(true)
   })
+
+  it('gives every clip a handle at each end', () => {
+    const scene = layoutScene(view, METRICS, input({ clips: [clip('a', 10, 30)] }))
+    const handles = of(scene.rects, 'handle')
+
+    expect(handles).toHaveLength(2)
+    expect(handles[0]).toMatchObject({ id: 'a', width: METRICS.handleWidth })
+    // Centred on the edge: half the handle hangs outside the clip, which is what makes it
+    // grabbable when two clips meet edge to edge.
+    expect(handles[0]!.x).toBe(100 - Math.floor(METRICS.handleWidth / 2))
+    expect(handles[1]!.x).toBe(300 - Math.floor(METRICS.handleWidth / 2))
+
+    // A clip out of sight brings none: two rects at minus five thousand for every clip ever
+    // cut is the cost of laying out what nobody is looking at.
+    const away = layoutScene(view, METRICS, input({ clips: [clip('a', 500, 600)] }))
+
+    expect(of(away.rects, 'handle')).toHaveLength(0)
+  })
+
+  it('draws the handle being dragged onto a target as caught', () => {
+    const scene = layoutScene(
+      view,
+      METRICS,
+      input({
+        clips: [clip('a', 10, 30)],
+        active: { id: 'a', edge: 'out' },
+        snap: { time: 30, kind: 'keyframe', label: 'keyframe' },
+      }),
+    )
+
+    expect(of(scene.rects, 'handle')).toHaveLength(1)
+    expect(of(scene.rects, 'handle-snapped')[0]).toMatchObject({ id: 'a', x: 300 - 3 })
+
+    // Dragged and catching nothing is not caught: under Alt the handle keeps its own colour all
+    // the way, and the colour is the whole of what says a target was found.
+    const free = layoutScene(
+      view,
+      METRICS,
+      input({ clips: [clip('a', 10, 30)], active: { id: 'a', edge: 'out' } }),
+    )
+
+    expect(of(free.rects, 'handle-snapped')).toHaveLength(0)
+  })
+
+  it('leaves the handles of the other clips alone while one of them is caught', () => {
+    // The caught colour belongs to the edge under the hand, not to the clip and not to the
+    // moment: a whole timeline lighting up would say nothing about where the line came from.
+    const scene = layoutScene(
+      view,
+      METRICS,
+      input({
+        clips: [clip('a', 10, 30), clip('b', 40, 60)],
+        active: { id: 'a', edge: 'out' },
+        snap: { time: 30, kind: 'keyframe', label: 'keyframe' },
+      }),
+    )
+
+    expect(of(scene.rects, 'handle-snapped')).toHaveLength(1)
+    expect(of(scene.rects, 'handle').map((rect) => rect.id)).toEqual(['a', 'b', 'b'])
+  })
+
+  it('runs the snap line the height of the scene and labels it', () => {
+    const scene = layoutScene(
+      view,
+      METRICS,
+      input({ snap: { time: 40, kind: 'gap', label: 'gap' } }),
+    )
+    const line = of(scene.rects, 'snap')[0]!
+
+    expect(line).toMatchObject({ x: 400, y: 0, width: 1, height: scene.height, label: 'gap' })
+  })
+
+  it('draws no snap line when nothing is caught', () => {
+    expect(of(layoutScene(view, METRICS, input()).rects, 'snap')).toHaveLength(0)
+  })
 })
