@@ -12,8 +12,14 @@ test('service worker applies its install-time setup', async () => {
   // launchWithExtension уже дождался воркера, поэтому список непустой
   const sw = context.serviceWorkers()[0]!
 
-  const color = await sw.evaluate(() => chrome.action.getBadgeBackgroundColor({}))
-  expect(color, 'onInstalled должен выставить цвет бейджа').toEqual([76, 141, 255, 255])
+  // Polled, not read once. The worker appears the moment the browser has evaluated its script,
+  // and onInstalled arrives afterwards as an event of its own — a fraction of a millisecond later
+  // on an idle machine, and long enough later on a busy one that a single read caught the default
+  // black. It went unseen while the suite ran one test at a time and failed on the first run four
+  // workers wide. The claim is unchanged: the colour has to become this one and no other.
+  await expect
+    .poll(() => sw.evaluate(() => chrome.action.getBadgeBackgroundColor({})), { timeout: 10_000 })
+    .toEqual([76, 141, 255, 255])
 
   await context.close()
 })

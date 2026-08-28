@@ -9,6 +9,26 @@ import { unexpectedWarnings } from '../support/media'
 const EXT = path.resolve('dist')
 
 /**
+ * Every browser this suite launches runs headless, and every one of them is the full Chromium.
+ *
+ * The two go together and neither works without the other. Playwright's own `headless: true`
+ * quietly swaps the binary for `chrome-headless-shell`, which has no extension support at all:
+ * the browser starts, `--load-extension` is ignored, and the wait for a service worker runs out.
+ * `channel: 'chromium'` asks for the ordinary Chromium build instead, whose headless mode is
+ * Chrome's own and carries extensions, the downloads API, MSE and a decoder.
+ *
+ * It is not a weaker browser. The frame a test reads back off a canvas is decoded the same way:
+ * on the same clip, the same 320×240 frame came out with a mean channel value of 123.79 headed
+ * and 123.67 headless. What it saves is the drawing of it — 648 s over the suite headed against
+ * 586 s headless, and rather more than that on the launches themselves: the two tests of
+ * `load.spec.ts` together fell from 0.8 s to 0.5 s, `hook.spec.ts` from 11.7 s to 4.9 s.
+ *
+ * `HEADED=1` puts the windows back, for the run a person needs to watch.
+ */
+const HEADLESS = process.env.HEADED !== '1'
+const CHANNEL = 'chromium' as const
+
+/**
  * One launch for both modes. Everything apart from the two arguments that load the extension has
  * to match: the overhead measurement in `overhead.spec.ts` compares these two launches against
  * each other, and any other difference in the settings it would put down to the extension.
@@ -16,7 +36,8 @@ const EXT = path.resolve('dist')
 async function launch(args: string[]): Promise<BrowserContext> {
   const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tailcut-'))
   const context = await chromium.launchPersistentContext(userDataDir, {
-    headless: false,
+    headless: HEADLESS,
+    channel: CHANNEL,
     args,
     acceptDownloads: true,
   })
@@ -375,7 +396,8 @@ export interface Playback {
  */
 export async function playInBrowser(file: string): Promise<Playback> {
   const browser = await chromium.launch({
-    headless: false,
+    headless: HEADLESS,
+    channel: CHANNEL,
     args: ['--enable-blink-features=AudioVideoTracks', '--disable-audio-output'],
   })
 
@@ -444,7 +466,8 @@ export async function playThroughMse(file: string, type: string): Promise<Remuxe
   // Away from the sound device for the same reason as in playInBrowser: this one waits for `ended`
   // too, and a host with no audio output makes the play head crawl whatever is being played.
   const browser = await chromium.launch({
-    headless: false,
+    headless: HEADLESS,
+    channel: CHANNEL,
     args: ['--disable-audio-output'],
   })
 

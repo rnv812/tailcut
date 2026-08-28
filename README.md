@@ -26,12 +26,24 @@ npm install
 npm run build        # bundle into dist/
 npm run dev          # rebuild on change
 npm test             # unit tests (Vitest)
-npm run e2e          # integration tests (Playwright, real Chromium)
+npm run e2e:fast     # the working set: run it after every change
+npm run e2e          # the whole sweep: run it once, when a task is finished
 npm run typecheck
 npm run plan:check   # every plan's code blocks still match the repository
 ```
 
 Load `dist/` through `chrome://extensions` with developer mode on.
+
+The integration tests drive a real Chromium with the real extension loaded, and
+they are split in two by what each one is for rather than by what it costs.
+`e2e:fast` is the working set — the hook, the bridge, triage, the popup and
+every path that ends in a saved file, sixty tests in about a minute. `e2e` adds
+the sweep on top of it: the codec matrix, a minute of watching, the
+ordinary-file path with its ranged reads, the pages full of frames, and the
+overhead measurement, which runs last and by itself. The reason each file is in
+the set it is in is written next to it in `playwright.config.ts`.
+
+Both run headless. `HEADED=1 npm run e2e:fast` puts the windows back.
 
 Test fixtures are generated once with `tools/make-fixtures.sh` and committed;
 ffmpeg is only needed to regenerate them. `ffprobe`, shipped with ffmpeg, is

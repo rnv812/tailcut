@@ -10,6 +10,20 @@ import {
   type FileFacts,
 } from './helpers'
 
+/**
+ * The rows of this file stay on one worker, alone among the specs of the suite.
+ *
+ * What is produced here is a table, printed whole in `afterAll` — which combination came out how
+ * heavy, how long, and with what said about it by a reader and by a decoder. `afterAll` runs once
+ * per worker, so a file spread over the pool prints a piece of the table per worker, each with
+ * its own heading and none of them the matrix.
+ *
+ * Eight rows of twenty seconds in a row is 164 s, which is longer than everything else the pool
+ * has to get through, so the whole run is as long as this file: measured at 170 s pinned against
+ * 163 s spread. Seven seconds is what the table costs.
+ */
+test.describe.configure({ mode: 'default' })
+
 const PLAYER_URL = 'https://tailcut.test/codecs'
 
 /**

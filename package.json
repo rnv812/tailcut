@@ -7,6 +7,7 @@
     "build": "node build.mjs",
     "dev": "node build.mjs --watch",
     "e2e": "playwright test",
+    "e2e:fast": "playwright test --project=working",
     "typecheck": "tsc --noEmit",
     "plan:check": "node tools/check-plan-blocks.mjs"
   },
