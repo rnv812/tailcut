@@ -34,13 +34,42 @@ function installContext(): void {
     context) as unknown as HTMLCanvasElement['getContext']
 }
 
-/** happy-dom measures every element as zero; the host is given a width to report. */
+/**
+ * The corner the canvas is measured at.
+ *
+ * Not the origin of the page: the timeline sits under a header and beside an inspector, and a
+ * pointer position that is not translated into the canvas lands minutes away in the material.
+ */
+const ORIGIN = { x: 40, y: 10 }
+
+/** happy-dom measures every element as zero; the host is given a box to report. */
 function installWidth(width: number): void {
   HTMLElement.prototype.getBoundingClientRect = () =>
-    ({ width, height: 0, x: 0, y: 0, top: 0, left: 0, right: width, bottom: 0, toJSON: () => ({}) }) as DOMRect
+    ({
+      width,
+      height: 0,
+      x: ORIGIN.x,
+      y: ORIGIN.y,
+      top: ORIGIN.y,
+      left: ORIGIN.x,
+      right: ORIGIN.x + width,
+      bottom: ORIGIN.y,
+      toJSON: () => ({}),
+    }) as DOMRect
 }
 
 const nextFrame = (): Promise<void> => new Promise((resolve) => requestAnimationFrame(() => resolve()))
+
+/** A mouse event at a point of the canvas, turned into the page coordinates the browser sends. */
+const at = (type: string, x: number, y: number, button = 0): MouseEvent =>
+  new MouseEvent(type, {
+    clientX: ORIGIN.x + x,
+    clientY: ORIGIN.y + y,
+    button,
+    bubbles: true,
+  })
+
+const press = (x: number, y: number, button = 0): MouseEvent => at('pointerdown', x, y, button)
 
 let host: HTMLDivElement
 
@@ -66,6 +95,7 @@ const props = () => ({
   playhead: 3,
   fps: 25,
   onResize: () => {},
+  onGesture: () => {},
 })
 
 describe('Timeline', () => {
@@ -117,5 +147,75 @@ describe('Timeline', () => {
     await nextFrame()
 
     expect(host.querySelector('canvas')).not.toBeNull()
+  })
+
+  it('turns a wheel over the canvas into a zoom at the pointer', () => {
+    const gestures: unknown[] = []
+    render(<Timeline {...props()} onGesture={(gesture) => gestures.push(gesture)} />, host)
+
+    const canvas = host.querySelector('canvas')!
+    const event = new WheelEvent('wheel', { deltaY: -120, cancelable: true })
+    // In a browser a wheel event is a MouseEvent and carries the pointer with it; happy-dom's
+    // descends from UIEvent and has no position at all. The component reads clientX, so the test
+    // gives the event one rather than letting the wheel arrive from nowhere.
+    Object.defineProperty(event, 'clientX', { value: ORIGIN.x + 300 })
+    canvas.dispatchEvent(event)
+
+    expect(gestures).toEqual([{ type: 'zoom', atPx: 300, factor: expect.any(Number) }])
+    // Without this the page scrolls under the timeline and Ctrl+wheel zooms the whole tab.
+    expect(event.defaultPrevented).toBe(true)
+  })
+
+  it('turns a drag across a lane into a pan', () => {
+    const gestures: unknown[] = []
+    render(<Timeline {...props()} onGesture={(gesture) => gestures.push(gesture)} />, host)
+
+    const canvas = host.querySelector('canvas')!
+    canvas.dispatchEvent(press(100, 60))
+    window.dispatchEvent(at('pointermove', 150, 60))
+    window.dispatchEvent(at('pointerup', 150, 60))
+
+    expect(gestures).toEqual([{ type: 'pan', dxPx: 50 }])
+  })
+
+  it('turns a click without travel into a seek', () => {
+    const gestures: unknown[] = []
+    render(<Timeline {...props()} onGesture={(gesture) => gestures.push(gesture)} />, host)
+
+    const canvas = host.querySelector('canvas')!
+    canvas.dispatchEvent(press(100, 60))
+    window.dispatchEvent(at('pointerup', 100, 60))
+
+    // 100 px into the canvas at 0.05 s/px, and not 140 px into the page: the seek is where the
+    // material was clicked, whatever the timeline has above it and to the left of it.
+    expect(gestures).toEqual([{ type: 'seek', time: 5 }])
+  })
+
+  it('lets a right-click alone', () => {
+    const gestures: unknown[] = []
+    render(<Timeline {...props()} onGesture={(gesture) => gestures.push(gesture)} />, host)
+
+    const canvas = host.querySelector('canvas')!
+    canvas.dispatchEvent(press(100, 60, 2))
+    window.dispatchEvent(at('pointermove', 200, 60))
+
+    // The context menu belongs to the page: grabbing the material on a right button would pan it
+    // behind the menu that is opening over it.
+    expect(gestures).toEqual([])
+  })
+
+  it('lets go of the window when it is taken off the page', () => {
+    const gestures: unknown[] = []
+    render(<Timeline {...props()} onGesture={(gesture) => gestures.push(gesture)} />, host)
+    const canvas = host.querySelector('canvas')!
+    canvas.dispatchEvent(press(100, 60))
+    render(null, host)
+
+    // A listener left on the window after the editor is gone keeps the whole component alive —
+    // and goes on answering the mouse for a timeline that is not on the page any more.
+    window.dispatchEvent(at('pointermove', 400, 60))
+    window.dispatchEvent(at('pointerup', 400, 60))
+
+    expect(gestures).toEqual([])
   })
 })

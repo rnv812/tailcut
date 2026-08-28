@@ -1,4 +1,14 @@
 import { useEffect, useLayoutEffect, useRef } from 'preact/hooks'
+import {
+  onPointerDown,
+  onPointerMove,
+  onPointerUp,
+  onWheel,
+  type DragState,
+  type GestureResult,
+  type Surface,
+  type TimelineGesture,
+} from '../../core/timeline/gesture'
 import type { Lane } from '../../core/timeline/lanes'
 import {
   METRICS,
@@ -20,6 +30,8 @@ export interface TimelineProps {
   metrics?: Metrics
   /** The width of the drawing area, in CSS pixels: the viewport is stored, so the owner keeps it. */
   onResize: (widthPx: number) => void
+  /** Everything the pointer decides, decided in one place; the component only relays it. */
+  onGesture: (gesture: TimelineGesture) => void
 }
 
 export function Timeline(props: TimelineProps) {
@@ -95,6 +107,75 @@ export function Timeline(props: TimelineProps) {
     const observer = new ResizeObserver(measure)
     observer.observe(element)
     return () => observer.disconnect()
+  }, [])
+
+  const drag = useRef<DragState>(null)
+
+  const surface = (): Surface => ({
+    view: latest.current.view,
+    metrics: latest.current.metrics ?? METRICS,
+    laneCount: latest.current.lanes.length,
+  })
+
+  // The listeners are put on by hand rather than through JSX for two reasons: the wheel has to be
+  // non-passive to be able to stop the page from scrolling, and a drag has to keep working after
+  // the pointer leaves the canvas, which means the window and not the element. They go on in a
+  // layout effect, with the paint and not a frame behind it: a canvas that is on the screen and
+  // deaf to the wheel is a canvas the first spin of it scrolls the page instead.
+  useLayoutEffect(() => {
+    const element = canvas.current
+    if (!element) return
+
+    const pointerAt = (event: MouseEvent): { x: number; y: number; alt: boolean } => {
+      const box = element.getBoundingClientRect()
+      return { x: event.clientX - box.left, y: event.clientY - box.top, alt: event.altKey }
+    }
+
+    const apply = (result: GestureResult): void => {
+      drag.current = result.drag
+      if (result.gesture) latest.current.onGesture(result.gesture)
+    }
+
+    const move = (event: MouseEvent): void => apply(onPointerMove(surface(), drag.current, pointerAt(event)))
+
+    const release = (): void => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+    }
+
+    const up = (event: MouseEvent): void => {
+      apply(onPointerUp(surface(), drag.current, pointerAt(event)))
+      release()
+    }
+
+    const down = (event: MouseEvent): void => {
+      if (event.button !== 0) return
+      apply(onPointerDown(surface(), pointerAt(event)))
+      window.addEventListener('pointermove', move)
+      window.addEventListener('pointerup', up)
+    }
+
+    const wheel = (event: WheelEvent): void => {
+      const box = element.getBoundingClientRect()
+      const gesture = onWheel({
+        x: event.clientX - box.left,
+        deltaX: event.deltaX,
+        deltaY: event.deltaY,
+        deltaMode: event.deltaMode,
+        shift: event.shiftKey,
+      })
+      if (!gesture) return
+      event.preventDefault()
+      latest.current.onGesture(gesture)
+    }
+
+    element.addEventListener('wheel', wheel, { passive: false })
+    element.addEventListener('pointerdown', down)
+    return () => {
+      element.removeEventListener('wheel', wheel)
+      element.removeEventListener('pointerdown', down)
+      release()
+    }
   }, [])
 
   return (

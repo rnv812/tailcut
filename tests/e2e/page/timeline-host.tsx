@@ -2,7 +2,7 @@ import { render } from 'preact'
 import { useState } from 'preact/hooks'
 import type { Lane, Span, Zone } from '../../../src/core/timeline/lanes'
 import { METRICS, layoutScene, type ClipBand, type MarkerPin } from '../../../src/core/timeline/layout'
-import type { Viewport } from '../../../src/core/timeline/view'
+import { fitAll, panBy, zoomAt, type ViewBounds, type Viewport } from '../../../src/core/timeline/view'
 import { PALETTE, paintScene } from '../../../src/editor/timeline/draw'
 import { Timeline } from '../../../src/editor/timeline/timeline'
 
@@ -58,6 +58,8 @@ const MARKERS: MarkerPin[] = Array.from({ length: 12 }, (_, i) => ({
   label: `M${i + 1}`,
 }))
 
+const BOUNDS: ViewBounds = { duration: DURATION, fps: 25 }
+
 const SEGMENTS =
   LANES.reduce((total, lane) => total + lane.runs.length + lane.gaps.length + lane.zones.length, 0) +
   CLIPS.length +
@@ -69,6 +71,8 @@ function Host() {
   const shared = globalThis as unknown as Record<string, unknown>
   shared.tcView = () => view
   shared.tcSetView = (next: Viewport) => setView(next)
+  shared.tcTimeAt = (x: number) => view.start + x * view.scale
+  shared.tcFit = () => setView((current) => fitAll(current, BOUNDS))
   shared.tcPalette = PALETTE
   shared.tcSegments = SEGMENTS
   shared.tcLanes = LANES
@@ -105,6 +109,13 @@ function Host() {
       playhead={61.2}
       fps={25}
       onResize={(widthPx) => setView((current) => ({ ...current, widthPx }))}
+      onGesture={(gesture) =>
+        setView((current) => {
+          if (gesture.type === 'zoom') return zoomAt(current, gesture.atPx, gesture.factor, BOUNDS)
+          if (gesture.type === 'pan') return panBy(current, gesture.dxPx, BOUNDS)
+          return current
+        })
+      }
     />
   )
 }
