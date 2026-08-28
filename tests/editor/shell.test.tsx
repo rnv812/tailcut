@@ -508,6 +508,13 @@ describe('the editor shell', () => {
     press('i')
     await settled()
 
+    // And the playhead is walked off the In it has just set. A split at the very edge of a clip
+    // is refused whatever the keyboard says, so left standing there the count below is 1 for a
+    // layout switched off and 1 for a layout left on, and the check says nothing at all.
+    press('ArrowRight')
+    press('ArrowRight')
+    await settled()
+
     const name = document.querySelector<HTMLInputElement>('[data-testid="name-c1"]')!
     name.dispatchEvent(new KeyboardEvent('keydown', { key: 's', bubbles: true, cancelable: true }))
     await settled()
