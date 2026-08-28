@@ -43,6 +43,10 @@ describe('keymap', () => {
   })
 
   it('zooms around the playhead on plus and minus', () => {
+    // How big a step it is may be tuned; which way round the pair goes may not. Every check
+    // below is written against the constant, so a step below one would swap plus with minus and
+    // pass all the same — the one thing about its value worth pinning is stated here.
+    expect(ZOOM_KEY_STEP).toBeGreaterThan(1)
     expect(actionFor(press('='))).toEqual({ type: 'zoomStep', factor: 1 / ZOOM_KEY_STEP })
     expect(actionFor(press('+'))).toEqual({ type: 'zoomStep', factor: 1 / ZOOM_KEY_STEP })
     expect(actionFor(press('-'))).toEqual({ type: 'zoomStep', factor: ZOOM_KEY_STEP })

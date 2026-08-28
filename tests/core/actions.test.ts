@@ -48,6 +48,15 @@ describe('the playhead', () => {
     expect(run([at(1), { type: 'skip', seconds: 1 }]).ui.playhead).toBeCloseTo(2, 9)
     expect(run([at(2), { type: 'skip', seconds: -1 }]).ui.playhead).toBeCloseTo(1, 9)
   })
+
+  it('skips a second of material, so a gap costs it nothing', () => {
+    // The second is counted in frames, and the grid holds what exists: from 3.6 a second forward
+    // is the 0.4 left of the first run and the rest taken out of the second one. A skip that
+    // added the seconds to the playhead would land in the hole and be dragged back to its near
+    // edge — 4 — where it would sit however many times it was pressed again.
+    expect(run([at(3.6), { type: 'skip', seconds: 1 }]).ui.playhead).toBeCloseTo(6.56, 9)
+    expect(run([at(6.56), { type: 'skip', seconds: -1 }]).ui.playhead).toBeCloseTo(3.6, 9)
+  })
 })
 
 describe('marking', () => {
@@ -259,7 +268,11 @@ describe('split', () => {
   })
 
   it('does nothing with no clip selected', () => {
-    const none = reduce(one, { type: 'selectClip', id: null }, ctx)
+    // The playhead is moved into the middle of the clip, where a cut would go through, so that
+    // the selection is the only thing left in the way — which is what this asks about. On the
+    // out point, where the clip was made, the minimum length above refuses the cut whatever the
+    // selection says, and a split that had stopped reading the selection would pass here too.
+    const none = run([at(1), { type: 'selectClip', id: null }], one)
 
     expect(reduce(none, { type: 'splitClip' }, ctx)).toBe(none)
   })
@@ -270,6 +283,16 @@ describe('markers', () => {
     const marked = run([at(2), { type: 'addMarker' }])
 
     expect(marked.doc.markers).toEqual([{ id: 'm1', time: 2, label: 'M1' }])
+  })
+
+  it('drops the marker on a frame boundary even when the playhead is between two', () => {
+    // The playhead can hold a time this grid does not have — it was put there on the grid of
+    // another representation (see the split above). A marker between two frames is a marker no
+    // cut and no handle can ever meet.
+    const project = fresh()
+    const between = { ...project, ui: { ...project.ui, playhead: 1.011 } }
+
+    expect(reduce(between, { type: 'addMarker' }, ctx).doc.markers[0]!.time).toBeCloseTo(1, 9)
   })
 
   it('does not drop a second marker on the same frame', () => {
@@ -324,6 +347,25 @@ describe('markers', () => {
 
     expect(reduce(drifted, { type: 'removeMarkerAt' }, ctx).doc.markers).toEqual([])
     expect(reduce(drifted, { type: 'addMarker' }, ctx)).toBe(drifted)
+  })
+
+  it('leaves alone a marker standing further away than half a frame', () => {
+    // The other side of the same window, and the reason it is half a frame and not two: the
+    // marker on the next frame along is somewhere else. Shift+M leaves it where it is, and M is
+    // free to put one down under the playhead. A wider window would take the neighbour away and
+    // refuse the marker that was actually asked for.
+    const marked = run([at(2), { type: 'addMarker' }])
+    const beside = (drift: number): Project => ({
+      ...marked,
+      doc: { ...marked.doc, markers: [{ id: 'm1', time: 2 + drift, label: 'M1' }] },
+    })
+
+    for (const drift of [FRAME * 0.6, FRAME, -FRAME]) {
+      const project = beside(drift)
+
+      expect(reduce(project, { type: 'removeMarkerAt' }, ctx)).toBe(project)
+      expect(reduce(project, { type: 'addMarker' }, ctx).doc.markers).toHaveLength(2)
+    }
   })
 })
 

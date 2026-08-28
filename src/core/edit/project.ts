@@ -42,7 +42,10 @@ export function newProject(widthPx: number, ctx: EditContext): Project {
 }
 
 export function clipById(doc: Doc, id: string | null): Clip | undefined {
-  return id === null ? undefined : doc.clips.find((clip) => clip.id === id)
+  // A selection of nothing finds nothing, and the search says so by itself: no clip carries
+  // `null` as an id. Guarding the null apart would add a branch no document can take — the test
+  // written for it would be one that cannot fail.
+  return doc.clips.find((clip) => clip.id === id)
 }
 
 export function selectedClip(project: Project): Clip | undefined {

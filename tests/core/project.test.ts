@@ -40,6 +40,8 @@ describe('project', () => {
 
     expect(clipById(doc, 'c1')!.name).toBe('One')
     expect(clipById(doc, 'nope')).toBeUndefined()
+    // Nothing selected finds nothing — and not the first clip, which is what a `?? clips[0]`
+    // slipped in anywhere under `selectedClip` would hand back to a project with no selection.
     expect(clipById(doc, null)).toBeUndefined()
     expect(selectedClip(project)!.id).toBe('c2')
   })

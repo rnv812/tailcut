@@ -35,6 +35,16 @@ describe('history', () => {
     expect(undo(again).present).toBe('a')
   })
 
+  it('has nothing to put back until something has been taken back', () => {
+    // canRedo is what greys the Redo button out (Task 14), and a button that is never grey is a
+    // button that lies. Fresh, after an edit, and after the one redo there was has been used up.
+    const one = commit(history('a'), 'b', step)
+
+    expect(canRedo(history('a'))).toBe(false)
+    expect(canRedo(one)).toBe(false)
+    expect(canRedo(redo(undo(one)))).toBe(false)
+  })
+
   it('clears the future as soon as something new is done', () => {
     const back = undo(commit(history('a'), 'b', step))
 
