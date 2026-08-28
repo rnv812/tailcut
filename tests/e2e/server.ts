@@ -107,9 +107,11 @@ export async function servePage(html: string, mediaOrigin: string, file: string)
     host.asked.push(request.headers.range ?? null)
 
     const page = await readFile(path.resolve('tests/e2e/page', html), 'utf8')
+    // Every occurrence and not the first: a page that hangs one file on two elements writes the
+    // address twice, and half a substitution would leave the second element pointing at nothing.
     const body = page
-      .replace('__MEDIA__', `${mediaOrigin}/${file}`)
-      .replace('__NAME__', file)
+      .replaceAll('__MEDIA__', `${mediaOrigin}/${file}`)
+      .replaceAll('__NAME__', file)
 
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
     host.served += body.length

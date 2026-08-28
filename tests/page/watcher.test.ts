@@ -848,6 +848,43 @@ describe('the watcher and an ordinary file', () => {
     expect(watcher.seen).toEqual([{ sourceId: CLIP_ID, verdict: 'promote' }])
   })
 
+  it('judges one file by the element playing it and not by the first on the page', async () => {
+    const watcher = await startWatcher()
+
+    // A page that shows one file twice. Measured on https://www.w3schools.com/html/html5_video.asp:
+    // an example with a control panel stands above, an autoplay example below it, and both point
+    // at mov_bbb.mp4. Whichever the reader starts, the file is the same file — but the account of
+    // it used to be taken from whichever element the walk of the page reached first.
+    stand(plainVideo({ paused: true, buffered: ranges() }))
+    stand(plainVideo({ buffered: ranges([0, 9.48]) }))
+
+    tick(13)
+
+    expect(watcher.seen, 'the element that was never started spoke for the file').toEqual([
+      { sourceId: CLIP_ID, verdict: 'promote' },
+    ])
+    // And what is offered is what the element that played it holds, not what the idle copy does.
+    expect(watcher.plain.at(-1)?.buffered).toEqual([[0, 9.48]])
+  })
+
+  it('does not let a copy nobody can see refuse the file being watched', async () => {
+    const watcher = await startWatcher()
+
+    // The same file in a carousel slide scrolled off the screen, and again in the player the
+    // reader is watching. An unmeasurable copy is rightly refused; refusing the file itself over
+    // it would take the recording away from the element that earned it.
+    stand(
+      plainVideo({
+        box: { width: 640, height: 360, top: 1200, left: 0, bottom: 1560, right: 640 },
+      }),
+    )
+    stand(plainVideo({ buffered: ranges([0, 9.48]) }))
+
+    tick(13)
+
+    expect(watcher.seen).toEqual([{ sourceId: CLIP_ID, verdict: 'promote' }])
+  })
+
   it('refuses the file an element has moved on from', async () => {
     const watcher = await startWatcher()
     const video = stand(plainVideo())

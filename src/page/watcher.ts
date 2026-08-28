@@ -104,6 +104,35 @@ function plainSignature(source: PlainSource): string {
   return `${source.durationSeconds}|${source.buffered.map((pair) => pair.join('-')).join(',')}`
 }
 
+/** What one element has to say about the file it is playing. */
+interface Speaker {
+  source: PlainSource
+  verdict: TriageVerdict
+  playedSeconds: number
+}
+
+/** How much a verdict is worth when two elements playing one file disagree. */
+const STANDING: Record<TriageVerdict, number> = { reject: 0, hold: 1, promote: 2 }
+
+/**
+ * Whether this element should speak for the file instead of the one that holds the floor.
+ *
+ * A page shows the same file in more than one place as a matter of course — an example above the
+ * one being read, a carousel slide scrolled away, a thumbnail beside the player — and the account
+ * of the file used to be taken from whichever the walk of the page reached first. Measured on
+ * https://www.w3schools.com/html/html5_video.asp, which shows mov_bbb.mp4 twice: start the lower
+ * of the two and the idle one above it answers for the file, so nothing is ever promoted; put the
+ * idle copy off the screen and the file is refused outright while it is being watched.
+ *
+ * So the strongest verdict wins, and the longest watched of equals. The file is one piece of
+ * material and either something on the page earned it or nothing did — an element that cannot be
+ * measured says nothing about one that can.
+ */
+function outranks(challenger: Omit<Speaker, 'source'>, holder: Omit<Speaker, 'source'>): boolean {
+  const gap = STANDING[challenger.verdict] - STANDING[holder.verdict]
+  return gap !== 0 ? gap > 0 : challenger.playedSeconds > holder.playedSeconds
+}
+
 /**
  * The hook has opened a MediaSource and named the address it handed the page for it.
  *
@@ -328,6 +357,8 @@ export function startWatching(
     const now = performance.now()
     /** Streams an element of the page is playing right now: everything else is out of reach. */
     const claimed = new Set<string>()
+    /** For each ordinary file, the element that speaks for it this poll; see outranks. */
+    const speaking = new Map<string, Speaker>()
 
     for (const [element, state] of watched) {
       // Элемент, выброшенный со страницы, продолжал бы считаться живым: ссылка на него
@@ -363,23 +394,31 @@ export function startWatching(
       const plain = plainSourceOf(element)
       if (!plain) continue
 
-      // The second element playing one file adds nothing: one file is one piece of material
-      // whatever it is hung on, and the fetch that reads it must not be made twice. It still
-      // claims the source, or the loop below would refuse a file that is playing.
-      if (claimed.has(plain.sourceId)) continue
+      // One file is one piece of material however many elements the page hangs it on, and the
+      // fetch that reads it must not be made twice — so the elements playing it are gathered and
+      // answered for once, below, by the best account any of them can give. Claimed here, or the
+      // loop after this one would refuse a file that is playing.
       claimed.add(plain.sourceId)
       announced.add(plain.sourceId)
 
+      const verdict = triage(signals, BALANCED)
+      const standing = speaking.get(plain.sourceId)
+      if (!standing || outranks({ verdict, playedSeconds: state.playedSeconds }, standing)) {
+        speaking.set(plain.sourceId, { source: plain, verdict, playedSeconds: state.playedSeconds })
+      }
+    }
+
+    for (const [sourceId, best] of speaking) {
       // The source before the verdict about it, always: the two are one thing said in two
       // messages, and a rejection that arrives first is a rejection of something the other side
       // has never heard of.
-      const signature = plainSignature(plain)
-      if (plainTold.get(plain.sourceId) !== signature) {
-        plainTold.set(plain.sourceId, signature)
-        onPlain(plain)
+      const signature = plainSignature(best.source)
+      if (plainTold.get(sourceId) !== signature) {
+        plainTold.set(sourceId, signature)
+        onPlain(best.source)
       }
 
-      tell(plain.sourceId, triage(signals, BALANCED))
+      tell(sourceId, best.verdict)
     }
 
     // A stream no element of the page is playing. The address from createObjectURL was announced,

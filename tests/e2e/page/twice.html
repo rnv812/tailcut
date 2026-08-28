@@ -1,0 +1,65 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>An article that shows __NAME__ twice</title>
+<!--
+  One file, hung on the page twice, and the lower of the two is the one watched.
+
+  Not a contrivance: https://www.w3schools.com/html/html5_video.asp shows mov_bbb.mp4 in two
+  examples one under the other, and a page that repeats a clip beside its own transcript, or in a
+  carousel, does the same. Whichever copy the reader starts, the file is one piece of material —
+  but the account of it used to be taken from whichever element the walk of the page reached
+  first, and the first one here has never been played.
+
+  Both are wide enough for triage and both have a control panel, so neither is refused for what it
+  looks like. Sized to sit in one viewport together: an element scrolled off the screen is refused
+  for being out of sight, which is a different case and is covered by the watcher's own tests.
+-->
+<p>Some words, and then the clip, twice.</p>
+<video
+  id="above"
+  controls
+  muted
+  src="__MEDIA__"
+  style="width: 480px; height: 170px; background: #000"
+></video>
+<p>The same file again, further down the page.</p>
+<video
+  id="below"
+  controls
+  muted
+  src="__MEDIA__"
+  style="width: 480px; height: 170px; background: #000"
+></video>
+<script>
+  const above = document.getElementById('above')
+  const below = document.getElementById('below')
+
+  /** Only the lower one is ever started; the one above it stays as the reader found it. */
+  window.tcPlayBelow = () => below.play()
+  window.tcPause = () => {
+    above.pause()
+    below.pause()
+  }
+
+  /** What each element holds, in the order they stand on the page. */
+  window.tcState = () => ({
+    above: stateOf(above),
+    below: stateOf(below),
+    /** Both in the viewport at once: the premise of this page, checked rather than assumed. */
+    bothOnScreen: [above, below].every((video) => {
+      const rect = video.getBoundingClientRect()
+      return rect.top >= 0 && rect.bottom <= innerHeight && rect.width > 0
+    }),
+  })
+
+  function stateOf(video) {
+    return {
+      currentTime: video.currentTime,
+      duration: video.duration,
+      buffered: Array.from({ length: video.buffered.length }, (_, i) => [
+        video.buffered.start(i),
+        video.buffered.end(i),
+      ]),
+    }
+  }
+</script>
