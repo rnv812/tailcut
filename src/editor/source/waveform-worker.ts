@@ -85,12 +85,24 @@ async function readRun(
   run: { start: number; segments: ArrayBuffer[] },
   post: (peaks: Peaks) => void,
 ): Promise<void> {
-  const builder = new PeakBuilder(setup.sampleRate, run.start)
+  let builder: PeakBuilder | null = null
+  /**
+   * The builder of this run, made when the first block comes out and at the rate that block came
+   * out at.
+   *
+   * Not at the rate the container declares: the two part company: HE-AAC's SBR doubles the rate
+   * off the AudioSpecificConfig, and a container that states the wrong pair has the description
+   * correct it. A bucket is ten milliseconds of what the decoder produced, so counting it off
+   * the declaration draws the wave stretched or squeezed against the picture it stands under.
+   */
+  const folding = (rate: number): PeakBuilder => (builder ??= new PeakBuilder(rate, run.start))
   const planes: Float32Array[] = []
   let failure: unknown = null
 
   const decoder = new AudioDecoder({
     output: (data) => {
+      const fold = folding(data.sampleRate)
+
       try {
         const frames = data.numberOfFrames
         const channels: Float32Array[] = []
@@ -105,13 +117,13 @@ async function readRun(
           channels.push(buffer)
         }
 
-        builder.push(channels, frames)
+        fold.push(channels, frames)
       } finally {
         // 69 MB of PCM against 36 KB of peaks: the sound must not outlive this callback.
         data.close()
       }
 
-      if (builder.pending >= job.sliceSeconds) post(builder.take())
+      if (fold.pending >= job.sliceSeconds) post(fold.take())
     },
     error: (cause) => {
       failure = cause
@@ -132,7 +144,7 @@ async function readRun(
   }
 
   await decoder.flush()
-  post(builder.finish())
+  post(folding(setup.sampleRate).finish())
   decoder.close()
 
   if (failure) throw failure

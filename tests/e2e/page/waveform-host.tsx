@@ -3,9 +3,10 @@ import { useState } from 'preact/hooks'
 import { ingestInit } from '../../../src/core/container'
 import { parseFragment } from '../../../src/core/iso/fragment'
 import { concatBytes } from '../../../src/core/iso/writer'
-import { planSnapshot, type SnapshotSource } from '../../../src/core/snapshot/build'
+import { planSnapshot, type SnapshotSource, type SnapshotSourceTrack } from '../../../src/core/snapshot/build'
 import { materialOf } from '../../../src/core/snapshot/material'
 import { SnapshotReader } from '../../../src/core/snapshot/read'
+import { METRICS, laneTop } from '../../../src/core/timeline/layout'
 import { lanesOf } from '../../../src/core/timeline/lanes'
 import { startWaveform, type WaveformState } from '../../../src/editor/source/waveform'
 import { PALETTE } from '../../../src/editor/timeline/draw'
@@ -30,6 +31,37 @@ const PAGE = {
 const bytesOf = async (path: string): Promise<Uint8Array> =>
   new Uint8Array(await (await fetch(`/fixtures/${path}`)).arrayBuffer())
 
+/**
+ * One five-second segment of picture.
+ *
+ * The sound is what is being read, but a recording of sound alone has one lane, and on a timeline
+ * of one lane "the wave is drawn on the sound lane" is a sentence no test can fail. With a
+ * picture above it the sound is the second lane and its band is somewhere in particular.
+ */
+async function pictureTrack(): Promise<SnapshotSourceTrack> {
+  const initBytes = await bytesOf('minute/init-stream0.m4s')
+  const info = ingestInit(initBytes)!.info
+  const timescale = info.tracks[0]!.timescale
+  const bytes = await bytesOf('minute/chunk-stream0-00001.m4s')
+  const fragment = parseFragment(bytes)!
+
+  return {
+    id: 'v',
+    bufferId: 'sb-v',
+    representation: 'video:avc1',
+    kinds: ['video'],
+    info,
+    initBytes,
+    chunks: [
+      {
+        start: fragment.baseMediaDecodeTime / timescale,
+        end: (fragment.baseMediaDecodeTime + fragment.duration) / timescale,
+        bytes,
+      },
+    ],
+  }
+}
+
 /** AAC: a minute in twelve segments of five seconds, the shape a real site delivers. */
 async function aacSource(drop: number[]): Promise<SnapshotSource> {
   const initBytes = await bytesOf('minute/init-stream1.m4s')
@@ -51,6 +83,7 @@ async function aacSource(drop: number[]): Promise<SnapshotSource> {
   return {
     page: PAGE,
     tracks: [
+      await pictureTrack(),
       { id: 'a', bufferId: 'sb-a', representation: 'audio:mp4a', kinds: ['audio'], info, initBytes, chunks },
     ],
   }
@@ -84,32 +117,7 @@ async function opusSource(): Promise<SnapshotSource> {
 
 /** A recording with a picture and no sound at all. */
 async function silentSource(): Promise<SnapshotSource> {
-  const initBytes = await bytesOf('minute/init-stream0.m4s')
-  const info = ingestInit(initBytes)!.info
-  const timescale = info.tracks[0]!.timescale
-  const bytes = await bytesOf('minute/chunk-stream0-00001.m4s')
-  const fragment = parseFragment(bytes)!
-
-  return {
-    page: PAGE,
-    tracks: [
-      {
-        id: 'v',
-        bufferId: 'sb-v',
-        representation: 'video:avc1',
-        kinds: ['video'],
-        info,
-        initBytes,
-        chunks: [
-          {
-            start: fragment.baseMediaDecodeTime / timescale,
-            end: (fragment.baseMediaDecodeTime + fragment.duration) / timescale,
-            bytes,
-          },
-        ],
-      },
-    ],
-  }
+  return { page: PAGE, tracks: [await pictureTrack()] }
 }
 
 const WORKER_URL = `${location.origin}${location.pathname}-worker.js`
@@ -125,6 +133,12 @@ function Host() {
   shared.tcWave = () => (wave ? { covered: wave.covered, done: wave.done, refused: wave.refused, pieces: wave.peaks.map((piece) => ({ start: piece.start, buckets: piece.min.length, loudest: Math.max(...piece.max) })) } : null)
   shared.tcSlices = () => slices
   shared.tcLanes = () => lanes.map((lane) => lane.kind)
+  /** Where the sound lane is on the canvas, in CSS pixels; null when there is no sound lane. */
+  shared.tcBand = () => {
+    const index = lanes.findIndex((lane) => lane.kind === 'audio')
+    if (index < 0) return null
+    return { index, top: laneTop(METRICS, index), height: METRICS.laneHeight - METRICS.zoneHeight }
+  }
 
   shared.tcStart = async (kind: 'aac' | 'opus' | 'silent', drop: number[] = []): Promise<void> => {
     const source = kind === 'aac' ? await aacSource(drop) : kind === 'opus' ? await opusSource() : await silentSource()

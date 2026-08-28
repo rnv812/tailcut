@@ -184,20 +184,25 @@ export function peakColumns(
     return { min, max }
   }
 
-  // Columns a second, multiplied in — not seconds a column, divided by. The two are the same
-  // arithmetic and not the same answer: 0.3 / 0.1 is 2.9999999999999996 in doubles, so bucket
-  // thirty of a second folded into ten columns landed in column two, and every tenth column of
-  // the wave took its neighbour's peak instead of its own.
-  const columnsPerSecond = columns / (to - from)
+  // The mapping is done in buckets and not in seconds. Seconds cannot hold a bucket boundary
+  // exactly — 29 / 100 * 100 is 28.999999999999996 in doubles, and bucket 29 landed in the
+  // column of bucket 28 while its own column stayed empty and was drawn as a flat line a pixel
+  // high. Counted in whole buckets the division is integer over integer, which IEEE gives back
+  // exactly: at a bucket a column, the working zoom of the editor, every column takes its own.
+  const originBucket = from * BUCKETS_PER_SECOND
+  const spanBuckets = (to - from) * BUCKETS_PER_SECOND
 
   for (const piece of peaks) {
     if (peaksEnd(piece) <= from || piece.start >= to) continue
 
-    const first = Math.max(0, Math.floor((from - piece.start) * BUCKETS_PER_SECOND))
-    const last = Math.min(piece.min.length - 1, Math.ceil((to - piece.start) * BUCKETS_PER_SECOND))
+    const pieceBucket = Math.round(piece.start * BUCKETS_PER_SECOND)
+    const first = Math.max(0, Math.floor(originBucket - pieceBucket))
+    const last = Math.min(piece.min.length - 1, Math.ceil(originBucket + spanBuckets - pieceBucket))
 
     for (let bucket = first; bucket <= last; bucket++) {
-      const column = Math.floor((piece.start + bucket / BUCKETS_PER_SECOND - from) * columnsPerSecond)
+      // Where this bucket stands in the viewport, counted from its left edge in buckets.
+      const at = pieceBucket + bucket - originBucket
+      const column = Math.floor((at * columns) / spanBuckets)
       if (column < 0 || column >= min.length) continue
 
       const low = piece.min[bucket]!

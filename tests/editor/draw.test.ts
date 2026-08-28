@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { PALETTE, paintScene, truncate, type Painter } from '../../src/editor/timeline/draw'
-import type { Scene, WaveformBand } from '../../src/core/timeline/layout'
+import type { RectKind, Scene, WaveformBand } from '../../src/core/timeline/layout'
 
 interface Call {
   args: number[]
@@ -191,17 +191,27 @@ describe('paintScene: the wave', () => {
     ])
   })
 
-  it('draws the wave over the lane and under the playhead', () => {
-    const withPlayhead = scene(band())
-    withPlayhead.rects.push({ kind: 'playhead', x: 2, y: 0, width: 1, height: 200 })
-    const { calls } = paint(withPlayhead)
+  it('draws the wave over what belongs to the lane and under everything else', () => {
+    // One rect of every kind there is, each at an x of its own — two kinds share a colour, and
+    // the place is what tells their calls apart. The wave lies inside the lane, so the lane and
+    // its markings go under it and everything a person reads across it goes over: a clip covered
+    // by the wave, or a wave covered by a quality zone, is the whole of what this pins.
+    const kinds = Object.keys(PALETTE.fill) as RectKind[]
+    const ofLane: RectKind[] = ['run-video', 'run-audio', 'gap', 'zone', 'zone-edge']
+    const xOf = (kind: RectKind): number => kinds.indexOf(kind) * 10
 
-    const lane = calls.findIndex((call) => call.style === PALETTE.fill['run-audio'])
+    const every = scene(band())
+    every.rects = kinds.map((kind) => ({ kind, x: xOf(kind), y: 100, width: 4, height: 40 }))
+    const { calls } = paint(every)
+
     const wave = calls.findIndex((call) => call.style === PALETTE.wave)
-    const playhead = calls.findIndex((call) => call.style === PALETTE.fill.playhead)
+    const at = (kind: RectKind): number =>
+      calls.findIndex((call) => call.style === PALETTE.fill[kind] && call.args[0] === xOf(kind))
 
-    expect(lane).toBeLessThan(wave)
-    expect(wave).toBeLessThan(playhead)
+    expect(wave).toBeGreaterThan(0)
+    expect(kinds.filter((kind) => at(kind) < 0)).toEqual([])
+    expect(kinds.filter((kind) => at(kind) < wave)).toEqual(ofLane)
+    expect(kinds.filter((kind) => at(kind) > wave)).toEqual(kinds.filter((kind) => !ofLane.includes(kind)))
   })
 
   it('paints nothing extra when there is no wave', () => {

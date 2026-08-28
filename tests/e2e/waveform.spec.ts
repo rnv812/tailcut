@@ -93,10 +93,11 @@ test('reads the sound of a captured minute, slice by slice', async ({ page }) =>
   expect(done.pieces).toHaveLength(1)
   // A minute of a 440 Hz tone: sixty seconds of buckets, and the loudest of them is the loudest
   // of the material. The fixture is not at full scale — ffmpeg puts its peak at −17.9 dBFS, which
-  // is 16 of 127 — and both sides of that are pinned on purpose. The decode has to reproduce the
-  // amplitude of what was recorded and not merely produce something: a guessed configuration
-  // decodes thousands of frames, reports no error and correlates with the source at 0.037, and
-  // what it puts out sits on the floor.
+  // is 16 of 127 — and both sides of that are pinned so that what is drawn is the amplitude of
+  // what was recorded and not merely something. What the bounds do not pin is the description:
+  // measured, the decode of this fixture survives losing it, and only a guessed rate on top of
+  // that turns these numbers red. That the description is built and handed over is the business
+  // of tests/core/audio-config.test.ts, which does fail without it.
   expect(done.pieces[0]!.buckets).toBeGreaterThan(5_900)
   expect(done.pieces[0]!.loudest).toBeGreaterThanOrEqual(15)
   expect(done.pieces[0]!.loudest).toBeLessThanOrEqual(18)
@@ -125,14 +126,15 @@ test('reads Opus that came in through WebM', async ({ page }) => {
   const done = await settled(page)
   expect(done.refused).toBe(false)
   // −20.6 dBFS on this fixture by ffmpeg's reckoning, which is 12 of 127. Pinned both ways for
-  // the reason the AAC test states, and for one more: Opus handed no description decodes without
-  // complaint and without applying its pre-skip.
+  // the reason the AAC test states, and with the same limit: measured, this fixture decodes to
+  // the same amplitude with the OpusHead withheld, so the header is pinned where it is built —
+  // tests/core/audio-config.test.ts — and here only the amplitude is.
   expect(done.pieces[0]!.loudest).toBeGreaterThanOrEqual(11)
   expect(done.pieces[0]!.loudest).toBeLessThanOrEqual(14)
   expect(done.covered).toBeGreaterThan(5)
 })
 
-test('draws the wave over the sound lane', async ({ page }) => {
+test('draws the wave inside the band of the sound lane', async ({ page }) => {
   await openHost(page)
   await start(page, 'aac')
   await settled(page)
@@ -141,17 +143,38 @@ test('draws the wave over the sound lane', async ({ page }) => {
   const found = await page.evaluate(() => {
     const canvas = document.querySelector('canvas')!
     const context = canvas.getContext('2d')!
-    const palette = (window as unknown as { tcPalette: { wave: string } }).tcPalette
-    const want = [1, 3, 5].map((at) => parseInt(palette.wave.slice(at, at + 2), 16))
+    const shared = window as unknown as {
+      tcPalette: { wave: string }
+      tcBand(): { index: number; top: number; height: number } | null
+    }
+    const band = shared.tcBand()!
+    const want = [1, 3, 5].map((at) => parseInt(shared.tcPalette.wave.slice(at, at + 2), 16))
     const data = context.getImageData(0, 0, canvas.width, canvas.height).data
+    // The canvas is in device pixels and the band is in CSS pixels; the rows are brought back.
+    const ratio = devicePixelRatio || 1
+
+    let count = 0
+    let top = Infinity
+    let bottom = -Infinity
 
     for (let at = 0; at < data.length; at += 4) {
-      if (data[at] === want[0] && data[at + 1] === want[1] && data[at + 2] === want[2]) return true
+      if (data[at] !== want[0] || data[at + 1] !== want[1] || data[at + 2] !== want[2]) continue
+      const row = Math.floor(at / 4 / canvas.width) / ratio
+      count++
+      top = Math.min(top, row)
+      bottom = Math.max(bottom, row)
     }
-    return false
+
+    return { count, top, bottom, band }
   })
 
-  expect(found).toBe(true)
+  // The stand records a picture as well as a sound, so the sound is the second lane and its band
+  // is somewhere in particular. A wave drawn a lane too high, or over the whole height of the
+  // timeline, is a wave on the wrong lane however much of it there is.
+  expect(found.band.index).toBe(1)
+  expect(found.count).toBeGreaterThan(500)
+  expect(found.top).toBeGreaterThanOrEqual(found.band.top)
+  expect(found.bottom).toBeLessThanOrEqual(found.band.top + found.band.height)
 })
 
 test('keeps the interface answering while it reads', async ({ page }) => {

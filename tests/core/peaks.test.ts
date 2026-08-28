@@ -129,12 +129,46 @@ describe('mergePeaks', () => {
 describe('peakColumns', () => {
   /** One second: bucket b is b + 1 loud. */
   const second = peaks(0, Array.from({ length: 100 }, (_, b) => b + 1))
+  /** Ten of those seconds end to end: bucket b is (b mod 100) + 1 loud. */
+  const ten = peaks(0, Array.from({ length: 1000 }, (_, b) => (b % 100) + 1))
 
   it('folds the buckets of a column into its loudest', () => {
     const columns = peakColumns([second], 0, 1, 10)
 
     expect([...columns.max]).toEqual([10, 20, 30, 40, 50, 60, 70, 80, 90, 100])
     expect([...columns.min]).toEqual([-10, -20, -30, -40, -50, -60, -70, -80, -90, -100])
+
+    // The loudest and not the last one seen: a ramp is loudest where it ends, so a fold that
+    // simply kept the bucket it read last would answer the ramp above correctly and the wave
+    // would still be wrong everywhere else. Here the loud bucket is the fourth of every ten.
+    const spikes = peaks(0, Array.from({ length: 100 }, (_, b) => (b % 10 === 3 ? 90 : 5)))
+    const folded = peakColumns([spikes], 0, 1, 10)
+
+    expect([...folded.max]).toEqual(Array.from({ length: 10 }, () => 90))
+    expect([...folded.min]).toEqual(Array.from({ length: 10 }, () => -90))
+  })
+
+  it('gives every column its own bucket where they stand one to one', () => {
+    // A thousand pixels across ten seconds is exactly a bucket a column, which is the zoom the
+    // editor opens at. A column that gets no bucket is drawn as a line one pixel high, so an
+    // arithmetic slip of a fraction here comes out as a comb with the teeth of the wave missing.
+    const columns = peakColumns([ten], 0, 10, 1000)
+
+    expect([...columns.max]).toEqual([...ten.max])
+  })
+
+  it('keeps the columns lined up when the viewport is not at the start', () => {
+    // Panning must move the wave and not resample it: the same buckets, in the same order, in
+    // the same columns. Both of these are a bucket a column again, from an origin of their own.
+    expect([...peakColumns([ten], 1, 6, 500).max]).toEqual([...ten.max.subarray(100, 600)])
+    expect([...peakColumns([ten], 2.5, 5, 250).max]).toEqual([...ten.max.subarray(250, 500)])
+  })
+
+  it('folds ten buckets to a column from a viewport that starts late', () => {
+    // The folding branch with an origin of its own — every other check of it looks at a viewport
+    // that starts at zero, where the whole of the subtraction can be dropped without a word.
+    // The second second of the ramp, ten buckets a column: the same ten answers as at the start.
+    expect([...peakColumns([ten], 1, 2, 10).max]).toEqual([10, 20, 30, 40, 50, 60, 70, 80, 90, 100])
   })
 
   it('reads only the stretch the viewport shows', () => {
@@ -159,7 +193,14 @@ describe('peakColumns', () => {
 
   it('answers an empty request with silence rather than a throw', () => {
     expect([...peakColumns([], 0, 1, 4).max]).toEqual([0, 0, 0, 0])
-    expect(peakColumns([second], 0, 0, 4).max.length).toBe(4)
+    // A viewport of no width, which is what a scene laid out before the canvas has been measured
+    // asks for. Silence and not the values: every column stands at the same instant, and the
+    // lane would otherwise show a solid block of whatever peak that instant fell in.
+    expect([...peakColumns([second], 0, 0, 4).max]).toEqual([0, 0, 0, 0])
+    expect([...peakColumns([second], 1, 0, 4).max]).toEqual([0, 0, 0, 0])
     expect(peakColumns([second], 0, 1, 0).max.length).toBe(0)
+    // A count of columns can come in negative from the same half-measured scene, and an
+    // Int8Array of minus five is a throw rather than an answer.
+    expect(peakColumns([second], 0, 1, -5).max.length).toBe(0)
   })
 })

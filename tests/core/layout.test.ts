@@ -349,6 +349,25 @@ describe('layoutScene: the wave', () => {
     expect(scene.waveform!.max[400]).toBe(0)
   })
 
+  it('keeps where the reading has got to inside the drawing area', () => {
+    // pendingFromPx is where the wave turns to the quieter colour, and it is a coordinate on the
+    // canvas: a reading that ended before the viewport begins dims none of it, and one that ran
+    // past the right-hand edge dims none of it either. Unclamped this is minus three hundred and
+    // fifteen hundred — the drawing then reads its own peaks past the end of the array.
+    const shown = { lanes, clips: [], markers: [], playhead: 0, fps: 25 }
+    const behind = layoutScene({ ...view, start: 5 }, METRICS, {
+      ...shown,
+      peaks: sound(Array.from({ length: 200 }, () => 40)),
+    })
+    const beyond = layoutScene(view, METRICS, {
+      ...shown,
+      peaks: sound(Array.from({ length: 1500 }, () => 40)),
+    })
+
+    expect(behind.waveform!.pendingFromPx).toBe(0)
+    expect(beyond.waveform!.pendingFromPx).toBe(beyond.waveform!.width)
+  })
+
   it('has no wave when the recording has no sound and none when none was asked for', () => {
     const picture = [lanes[0]!]
     const withSound = { lanes: picture, clips: [], markers: [], playhead: 0, fps: 25, peaks: sound([50]) }

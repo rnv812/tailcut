@@ -5,7 +5,7 @@ import {
   audioSpecificConfig,
   opusHeadOf,
 } from '../../src/core/codec/audio'
-import { audioSampleEntry, videoSampleEntry } from '../../src/core/iso/entry'
+import { audioSampleEntry, videoSampleEntry, type SampleEntry } from '../../src/core/iso/entry'
 import { ingestInit } from '../../src/core/container'
 
 const fixture = (path: string): Uint8Array => new Uint8Array(readFileSync(`tests/fixtures/${path}`))
@@ -52,6 +52,17 @@ describe('audioSpecificConfig', () => {
     expect(audioSpecificConfig(Uint8Array.from([0, 0, 0, 0, 0x06, 1, 0]))).toBeNull()
     // A descriptor claiming more than the box holds.
     expect(audioSpecificConfig(Uint8Array.from([0, 0, 0, 0, 0x03, 40, 0, 1, 0]))).toBeNull()
+
+    // The overrun that has to be caught rather than clipped: everything down to the
+    // AudioSpecificConfig parses, and the configuration itself claims ten bytes where two are
+    // left. Handing back the two — a truncated AudioSpecificConfig — configures a decoder with
+    // half a description, which is the one thing worse than no description at all.
+    const cut = [0x05, 10, ...AAC_LC]
+    const overrun = Uint8Array.from([
+      0, 0, 0, 0,
+      ...descriptor(0x03, [0, 1, 0, ...descriptor(0x04, [0x40, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ...cut])]),
+    ])
+    expect(audioSpecificConfig(overrun)).toBeNull()
   })
 })
 
@@ -111,6 +122,30 @@ describe('audioDecoderConfig', () => {
     // The same pre-skip, read the other way round: the box is big-endian, the header is not.
     const skip = config.description![10]! | (config.description![11]! << 8)
     expect(skip).toBe((dOps[2]! << 8) | dOps[3]!)
+  })
+
+  it('tells the decoder 48 kHz for Opus whatever rate the entry states', () => {
+    // Opus decodes at 48 kHz whatever it was fed, and the rate beside the entry is the rate that
+    // went in. Handed on as it stands it makes an AudioDecoder that is wrong by a factor of
+    // three. Both of our roads to an entry — our own writer and the WebM ingest — put 48 000
+    // there, so a synthetic entry is the only place the rule can be caught working.
+    const dOps = Uint8Array.from([0, 2, 0x01, 0x38, 0, 0, 0x3e, 0x80, 0, 0, 0])
+    const entry: SampleEntry = {
+      format: 'Opus',
+      trackId: 1,
+      codedWidth: 0,
+      codedHeight: 0,
+      channels: 2,
+      sampleRate: 16_000,
+      children: new Map([['dOps', dOps]]),
+      bytes: new Uint8Array(0),
+    }
+    const config = audioDecoderConfig(entry)!
+
+    expect(config.sampleRate).toBe(48_000)
+    // The rate the encoder saw is not thrown away: it lives on in the header, little-endian.
+    const seen = config.description!
+    expect(seen[12]! | (seen[13]! << 8) | (seen[14]! << 16) | (seen[15]! << 24)).toBe(16_000)
   })
 
   it('refuses what it cannot describe instead of guessing', () => {
