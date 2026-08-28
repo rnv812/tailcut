@@ -267,8 +267,9 @@ export const EXTENSION_ORIGIN_PREFIX = 'chrome-extension://'
  * message does not reach on its own — the content script passes the request on and returns the
  * answer.
  *
- * A tab holds one of each per frame, so a request is addressed to a frame and a tab is asked by
- * asking all of them; see src/shared/frames.ts.
+ * A tab holds one of each per frame, so a request is addressed to a frame. The popup asks all of
+ * them; the badge asks the main one and whichever have said they hold a recording (see
+ * FrameRecording). Both roads are in src/shared/frames.ts.
  */
 export type ExtensionToTab = { type: 'tc:list' } | { type: 'tc:save'; key: string }
 

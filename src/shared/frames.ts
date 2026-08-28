@@ -15,8 +15,11 @@ import type { ExtensionToTab, SaveResult, SessionList, SessionSummary } from './
  * registry of the frame that holds the player, and the popup, asking the top frame alone, said
  * "Nothing recorded on this page yet".
  *
- * It stays here as the fallback: when the frames of a tab cannot be enumerated at all, this is
- * the one frame that is certainly there.
+ * It stays for the two places a frame number is needed without an enumeration. When the frames of
+ * a tab cannot be enumerated at all, this is the one frame that is certainly there. And the badge
+ * asks it always, whether or not it has announced itself: it is one message, it is where the
+ * player is on nearly every page that has one, and it is all a service worker that has just
+ * restarted has to go on.
  */
 export const MAIN_FRAME = 0
 
