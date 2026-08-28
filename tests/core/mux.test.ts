@@ -6,6 +6,8 @@ import { muxFragmentedMp4 } from '../../src/core/mux'
 import { boxOf, concatBytes } from '../../src/core/iso/writer'
 import { boxBody, childBoxes, topLevelBoxes, type Box } from '../../src/core/iso/reader'
 import { withTrexDefault, withoutTfhdDefault } from './trex-defaults'
+import { decodeWarnings, unexpectedWarnings } from '../support/media'
+import { withSdtp } from '../support/fragments'
 
 /** Video of the fixture: timescale 12288, three segments of two seconds, 48 frames each. */
 const videoInit = new Uint8Array(readFileSync('tests/fixtures/h264/init-stream0.m4s'))
@@ -359,6 +361,7 @@ function asVersion1(init: Uint8Array): Uint8Array {
 const video = { initBytes: videoInit, segments: videoSegments }
 const audio = { initBytes: audioInit, segments: audioSegments }
 
+
 /**
  * Two media segments joined into one that carries both fragments.
  *
@@ -463,6 +466,32 @@ describe('muxFragmentedMp4', () => {
     const seconds = Number(probed.format.duration)
     expect(seconds).toBeGreaterThan(5.9)
     expect(seconds).toBeLessThan(6.1)
+  })
+
+  it('carries a fragment that brought its own sdtp into a file that decodes whole', () => {
+    const file = muxFragmentedMp4([
+      { initBytes: videoInit, segments: videoSegments.map(withSdtp) },
+      { initBytes: audioInit, segments: audioSegments.map(withSdtp) },
+    ])
+    const probed = probe('mux-sdtp.mp4', file)
+
+    // Not a frame is lost to the box the packager put there: it is described by the trun as it
+    // always was, and the sdtp beside it says nothing that contradicts it.
+    expect(probed.streams.map((s) => Number(s.nb_read_frames))).toEqual([
+      VIDEO_FRAMES,
+      AUDIO_FRAMES,
+    ])
+
+    const said = decodeWarnings('tests/tmp/mux-sdtp.mp4')
+
+    // ffmpeg keeps one sample-dependency table per stream and says so when a second arrives. It
+    // is the file's own truth, not a defect of the save: every rutube clip we write carries one
+    // of these per fragment. What the suite must not do is either fail over it or fall silent —
+    // it is named, with its reason, and everything else ffmpeg might say still fails.
+    expect(said, 'the fragments no longer carry the box this is about').toContain(
+      'Duplicated SDTP atom',
+    )
+    expect(unexpectedWarnings(said), 'ffmpeg complains of something else as well').toEqual([])
   })
 
   it('keeps the offset between the tracks when the clip starts in the middle', () => {

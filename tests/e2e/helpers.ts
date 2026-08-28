@@ -4,6 +4,7 @@ import path from 'node:path'
 import os from 'node:os'
 import fs from 'node:fs/promises'
 import fsSync from 'node:fs'
+import { unexpectedWarnings } from '../support/media'
 
 const EXT = path.resolve('dist')
 
@@ -264,14 +265,20 @@ export function seekingLandsRight(file: string, times: number[]): void {
  * Decodes every frame of every stream of a file and throws the result away.
  *
  * ffprobe reads a file; this one plays it through. A track whose samples are described wrongly
- * gets past the headers and past a frame count, and only a decoder run over the whole thing
- * turns it into words on stderr — which is why the empty stderr is the assertion here.
+ * gets past the headers and past a frame count, and only a decoder run over the whole thing turns
+ * it into words on stderr — which is why what ffmpeg said is the assertion here.
+ *
+ * Not the whole of what it said. A correct file does draw one complaint out of ffmpeg — a
+ * fragment carrying its own sample-dependency table, which rutube's packager writes and our muxer
+ * copies whole — and a suite that insisted on silence would fail over a box that is telling the
+ * truth. What is benign is named one line at a time, with the reason, in `unexpectedWarnings`;
+ * everything else is a defect.
  */
 export function decodeFile(file: string): void {
   const run = runDecode(file)
 
   expect(run.status, run.stderr).toBe(0)
-  expect(run.stderr, 'decoding the saved file produces warnings').toBe('')
+  expect(unexpectedWarnings(run.stderr), 'decoding the saved file produces warnings').toEqual([])
 }
 
 /** The same decode, handing back what it said instead of insisting it said nothing. */

@@ -90,6 +90,54 @@ export function decodeWarnings(file: string): string {
   return run.stderr ?? ''
 }
 
+/**
+ * Things ffmpeg says about a file that is nevertheless correct, each with the reason it is not a
+ * defect. Anything it says that is not on this list is.
+ *
+ * The list is short on purpose and every line of it is argued: a decoder that is allowed to
+ * complain freely stops being an assertion at all. Two entries so far, and the first is the one
+ * this list exists for.
+ *
+ * `Duplicated SDTP atom` — a sample-dependency table in the traf of a fragment. It is legal
+ * there (14496-12 §8.6.4), rutube's packager writes one into every fragment it sends, and our
+ * muxer copies fragments whole and byte for byte. ffmpeg keeps one such table per stream and
+ * says this when a second arrives; the samples are described by the trun either way, the file
+ * decodes from end to end, and every frame comes out. Measured on every rutube save.
+ *
+ * The alternative was to drop the box while repacking. It was weighed and refused. A fragment
+ * moves through the muxer untouched, which is the property the whole design rests on — nothing
+ * of a foreign packager's material is rewritten — and taking a box out of a traf would end that:
+ * the traf and the moof would have to be resized and every trun's data_offset patched, because
+ * it addresses the samples from the start of the moof and the mdat would have moved. That is
+ * arithmetic over somebody else's container on the save path, run over every fragment of every
+ * file, to remove a box that is telling the truth. And it would throw away what the box says —
+ * which frames may be discarded, which are depended upon — that the source file carried and a
+ * player is entitled to read.
+ *
+ * `Last message repeated N times` — ffmpeg folds a line it has just printed rather than printing
+ * it again. It says nothing of its own; whatever was folded stands on its own line above and is
+ * judged there.
+ */
+const BENIGN: Array<{ line: RegExp; why: string }> = [
+  { line: /Duplicated SDTP atom/, why: 'a legal sample-dependency table in a copied fragment' },
+  { line: /Last message repeated \d+ times/, why: 'ffmpeg folding a line it has already printed' },
+]
+
+/**
+ * The lines of a decode that are not accounted for: empty when ffmpeg said nothing that matters.
+ *
+ * What a caller wants to know is whether the file is wrong, and an empty stderr answers that only
+ * as long as no correct file makes ffmpeg speak. One does — see BENIGN — and a suite that
+ * insisted on silence would fail over a box that is telling the truth.
+ */
+export function unexpectedWarnings(stderr: string): string[] {
+  return stderr
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => !BENIGN.some((benign) => benign.line.test(line)))
+}
+
 function rawFrame(args: string[]): Buffer {
   const run = spawnSync('ffmpeg', args, { maxBuffer: 128 * 1024 * 1024 })
   if (run.status !== 0) throw new Error(`ffmpeg failed: ${run.stderr.toString()}`)
