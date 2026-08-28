@@ -27,8 +27,67 @@ interface PageContext {
 /** What the bridge has already been told; null — it has not been told anything yet. */
 let toldContext: PageContext | null = null
 
+/**
+ * Extensions of a media file: cut off a name taken out of an address.
+ *
+ * What is being named is the recording, and the container it will be saved in is the save's own
+ * business — every save writes an mp4. Left on, a clip of `cat.webm` would be handed over as
+ * `cat.webm.mp4`.
+ */
+const MEDIA_EXTENSION = /\.(?:mp4|m4v|m4a|mov|webm|mkv|ogv|ogg|ogm|avi|ts|m2ts|mpg|mpeg|3gp|flv|wmv|mp3|aac|opus|flac|wav)$/i
+
+/**
+ * The name of a file out of the address it stands at; empty when the address names none.
+ *
+ * The last part of the path and nothing else: the query carries a token or a signature, the
+ * fragment carries a start time, and neither is part of what the material is called. What the
+ * address spells in percent signs is a name in somebody's language and is read back as one — a
+ * malformed escape is left as it stands rather than thrown over.
+ */
+function fileNameIn(href: string): string {
+  let path: string
+  try {
+    path = new URL(href).pathname
+  } catch {
+    return ''
+  }
+
+  const last = path.slice(path.lastIndexOf('/') + 1)
+  if (!last) return ''
+
+  let name = last
+  try {
+    name = decodeURIComponent(last)
+  } catch {
+    // A stray percent sign: the address is somebody else's and not ours to correct.
+  }
+
+  return name.replace(MEDIA_EXTENSION, '')
+}
+
+/**
+ * Where the page stands and what it is called.
+ *
+ * A link straight to a file makes Chrome build a document around it — one `<video>` and nothing
+ * else — and content scripts do run in that document, which is how a plain file gets watched
+ * without a page around it. Such a document has no `<title>` at all: the name on the tab is the
+ * browser's own doing and appears nowhere in the DOM, measured as the empty string on
+ * https://www.w3schools.com/html/mov_bbb.mp4. So the address is asked instead, because on that
+ * one kind of page the address is the name of the material itself.
+ *
+ * Only on that kind of page. On an ordinary one the last part of the path is a slug, a number or
+ * the word "watch", and a page that has not filled its title in yet is a page whose title is
+ * coming — the poll above exists for exactly that.
+ */
 function pageContext(): PageContext {
-  return { url: location.href, title: document.title }
+  const url = location.href
+  const title = document.title
+  if (title) return { url, title }
+
+  const type = document.contentType ?? ''
+  const isMediaDocument = type.startsWith('video/') || type.startsWith('audio/')
+
+  return { url, title: isMediaDocument ? fileNameIn(url) : '' }
 }
 
 /**

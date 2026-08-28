@@ -100,7 +100,7 @@ function fakeVideo(overrides: Record<string, unknown> = {}) {
   }
 }
 
-function installDom(options: { title?: string } = {}) {
+function installDom(options: { title?: string; url?: string; contentType?: string } = {}) {
   const created: FakeElement[] = []
   const appended: FakeElement[] = []
   const messageListeners: Array<(event: MessageEvent) => void> = []
@@ -133,7 +133,7 @@ function installDom(options: { title?: string } = {}) {
 
   // The address and the title are mutable: a single-page application changes both without a
   // navigation, and that is what the page context has to survive.
-  const location = { href: PAGE_URL }
+  const location = { href: options.url ?? PAGE_URL }
   vi.stubGlobal('location', location)
 
   /** Listeners the content script put on the document: the naming of a worker's stream. */
@@ -141,6 +141,9 @@ function installDom(options: { title?: string } = {}) {
 
   const document = {
     title: options.title ?? PAGE_TITLE,
+    // What the browser made of what the address answered. 'text/html' for a page; the media type
+    // itself for the document Chrome builds around a link straight to a file.
+    contentType: options.contentType ?? 'text/html',
     visibilityState: 'visible',
     querySelectorAll: () => videos,
     addEventListener: (type: string, listener: (event: Event) => void) => {
@@ -494,6 +497,65 @@ describe('the page context for the bridge', () => {
       { type: 'tc:context', url: PAGE_URL, title: '' },
       CONTEXT,
     ])
+  })
+
+  it('names a file opened on its own after the file, since such a page has no title', async () => {
+    // A link straight to an mp4 makes Chrome build a document around the file, and content
+    // scripts run in it — one of the ordinary ways a plain file is watched. Measured on
+    // https://www.w3schools.com/html/mov_bbb.mp4: `document.title` is the empty string, and the
+    // name shown on the tab is the browser's own doing and nowhere in the DOM. Left at that, the
+    // popup says "Untitled" over the one page whose name is written in its address, and the file
+    // is saved as `tailcut.mp4`.
+    const dom = installDom({
+      title: '',
+      url: 'https://www.w3schools.com/html/mov_bbb.mp4',
+      contentType: 'video/mp4',
+    })
+    await importContent()
+    dom.deliverLoad()
+
+    expect(dom.contexts()).toEqual([
+      {
+        type: 'tc:context',
+        url: 'https://www.w3schools.com/html/mov_bbb.mp4',
+        // Without the extension: what is being named is the recording, and the container it is
+        // saved in is the save's own business — a clip of a webm must not be called `x.webm.mp4`.
+        title: 'mov_bbb',
+      },
+    ])
+  })
+
+  it('reads that name out of the address as a name and not as an address', async () => {
+    const dom = installDom({
+      title: '',
+      url: 'https://cdn.example/files/%D0%BA%D0%BE%D1%82%20%231.webm?token=abc#t=10',
+      contentType: 'video/webm',
+    })
+    await importContent()
+    dom.deliverLoad()
+
+    // The query and the fragment belong to the request and not to the name, and what the address
+    // spells in percent signs is a name in somebody's language.
+    expect((dom.contexts()[0] as { title: string }).title).toBe('кот #1')
+  })
+
+  it('invents no name for a file whose address ends in nothing', async () => {
+    const dom = installDom({ title: '', url: 'https://cdn.example/stream/', contentType: 'video/mp4' })
+    await importContent()
+    dom.deliverLoad()
+
+    expect((dom.contexts()[0] as { title: string }).title).toBe('')
+  })
+
+  it('leaves an ordinary page with no title unnamed', async () => {
+    // The fallback is about the document Chrome builds around a file, where the address is the
+    // name of the material itself. On an ordinary page the last part of the path is a slug, a
+    // number, or the word "watch", and none of those is what the video is called.
+    const dom = installDom({ title: '', url: 'https://site.example/watch?v=abc' })
+    await importContent()
+    dom.deliverLoad()
+
+    expect((dom.contexts()[0] as { title: string }).title).toBe('')
   })
 
   it('tells the bridge the next video of a page that navigates without a navigation', async () => {
