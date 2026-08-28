@@ -95,7 +95,7 @@ export function decodeWarnings(file: string): string {
  * defect. Anything it says that is not on this list is.
  *
  * The list is short on purpose and every line of it is argued: a decoder that is allowed to
- * complain freely stops being an assertion at all. Two entries so far, and the first is the one
+ * complain freely stops being an assertion at all. Three entries so far, and the first is the one
  * this list exists for.
  *
  * `Duplicated SDTP atom` — a sample-dependency table in the traf of a fragment. It is legal
@@ -114,12 +114,35 @@ export function decodeWarnings(file: string): string {
  * which frames may be discarded, which are depended upon — that the source file carried and a
  * player is entitled to read.
  *
+ * `Increasing reorder buffer to N` — the h264 decoder found the stream reordering more pictures
+ * than it had allowed for and grew its buffer once, at the start. It is a fact about the coded
+ * frames and not about the container: an encoder that writes no `bitstream_restriction_flag` in
+ * the VUI of its SPS declares no `num_reorder_frames`, so ffmpeg starts at its own guess and
+ * corrects it on the first out-of-order picture. Our muxer copies coded frames byte for byte and
+ * never touches an SPS.
+ *
+ * Proved rather than reasoned. The picture track of a rutube save was written out as a bare
+ * Annex-B elementary stream — no mp4 around it at all, `-c copy -bsf:v h264_mp4toannexb -f h264`
+ * — and decoding that drew the very same line. Whatever the message is about, it is not about
+ * how the samples were wrapped. Measured on the same file: 1822 frames of picture and 3272 of
+ * sound all decoded, ffprobe silent, both exit codes zero.
+ *
+ * Why our file draws it where ffmpeg's own remux of it does not: ours is fragmented, and a
+ * fragmented file states its composition offsets in each trun instead of in one `ctts`. There is
+ * no table for the demuxer to read the reordering depth out of ahead of the first frame, so the
+ * decoder learns it by decoding. The offsets themselves are right — the presentation times come
+ * out reordered against the decode times, frame for frame, in both files.
+ *
  * `Last message repeated N times` — ffmpeg folds a line it has just printed rather than printing
  * it again. It says nothing of its own; whatever was folded stands on its own line above and is
  * judged there.
  */
 const BENIGN: Array<{ line: RegExp; why: string }> = [
   { line: /Duplicated SDTP atom/, why: 'a legal sample-dependency table in a copied fragment' },
+  {
+    line: /Increasing reorder buffer to \d+/,
+    why: 'an SPS that declares no reordering depth, in coded frames we copy untouched',
+  },
   { line: /Last message repeated \d+ times/, why: 'ffmpeg folding a line it has already printed' },
 ]
 
