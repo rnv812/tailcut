@@ -17,6 +17,9 @@ const EMBED = 4
 type Alarm = { name: string; options: unknown }
 type BadgeText = { tabId?: number; text: string }
 type Sent = { tabId: number; message: unknown; options: unknown }
+/** What Chrome puts on a message of a content script: the tab and the frame it came from. */
+type Sender = { tab: { id: number }; frameId: number }
+type MessageListener = (message: unknown, sender: Sender) => unknown
 
 /**
  * The active tab of a neighbouring window. A user has several windows open, and Chrome lists tabs
@@ -58,6 +61,10 @@ function installChrome(
   const sent: Sent[] = []
   const installed: Array<() => void> = []
   const alarmFired: Array<(alarm: { name: string }) => Promise<void> | void> = []
+  const messaged: MessageListener[] = []
+  const tabClosed: Array<(tabId: number) => void> = []
+  /** Enumerations of the frames of a tab: what the badge used to pay on every recount. */
+  const injections: unknown[] = []
 
   const tabs = options.tabs ?? [{ id: 7 }]
   const reply: unknown = 'reply' in options ? options.reply : { sessions: [summary(6)] }
@@ -66,10 +73,15 @@ function installChrome(
   let badgeFailure: Error | null = null
 
   vi.stubGlobal('chrome', {
-    runtime: { onInstalled: { addListener: (fn: () => void) => installed.push(fn) } },
+    runtime: {
+      onInstalled: { addListener: (fn: () => void) => installed.push(fn) },
+      onMessage: { addListener: (fn: MessageListener) => messaged.push(fn) },
+    },
     scripting: {
-      executeScript: async () =>
-        Object.keys(frames).map((id) => ({ frameId: Number(id), result: true })),
+      executeScript: async (options: unknown) => {
+        injections.push(options)
+        return Object.keys(frames).map((id) => ({ frameId: Number(id), result: true }))
+      },
     },
     alarms: {
       create: (name: string, opts: unknown) => alarms.push({ name, options: opts }),
@@ -95,6 +107,7 @@ function installChrome(
         if (failure) throw failure
         return frames[opts.frameId ?? TOP]
       },
+      onRemoved: { addListener: (fn: (tabId: number) => void) => tabClosed.push(fn) },
     },
   })
 
@@ -103,11 +116,32 @@ function installChrome(
     badgeText,
     badgeColor,
     sent,
+    injections,
     install: () => {
       for (const listener of installed) listener()
     },
     fire: async (name = 'tc:badge') => {
       for (const listener of alarmFired) await listener({ name })
+    },
+    /**
+     * A frame of a tab says it has something recorded in it, the way the content script does.
+     *
+     * The tab and the frame come from Chrome and not from the message: a page can write neither.
+     */
+    announce: async (frameId: number, tabId = 7) => {
+      for (const listener of messaged) listener({ type: 'tc:recording' }, { tab: { id: tabId }, frameId })
+      // The listener answers nothing and counts the badge on its own time; the count is a round
+      // trip to the tab, and the test has to let it finish.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    },
+    /** The same, with a message of somebody else's making. */
+    announceRaw: async (message: unknown, frameId: number, tabId = 7) => {
+      for (const listener of messaged) listener(message, { tab: { id: tabId }, frameId })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    },
+    /** Chrome says the tab is gone. */
+    closeTab: (tabId = 7) => {
+      for (const listener of tabClosed) listener(tabId)
     },
     /** A page with no content script: sendMessage refuses with "receiving end does not exist". */
     breakTab: () => {
@@ -285,12 +319,133 @@ describe('recounting the badge', () => {
     })
     await importWorker()
 
+    // The frame says it has something; that is how the badge learns of a frame at all.
+    await chrome.announce(EMBED)
     await chrome.fire()
 
     // The badge is the only sign that anything is being recorded at all. On a page carrying an
     // embedded player the recording lives in the frame of the embed, and a badge counted off the
     // top frame alone stayed empty over a tab that had four megabytes of video in it.
+    expect(chrome.badgeText.at(-1)).toEqual({ tabId: 7, text: '12s' })
+  })
+
+  it('counts a frame the moment it says it has something, without waiting for the alarm', async () => {
+    const chrome = installChrome({
+      frames: { [TOP]: { sessions: [] }, [EMBED]: { sessions: [summary(12)] } },
+    })
+    await importWorker()
+
+    await chrome.announce(EMBED)
+
+    // The recording that has just been announced is the news the badge exists for. Left to the
+    // alarm it would show up a period later, and a period of nothing over a page that is
+    // recording is a period the user has no reason to open the popup in.
     expect(chrome.badgeText).toEqual([{ tabId: 7, text: '12s' }])
+  })
+
+  it('asks the frames of a crowded page that have something, and the main one, and no others', async () => {
+    // A news page: one player, and 153 frames of advertising and analytics around it.
+    const frames: Record<number, unknown> = { [TOP]: { sessions: [] }, [EMBED]: { sessions: [summary(12)] } }
+    for (let frameId = 100; frameId < 253; frameId++) frames[frameId] = { sessions: [] }
+
+    const chrome = installChrome({ frames })
+    await importWorker()
+
+    await chrome.announce(EMBED)
+    chrome.sent.length = 0
+    chrome.injections.length = 0
+
+    await chrome.fire()
+
+    // Enumerating the frames and asking every one cost 154 injections and 154 messages here, ten
+    // seconds apart, on a tab whose recording is one frame — 60 to 90 ms of extension work per
+    // recount for a page that mostly has no video in it at all.
+    expect(chrome.injections, 'the badge enumerates the frames of the tab again').toEqual([])
+    expect(chrome.sent.map((item) => (item.options as { frameId: number }).frameId)).toEqual([
+      TOP,
+      EMBED,
+    ])
+    expect(chrome.badgeText.at(-1)).toEqual({ tabId: 7, text: '12s' })
+  })
+
+  it('asks the main frame of a tab that has said nothing, and nobody else', async () => {
+    const frames: Record<number, unknown> = { [TOP]: { sessions: [summary(6)] } }
+    for (let frameId = 100; frameId < 253; frameId++) frames[frameId] = { sessions: [] }
+
+    const chrome = installChrome({ frames })
+    await importWorker()
+
+    await chrome.fire()
+
+    // The main frame is asked whether it announced itself or not: it is one message, it is where
+    // the player is on nearly every page that has one, and it is the whole answer a worker that
+    // has just restarted has — the frames repeat themselves, but one that has stopped recording
+    // and gone quiet would not.
+    expect(chrome.sent.map((item) => (item.options as { frameId: number }).frameId)).toEqual([TOP])
+    expect(chrome.injections).toEqual([])
+    expect(chrome.badgeText).toEqual([{ tabId: 7, text: '6s' }])
+  })
+
+  it('stops asking a frame that has nothing left in it', async () => {
+    // The embed answers once and is empty by the next recount: triage evicted its session, or the
+    // page replaced the iframe.
+    const frames: Record<number, unknown> = { [TOP]: { sessions: [] }, [EMBED]: { sessions: [summary(12)] } }
+    const chrome = installChrome({ frames })
+    await importWorker()
+
+    await chrome.announce(EMBED)
+    frames[EMBED] = { sessions: [] }
+    await chrome.fire()
+    chrome.sent.length = 0
+
+    await chrome.fire()
+
+    // Kept, the numbers of frames that once recorded would gather for as long as the tab stayed
+    // open — a page that opens a player in a fresh frame every few minutes would bring the cost
+    // back one frame at a time. It says so again if it has something again.
+    expect(chrome.sent.map((item) => (item.options as { frameId: number }).frameId)).toEqual([TOP])
+    expect(chrome.badgeText.at(-1)).toEqual({ tabId: 7, text: '' })
+  })
+
+  it('forgets the frames of a tab that has closed', async () => {
+    const chrome = installChrome({
+      frames: { [TOP]: { sessions: [] }, [EMBED]: { sessions: [summary(12)] } },
+    })
+    await importWorker()
+
+    await chrome.announce(EMBED)
+    chrome.closeTab()
+    chrome.sent.length = 0
+
+    // The numbers of a closed tab are never asked for again, so nothing breaks without this —
+    // but the map would grow by an entry per recording for as long as the browser stayed open.
+    await chrome.fire()
+    expect(chrome.sent.map((item) => (item.options as { frameId: number }).frameId)).toEqual([TOP])
+  })
+
+  it('does not recount a frame it already knows about', async () => {
+    const chrome = installChrome({
+      frames: { [TOP]: { sessions: [] }, [EMBED]: { sessions: [summary(12)] } },
+    })
+    await importWorker()
+
+    await chrome.announce(EMBED)
+    chrome.sent.length = 0
+
+    // A frame repeats itself every ten seconds so that a worker which restarted learns of it
+    // again. Counting the badge on each of those would double what the alarm already pays.
+    await chrome.announce(EMBED)
+    expect(chrome.sent).toEqual([])
+  })
+
+  it('takes no notice of a message that is not one of ours', async () => {
+    const chrome = installChrome()
+    await importWorker()
+
+    await chrome.announceRaw({ type: 'tc:something-else' }, EMBED)
+
+    expect(chrome.sent).toEqual([])
+    expect(chrome.badgeText).toEqual([])
   })
 
   it('takes the freshest session of the tab', async () => {

@@ -15,7 +15,14 @@ import { writeSaveFile } from './write'
  * what this frame is and what the page is not — 48 CORS refusals out of 57 measured from the page
  * — and the registry itself has no business knowing that.
  */
-const store = new SessionStore({ openPlain: (url) => openPlainFile(url) })
+const store = new SessionStore({
+  openPlain: (url) => openPlainFile(url),
+  // The read of a file's tables is the one thing here that finishes after the message that asked
+  // for it: the session it makes appears with nothing else arriving to carry the word out. A file
+  // watched to the end and fully downloaded would otherwise be recorded and never counted on the
+  // badge — see tellRecording.
+  onFileRead: () => tellRecording(),
+})
 
 /**
  * How long a blob lives after a download starts. Chrome does not read it instantly, and an
@@ -124,6 +131,47 @@ let unreachable = false
  * Whether the main world has already been told that this page is refused; see tellRefusal.
  */
 let refusalTold = false
+
+/**
+ * How often this frame repeats that it has something recorded in it; see tellRecording.
+ *
+ * The badge is recounted every ten seconds, so a word more often than that would be a word
+ * nobody acts on. Less often and a service worker that restarted would go a whole period longer
+ * than it has to with a badge counted off the main frame alone.
+ */
+const ANNOUNCE_INTERVAL_MS = 10_000
+
+/** When this frame last said it was recording; 0 — it never has. */
+let announcedAt = 0
+
+/**
+ * Tells the document that inserted this bridge that there is a recording in here.
+ *
+ * The badge of the tab is counted out of the registries of its frames, and a tab has as many of
+ * those as it has frames. Enumerating them all and asking every one, every ten seconds, cost 154
+ * injections and 154 messages on a news page that held no video at all — so the frames that have
+ * something say so, and the badge asks those and the main frame (see FrameRecording).
+ *
+ * Said again and again rather than once, at most this often: the service worker keeps what it is
+ * told in memory and has no memory across a restart, and a frame gone quiet after one would be
+ * left out of the count for as long as the tab stayed open.
+ *
+ * Cheap on the path it stands in: the store answers whether it holds anything without walking
+ * anything, and on a frame with nothing recorded in it this is one comparison per segment.
+ */
+function tellRecording(): void {
+  if (!store.recording) return
+
+  const now = Date.now()
+  if (now - announcedAt < ANNOUNCE_INTERVAL_MS) return
+  announcedAt = now
+
+  // To the window that inserted this frame, as the handshake is, and for the same reason: the
+  // bridge stands up in every frame of the page, and the content script that can carry this to
+  // the service worker is the one of that very frame.
+  const notice: BridgeToPage = { type: 'tc:recording' }
+  window.parent.postMessage(notice, '*')
+}
 
 /**
  * Tells the world that does the copying that it may stop.
@@ -343,6 +391,10 @@ window.addEventListener('message', (event: MessageEvent) => {
     if (data.verdict === 'reject') store.dropPending(sourceId)
     if (data.verdict === 'hold') store.resumePending(sourceId)
     if (data.verdict === 'promote') store.promotePending(sourceId)
+    // A promotion is the moment a page that has been playing for six seconds becomes a recording,
+    // and on a page that appended everything it had in the first second it is the only moment
+    // there is: nothing arrives here afterwards to carry the word out.
+    tellRecording()
     return
   }
 
@@ -372,6 +424,7 @@ window.addEventListener('message', (event: MessageEvent) => {
       buffered: data.buffered,
       now: Date.now(),
     })
+    tellRecording()
     return
   }
 
@@ -394,6 +447,10 @@ window.addEventListener('message', (event: MessageEvent) => {
     // begin here as readily as it does in tc:encrypted above — and this is the one that fires on
     // the pages that never announce themselves.
     tellRefusal()
+
+    // After the refusal and never before it: a page that has just been refused holds no session
+    // any more, and there is nothing here for the badge to count.
+    tellRecording()
   }
 })
 

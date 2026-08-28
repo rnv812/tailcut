@@ -163,6 +163,72 @@ test('the badge counts a recording that lives inside an embed', async () => {
   await context.close()
 })
 
+test('the badge counts a crowded page without a round trip over every frame of it', async () => {
+  test.setTimeout(90_000)
+
+  const { context, page } = await embedding('crowded.html', CROWDED_URL, [PLAYER_URL])
+  const [sw] = context.serviceWorkers()
+
+  const frames = page.frames().length
+  expect(frames, 'the page under test is not crowded').toBeGreaterThan(50)
+
+  await page.bringToFront()
+
+  const badgeText = async () =>
+    sw!.evaluate(async () => {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+      return chrome.action.getBadgeText({ tabId: tab!.id! })
+    })
+
+  // The recording has to be on the badge before the counting starts: what is measured here is a
+  // recount of a page whose player is already known, which is every recount but the first.
+  await expect.poll(badgeText, { timeout: 20_000 }).toBe('6s')
+
+  // Counted inside the worker, because that is where the cost is: an injection into every frame
+  // to enumerate them, and a message to every frame to ask it. Wall-clock time would measure the
+  // machine as much as the extension; these two numbers are the work itself.
+  await sw!.evaluate(() => {
+    const counted = { asked: 0, injected: 0 }
+    Object.assign(globalThis, { counted })
+
+    const ask = chrome.tabs.sendMessage.bind(chrome.tabs)
+    chrome.tabs.sendMessage = ((...args: Parameters<typeof ask>) => {
+      counted.asked += 1
+      return ask(...args)
+    }) as typeof chrome.tabs.sendMessage
+
+    const inject = chrome.scripting.executeScript.bind(chrome.scripting)
+    chrome.scripting.executeScript = ((...args: Parameters<typeof inject>) => {
+      counted.injected += 1
+      return inject(...args)
+    }) as typeof chrome.scripting.executeScript
+  })
+
+  const counted = () =>
+    sw!.evaluate(() => (globalThis as unknown as { counted: { asked: number; injected: number } }).counted)
+
+  // The same handler as the scheduled one, only without the wait for the next due time.
+  await sw!.evaluate(() => chrome.alarms.create('tc:badge', { when: Date.now() }))
+  await expect.poll(async () => (await counted()).asked, { timeout: 20_000 }).toBeGreaterThan(0)
+  // Long enough for a round that asked every frame to have finished asking.
+  await page.waitForTimeout(1_000)
+
+  const cost = await counted()
+  console.log(`  one recount of ${frames} frames: ${cost.asked} messages, ${cost.injected} injections`)
+
+  // Measured on a news page of 154 frames: 154 injections and 154 messages every ten seconds, 60
+  // to 90 ms of extension work, on a page with no video anywhere in it. The frames that record
+  // say so now, and the recount asks those and the main one — two messages here, whatever the
+  // page is carrying.
+  expect(cost.injected, 'the badge enumerates every frame of the tab again').toBe(0)
+  expect(cost.asked, 'the badge asks a message per frame again').toBeLessThan(frames / 4)
+
+  // And it is still right: the whole point of asking every frame was the player inside an embed.
+  await expect.poll(badgeText, { timeout: 10_000 }).toBe('6s')
+
+  await context.close()
+})
+
 test('the popup finds the one recording on a page of fifty frames, and opens at once', async () => {
   const { context, page, extensionId } = await embedding('crowded.html', CROWDED_URL, [PLAYER_URL])
 

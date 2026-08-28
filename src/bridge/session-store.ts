@@ -676,6 +676,18 @@ export type PlainOpener = (url: string) => Promise<OpenedFile | null>
 
 export interface StoreOptions {
   openPlain?: PlainOpener
+  /**
+   * Called when a read of a file's tables has finished, whatever it found.
+   *
+   * Reading a file is the one step of this registry that is not immediate: everything else has
+   * happened by the time the call that set it going returns, and a caller that wants to know what
+   * changed can simply look. A session that came out of a read cannot be seen that way — it
+   * appears two turns after the promotion that asked for it — and the one thing that has to hear
+   * of it is the badge, which is told when this frame has something and not asked (see
+   * FrameRecording). Without this, a small file watched to the end would be recorded, offered in
+   * the popup, and never counted on the button.
+   */
+  onFileRead?: () => void
 }
 
 /** Everything the registry keeps about one ordinary file the page is playing. */
@@ -741,9 +753,11 @@ export class SessionStore {
   /** Reads of the tables now in flight: what settled() waits on. */
   private reads = new Set<Promise<void>>()
   private readonly openPlain?: PlainOpener
+  private readonly onFileRead?: () => void
 
   constructor(options: StoreOptions = {}) {
     this.openPlain = options.openPlain
+    this.onFileRead = options.onFileRead
   }
 
   /**
@@ -914,6 +928,7 @@ export class SessionStore {
       })
       .finally(() => {
         this.reads.delete(read)
+        this.onFileRead?.()
       })
 
     this.reads.add(read)
@@ -1104,6 +1119,18 @@ export class SessionStore {
 
   list(): Session[] {
     return [...this.sessions.values()].sort((a, b) => b.lastSeenAt - a.lastSeenAt)
+  }
+
+  /**
+   * Whether this registry holds a session at all.
+   *
+   * The same question `list()` answers, asked where the answer has to cost nothing: the bridge
+   * asks it on the arrival of every segment, to tell the badge that this frame has something (see
+   * FrameRecording). A copy and a sort of the map on that path would be work done for nothing on
+   * a page that plays for an hour.
+   */
+  get recording(): boolean {
+    return this.sessions.size > 0
   }
 
   /**

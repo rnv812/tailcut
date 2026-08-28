@@ -2,9 +2,11 @@ import { describe, it, expect } from 'vitest'
 import {
   isExtensionToTab,
   isPageToBridge,
+  isTabToExtension,
   type BridgeToPage,
   type ExtensionToTab,
   type PageToBridge,
+  type TabToExtension,
 } from '../../src/shared/protocol'
 
 const append: PageToBridge = {
@@ -38,6 +40,7 @@ const accepted: [string, PageToBridge][] = [
 /** Both variants of the other side of the protocol: the bridge sends these, it does not take them. */
 const bridgeToPage: [string, BridgeToPage][] = [
   ['the handshake', { type: 'tc:ready' }],
+  ['the word that this frame is recording', { type: 'tc:recording' }],
   [
     'an answer with sessions in it',
     {
@@ -151,6 +154,9 @@ describe('isExtensionToTab', () => {
     ['a message of the hook', { type: 'tc:append', sourceId: 's', bufferId: 'b', mime: 'video/mp4' }],
     ['a triage verdict', { type: 'tc:verdict', sourceId: 's', verdict: 'reject' }],
     ['the handshake of the bridge', { type: 'tc:ready' }],
+    // The other direction of the same road: the content script sends this one to the worker, and
+    // it must never come back down as a request to be passed on to the bridge.
+    ['the word that a frame is recording', { type: 'tc:recording' }],
   ])('turns %s away', (_name, value) => {
     expect(isExtensionToTab(value)).toBe(false)
   })
@@ -160,5 +166,43 @@ describe('isExtensionToTab', () => {
     if (!isExtensionToTab(value)) throw new Error('expected tc:save')
     if (value.type !== 'tc:save') throw new Error('expected tc:save')
     expect(value.key).toBe('k')
+  })
+})
+
+/** What a content script says to the service worker of its own accord: the one message there is. */
+const workerNotices: [string, TabToExtension][] = [
+  ['the word that this frame is recording', { type: 'tc:recording' }],
+]
+
+describe('isTabToExtension', () => {
+  it.each(workerNotices)('lets %s through', (_name, message) => {
+    expect(isTabToExtension(message)).toBe(true)
+  })
+
+  // The service worker hears every message any part of the extension sends: the popup's, the
+  // bridge's, and those of the stages yet to come. Acting on one that is not this is acting on a
+  // message meant for somebody else.
+  it.each([
+    ['null', null],
+    ['undefined', undefined],
+    ['a string', 'tc:recording'],
+    ['a number', 42],
+    ['an array', [{ type: 'tc:recording' }]],
+    ['an object without a type', { frameId: 4 }],
+    ['a non-string type', { type: 7 }],
+    ["somebody else's type", { type: 'tc:ping' }],
+    // Requests travelling the other way, from the extension to a tab. Recognise one here and a
+    // list request would count as a frame announcing itself.
+    ['a list request', { type: 'tc:list' }],
+    ['a save request', { type: 'tc:save', key: 'k' }],
+    ['the handshake of the bridge', { type: 'tc:ready' }],
+  ])('turns %s away', (_name, value) => {
+    expect(isTabToExtension(value)).toBe(false)
+  })
+
+  it('narrows the type down to the TabToExtension union', () => {
+    const value: unknown = { type: 'tc:recording' }
+    if (!isTabToExtension(value)) throw new Error('expected tc:recording')
+    expect(value.type).toBe('tc:recording')
   })
 })

@@ -125,12 +125,15 @@ function isSummary(value: unknown): value is SessionSummary {
 }
 
 /** The variant of the BridgeToPage union a value fits; null — it fits none of them. */
-function variantOf(value: unknown): 'tc:ready' | 'tc:refused' | 'session list' | null {
+function variantOf(
+  value: unknown,
+): 'tc:ready' | 'tc:refused' | 'tc:recording' | 'session list' | null {
   if (typeof value !== 'object' || value === null) return null
   const fields = value as Record<string, unknown>
 
   if (fields.type === 'tc:ready' && Object.keys(fields).length === 1) return 'tc:ready'
   if (fields.type === 'tc:refused' && Object.keys(fields).length === 1) return 'tc:refused'
+  if (fields.type === 'tc:recording' && Object.keys(fields).length === 1) return 'tc:recording'
 
   const known = ['sessions', 'unreachable', 'unreadableFile']
   const fits =
@@ -918,7 +921,12 @@ describe('the bridge refuses a page that plays encrypted media', () => {
     win.append(seg1Bytes, 's1')
     win.answer()
 
-    expect(win.parent.posts.map((post) => post.message)).toEqual([{ type: 'tc:ready' }])
+    // The word that this frame is recording goes out beside the handshake and belongs there: the
+    // page is being recorded, which is the opposite of refused.
+    expect(win.parent.posts.map((post) => post.message)).toEqual([
+      { type: 'tc:ready' },
+      { type: 'tc:recording' },
+    ])
   })
 })
 
@@ -971,6 +979,7 @@ describe('BridgeToPage describes everything the bridge sends', () => {
     const sent: unknown[] = [...win.parent.posts.map((post) => post.message), ...reply.received]
     expect(sent.map(variantOf), 'the bridge sent a message not described in BridgeToPage').toEqual([
       'tc:ready',
+      'tc:recording',
       'session list',
     ])
   })
@@ -985,13 +994,15 @@ describe('BridgeToPage describes everything the bridge sends', () => {
     // away from the summary the bridge actually returns.
     const handshake: BridgeToPage = { type: 'tc:ready' }
     const refusal: BridgeToPage = { type: 'tc:refused' }
+    const recording: BridgeToPage = { type: 'tc:recording' }
     const list: BridgeToPage = win.answer()
 
-    expect([variantOf(handshake), variantOf(refusal), variantOf(list)]).toEqual([
-      'tc:ready',
-      'tc:refused',
-      'session list',
-    ])
+    expect([
+      variantOf(handshake),
+      variantOf(refusal),
+      variantOf(recording),
+      variantOf(list),
+    ]).toEqual(['tc:ready', 'tc:refused', 'tc:recording', 'session list'])
   })
 })
 
@@ -1593,5 +1604,75 @@ describe('the bridge and a page playing an ordinary file', () => {
     expect(reply.received).toEqual([
       { ok: false, reason: 'refused', detail: 'the file could not be read' },
     ])
+  })
+})
+
+describe('the word that this frame is recording', () => {
+  /** Every tc:recording the bridge has sent its parent, in order. */
+  const notices = (win: ReturnType<typeof installWindow>): unknown[] =>
+    win.parent.posts.map((post) => post.message).filter((message) => variantOf(message) === 'tc:recording')
+
+  it('goes out as soon as the registry holds something', async () => {
+    const win = await loadBridge()
+    win.context()
+
+    win.append(initBytes)
+
+    // The badge is counted out of the registries of a tab's frames, and asking every frame of
+    // every tab cost 154 injections and 154 messages on one news page. A frame that has something
+    // says so, and the badge asks those and the main one.
+    expect(notices(win)).toEqual([{ type: 'tc:recording' }])
+  })
+
+  it('stays unsaid while there is nothing in here to count', async () => {
+    const win = await loadBridge()
+    win.context()
+
+    // A frame with no player in it — 153 of the 154 on that page. The check costs one comparison
+    // per message and nothing at all goes out.
+    expect(notices(win)).toEqual([])
+  })
+
+  it('is not repeated for every segment of a page that is playing', async () => {
+    const win = await loadBridge()
+    win.context()
+
+    win.append(initBytes)
+    win.append(seg1Bytes)
+    win.append(seg2Bytes)
+
+    // The badge is recounted every ten seconds, so a word per segment would be a word nobody
+    // acts on — and this is the very traffic the change was made to end.
+    expect(notices(win)).toHaveLength(1)
+  })
+
+  it('stays unsaid on a page that was refused', async () => {
+    const win = await loadBridge()
+    win.context()
+
+    win.append(cencInitBytes, 's1')
+
+    // Everything gathered is dropped and nothing more is taken in (§5.4): there is no session
+    // here, and a frame the badge asked would answer with the refusal and nothing to count.
+    expect(notices(win)).toEqual([])
+  })
+
+  it('goes out when a file becomes a session after its tables have been read', async () => {
+    installHost()
+    const win = await loadBridge()
+    win.context()
+
+    const clip = 'https://cdn.example/clip.mp4'
+    const source = `plain:${clip}`
+    win.deliver({ type: 'tc:plain', sourceId: source, url: clip, durationSeconds: 6, buffered: [[0, 6]] })
+    win.deliver({ type: 'tc:verdict', sourceId: source, verdict: 'promote' })
+    // The read is the one step of the registry that is not immediate.
+    for (let turn = 0; turn < 10; turn++) await new Promise((resolve) => setTimeout(resolve, 1))
+
+    // A file fully downloaded before triage promoted it: the page says nothing more about it
+    // afterwards, so the read landing is the last moment there is to say anything at all. Without
+    // it a file watched to the end is recorded, offered in the popup, and never counted.
+    expect(notices(win)).toEqual([{ type: 'tc:recording' }])
+    expect(win.list()).toHaveLength(1)
   })
 })

@@ -219,13 +219,36 @@ export interface PageRefused {
 }
 
 /**
- * Everything the bridge sends outwards and nothing besides. There are two channels and the union
- * describes both: the handshake and the refusal go to the window that inserted the bridge, and
- * the answer to a list request only into the MessageChannel port that came with it. A message not
- * described here is an undeclared part of the protocol: the receiver does not know of it, and the
- * next reader of the code learns of it from the bridge implementation rather than from the type.
+ * This frame has something recorded in it.
+ *
+ * Said by the bridge to the document that inserted it, and passed on from there to the service
+ * worker (`TabToExtension` below). The badge is the whole reason it exists.
+ *
+ * The badge has to count what a tab holds, and a tab holds a registry per frame, so it used to
+ * enumerate the frames of the active tab and ask every one of them, every ten seconds. Measured
+ * on a news page carrying 154 frames: 154 script injections and 154 messages per recount, 60 to
+ * 90 ms of extension work every ten seconds, on a page with no video anywhere in it. The recount
+ * costs what a page has recorded and not what it has frames, so the frames that recorded
+ * something say so and the badge asks those.
+ *
+ * Repeated rather than said once: the service worker is not a place to keep anything, and one
+ * that has been restarted knows nothing of what it was told before. It carries no number — the
+ * badge asks for that — and no identity: the frame it came from is the frame the sender says it
+ * came from, which no page can write for itself.
  */
-export type BridgeToPage = { type: 'tc:ready' } | PageRefused | SessionList
+export interface FrameRecording {
+  type: 'tc:recording'
+}
+
+/**
+ * Everything the bridge sends outwards and nothing besides. There are two channels and the union
+ * describes both: the handshake, the refusal and the word that this frame is recording go to the
+ * window that inserted the bridge, and the answer to a list request only into the MessageChannel
+ * port that came with it. A message not described here is an undeclared part of the protocol: the
+ * receiver does not know of it, and the next reader of the code learns of it from the bridge
+ * implementation rather than from the type.
+ */
+export type BridgeToPage = { type: 'tc:ready' } | PageRefused | FrameRecording | SessionList
 
 /**
  * How the main world tells a message of the bridge from a message of the page.
@@ -248,6 +271,16 @@ export const EXTENSION_ORIGIN_PREFIX = 'chrome-extension://'
  * asking all of them; see src/shared/frames.ts.
  */
 export type ExtensionToTab = { type: 'tc:list' } | { type: 'tc:save'; key: string }
+
+/**
+ * What the content script of a tab sends the service worker of its own accord.
+ *
+ * The one message that travels this way, and it travels because the alternative is polling: see
+ * FrameRecording. Chrome signs it with the tab and the frame it came from — `sender.tab.id` and
+ * `sender.frameId` — so nothing here has to name either, and a page cannot claim to be a frame it
+ * is not.
+ */
+export type TabToExtension = FrameRecording
 
 /**
  * Why a save produced no file.
@@ -285,6 +318,11 @@ export function isPageToBridge(value: unknown): value is PageToBridge {
     type === 'tc:duration' ||
     type === 'tc:plain'
   )
+}
+
+export function isTabToExtension(value: unknown): value is TabToExtension {
+  if (typeof value !== 'object' || value === null) return false
+  return (value as { type?: unknown }).type === 'tc:recording'
 }
 
 export function isExtensionToTab(value: unknown): value is ExtensionToTab {

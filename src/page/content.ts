@@ -1,7 +1,28 @@
-import { BRIDGE_PATH, SOURCE_EVENT, isExtensionToTab, isPageToBridge } from '../shared/protocol'
+import {
+  BRIDGE_PATH,
+  SOURCE_EVENT,
+  isExtensionToTab,
+  isPageToBridge,
+  type TabToExtension,
+} from '../shared/protocol'
 import { bindSource, registerSource, registerWorkerSource, startWatching } from './watcher'
 
 let bridgePromise: Promise<HTMLIFrameElement> | null = null
+
+/**
+ * The origin the bridge of this frame speaks from.
+ *
+ * A page may post whatever it likes into its own window, and what arrives from the bridge is
+ * acted on — so the sender has to be established, and an origin is the one thing a page cannot
+ * imitate: no document of a site is served from the extension scheme. The exact origin and not
+ * the scheme alone, because the isolated world has chrome.runtime to ask and nothing is gained by
+ * accepting another extension's frames as this one's bridge.
+ *
+ * Spelled out of the address rather than taken from `new URL(...).origin`: `chrome-extension` is
+ * a scheme the URL parser of a browser knows and the one in a test runner does not, and outside
+ * Chrome that call answers "null" for every extension there has ever been.
+ */
+const BRIDGE_ORIGIN = chrome.runtime.getURL('').replace(/\/$/, '')
 
 /**
  * How often the address and the title of the page are re-read when nothing else has asked.
@@ -157,7 +178,39 @@ function watchContext(): void {
 ensureBridge()
 watchContext()
 
+/**
+ * Passes the bridge's word that this frame is recording on to the service worker.
+ *
+ * The badge is counted out of the registries of the frames of a tab, and a tab holds one per
+ * frame. Asked of every frame every ten seconds it cost 154 injections and 154 messages on a news
+ * page with no video in it; the frames that have something say so instead, and the badge asks
+ * those (see FrameRecording). Chrome signs the message with the tab and the frame it came from,
+ * so nothing of either has to be carried in it.
+ *
+ * Sent and forgotten: there is no answer to wait for, and the one thing that can come back is a
+ * worker that was asleep or an extension that was reloaded under the page. Neither is news, and
+ * neither may be left as an unhandled rejection in somebody's page.
+ */
+function tellWorkerRecording(): void {
+  const notice: TabToExtension = { type: 'tc:recording' }
+  try {
+    void chrome.runtime.sendMessage(notice).catch(() => undefined)
+  } catch {
+    // The extension was reloaded and this content script outlived it: chrome.runtime is there and
+    // its context is not. Nothing of this page reaches the new instance until it is loaded again.
+  }
+}
+
 window.addEventListener('message', async (event: MessageEvent) => {
+  // The bridge of this frame speaking. It is answered before the check below, and not after it:
+  // the bridge posts from its own frame, so `event.source` is that frame's window and never this
+  // one. Nothing else of what it sends is for this world — the handshake and the refusal are
+  // addressed to the hook in the MAIN world, which reads the same origin off the same message.
+  if (event.origin === BRIDGE_ORIGIN) {
+    if ((event.data as { type?: unknown } | null)?.type === 'tc:recording') tellWorkerRecording()
+    return
+  }
+
   if (event.source !== window) return
   if (!isPageToBridge(event.data)) return
 

@@ -168,6 +168,9 @@ function installDom(options: { title?: string; url?: string; contentType?: strin
     (message: unknown, sender: unknown, sendResponse: (reply: unknown) => void) => boolean
   > = []
 
+  /** What the content script has sent the service worker of its own accord. */
+  const toWorker: unknown[] = []
+
   vi.stubGlobal('chrome', {
     runtime: {
       getURL: (path: string) => `${EXTENSION_ORIGIN}/${path}`,
@@ -175,11 +178,18 @@ function installDom(options: { title?: string; url?: string; contentType?: strin
         addListener: (listener: (typeof tabRequestListeners)[number]) =>
           tabRequestListeners.push(listener),
       },
+      sendMessage: (message: unknown) => {
+        toWorker.push(message)
+        // Chrome answers the promise with whatever the worker replied, and the worker replies
+        // nothing at all to this one.
+        return Promise.resolve(undefined)
+      },
     },
   })
 
   return {
     created,
+    toWorker,
     appended,
     pageWindow,
     videos,
@@ -219,6 +229,18 @@ function installDom(options: { title?: string; url?: string; contentType?: strin
      */
     deliverMessage: async (data: unknown, source: unknown = pageWindow): Promise<void> => {
       for (const listener of messageListeners) listener({ data, source } as MessageEvent)
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    },
+    /**
+     * Delivers a message the way the bridge sends one: from its own frame, and from the extension
+     * origin. The source is the frame's window and not the page's — that is what tells the two
+     * apart, and why the check on the origin has to come before the check on the source.
+     */
+    deliverFromBridge: async (data: unknown, origin = EXTENSION_ORIGIN): Promise<void> => {
+      const source = { name: 'bridge frame' }
+      for (const listener of messageListeners) {
+        listener({ data, source, origin } as unknown as MessageEvent)
+      }
       await new Promise((resolve) => setTimeout(resolve, 0))
     },
     /**
@@ -1029,5 +1051,60 @@ describe('a player whose MediaSource lives in a worker', () => {
     expect(dom.forwarded().map((post) => post.message)).not.toContainEqual({
       type: 'tc:unreachable',
     })
+  })
+})
+
+describe('the word that this frame is recording', () => {
+  async function withBridge() {
+    const dom = installDom()
+    await importContent()
+    dom.deliverLoad()
+    return dom
+  }
+
+  it('goes on to the service worker when the bridge says it', async () => {
+    const dom = await withBridge()
+
+    await dom.deliverFromBridge({ type: 'tc:recording' })
+
+    // The badge counts the registries of a tab's frames, and there is one per frame. Asked of
+    // every frame every ten seconds it cost 154 injections and 154 messages on a news page with
+    // no video in it; the frames that have something say so, and the badge asks those. Chrome
+    // signs the message with the frame it came from, so nothing of that is carried in it.
+    expect(dom.toWorker).toEqual([{ type: 'tc:recording' }])
+  })
+
+  it('is not taken from the page, whatever the page posts into its own window', async () => {
+    const dom = await withBridge()
+
+    await dom.deliverMessage({ type: 'tc:recording' })
+    await dom.deliverFromBridge({ type: 'tc:recording' }, 'https://site.example')
+
+    // A page may post what it likes into its own window. Nothing much would follow from this one
+    // — the worker would ask this frame and be told the truth — but the sender of anything acted
+    // on is established by its origin, which is the one thing a page cannot write for itself.
+    expect(dom.toWorker).toEqual([])
+  })
+
+  it('leaves the rest of what the bridge sends to the world it is addressed to', async () => {
+    const dom = await withBridge()
+
+    // The handshake and the refusal come from the same frame on the same origin and are read by
+    // the hook in the MAIN world. Passed on from here they would be messages of a protocol the
+    // service worker knows nothing about.
+    await dom.deliverFromBridge({ type: 'tc:ready' })
+    await dom.deliverFromBridge({ type: 'tc:refused' })
+
+    expect(dom.toWorker).toEqual([])
+  })
+
+  it('is not mistaken for something the bridge should be told', async () => {
+    const dom = await withBridge()
+
+    await dom.deliverFromBridge({ type: 'tc:recording' })
+
+    // It travels outwards, from the bridge to the worker. Forwarded back into the bridge it
+    // would be a message the bridge has no branch for, sent on every ten seconds of recording.
+    expect(dom.forwarded()).toEqual([])
   })
 })

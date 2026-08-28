@@ -101,13 +101,22 @@ async function askFrame(tabId: number, frameId: number): Promise<SessionList | u
 }
 
 /**
- * Asks every frame of a tab what it has gathered and merges the answers into one.
+ * Asks the frames of a tab what they have gathered and merges the answers into one.
  *
  * All the frames at once: asked one after another, a page with fifty of them would pay for fifty
  * round trips in a row, and the popup has to open instantly.
+ *
+ * Which frames is the caller's business when the caller knows. The popup asks all of them and has
+ * to: it is opened by hand, once, and an embed it failed to ask is a recording the user cannot
+ * reach. The badge is recounted every ten seconds unasked, and paying the enumeration and a
+ * message per frame for that cost 60 to 90 ms on a news page of 154 frames — so it names the
+ * frames that said they had something instead (see FrameRecording).
  */
-export async function listTabSessions(tabId: number): Promise<TabSessions> {
-  const frames = await framesOf(tabId)
+export async function listTabSessions(
+  tabId: number,
+  only?: readonly number[],
+): Promise<TabSessions> {
+  const frames = only ?? (await framesOf(tabId))
 
   let expire: ReturnType<typeof setTimeout> | undefined
   const deadline = new Promise<undefined>((resolve) => {
