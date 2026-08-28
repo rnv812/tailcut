@@ -18,6 +18,7 @@ export const ENTRIES = [
   { entryPoints: { 'page/content': 'src/page/content.ts' }, format: 'iife' },
   { entryPoints: { 'sw/service-worker': 'src/sw/service-worker.ts' }, format: 'esm' },
   { entryPoints: { 'bridge/bridge': 'src/bridge/bridge.ts' }, format: 'esm' },
+  { entryPoints: { 'bridge/snapshot-worker': 'src/bridge/snapshot-worker.ts' }, format: 'iife' },
   { entryPoints: { 'popup/popup': 'src/popup/popup.tsx' }, format: 'esm' },
 ]
 

@@ -1,12 +1,16 @@
+import { planSnapshot } from '../core/snapshot/build'
 import {
   isPageToBridge,
+  snapshotPath,
   type BridgeToPage,
+  type EditResult,
   type SaveResult,
   type SessionList,
   type SessionSummary,
 } from '../shared/protocol'
 import { openPlainFile } from './loader'
-import { SessionStore, planSave, summarize } from './session-store'
+import { SessionStore, planSave, snapshotSourceOf, summarize } from './session-store'
+import { writeSnapshot } from './snapshot-writer'
 import { writeSaveFile } from './write'
 
 /**
@@ -346,6 +350,36 @@ async function save(key: string, port: MessagePort | undefined): Promise<void> {
   )
 }
 
+/**
+ * Freezes the session and writes it out as a snapshot.
+ *
+ * This is the "freeze on click" of §9.2 made into a file. Recording carries on behind it: the
+ * page keeps appending, triage keeps evicting, and the editor works from the file, so the buffer
+ * cannot move under the user while they are choosing.
+ *
+ * Everything up to the first await is one turn — reading the maps, laying the parts out, copying
+ * them into the buffer that goes to the worker. Split across an await, the plan would describe
+ * chunks an eviction had already dropped.
+ */
+async function freeze(key: string): Promise<EditResult> {
+  const session = store.get(key)
+  if (!session) return { ok: false, reason: 'gone' }
+
+  const id = crypto.randomUUID()
+  const plan = planSnapshot(snapshotSourceOf(session), {
+    id,
+    capturedAt: Date.now(),
+    producer: `tailcut ${chrome.runtime.getManifest().version}`,
+  })
+
+  // A session of init segments alone, or one whose buffers have not brought a fragment yet.
+  // Nothing to edit, and a snapshot of it would open on an empty timeline.
+  if (!plan.index.tracks.some((track) => track.chunks.length)) return { ok: false, reason: 'empty' }
+
+  const written = await writeSnapshot(plan, snapshotPath(id))
+  return written ? { ok: true, snapshotId: id } : { ok: false, reason: 'storage' }
+}
+
 window.addEventListener('message', (event: MessageEvent) => {
   const data = event.data
 
@@ -383,6 +417,15 @@ window.addEventListener('message', (event: MessageEvent) => {
   // pushing megabytes through extension messages would copy them twice and through JSON.
   if (data?.type === 'tc:save') {
     void save(String(data.key), event.ports[0])
+    return
+  }
+
+  // Edit does not build a file: it writes the material out as it stands and hands back the name
+  // of it. The editor is a tab of its own and reads the snapshot from storage, so it survives
+  // this page being closed — which is the whole reason the snapshot exists.
+  if (data?.type === 'tc:edit') {
+    const port = event.ports[0]
+    void freeze(String(data.key)).then((result) => port?.postMessage(result))
     return
   }
 
