@@ -82,6 +82,26 @@ test('lays out and paints three minutes of material well inside a frame', async 
   expect(p95).toBeLessThan(12)
 })
 
+test('measures the drawing area once on mount, and again only when it changes', async ({ page }) => {
+  await openHost(page)
+  const reported = () => page.evaluate(() => (window as unknown as { tcResizes: number[] }).tcResizes)
+
+  // One report and not two. The component measures its host when the effect runs and then hands
+  // the host to a ResizeObserver, which answers immediately with the size it already has; the
+  // second answer is the same width, and passing it on is a render of the whole editor for a
+  // screen that did not change. This is where that can be seen at all — happy-dom's observer
+  // never calls back, so the unit test has to stage the observation this browser really makes.
+  expect(await reported()).toHaveLength(1)
+
+  await page.setViewportSize({ width: 900, height: 700 })
+  await page.waitForFunction(() => (window as unknown as { tcResizes: number[] }).tcResizes.length > 1)
+
+  // And a width that really changed is passed on — once.
+  const widths = await reported()
+  expect(widths).toHaveLength(2)
+  expect(widths[1]).toBeLessThan(widths[0]!)
+})
+
 /** The window the stand exposes for the test to read and to drive. */
 type View = { start: number; scale: number; widthPx: number }
 type Stand = {
@@ -165,13 +185,28 @@ async function dragHandle(
   )
 }
 
-test('the out handle catches the keyframe it was dragged near', async ({ page }) => {
+test('the out handle catches the edge of the hole it was dragged near', async ({ page }) => {
   await openHost(page)
 
   const clip = await dragHandle(page, 'c3', 'out', 31.95)
 
-  // Keyframes stand every two seconds in the stand: 32 is the one nearby.
+  // 32 s is where the recording of the stand stops for two seconds. A hole is the one edge a cut
+  // must not cross, so it wins the tie against the zone that ends at the same instant, and it
+  // beats the keyframe at 31.52 by being nearer.
   expect(clip.out).toBeCloseTo(32, 6)
+})
+
+test('the out handle catches a keyframe standing clear of the edges of the material', async ({ page }) => {
+  await openHost(page)
+
+  // 27.52 s is a keyframe of the stand and nothing else: the nearest hole is four and a half
+  // seconds away, the zone boundaries either side of it are half a second off, and the in point
+  // of the next clip stands on one of them. Drag onto it and the keyframe is what is caught —
+  // which the branch that looks for keyframes is the only thing that can do. Without it the
+  // handle lands on the zone boundary at 28 instead.
+  const clip = await dragHandle(page, 'c3', 'out', 27.52)
+
+  expect(clip.out).toBeCloseTo(27.52, 6)
 })
 
 test('alt lets the handle go where it likes, but still on a frame', async ({ page }) => {
@@ -180,7 +215,9 @@ test('alt lets the handle go where it likes, but still on a frame', async ({ pag
   const clip = await dragHandle(page, 'c3', 'out', 31.95, 'Alt')
 
   // It went, and it went where the hand was: a handle that never moved is also a handle that
-  // never caught the keyframe, and that is not what this test is asking about.
+  // never caught the edge of the hole, and that is not what this test is asking about. The
+  // nearest frame to 31.95 is 31.96, which is not 32 and is not where the hand was either — a
+  // free handle still lands on a frame.
   expect(clip.out).toBeGreaterThan(31.5)
   expect(Math.abs(clip.out - 32)).toBeGreaterThan(0.001)
   expect(Math.abs(clip.out * 25 - Math.round(clip.out * 25))).toBeLessThan(1e-6)

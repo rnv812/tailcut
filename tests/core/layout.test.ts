@@ -26,11 +26,15 @@ const lanes: Lane[] = [
       { start: 60, end: 100 },
     ],
     gaps: [{ start: 40, end: 60 }],
-    // Two zones, not three: the gap at 40–60 breaks the runs and leaves the quality alone, so
-    // the 720p zone runs straight through it (lanes.ts, Task 7).
+    // Three zones, and the last of them does not touch the one before it: the recording stopped
+    // at 40 and came back at 60 at a third quality, so 720p ends where the material ends and
+    // 1080p starts where it resumes. A zone is broken only by a change of the init segment
+    // (lanes.ts, Task 7) — the hole itself splits nothing, which is why 480p→720p at 20 is the
+    // one switch here that a line is drawn for and 720p→1080p across the hole is not.
     zones: [
       { start: 0, end: 20, representation: '480p', codec: 'avc1', width: 854, height: 480 },
-      { start: 20, end: 100, representation: '720p', codec: 'avc1', width: 1280, height: 720 },
+      { start: 20, end: 40, representation: '720p', codec: 'avc1', width: 1280, height: 720 },
+      { start: 60, end: 100, representation: '1080p', codec: 'avc1', width: 1920, height: 1080 },
     ],
   },
   {
@@ -153,10 +157,12 @@ describe('layoutScene', () => {
     const scene = layoutScene(view, METRICS, input())
     const edges = of(scene.rects, 'zone-edge')
 
-    // 0 is the start of the material and nothing precedes it; the gap at 40–60 is inside one
-    // zone and is drawn as a gap, not as a switch of quality.
+    // 200 px is 20 s, where 480p becomes 720p with the recording running: a switch one can see
+    // happen. The other two starts of a zone are not switches. 0 is the start of the material
+    // and nothing precedes it; 60 s — 600 px — is the far side of the hole at 40–60, and what
+    // separates 1080p from 720p there is twenty seconds of nothing, not a line.
     expect(edges.map((edge) => edge.x)).toEqual([200])
-    expect(of(scene.rects, 'zone')).toHaveLength(3)
+    expect(of(scene.rects, 'zone')).toHaveLength(4)
   })
 
   it('packs overlapping clips into rows and leaves the rest on one', () => {

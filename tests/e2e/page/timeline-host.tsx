@@ -62,7 +62,17 @@ const MARKERS: MarkerPin[] = Array.from({ length: 12 }, (_, i) => ({
 
 const BOUNDS: ViewBounds = { duration: DURATION, fps: 25 }
 
-/** Frames of 1/25 s inside the runs, and a keyframe every two seconds. */
+/**
+ * Every width the component has reported, in order.
+ *
+ * A `ResizeObserver` delivers a first observation of its own the moment it is given an element,
+ * on top of the measurement the component takes by hand when it mounts — behaviour a test in
+ * happy-dom has to stage, because the observer there never calls back at all. Here it is real,
+ * and the list is how the test says the same width is not pushed through twice.
+ */
+const RESIZES: number[] = []
+
+/** Frames of 1/25 s inside the runs. */
 const FPS = 25
 const PTS = LANES[0]!.runs.flatMap((run) => {
   const count = Math.round((run.end - run.start) * FPS)
@@ -72,7 +82,25 @@ const FRAMES = frameGrid({
   pts: Float64Array.from(PTS),
   durations: Float64Array.from({ length: PTS.length }, () => 1 / FPS),
 })
-const KEYFRAMES = Float64Array.from({ length: Math.floor(DURATION / 2) }, (_, i) => i * 2)
+/**
+ * A keyframe every two seconds, thirteen frames into the second and never on the second itself.
+ *
+ * The offset is the whole point of the stand for snapping. Quality switches every second here,
+ * so a keyframe standing on a whole second shares its instant with a zone boundary — and a tie
+ * goes to the boundary by priority (snap.ts), which leaves the keyframe unable to win anywhere
+ * and the branch that looks for it unexercised. Thirteen frames is 0.52 s: clear of the zones,
+ * clear of the markers and the clips, and still exactly on the frame grid, which a caught
+ * target has to be or the grid pulls the handle off it and the catch does not count.
+ */
+const KEYFRAME_FRAME = 13
+const KEYFRAMES = Float64Array.from(
+  LANES[0]!.runs.flatMap((run) => {
+    const count = Math.round((run.end - run.start) * FPS)
+    const times: number[] = []
+    for (let i = KEYFRAME_FRAME; i < count; i += 2 * FPS) times.push(run.start + i / FPS)
+    return times
+  }),
+)
 
 const SEGMENTS =
   LANES.reduce((total, lane) => total + lane.runs.length + lane.gaps.length + lane.zones.length, 0) +
@@ -98,6 +126,7 @@ function Host() {
   shared.tcFit = () => setView((current) => fitAll(current, BOUNDS))
   shared.tcPalette = PALETTE
   shared.tcSegments = SEGMENTS
+  shared.tcResizes = RESIZES
   shared.tcLanes = LANES
   shared.tcClips = () => clips
   shared.tcXAt = (time: number) => (time - view.start) / view.scale
@@ -144,7 +173,10 @@ function Host() {
       frames={FRAMES}
       snap={set}
       snapping
-      onResize={(widthPx) => setView((current) => ({ ...current, widthPx }))}
+      onResize={(widthPx) => {
+        RESIZES.push(widthPx)
+        setView((current) => ({ ...current, widthPx }))
+      }}
       onGesture={(gesture) => {
         if (gesture.type === 'zoom') {
           setView((current) => zoomAt(current, gesture.atPx, gesture.factor, BOUNDS))

@@ -161,7 +161,12 @@ describe('truncate', () => {
     expect(cut.length).toBeLessThan('a very long clip name indeed'.length)
   })
 
-  it('never returns an empty string', () => {
-    expect(truncate('name', 0).length).toBeGreaterThan(0)
+  it('never returns an empty string, and never a longer one', () => {
+    // A width of nothing still has to say something — a clip band a pixel wide is drawn without
+    // a label, but `truncate` is asked for one wherever a caller decides the width is enough —
+    // and what it says has to be shorter than what it was handed. Cutting to fit in zero pixels
+    // by slicing one character off the end gives 'nam…', which is a label that grew.
+    expect(truncate('name', 0)).toBe('n…')
+    expect(truncate('name', 0).length).toBeLessThan('name'.length)
   })
 })

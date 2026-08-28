@@ -64,6 +64,19 @@ function installWidth(width: number): void {
 
 const nextFrame = (): Promise<void> => new Promise((resolve) => requestAnimationFrame(() => resolve()))
 
+/**
+ * A frame, and the turn after it on which preact runs the effects of that render.
+ *
+ * `useLayoutEffect` runs during the render and `useEffect` does not: preact flushes it from a
+ * `setTimeout` scheduled inside its own frame callback, one turn later than the paint. A test
+ * that waits for the frame alone sees the canvas but not the measurement, and passes only when
+ * a neighbouring test happens to have left a timer running.
+ */
+const afterEffects = async (): Promise<void> => {
+  await nextFrame()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+}
+
 /** A mouse event at a point of the canvas, turned into the page coordinates the browser sends. */
 const at = (type: string, x: number, y: number, button = 0): MouseEvent =>
   new MouseEvent(type, {
@@ -143,9 +156,43 @@ describe('Timeline', () => {
   it('reports the width of its host on mount', async () => {
     const widths: number[] = []
     render(<Timeline {...props()} onResize={(width) => widths.push(width)} />, host)
-    await nextFrame()
+    await afterEffects()
 
     expect(widths).toEqual([900])
+  })
+
+  it('reports a width once however many times it is observed', async () => {
+    // The observation this stages is one happy-dom never delivers: its ResizeObserver takes the
+    // callback and never calls it — measured with a probe, zero calls in 50 ms — so the double
+    // report the component guards against cannot arise in this environment on its own. What a
+    // real observer does is deliver a first observation the moment `observe` is called, on top
+    // of the measurement the effect has just taken by hand; the extra rounds below stand for a
+    // resize that moved something else and left the width where it was.
+    const fired: (() => void)[] = []
+    class StagedObserver {
+      constructor(private readonly callback: () => void) {}
+      observe(): void {
+        fired.push(this.callback)
+        this.callback()
+      }
+      disconnect(): void {}
+    }
+    vi.stubGlobal('ResizeObserver', StagedObserver)
+
+    const widths: number[] = []
+    render(<Timeline {...props()} onResize={(width) => widths.push(width)} />, host)
+    await afterEffects()
+    for (const fire of fired) fire()
+
+    // One report, not three: a viewport of the same width pushed through the reducer again is a
+    // render of the whole editor for a screen that did not change.
+    expect(widths).toEqual([900])
+
+    // And the guard is a guard and not a lid: a width that really changed is reported.
+    installWidth(640)
+    for (const fire of fired) fire()
+
+    expect(widths).toEqual([900, 640])
   })
 
   it('survives a canvas with no 2d context', async () => {
@@ -263,7 +310,38 @@ describe('Timeline', () => {
       { type: 'selectClip', id: 'c1' },
       { type: 'trim', id: 'c1', edge: 'out', time: 8 },
     ])
-    expect(calls.some((call) => call.style === PALETTE.fill.snap)).toBe(true)
+    // The colour alone says nothing: a caught handle is painted in the same amber as the line
+    // and the caption. So the line is looked for by what makes it a line — one pixel wide, the
+    // whole scene tall, standing at the target — and the caption by what it says.
+    const height = sceneHeight(METRICS, 1, 1)
+    const line = calls.filter(
+      (call) =>
+        call.op === 'fillRect' &&
+        call.style === PALETTE.fill.snap &&
+        call.args[2] === 1 &&
+        call.args[3] === height,
+    )
+    expect(line).toHaveLength(1)
+    expect(line[0]!.args[0]).toBe(160)
+    const caption = calls.filter((call) => call.op === 'fillText' && call.text === 'keyframe')
+    expect(caption).toHaveLength(1)
+    expect(caption[0]!.style).toBe(PALETTE.snapLabel)
+
+    // And the handle under the hand is drawn as the one that caught it. This is the other half
+    // of the wire: the component is what knows which handle is being dragged, and a scene never
+    // told would stand the line beside a handle painted as though it were free.
+    const caught = calls.filter(
+      (call) =>
+        call.op === 'fillRect' &&
+        call.style === PALETTE.fill['handle-snapped'] &&
+        call.args[2] === METRICS.handleWidth &&
+        call.args[3] === METRICS.clipHeight,
+    )
+    expect(caught).toHaveLength(1)
+    // At 10 s and not at the 8 s it caught: the trim is a gesture the owner of the clips applies,
+    // and this test does not apply it. Of the two handles of the clip it is the one that was
+    // taken hold of — the in handle at 5 s is painted in the ordinary colour.
+    expect(caught[0]!.args[0]).toBe(200 - Math.floor(METRICS.handleWidth / 2))
 
     // And the line goes with the hand: a caption left on the canvas would name a target that
     // nothing is being dragged onto any more.
@@ -272,5 +350,6 @@ describe('Timeline', () => {
     await nextFrame()
 
     expect(calls.some((call) => call.style === PALETTE.fill.snap)).toBe(false)
+    expect(calls.some((call) => call.text === 'keyframe')).toBe(false)
   })
 })

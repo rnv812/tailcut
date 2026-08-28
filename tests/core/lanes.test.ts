@@ -236,7 +236,10 @@ describe('materialSpan, laneOf, cuttingLane, allGaps', () => {
       id: 'a',
       kinds: ['audio'],
       tracks: [audio()],
-      chunks: [chunk(0, 4.1), chunk(9.9, 14.2)],
+      // The sound breaks before the picture and comes back before it: one break of the recording,
+      // two holes a fraction of a second apart, and the earlier of the two is not the one the
+      // lanes are listed in.
+      chunks: [chunk(0, 3.9), chunk(9.9, 14.2)],
     }),
   ])
 
@@ -254,9 +257,11 @@ describe('materialSpan, laneOf, cuttingLane, allGaps', () => {
   })
 
   it('allGaps merges the holes of both lanes in time order', () => {
+    // Time order and not lane order: the picture is the first lane and its hole is the later
+    // one, so a list that merely runs the lanes end to end comes out the other way round.
     expect(allGaps(lanes)).toEqual([
+      { start: 3.9, end: 9.9 },
       { start: 4, end: 10 },
-      { start: 4.1, end: 9.9 },
     ])
   })
 
@@ -265,6 +270,11 @@ describe('materialSpan, laneOf, cuttingLane, allGaps', () => {
     // user two gaps where there is one.
     expect(cuttingLane(lanes)!.kind).toBe('video')
     expect(cuttingLane(lanes)!.gaps).toEqual([{ start: 4, end: 10 }])
+
+    // Asked of the lanes the other way round it still names the picture. `lanesOf` happens to
+    // build the video lane first, so on its output "the picture" and "the first one" are the
+    // same answer and the rule is not being tested at all; here they are different answers.
+    expect(cuttingLane([...lanes].reverse())!.kind).toBe('video')
   })
 
   it('cuttingLane falls back to the only lane there is', () => {
