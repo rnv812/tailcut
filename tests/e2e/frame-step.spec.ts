@@ -118,7 +118,24 @@ test('a step lands deep inside a group of pictures and at the edges of the mater
   }
 })
 
-test('a held key does not pile up a queue of seeks', async () => {
+/**
+ * What this measures, and what it does not.
+ *
+ * Thirty repeats arriving in one turn are batched by the renderer into a single update, so what
+ * is under test here is the composition of the steps and not the suppression of a queue: the
+ * handler adds a delta to the playhead rather than setting a number, and thirty handlers reading
+ * one stale index would move the picture on by a single frame. That failure is a real one and it
+ * is this test's own — the first draft of the stepper had it.
+ *
+ * The queue is a different claim: a seek asked for while another is in flight is dropped and the
+ * last request wins. It is measured where it can be, in `tests/editor/seek.test.ts` ("keeps one
+ * seek in flight" and "catches up to the last request afterwards"), over an element that finishes
+ * a seek only when told to. A browser cannot be made to do that: the presses would have to be
+ * spaced further apart than a decode, and then every one of them is answered and there is no
+ * queue to suppress. This test used to carry the queue's name and the seek count below is all
+ * that was left of the claim — one batched step costs the element one seek, no more.
+ */
+test('a burst of key repeats composes into one step instead of racing', async () => {
   const { editor, close } = await openEditor()
 
   try {
@@ -131,14 +148,15 @@ test('a held key does not pile up a queue of seeks', async () => {
       }
     })
 
-    // The playhead followed the keyboard at once, without waiting for the decoder.
+    // Thirty frames on and not one: the readout followed the keyboard at once, and every press
+    // of the burst counted. Set rather than added, the whole burst would read "2" here.
     await expect(editor.getByTestId('frame')).toHaveText('31')
 
     await settled(editor, 30)
     expect(Math.abs((await shown(editor)) - 30 / FPS)).toBeLessThan(HALF_FRAME)
     expect(
       (await seeks(editor)) - before,
-      'thirty repeats cost more than three seeks: the queue is growing',
+      'one composed step cost the element more than one seek',
     ).toBeLessThanOrEqual(3)
   } finally {
     await close()
