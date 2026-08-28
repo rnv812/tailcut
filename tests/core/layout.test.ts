@@ -1,0 +1,221 @@
+import { describe, it, expect } from 'vitest'
+import type { Lane } from '../../src/core/timeline/lanes'
+import {
+  METRICS,
+  MIN_BAND_PX,
+  clipsTop,
+  firstVisible,
+  laneTop,
+  layoutScene,
+  packRows,
+  rowTop,
+  sceneHeight,
+  type ClipBand,
+  type Rect,
+  type SceneInput,
+} from '../../src/core/timeline/layout'
+import type { Viewport } from '../../src/core/timeline/view'
+
+const view: Viewport = { start: 0, scale: 0.1, widthPx: 1000 } // 100 seconds across 1000 px
+
+const lanes: Lane[] = [
+  {
+    kind: 'video',
+    runs: [
+      { start: 0, end: 40 },
+      { start: 60, end: 100 },
+    ],
+    gaps: [{ start: 40, end: 60 }],
+    // Two zones, not three: the gap at 40–60 breaks the runs and leaves the quality alone, so
+    // the 720p zone runs straight through it (lanes.ts, Task 7).
+    zones: [
+      { start: 0, end: 20, representation: '480p', codec: 'avc1', width: 854, height: 480 },
+      { start: 20, end: 100, representation: '720p', codec: 'avc1', width: 1280, height: 720 },
+    ],
+  },
+  {
+    kind: 'audio',
+    runs: [{ start: 0, end: 100 }],
+    gaps: [],
+    zones: [{ start: 0, end: 100, representation: 'aac', codec: 'mp4a', width: 0, height: 0 }],
+  },
+]
+
+const clip = (id: string, start: number, end: number, selected = false): ClipBand => ({
+  id,
+  name: `Clip ${id}`,
+  in: start,
+  out: end,
+  selected,
+})
+
+const input = (overrides: Partial<SceneInput> = {}): SceneInput => ({
+  lanes,
+  clips: [],
+  markers: [],
+  playhead: 10,
+  fps: 25,
+  ...overrides,
+})
+
+const of = (rects: Rect[], kind: Rect['kind']): Rect[] => rects.filter((rect) => rect.kind === kind)
+
+describe('firstVisible', () => {
+  const spans = [
+    { start: 0, end: 10 },
+    { start: 20, end: 30 },
+    { start: 40, end: 50 },
+  ]
+
+  it('finds the first span the viewport touches', () => {
+    expect(firstVisible(spans, 0)).toBe(0)
+    expect(firstVisible(spans, 15)).toBe(1)
+    expect(firstVisible(spans, 25)).toBe(1)
+  })
+
+  it('skips a span that ends exactly at the edge', () => {
+    expect(firstVisible(spans, 10)).toBe(1)
+  })
+
+  it('is past the end when everything is behind', () => {
+    expect(firstVisible(spans, 100)).toBe(3)
+    expect(firstVisible([], 5)).toBe(0)
+  })
+})
+
+describe('layoutScene', () => {
+  it('is as tall as the ruler, the lanes and the clip rows', () => {
+    const scene = layoutScene(view, METRICS, input())
+
+    expect(scene.width).toBe(1000)
+    expect(scene.rulerHeight).toBe(METRICS.rulerHeight)
+    expect(scene.height).toBe(sceneHeight(METRICS, 2, 1))
+    expect(laneTop(METRICS, 1)).toBeGreaterThan(laneTop(METRICS, 0))
+    expect(clipsTop(METRICS, 2)).toBeGreaterThan(laneTop(METRICS, 1))
+  })
+
+  it('draws a run as a band on its own lane', () => {
+    const scene = layoutScene(view, METRICS, input())
+    const runs = of(scene.rects, 'run-video')
+
+    expect(runs).toHaveLength(2)
+    expect(runs[0]).toMatchObject({ x: 0, width: 400, y: laneTop(METRICS, 0) })
+    expect(runs[1]).toMatchObject({ x: 600, width: 400 })
+    expect(of(scene.rects, 'run-audio')).toHaveLength(1)
+    expect(of(scene.rects, 'run-audio')[0]!.y).toBe(laneTop(METRICS, 1))
+  })
+
+  it('draws a gap between the runs', () => {
+    const gaps = of(layoutScene(view, METRICS, input()).rects, 'gap')
+
+    expect(gaps).toHaveLength(1)
+    expect(gaps[0]).toMatchObject({ x: 400, width: 200 })
+  })
+
+  it('keeps a band narrower than a pixel visible', () => {
+    // A quarter of a second of dropped material at the widest zoom is 0.02 px. Rounded away it
+    // would leave the timeline claiming a continuous recording that is not continuous.
+    const narrow: Lane[] = [
+      {
+        kind: 'video',
+        runs: [
+          { start: 0, end: 50 },
+          { start: 50.02, end: 100 },
+        ],
+        gaps: [{ start: 50, end: 50.02 }],
+        zones: [],
+      },
+    ]
+    const gaps = of(layoutScene(view, METRICS, input({ lanes: narrow })).rects, 'gap')
+
+    expect(gaps).toHaveLength(1)
+    expect(gaps[0]!.width).toBe(MIN_BAND_PX)
+  })
+
+  it('leaves out what the viewport does not touch', () => {
+    const scene = layoutScene({ start: 70, scale: 0.01, widthPx: 1000 }, METRICS, input())
+
+    expect(of(scene.rects, 'gap')).toHaveLength(0)
+    expect(of(scene.rects, 'run-video')).toHaveLength(1)
+    for (const rect of scene.rects) {
+      expect(rect.x).toBeLessThanOrEqual(scene.width + 1)
+      expect(rect.x + rect.width).toBeGreaterThanOrEqual(-1)
+    }
+  })
+
+  it('clips a band that starts before the viewport to its left edge', () => {
+    const scene = layoutScene({ start: 30, scale: 0.01, widthPx: 1000 }, METRICS, input())
+
+    expect(of(scene.rects, 'run-video')[0]!.x).toBe(-1)
+  })
+
+  it('draws a zone boundary only where the quality actually changes', () => {
+    const scene = layoutScene(view, METRICS, input())
+    const edges = of(scene.rects, 'zone-edge')
+
+    // 0 is the start of the material and nothing precedes it; the gap at 40–60 is inside one
+    // zone and is drawn as a gap, not as a switch of quality.
+    expect(edges.map((edge) => edge.x)).toEqual([200])
+    expect(of(scene.rects, 'zone')).toHaveLength(3)
+  })
+
+  it('packs overlapping clips into rows and leaves the rest on one', () => {
+    const clips = [clip('a', 0, 30), clip('b', 20, 50), clip('c', 60, 80)]
+    const rows = packRows(clips)
+
+    expect(rows.get('a')).toBe(0)
+    expect(rows.get('b')).toBe(1)
+    expect(rows.get('c')).toBe(0)
+
+    const scene = layoutScene(view, METRICS, input({ clips }))
+    expect(scene.rows).toBe(2)
+    expect(of(scene.rects, 'clip')).toHaveLength(3)
+    expect(of(scene.rects, 'clip')[1]!.y).toBe(rowTop(METRICS, 2, 1))
+  })
+
+  it('gives the selected clip its own kind', () => {
+    const scene = layoutScene(view, METRICS, input({ clips: [clip('a', 0, 30, true)] }))
+
+    expect(of(scene.rects, 'clip')).toHaveLength(0)
+    expect(of(scene.rects, 'clip-selected')[0]).toMatchObject({ id: 'a', label: 'Clip a' })
+  })
+
+  it('a clip too narrow for its name carries no label', () => {
+    const scene = layoutScene(view, METRICS, input({ clips: [clip('a', 0, 1)] }))
+
+    expect(of(scene.rects, 'clip')[0]!.label).toBeUndefined()
+  })
+
+  it('draws the playhead across the whole scene and only when it is in view', () => {
+    const scene = layoutScene(view, METRICS, input({ playhead: 50 }))
+    const playhead = of(scene.rects, 'playhead')[0]!
+
+    expect(playhead).toMatchObject({ x: 500, y: 0, width: 1, height: scene.height })
+    expect(of(layoutScene(view, METRICS, input({ playhead: 500 })).rects, 'playhead')).toHaveLength(0)
+  })
+
+  it('draws a marker as a pin in the ruler and a line down the scene', () => {
+    const scene = layoutScene(view, METRICS, input({ markers: [{ id: 'm1', time: 20, label: 'M1' }] }))
+    const pins = of(scene.rects, 'marker')
+
+    expect(pins).toHaveLength(2)
+    expect(pins[0]).toMatchObject({ x: 200, y: 0, height: METRICS.markerHeight, id: 'm1' })
+    // The line hangs off the bottom of the pin and stops at the foot of the scene: given the
+    // whole height it would run twelve pixels past it, which a canvas hides and a scrollable
+    // one would not.
+    expect(pins[1]).toMatchObject({
+      x: 200,
+      y: METRICS.markerHeight,
+      height: scene.height - METRICS.markerHeight,
+    })
+  })
+
+  it('carries the ticks with the labels of the major ones', () => {
+    const scene = layoutScene(view, METRICS, input())
+
+    expect(scene.ticks.length).toBeGreaterThan(4)
+    expect(scene.ticks.every((tick) => tick.x >= 0 && tick.x <= scene.width)).toBe(true)
+    expect(scene.ticks.filter((tick) => tick.major).every((tick) => Boolean(tick.label))).toBe(true)
+    expect(scene.ticks.filter((tick) => !tick.major).every((tick) => tick.label === undefined)).toBe(true)
+  })
+})
