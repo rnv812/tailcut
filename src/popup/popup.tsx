@@ -135,7 +135,18 @@ function Popup() {
   // leaves one behind per video — so the rest of them are listed below and can be shown here in
   // its place.
   const current = sessions.find((session) => session.key === pickedKey) ?? sessions[0]!
-  const others = sessions.filter((session) => session !== current)
+  // Every other session of the page that the user could actually do something with.
+  //
+  // A session with no bytes in it is left out. It is not a lie — a save of it answers, truthfully,
+  // that there is nothing recorded to save yet — but a row here is an offer to switch to that
+  // session, and this one can only lead to 0:00 and a button that refuses. A stream that opened
+  // and brought nothing, a second buffer still waiting for its first fragment: both are ordinary,
+  // and both stood in "Recent" promising a clip of no length.
+  //
+  // The block above keeps such a session when it is the freshest one, because up there it is not
+  // an offer but the state of the page: something is being recorded and has not come to anything
+  // yet, and the button says so in as many words.
+  const others = sessions.filter((session) => session !== current && session.bytes > 0)
 
   // Picking is closed while a save is running, along with the button that started it: the answer
   // of the bridge is about the session that was saved, and switching under it would hang the

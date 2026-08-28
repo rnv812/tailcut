@@ -355,6 +355,33 @@ describe('the popup and the other sessions of the page', () => {
     ])
   })
 
+  it('leaves a session with nothing in it out of the list', async () => {
+    // A session with no material to cut: a stream that opened and brought nothing, a second
+    // buffer that has not delivered its first fragment. Live, one of these stood in "Recent"
+    // promising 0:00.
+    const empty: SessionSummary = { ...older, key: 'empty', title: 'Nothing in it', duration: 0, bytes: 0 }
+    await mount({ sessions: [fresh, empty, older] })
+
+    // A row is an offer to switch to that session, and this one can only refuse: the bridge
+    // answers "there is nothing recorded to save yet" and the popup would have shown 0:00 and a
+    // button that does nothing.
+    expect(allAt('session').map((row) => row.textContent)).toEqual([
+      expect.stringContaining(older.title),
+    ])
+  })
+
+  it('still shows a session with nothing in it when it is the one being recorded', async () => {
+    const empty: SessionSummary = { ...fresh, duration: 0, bytes: 0 }
+    await mount({ sessions: [empty] })
+
+    // The block at the top is not an offer, it is the state of the page: a recording that has
+    // just started and has no whole fragment yet is there, and saying "Nothing recorded on this
+    // page yet" over it would be the wrong sentence about a page that is recording.
+    expect(textAt('title')).toBe(fresh.title)
+    expect(textAt('duration')).toBe('0:00')
+    expect(at('recent')).toBeNull()
+  })
+
   it('signs a session without a title in the list too', async () => {
     await mount({ sessions: [fresh, { ...older, title: '' }] })
 
