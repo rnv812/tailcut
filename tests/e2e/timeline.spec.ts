@@ -81,3 +81,52 @@ test('lays out and paints three minutes of material well inside a frame', async 
   expect(median).toBeLessThan(4)
   expect(p95).toBeLessThan(12)
 })
+
+/** The window the stand exposes for the test to read and to drive. */
+type View = { start: number; scale: number; widthPx: number }
+type Stand = {
+  tcView: () => View
+  tcSetView: (view: View) => void
+  tcTimeAt: (x: number) => number
+}
+
+test('a wheel notch leaves the time under the pointer where it was', async ({ page }) => {
+  await openHost(page)
+  const box = (await page.locator('canvas').boundingBox())!
+
+  await page.mouse.move(box.x + 400, box.y + 60)
+  const before = await page.evaluate(() => (window as unknown as Stand).tcTimeAt(400))
+  const scaleBefore = await page.evaluate(() => (window as unknown as Stand).tcView().scale)
+
+  await page.mouse.wheel(0, -240)
+  await page.waitForFunction(
+    (was) => (window as unknown as Stand).tcView().scale < was,
+    scaleBefore,
+  )
+
+  const after = await page.evaluate(() => (window as unknown as Stand).tcTimeAt(400))
+  expect(Math.abs(after - before)).toBeLessThan(0.005)
+})
+
+test('dragging the material moves it under the hand', async ({ page }) => {
+  await openHost(page)
+  const box = (await page.locator('canvas').boundingBox())!
+
+  // Zoomed in first: at the opening zoom the whole material is on the screen and there is
+  // nowhere to pan to, which is the clamp doing its job and not a drag failing.
+  await page.evaluate(() => {
+    const stand = window as unknown as Stand
+    stand.tcSetView({ ...stand.tcView(), start: 20, scale: 0.05 })
+  })
+  await page.waitForFunction(() => (window as unknown as Stand).tcView().scale === 0.05)
+
+  const before = await page.evaluate(() => (window as unknown as Stand).tcView())
+
+  await page.mouse.move(box.x + 400, box.y + 60)
+  await page.mouse.down()
+  await page.mouse.move(box.x + 300, box.y + 60, { steps: 4 })
+  await page.mouse.up()
+
+  const after = await page.evaluate(() => (window as unknown as Stand).tcView())
+  expect(after.start).toBeCloseTo(before.start + 100 * before.scale, 3)
+})
