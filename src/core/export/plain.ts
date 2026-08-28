@@ -1,7 +1,8 @@
 import { isoEncrypted } from '../iso/encryption'
 import { parseInit } from '../iso/init'
 import type { RangeReader } from '../iso/locate'
-import { planClip, presentationSpan, type ExportPlan, type SourceTrack } from './plan'
+import { planClip, presentationSpan, type ClipSource, type ExportPlan, type SourceTrack } from './plan'
+import { MAX_BRIDGED_GAP } from './ranges'
 import { clipSourceFrom, movieTracksOf } from './source'
 
 /**
@@ -135,6 +136,118 @@ export interface PlainCut {
    * quality. Measured on w3schools' mov_bbb.mp4: one picture, two soundtracks.
    */
   alternate: boolean
+  /** The sound in this clip came from a file of its own; see SoundApart. */
+  paired: boolean
+  /** That sound runs out before the picture does. False when there is no paired sound. */
+  soundShort: boolean
+}
+
+/**
+ * A soundtrack playing beside a picture that has none of its own.
+ *
+ * ## What is being paired, and what a clip means when it is
+ *
+ * One site of the seven surveyed plays its picture and its sound as two media elements (§5.6):
+ * `<video src>` of 9.48 s with no audio track in it at all, and `<audio src>` of 66.35 s, both
+ * looping, each on its own cycle. There is no single piece of media on that page and there is no
+ * single clock: what the viewer gets is the picture at t mod 9.48 over the sound at t mod 66.35,
+ * and wall-clock t is written down nowhere either file can be read for afterwards.
+ *
+ * So a clip here has to be defined rather than found, and it is defined by three rules.
+ *
+ * **The picture is the clip, and states its length.** §8.2 already cuts the sound to the picture
+ * and not the other way round; here that decides the whole question of "which of the two lengths".
+ * The extra 56.9 seconds of soundtrack are not clipped and never offered: they are somebody's
+ * music track, and a file of a song with a few seconds of picture at the front is not a clip of
+ * anything. It would also be the general-purpose downloader §2 puts out of scope.
+ *
+ * **Both are taken from zero.** The pairing written into the file is the one the page itself
+ * makes when it loads, with both elements at the start — and it is the only pairing that can be
+ * stated in media time, which is the clock every other part of this program measures on (§6.3).
+ * Taken instead from wherever the sound happened to have got to at the instant of the click, the
+ * clip would be a property of that instant: two saves of one session would hold different sound,
+ * and §6.1 says two saves of one session are two copies of one video.
+ *
+ * **There is no loop boundary, because nothing is looped.** The clip cannot outrun the picture's
+ * own material, so at most one turn of the picture is ever written, and the sound needed for it
+ * is at most that long. Where the track is the shorter of the two — a jingle under a long picture
+ * — the file's sound ends where the track does and the rest of the clip is silent (`soundShort`).
+ * Looping it round to fill the gap would be composing something the page never played.
+ *
+ * And it is not called the sound of the video anywhere the user can read: the popup says it came
+ * from a separate track on the page, because that is what it is.
+ */
+export interface SoundApart {
+  /**
+   * The head of the track as a track to cut from, addressed inside its own file.
+   *
+   * Only the head: the reader indexes as far as the picture is long and no further, which is the
+   * same rule stated in requests — the whole of somebody's soundtrack is never even fetched.
+   */
+  track: SourceTrack
+}
+
+/**
+ * Where the soundtrack's bytes are addressed from, when a clip is made out of two files.
+ *
+ * The plan, the reads and the writer all speak one flat address space, because the material of a
+ * clip has always lain in one file. Two files are put into that space by laying them apart: the
+ * picture from zero, the soundtrack from here.
+ *
+ * The gap between them is not decoration. `readsFor` merges ranges that lie within
+ * `MAX_BRIDGED_GAP` of each other into one request, on the ground that a quarter of a megabyte of
+ * transfer is cheaper than a round trip — and with the two files laid end to end it would merge
+ * across the seam and ask one host for bytes that live on another. So they are put further apart
+ * than that merge will ever reach.
+ */
+export function soundBaseOf(file: PlainFile): number {
+  let end = file.total
+  for (const track of file.tracks) {
+    for (const sample of track.samples) {
+      const finish = sample.source.at + sample.source.length
+      if (finish > end) end = finish
+    }
+  }
+
+  return end + MAX_BRIDGED_GAP + 1
+}
+
+/**
+ * One reader over the two files, dispatching by where the address falls.
+ *
+ * The counterpart of `soundBaseOf` and the reason the two live in one module: they are one
+ * decision about one address space, and a second opinion about where the seam is would be a save
+ * fetching the head of a soundtrack and writing it into the picture.
+ */
+export function pairedReader(picture: RangeReader, sound: RangeReader, base: number): RangeReader {
+  return async (at, length) =>
+    at >= base ? await sound(at - base, length) : await picture(at, length)
+}
+
+/**
+ * The picture and the soundtrack as one source to cut from, or the file's own tracks unchanged.
+ *
+ * The offer is refused outright where the file has sound of its own: a track from outside is an
+ * answer to a picture that has none, and adding a second would be composing rather than clipping.
+ */
+function pairedSource(file: PlainFile, sound: SoundApart | undefined): ClipSource | null {
+  const own = clipSourceFrom(file.tracks)
+  if (!own || !sound || own.audio || own.video.kind !== 'video') return own
+
+  const base = soundBaseOf(file)
+
+  return {
+    video: own.video,
+    audio: {
+      ...sound.track,
+      // Moved into the address space of the clip. The track itself is indexed in its own file and
+      // knows nothing of the picture it will be laid beside — it is read once and cut many times.
+      samples: sound.track.samples.map((sample) => ({
+        ...sample,
+        source: { at: base + sample.source.at, length: sample.source.length },
+      })),
+    },
+  }
 }
 
 /**
@@ -145,9 +258,16 @@ export interface PlainCut {
  * be planned over material that is not there. Of the stretches that survive, the longest is
  * taken — the same rule the captured path uses for the longest run of its map.
  */
-export function cutPlain(file: PlainFile, buffered: readonly Span[]): PlainCut | null {
-  const source = clipSourceFrom(file.tracks)
-  if (!source) return null
+export function cutPlain(
+  file: PlainFile,
+  buffered: readonly Span[],
+  sound?: SoundApart,
+): PlainCut | null {
+  const own = clipSourceFrom(file.tracks)
+  const source = pairedSource(file, sound)
+  if (!source || !own) return null
+
+  const paired = source.audio !== undefined && own.audio === undefined
 
   const cover = presentationSpan(source.video)
   let longest: Span | undefined
@@ -172,5 +292,34 @@ export function cutPlain(file: PlainFile, buffered: readonly Span[]): PlainCut |
   const of = (kind: 'video' | 'audio'): number =>
     file.tracks.filter((track) => track.kind === kind).length
 
-  return { plan, stretches, alternate: of('video') > 1 || of('audio') > 1 }
+  return {
+    plan,
+    stretches,
+    alternate: of('video') > 1 || of('audio') > 1,
+    paired,
+    // The track ran out before the picture did. Measured against the clip that was actually
+    // planned and not against the two files' lengths: what the user is owed a word about is the
+    // silence at the end of the file they are about to be handed.
+    soundShort: paired && soundEndsEarly(plan, longest),
+  }
+}
+
+/**
+ * Whether the sound of a planned clip stops before its picture does.
+ *
+ * Half a frame of slack, because the two tracks end on different grids: a frame of MPEG-1 audio
+ * at 44.1 kHz is 26 ms, and the last one to begin inside the clip carries sound past its end as
+ * often as not. What is being looked for is a track that is short by seconds.
+ */
+function soundEndsEarly(plan: ExportPlan, span: Span): boolean {
+  const audio = plan.tracks.find((track) => track.kind === 'audio')
+  if (!audio) return false
+
+  let ticks = 0
+  for (const sample of audio.samples) ticks += sample.duration
+
+  const sounded = ticks / audio.timescale
+  const half = audio.samples.length ? audio.samples[0]!.duration / audio.timescale / 2 : 0
+
+  return sounded + half < span.end - span.start
 }
