@@ -29,6 +29,22 @@ const capture = vi.fn(async (): Promise<ImageBitmap> => {
 
 const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
 
+/**
+ * A capture held open by hand, so that a picture can be caught while it is still being made.
+ *
+ * `createImageBitmap` answers a promise, and everything the source does about a picture — filing
+ * it, closing it, letting the next seek go — happens when that promise lands. A test that wants
+ * to say anything about that window has to hold it open.
+ */
+const heldCapture = () => {
+  let release = (): void => {}
+  const slow = async (): Promise<ImageBitmap> => {
+    await new Promise<void>((resolve) => { release = resolve })
+    return capture()
+  }
+  return { slow, finish: (): void => release() }
+}
+
 const stand = (options = {}) => {
   const video = document.createElement('video')
   const drawn: number[] = []
@@ -43,7 +59,7 @@ const stand = (options = {}) => {
 
 describe('thumbSource', () => {
   it('keeps one seek in flight and lets the last request win', async () => {
-    const { video, source, arrive } = stand()
+    const { video, source, drawn, arrive } = stand()
 
     source.want(1)
     source.want(5)
@@ -56,6 +72,28 @@ describe('thumbSource', () => {
     await arrive()
     expect(source.seeks).toBe(2)
     expect(video.currentTime).toBeCloseTo(table.seekTimeOf(9), 9)
+
+    // One picture landed, so the interface was asked to repaint once — and asked while the
+    // element still stood where that picture was taken. A source that files a bitmap and tells
+    // nobody leaves the box showing the frame before it until the pointer happens to move again.
+    expect(drawn).toHaveLength(1)
+    expect(drawn[0]).toBeCloseTo(table.seekTimeOf(1), 9)
+  })
+
+  it('leaves alone a seek it did not ask for', async () => {
+    const { source, arrive } = stand()
+    const taken = fakes.length
+
+    // Nothing has been asked for, and the element moved anyway: a player, a scrub bar, or the
+    // browser restoring a position. Two parties correcting one element is a fight neither wins,
+    // and a capture answered here spends a decode nobody wanted and files the picture under the
+    // −1 that means «nothing is in flight» — where `shown` would go on offering it as the frame
+    // before the first one.
+    await arrive()
+
+    expect(source.seeks).toBe(0)
+    expect(fakes).toHaveLength(taken)
+    expect(source.shown(-1)).toBeNull()
   })
 
   it('costs nothing to come back to a frame already seen', async () => {
@@ -114,11 +152,7 @@ describe('thumbSource', () => {
     // createImageBitmap reads the frame the element is showing at the moment it runs. A seek
     // issued while that read is outstanding moves the element under it, and the picture filed
     // against one frame is of another.
-    let finish = (): void => {}
-    const slow = async (): Promise<ImageBitmap> => {
-      await new Promise<void>((resolve) => { finish = resolve })
-      return capture()
-    }
+    const { slow, finish } = heldCapture()
     const { source, arrive } = stand({ capture: slow })
 
     source.want(2)
@@ -154,5 +188,27 @@ describe('thumbSource', () => {
     video.dispatchEvent(new Event('seeked'))
     await settle()
     expect(fakes).toHaveLength(taken)
+  })
+
+  it('closes a picture that lands after it has been closed', async () => {
+    // The window this is about is the one the whole file is written around: a capture already
+    // outstanding when the box is closed. The map the picture would be filed into has just been
+    // emptied, so it lands where nothing will ever look at it again — sixty kilobytes outside the
+    // JS heap, held until the tab is. A pointer leaving the strip mid-sweep does this every time.
+    const { slow, finish } = heldCapture()
+    const { source, arrive } = stand({ capture: slow })
+
+    source.want(2)
+    await arrive()
+    const taken = fakes.length
+
+    source.close()
+    finish()
+    await settle()
+
+    // The capture really was outstanding across the close, and really did land afterwards.
+    expect(fakes).toHaveLength(taken + 1)
+    expect(fakes[fakes.length - 1]!.closed).toBe(true)
+    expect(source.shown(2)).toBeNull()
   })
 })

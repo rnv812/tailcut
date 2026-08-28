@@ -175,6 +175,15 @@ test('draws the wave inside the band of the sound lane', async ({ page }) => {
   expect(found.count).toBeGreaterThan(500)
   expect(found.top).toBeGreaterThanOrEqual(found.band.top)
   expect(found.bottom).toBeLessThanOrEqual(found.band.top + found.band.height)
+
+  // And that what is inside the band has a shape. The three lines above are all satisfied by a
+  // wave collapsed to the silence line — every column one pixel tall in the middle of the lane —
+  // because a thousand such columns clear the count and a line through the middle is inside the
+  // band by definition; measured, that is exactly what happens when the two rows of paintWaveform
+  // are replaced by `band.mid`. The loudest bucket of this fixture is 16 of 127 and the band is
+  // 43 CSS pixels tall, so the ink reaches about 2.6 pixels either side of the middle: four rows
+  // top to bottom, where a flat line gives none.
+  expect(found.bottom - found.top).toBeGreaterThanOrEqual(3)
 })
 
 test('keeps the interface answering while it reads', async ({ page }) => {

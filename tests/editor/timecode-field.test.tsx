@@ -115,12 +115,18 @@ describe('TimecodeField', () => {
     await type('+10')
     await press('Enter')
 
-    expect(new Set(onCommit.mock.calls.map(([time]) => time))).toEqual(new Set([40]))
+    // Both calls, in order, and not the set of the numbers they carried: a set of one is what
+    // three calls of 40 make too, and the sentence being made here is about how many.
+    expect(onCommit.mock.calls).toEqual([[40], [40]])
   })
 
   it('puts the value back on Escape', async () => {
+    // What is typed has to be readable, and that is the whole of the second line below. Escape
+    // means «forget what I was typing», and a box that committed on it instead would be caught
+    // only by an entry it could commit: with rubbish in it the commit answers null and calls
+    // nobody, and «onCommit was not called» is then true of every implementation there is.
     const onCommit = await show(30)
-    await type('nonsense')
+    await type('1:23')
     await press('Escape')
 
     expect(field().value).toBe('00:00:30:00')

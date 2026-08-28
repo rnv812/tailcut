@@ -78,13 +78,32 @@ const afterEffects = async (): Promise<void> => {
 }
 
 describe('FramePreview', () => {
-  it('stays out of the way while the pointer is not over the strip', () => {
+  it('stays out of the way while the pointer is not over the strip', async () => {
+    let taken = 0
+    vi.stubGlobal('createImageBitmap', async () => {
+      taken++
+      return { close: () => {} } as unknown as ImageBitmap
+    })
+
     render(<FramePreview preview={preview} hover={null} widthPx={1_000} fps={FPS} />, host)
+    await afterEffects()
 
     expect(host.querySelector<HTMLElement>('[data-testid="thumb"]')!.hidden).toBe(true)
     // The element is still there: unmounting it would throw away the cache and the decoder, and
     // the next hover would start from nothing again.
-    expect(host.querySelector('video')!.src).toBe('blob:tailcut/preview')
+    const video = host.querySelector('video')!
+    expect(video.src).toBe('blob:tailcut/preview')
+
+    // Mounted is not working. With no pointer there is no frame, and a box that read that as
+    // frame 0 would sit behind the timeline asking for a decode nobody wanted and answering a
+    // `seeked` that belongs to whoever else moved the element.
+    video.dispatchEvent(new Event('seeked'))
+    await afterEffects()
+
+    expect(taken).toBe(0)
+    expect(video.dataset.seeks).toBeUndefined()
+    expect(host.querySelector('[data-testid="thumb-shot"]')!.getAttribute('data-exact')).toBe('no')
+    expect(draws.some((call) => call.op === 'drawImage')).toBe(false)
   })
 
   it('says the timecode of the frame under the pointer straight away', () => {
