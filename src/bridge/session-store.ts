@@ -414,12 +414,14 @@ function extentOf(chunks: Chunk[]): Span | null {
 function omissionsOf(losses: {
   refusedTracks: boolean
   rendition: boolean
+  alternate: boolean
   stretches: number
 }): Omission[] {
   const omitted: Omission[] = []
 
   if (losses.refusedTracks) omitted.push('track')
   if (losses.rendition) omitted.push('rendition')
+  if (losses.alternate) omitted.push('alternate')
   if (losses.stretches > 1) omitted.push('gap')
 
   return omitted
@@ -497,7 +499,10 @@ function planPlainSave(session: Session, material: PlainMaterial): SavePlan {
     bytes: cut.plan.bytes,
     omitted: omissionsOf({
       refusedTracks: session.refusedTracks || material.file.refusedTracks,
-      rendition: cut.rendition,
+      // A file states its tracks once and for all, so a second one of a kind in it is other
+      // material rather than the same material at another quality: see PlainCut.alternate.
+      rendition: false,
+      alternate: cut.alternate,
       stretches: cut.stretches,
     }),
   }
@@ -530,6 +535,10 @@ function planCapturedSave(session: Session): SavePlan {
       // costs the file nothing, and warning about it would be a warning about every quality
       // switch the moment it happens.
       rendition: session.tracks.some((t) => !chosen.includes(t) && t.map.duration() > 0),
+      // Nothing captured is an alternate. A stream out of MediaSource is opened by an init, and a
+      // second init of a kind on one page is the page switching quality (§6.2) — two languages
+      // would be two sessions, because the codecs are part of the merge key.
+      alternate: false,
       stretches: stretches.length,
     }),
   }

@@ -103,7 +103,7 @@ type MessageListener = (event: MessageEvent) => void
 type Summary = SessionSummary
 
 /** The reasons a summary may give for the file holding less than the session does. */
-const OMISSIONS = ['track', 'rendition', 'gap']
+const OMISSIONS = ['track', 'rendition', 'alternate', 'gap']
 
 /** A session summary by the facts: postMessage has no types, so the value has to be checked. */
 function isSummary(value: unknown): value is SessionSummary {

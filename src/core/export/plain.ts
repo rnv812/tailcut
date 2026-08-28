@@ -116,8 +116,15 @@ export interface PlainCut {
   plan: ExportPlan
   /** How many separate stretches of the material the element holds; the longest is saved. */
   stretches: number
-  /** The file holds more than one track of a kind, and one file carries one of them. */
-  rendition: boolean
+  /**
+   * The file holds more than one track of a kind, and a clip carries one of each.
+   *
+   * An alternate and not a rendition (§6.2): a file on somebody's server states its tracks once
+   * and for all, and a second one of a kind in it is other material — a dub beside the original,
+   * a commentary beside the film — rather than the same material recorded over again at another
+   * quality. Measured on w3schools' mov_bbb.mp4: one picture, two soundtracks.
+   */
+  alternate: boolean
 }
 
 /**
@@ -155,5 +162,5 @@ export function cutPlain(file: PlainFile, buffered: readonly Span[]): PlainCut |
   const of = (kind: 'video' | 'audio'): number =>
     file.tracks.filter((track) => track.kind === kind).length
 
-  return { plan, stretches, rendition: of('video') > 1 || of('audio') > 1 }
+  return { plan, stretches, alternate: of('video') > 1 || of('audio') > 1 }
 }

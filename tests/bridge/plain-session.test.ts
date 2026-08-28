@@ -10,6 +10,15 @@ import { decodeWarnings, probeFile, writeTemp } from '../support/media'
 
 const whole = new Uint8Array(readFileSync('tests/fixtures/plain/whole.mp4'))
 
+/**
+ * The same recording with a second soundtrack beside the first: one picture, two sounds.
+ *
+ * The shape of w3schools' mov_bbb.mp4, and a shape a save really does lose something to — one
+ * file carries one track of each kind. What it does not lose is a quality: the two soundtracks
+ * are a dub beside the original, and neither of them is the other recorded over again.
+ */
+const twoSound = new Uint8Array(readFileSync('tests/fixtures/plain/two-sound.mp4'))
+
 /** A whole webm: the init segment and its clusters laid end to end, as a server would hold them. */
 const webm = new Uint8Array(
   Buffer.concat([
@@ -397,6 +406,29 @@ describe('what an ordinary file promises, and what it delivers', () => {
     const session = page.store.list()[0]!
     expect(summarize(session)).toEqual({ duration: 0, bytes: 0 })
     expect(await writeSaveFile(planSave(session).source)).toBeNull()
+  })
+
+  it('says a second soundtrack is left behind without calling it another quality', async () => {
+    const page = registry({ [CLIP]: twoSound })
+
+    page.says()
+    page.store.promotePending(SOURCE)
+    await page.store.settled()
+
+    const session = page.store.list()[0]!
+    const summary = summarize(session)
+
+    // Something really is dropped, so a word is owed. But `rendition` is the word for §6.2 — the
+    // same material recorded over again at another quality — and over this file it told the user
+    // their video had been "recorded at more than one quality" when what it holds is a second
+    // language.
+    expect(summary.omits).toBe('alternate')
+
+    // And the file delivers exactly what that word promises: one track of each kind, both whole.
+    const { probe } = await saved(session, 'plain-session-two-sound.mp4')
+    expect(probe.stderr).toBe('')
+    expect(probe.probed!.streams.map((stream) => stream.codec_type)).toEqual(['video', 'audio'])
+    expect(Number(probe.probed!.format.duration)).toBeCloseTo(summary.duration, 1)
   })
 
   it('gives up the material eviction has taken, and keeps giving it up', async () => {

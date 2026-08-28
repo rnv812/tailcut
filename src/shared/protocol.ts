@@ -101,9 +101,14 @@ export const SOURCE_EVENT = 'tailcut:source'
  *   out, nothing of it was ever collected, and the file is short of a whole kind of media.
  * - `rendition` — the picture or the sound was recorded at more than one quality (§6.2), and
  *   one file carries one of them.
+ * - `alternate` — the material holds more than one track of a kind, and one file carries one of
+ *   each. Kept apart from `rendition` because the two are different news: a rendition is the
+ *   same material over again at another quality, an alternate is other material altogether —
+ *   a dub beside the original, a commentary beside the film. Measured on w3schools' mov_bbb.mp4,
+ *   one picture and two soundtracks, which the popup called "recorded at more than one quality".
  * - `gap` — the material is not continuous, and a save takes the longest unbroken stretch.
  */
-export type Omission = 'track' | 'rendition' | 'gap'
+export type Omission = 'track' | 'rendition' | 'alternate' | 'gap'
 
 /**
  * Summary of one session of the registry: this is what the bridge answers a list request with,

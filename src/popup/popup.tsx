@@ -42,6 +42,7 @@ const PROTECTED =
 const OMITTED: Record<Omission, string> = {
   track: 'One track is in a format tailcut cannot save.',
   rendition: 'Recorded at more than one quality; one is saved.',
+  alternate: 'This file has more than one picture or sound track; one of each is saved.',
   gap: 'Recording has gaps: the longest piece is saved.',
 }
 

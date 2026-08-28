@@ -255,6 +255,9 @@ describe('the popup', () => {
   it.each<[Omission, string]>([
     ['track', 'One track is in a format tailcut cannot save.'],
     ['rendition', 'Recorded at more than one quality; one is saved.'],
+    // Not the same news as a rendition, and it was told as one: over a file holding one picture
+    // and two soundtracks the popup said the video had been recorded at more than one quality.
+    ['alternate', 'This file has more than one picture or sound track; one of each is saved.'],
     ['gap', 'Recording has gaps: the longest piece is saved.'],
   ])('says what the file will be missing when part of it cannot be saved (%s)', async (
     omits,

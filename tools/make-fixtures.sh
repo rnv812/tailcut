@@ -325,4 +325,23 @@ ffmpeg -y -i "$work/source-watched.mp4" -c copy -f mp4 "$out/plain/watched.mp4"
 ffmpeg -y -i "$work/source-watched.mp4" -c copy -f mp4 -movflags +faststart \
        "$out/plain/watched-faststart.mp4"
 
+# One picture and two sound tracks: a file that holds alternates rather than qualities.
+#
+# The shape measured on w3schools' mov_bbb.mp4, and the reason `alternate` exists as a word of its
+# own. A save takes one track of each kind, so something really is left behind and the popup owes
+# the user a line about it — but nothing here was recorded twice over, and calling the second
+# soundtrack another quality of the first was a sentence about a file of a different shape.
+#
+# The two are given languages so that what they are is written in the file and not only in this
+# comment: a dub beside the original, which is what a second sound track is on the web.
+ffmpeg -y -f lavfi -i "color=c=#202040:s=256x144:r=10:d=6" \
+       -f lavfi -i "sine=frequency=440:duration=6" \
+       -f lavfi -i "sine=frequency=880:duration=6" \
+       -filter:v "drawbox=x='mod(t*60\,220)':y='60+40*sin(t)':w=30:h=30:color=orange:t=fill" \
+       -map 0:v -map 1:a -map 2:a \
+       -c:v libx264 -profile:v main -crf 30 -g 20 -keyint_min 20 -sc_threshold 0 \
+       -pix_fmt yuv420p -c:a aac -b:a 16k -ar 22050 -ac 1 \
+       -metadata:s:a:0 language=eng -metadata:s:a:1 language=rus \
+       -shortest -f mp4 "$out/plain/two-sound.mp4"
+
 ls -la "$out/h264" "$out/minute" "$out/vp9" "$out/av1" "$out/webm" "$out/muxed" "$out/muxed-edits" "$out/multi" "$out/cenc" "$out/plain"
