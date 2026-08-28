@@ -5,6 +5,7 @@ import { Shell, type EditorState } from '../../src/editor/shell'
 import { planSnapshot, type SnapshotSource } from '../../src/core/snapshot/build'
 import { SnapshotReader } from '../../src/core/snapshot/read'
 import { materialOf } from '../../src/core/snapshot/material'
+import { FrameTable } from '../../src/core/timeline/frames'
 import { concatBytes } from '../../src/core/iso/writer'
 
 const page = {
@@ -60,7 +61,7 @@ async function ready(): Promise<Extract<EditorState, { status: 'ready' }>> {
     file.byteLength,
   ))!
 
-  return { status: 'ready', reader, material: materialOf(reader.index) }
+  return { status: 'ready', reader, material: materialOf(reader.index), preview: null }
 }
 
 const show = (state: EditorState) => render(<Shell state={state} />, document.body)
@@ -141,5 +142,43 @@ describe('the editor shell', () => {
     show({ status: 'failed', reason: 'missing' })
     expect(document.querySelector('[data-testid="player"]')).toBeNull()
     expect(document.querySelector('[data-testid="timeline"]')).toBeNull()
+  })
+
+  it('leaves the player pane in place while the preview is being assembled', async () => {
+    show({ ...(await ready()), preview: 'building' } as EditorState)
+
+    expect(document.querySelector('[data-testid="player"]')).not.toBeNull()
+    expect(document.querySelector('[data-testid="preview"]')).toBeNull()
+    expect(document.body.textContent).toContain('Building the preview')
+  })
+
+  it('says why there is nothing to play in a snapshot with no picture', async () => {
+    show({ ...(await ready()), preview: null } as EditorState)
+    expect(document.body.textContent).toContain('no picture in this recording')
+  })
+
+  it('puts the element and the frame readout in the player pane once there is a preview', async () => {
+    const frames = Array.from({ length: 5 }, (_, at) => ({
+      pts: at / 25,
+      out: at / 25,
+      duration: 1 / 25,
+      sync: at === 0,
+      source: { at, length: 1 },
+    }))
+    const preview = {
+      url: 'blob:preview',
+      bytes: 10,
+      frames: FrameTable.of(frames),
+      release: () => {},
+    }
+
+    show({ ...(await ready()), preview } as EditorState)
+
+    expect(document.querySelector<HTMLVideoElement>('[data-testid="preview"]')!.src).toBe(
+      'blob:preview',
+    )
+    expect(text('frame')).toBe('1')
+    expect(text('frame-count')).toBe('5')
+    expect(text('timecode')).toBe('00:00:00:00')
   })
 })

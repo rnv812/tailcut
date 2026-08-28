@@ -1,11 +1,20 @@
+import { useState } from 'preact/hooks'
 import { gapsBetween, type Material, type MaterialTrack } from '../core/snapshot/material'
 import type { SnapshotReader } from '../core/snapshot/read'
+import { Player } from './player/player'
+import type { Preview } from './source/preview'
 import type { SnapshotFailure } from './source/snapshot'
 
 export type EditorState =
   | { status: 'opening' }
   | { status: 'failed'; reason: SnapshotFailure }
-  | { status: 'ready'; reader: SnapshotReader; material: Material }
+  | {
+      status: 'ready'
+      reader: SnapshotReader
+      material: Material
+      /** 'building' while the preview is being assembled; null when the snapshot has no picture. */
+      preview: Preview | 'building' | null
+    }
 
 /**
  * What the editor says when there is nothing to edit.
@@ -83,6 +92,8 @@ function Inspector({ material }: { material: Material }) {
 }
 
 export function Shell({ state }: { state: EditorState }) {
+  const [index, setIndex] = useState(0)
+
   if (state.status === 'opening') {
     return <div class="pad muted">Opening the recording…</div>
   }
@@ -98,6 +109,12 @@ export function Shell({ state }: { state: EditorState }) {
   const { material } = state
   const page = state.reader.index.page
   const gaps = material.video ? gapsBetween(material.video.runs) : []
+  const preview = state.preview
+  const total = preview && preview !== 'building' ? preview.frames.count() : 0
+  // Relative, and clamped where the total is known: a burst of key repeats lands in one batch,
+  // and thirty handlers each adding one to the same stale number would advance the playhead by one.
+  const step = (delta: number) =>
+    setIndex((was) => Math.min(Math.max(was + delta, 0), Math.max(total - 1, 0)))
 
   return (
     <div class="editor">
@@ -119,7 +136,17 @@ export function Shell({ state }: { state: EditorState }) {
         </div>
       </header>
 
-      <section class="player" data-testid="player" />
+      {preview === 'building' ? (
+        <section class="player" data-testid="player">
+          <p class="muted">Building the preview…</p>
+        </section>
+      ) : preview ? (
+        <Player preview={preview} index={index} onStep={step} onSeek={setIndex} />
+      ) : (
+        <section class="player" data-testid="player">
+          <p class="muted">There is no picture in this recording to play back.</p>
+        </section>
+      )}
       <section class="timeline" data-testid="timeline" />
       <Inspector material={material} />
     </div>
