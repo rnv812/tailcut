@@ -72,6 +72,56 @@ function fakeIo(overrides: Partial<ExportIo> = {}): ExportIo & { saved: Saved[] 
   }
 }
 
+/** A turn of the event loop, which drains whatever number of awaits the runner takes. */
+const turn = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
+
+/**
+ * Reads that park until they are let go, so a command can land in the middle of a run.
+ *
+ * Cancel and retry are two clicks a second apart at most, and what they race is a read in flight
+ * — not the gap between two runs. Holding the reads is the only way to put a test in that gap on
+ * purpose. `short` names parked reads, by the order they parked, that come back a byte light: a
+ * run that has been called off can still be handed material that has gone away.
+ */
+function heldIo(
+  short: readonly number[] = [],
+): ExportIo & { saved: Saved[]; release(): void; peakReads(): number } {
+  const io = fakeIo()
+  const parked: Array<() => void> = []
+  let holding = true
+  let seen = 0
+  let open = 0
+  let peak = 0
+
+  return {
+    saved: io.saved,
+    peakReads: () => peak,
+
+    read: async (at: Located) => {
+      open += 1
+      peak = Math.max(peak, open)
+      try {
+        let cut = false
+        if (holding) {
+          cut = short.includes(seen++)
+          await new Promise<void>((resolve) => parked.push(resolve))
+        }
+        const bytes = await io.read(at)
+        return cut ? bytes.subarray(0, bytes.byteLength - 1) : bytes
+      } finally {
+        open -= 1
+      }
+    },
+
+    save: io.save,
+
+    release(): void {
+      holding = false
+      for (const resolve of parked.splice(0)) resolve()
+    },
+  }
+}
+
 describe('planSlices', () => {
   it('reads a clip in one go when its samples lie together', () => {
     expect(planSlices(planFor(0.5, 1.5))).toHaveLength(1)
@@ -303,6 +353,195 @@ describe('the export runner', () => {
     expect(runner.queue().jobs[0]!.state).toBe('done')
     expect(runner.queue().jobs[0]!.error).toBeUndefined()
     expect(io.saved).toHaveLength(1)
+  })
+
+  it('writes one file when a job is retried while the run it called off is still reading', async () => {
+    // The sequence a user can type in a second: Cancel, then Try again, while the run is parked
+    // on a read. Retry used to clear the very flag the running loop read, so the run woke up
+    // believing it had never been called off — it read on, saved, and reported done, and the
+    // second run saved the same name again. One "Saved" row in the queue, two files on disk.
+    const io = heldIo()
+    const runner = createRunner(io, { parallel: 1, sliceBytes: 4_096 })
+
+    runner.enqueue([request('c1', planFor(0, 6))])
+    const id = runner.queue().jobs[0]!.id
+    expect(runner.queue().jobs[0]!.state).toBe('running')
+
+    runner.cancel(id)
+    runner.retry(id)
+    io.release()
+    await runner.settled()
+    // Settled says a row reached done. The run that was called off is still coming back from its
+    // read, and these are the turns on which it would save.
+    await turn()
+    await turn()
+
+    expect(io.saved.map((one) => one.fileName)).toEqual(['c1.mp4'])
+    expect(runner.queue().jobs.map((job) => job.state)).toEqual(['done'])
+  })
+
+  it('keeps a stale run from failing the attempt that replaced it', async () => {
+    // The same two clicks, and this time the material goes away under the run that was called
+    // off. Its error belongs to nobody: the only row left to land on is the fresh attempt, which
+    // has not read a byte, and 'fail' takes a waiting job as readily as a running one. The file
+    // went out and the queue said it had not.
+    const io = heldIo([0])
+    const runner = createRunner(io, { parallel: 1, sliceBytes: 4_096 })
+
+    runner.enqueue([request('c1', planFor(0, 6))])
+    const id = runner.queue().jobs[0]!.id
+
+    runner.cancel(id)
+    runner.retry(id)
+    io.release()
+    await runner.settled()
+    await turn()
+
+    expect(runner.queue().jobs[0]!.state).toBe('done')
+    expect(runner.queue().jobs[0]!.error).toBeUndefined()
+    expect(io.saved.map((one) => one.fileName)).toEqual(['c1.mp4'])
+  })
+
+  it('does not start the fresh attempt until the run it replaced has let go', async () => {
+    // One clip, one run, always. Two runs of a clip hold that clip's material twice over, and
+    // worse than the memory: the runner keeps its marks by job id, so the run winding down would
+    // clear the point of no return belonging to the run beside it — and the file goes out twice
+    // again by a longer road. The retried row waits, visibly, and starts when the other lets go.
+    const io = heldIo()
+    const runner = createRunner(io, { parallel: 1, sliceBytes: 4_096 })
+
+    runner.enqueue([request('c1', planFor(0, 6))])
+    const id = runner.queue().jobs[0]!.id
+
+    runner.cancel(id)
+    runner.retry(id)
+    expect(runner.queue().jobs[0]!.state).toBe('queued')
+
+    io.release()
+    await runner.settled()
+    await turn()
+
+    expect(io.peakReads()).toBe(1)
+    expect(io.saved.map((one) => one.fileName)).toEqual(['c1.mp4'])
+  })
+
+  it('stops a file called off on the last thing the queue was told about it', async () => {
+    // The gate before the save, and the way to arrive at it: subscribers are told synchronously,
+    // so a listener that calls off on the closing progress report lands after the read loop has
+    // run out of turns. Past that gate the file is the browser's, so the answer has to be no
+    // here — or the row says "Cancelled" over a file that went out all the same.
+    const io = fakeIo()
+    const runner = createRunner(io, { parallel: 1, sliceBytes: 4_096 })
+
+    runner.enqueue([request('c1', planFor(0, 6))])
+    const id = runner.queue().jobs[0]!.id
+    runner.subscribe((queue) => {
+      const job = queue.jobs[0]!
+      if (job.state === 'running' && job.progress === 1) runner.cancel(id)
+    })
+
+    await runner.settled()
+    await turn()
+
+    expect(runner.queue().jobs[0]!.state).toBe('cancelled')
+    expect(io.saved).toEqual([])
+  })
+
+  it('refuses to call off a file already handed over, and does not write a second one', async () => {
+    // The narrow end of the same window. Past the save there is nothing left to stop: the row
+    // must not say it was stopped, and Try again must not open a second file behind the first.
+    const io = fakeIo()
+    const saves: Array<() => void> = []
+    const holding: ExportIo = {
+      read: io.read,
+      save: async (file, fileName) => {
+        await new Promise<void>((resolve) => saves.push(resolve))
+        await io.save(file, fileName)
+      },
+    }
+    const runner = createRunner(holding, { parallel: 1 })
+
+    runner.enqueue([request('c1', planFor(0.5, 1.5))])
+    await turn()
+    const id = runner.queue().jobs[0]!.id
+    expect(saves).toHaveLength(1)
+
+    runner.cancel(id)
+    expect(runner.queue().jobs[0]!.state).toBe('running')
+    runner.retry(id)
+
+    // Let go of whatever save is waiting, turn by turn: a second run would park on one of its own.
+    for (let round = 0; round < 4; round++) {
+      for (const resolve of saves.splice(0)) resolve()
+      await turn()
+    }
+
+    expect(io.saved.map((one) => one.fileName)).toEqual(['c1.mp4'])
+    expect(runner.queue().jobs.map((job) => job.state)).toEqual(['done'])
+  })
+
+  it('leaves a run alone when Try again is asked of a job that never stopped', async () => {
+    // The queue refuses this: Try again is not offered on a row that is still writing. The
+    // runner must refuse it the same way and not merely ignore it — a job whose attempt turned
+    // over behind the refusal would have its run go stale with nothing waiting to replace it,
+    // and the row would sit at "Writing" for ever over a file that never arrived.
+    const io = heldIo()
+    const runner = createRunner(io, { parallel: 1, sliceBytes: 4_096 })
+
+    runner.enqueue([request('c1', planFor(0, 6))])
+    const id = runner.queue().jobs[0]!.id
+
+    runner.retry(id)
+    expect(runner.queue().jobs[0]!.state).toBe('running')
+
+    io.release()
+    await runner.settled()
+    await turn()
+
+    expect(runner.queue().jobs[0]!.state).toBe('done')
+    expect(io.saved.map((one) => one.fileName)).toEqual(['c1.mp4'])
+  })
+
+  it('lets a retried job be called off again after a save that fell over', async () => {
+    // The point of no return belongs to one attempt and not to the job. A save that threw leaves
+    // the row failed, and the mark behind it has to go the same way: the attempt that follows is
+    // called off in its reads like any other. A Cancel button that does nothing is a lie, and a
+    // job that cannot be called off is a job that writes its file whatever the user asks.
+    const io = fakeIo()
+    const parked: Array<() => void> = []
+    let refuse = true
+    let holding = false
+    const flaky: ExportIo = {
+      read: async (at: Located) => {
+        if (holding) await new Promise<void>((resolve) => parked.push(resolve))
+        return io.read(at)
+      },
+      save: async (file, fileName) => {
+        if (refuse) throw new Error('not this time')
+        await io.save(file, fileName)
+      },
+    }
+    const runner = createRunner(flaky, { parallel: 1, sliceBytes: 4_096 })
+
+    runner.enqueue([request('c1', planFor(0, 6))])
+    await runner.settled()
+    expect(runner.queue().jobs[0]!.state).toBe('failed')
+
+    refuse = false
+    holding = true
+    const id = runner.queue().jobs[0]!.id
+    runner.retry(id)
+    expect(runner.queue().jobs[0]!.state).toBe('running')
+
+    runner.cancel(id)
+    expect(runner.queue().jobs[0]!.state).toBe('cancelled')
+
+    holding = false
+    for (const resolve of parked.splice(0)) resolve()
+    await turn()
+    await turn()
+
+    expect(io.saved).toEqual([])
   })
 
   it('tells whoever is listening, and lets them go', async () => {
