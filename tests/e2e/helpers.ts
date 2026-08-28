@@ -1,4 +1,4 @@
-import { chromium, expect, type BrowserContext, type Page } from '@playwright/test'
+import { chromium, expect, type BrowserContext, type Download, type Page } from '@playwright/test'
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import os from 'node:os'
@@ -323,7 +323,13 @@ export function frameTimes(file: string, stream: 'v' | 'a'): number[] {
 
   return probe.stdout
     .split('\n')
-    .map((line) => Number(line.trim().replace(/,$/, '')))
+    .map((line) => line.trim().replace(/,$/, ''))
+    // The blank line at the end of the output is dropped before the number is read out of it, and
+    // not by `Number.isFinite` afterwards: `Number('')` is 0, not NaN, so the filter let the blank
+    // through as a frame standing at the start of the file. Every file this helper has ever been
+    // asked about came back one frame longer than it is, with a duplicate at time zero.
+    .filter((text) => text !== '' && text !== 'N/A')
+    .map(Number)
     .filter((time) => Number.isFinite(time))
     .sort((a, b) => a - b)
 }
@@ -553,4 +559,157 @@ export async function playInBrowser(file: string): Promise<Playback> {
   } finally {
     await browser.close()
   }
+}
+
+/**
+ * Types a timecode into one of the editor's boxes, commits it, and waits for the box to let go.
+ *
+ * The turn of the event loop between the filling and the Enter is not decoration. The Enter
+ * handler on the node is the one the last render put there and it closes over the text of that
+ * render; filled and pressed inside one turn it commits the text from before the fill — observed
+ * committing nothing at all under four workers (Task 14, and `enter` in editor-keys.spec.ts says
+ * the same thing about the same field).
+ *
+ * The focus at the end matters as much as the Enter. The editor turns its whole keyboard off
+ * while a text field has the focus (Task 14) — otherwise `s` in a clip's name would split the
+ * clip — so a press of `i` straight after typing would arrive in the box as a letter and mark
+ * nothing. The field gives the focus back on Enter by itself (Task 13), and this insists on it
+ * rather than trusting it: blurring the box from here instead would make it let go whether the
+ * field did or not, and the regression would surface lines later as a wrong clip count with the
+ * reader sent looking at the reducer. Measured — take the blur out of the field's Enter handler
+ * and this line is what goes red, in both of the runs that use it.
+ */
+export async function typeInto(editor: Page, testid: string, text: string): Promise<void> {
+  await editor.getByTestId(testid).fill(text)
+  await editor.evaluate(
+    () => new Promise<void>((done) => requestAnimationFrame(() => setTimeout(done, 0))),
+  )
+  await editor.getByTestId(testid).press('Enter')
+  await expect(editor.getByTestId(testid)).not.toBeFocused()
+}
+
+/**
+ * The frame at a given place in the file, counted from the first frame the file shows.
+ *
+ * Counted and not timed, because a frame has a number and does not have an instant. This is the
+ * only way in this file to point at one particular frame, of a clip or of the recording, and
+ * `frameByPlaying(file, at)` is not a second one: that is `select='gte(t,at)'`, the first frame
+ * **not earlier** than `at` — the frame *on screen* at that instant, which is a different
+ * question with a different right answer at every boundary. Ask it for a frame boundary and a
+ * float a hair over the boundary takes the next frame; nudge it half a frame the way a seek in
+ * the browser is nudged (`FrameTable.seekTimeOf`, Task 6) and it takes the next frame every
+ * time, on every frame, silently. Half a frame belongs to `currentTime` and to nothing else.
+ *
+ * A second of the session is turned into a frame number by multiplying by the frame rate, which
+ * is what `sourceFrame` in the end-to-end run does.
+ *
+ * The count starts after the edit list has done its work — ffmpeg drops the head the list hides
+ * — so index zero is the frame the user asked for and not the key frame before it.
+ */
+export function frameByIndex(file: string, index: number): Buffer {
+  return decodeOneFrame(
+    [
+      '-v', 'error',
+      '-i', file,
+      '-vf', `select='eq(n\\,${index})'`,
+      '-vsync', '0',
+      '-frames:v', '1',
+      '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-',
+    ],
+    `frame ${index}`,
+  )
+}
+
+/**
+ * Runs `act`, waits for a given number of downloads out of one extension page, and gives back
+ * where each landed together with **the name the extension asked Chrome to save it under**.
+ *
+ * The action is passed in rather than done by the caller afterwards, because two things have to
+ * be in place before it runs and one of them is not a listener: three clips are written at once
+ * (§8.6), so a `waitForEvent` per file would miss the ones that arrive while it is being set up
+ * again — and the name has to be caught on its way past.
+ *
+ * The name needs catching because it does not survive the download. Under Playwright every
+ * download is redirected to an artifact of its own and named by a GUID: `suggestedFilename()`
+ * carries the GUID, and so does `filename` on Chrome's own `DownloadItem` — measured on this
+ * suite, both were `f5ec0166-…-cb8019041987.mp4` for a file the extension asked to call «test
+ * player with a hole 00.00.mp4». The only place the asked-for name still exists is the call
+ * itself, so the call is what is watched: `chrome.downloads.download` is wrapped in the page,
+ * the wrapper notes `filename` against the id Chrome hands back, and the id is what ties it to
+ * the artifact on disk. The real download still happens — the wrapper delegates and adds nothing
+ * to what is under test but a note in the margin.
+ *
+ * For an extension page, therefore, and no other: `chrome.downloads` is what it reads.
+ */
+export async function collectDownloads(
+  page: Page,
+  count: number,
+  act: () => Promise<unknown>,
+  timeoutMs = 60_000,
+): Promise<Array<{ file: string; name: string }>> {
+  await page.evaluate(() => {
+    const noted = ((window as unknown as Named).tcNames ??= {})
+    if ((window as unknown as Named).tcWrapped) return
+    ;(window as unknown as Named).tcWrapped = true
+
+    const downloads = chrome.downloads as unknown as {
+      download: (options: { filename?: string }, then?: (id?: number) => void) => void
+    }
+    const real = downloads.download.bind(chrome.downloads)
+
+    downloads.download = (options, then) =>
+      real(options, (id?: number) => {
+        if (id !== undefined && options.filename) noted[id] = options.filename
+        then?.(id)
+      })
+  })
+
+  const arrived: Array<Promise<{ file: string; id: number | null }>> = []
+
+  const landed = new Promise<Array<{ file: string; id: number | null }>>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      page.off('download', onDownload)
+      reject(new Error(`only ${arrived.length} of ${count} downloads arrived`))
+    }, timeoutMs)
+
+    function onDownload(download: Download): void {
+      arrived.push(
+        download.path().then(async (file) => {
+          if (!file) throw new Error('the download left no file on disk')
+          return { file, id: await idOfDownloadTo(page, file) }
+        }),
+      )
+
+      if (arrived.length < count) return
+      clearTimeout(timer)
+      page.off('download', onDownload)
+      resolve(Promise.all(arrived))
+    }
+
+    page.on('download', onDownload)
+  })
+
+  await act()
+  const files = await landed
+  const noted = await page.evaluate(() => (window as unknown as Named).tcNames ?? {})
+
+  return files.map(({ file, id }) => {
+    const name = id === null ? null : noted[id]
+    expect(name, `Chrome knows of no name for the file it wrote to ${file}`).toBeTruthy()
+    return { file, name: name! }
+  })
+}
+
+/** Where the wrapper above keeps what it saw, on the page it wrapped. */
+interface Named {
+  tcNames?: Record<number, string>
+  tcWrapped?: boolean
+}
+
+/** Chrome's own id for the download that landed on a given path, or null if it knows of none. */
+function idOfDownloadTo(page: Page, file: string): Promise<number | null> {
+  return page.evaluate(
+    async (path) => (await chrome.downloads.search({ filename: path }))[0]?.id ?? null,
+    file,
+  )
 }

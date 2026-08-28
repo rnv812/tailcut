@@ -45,6 +45,28 @@ the set it is in is written next to it in `playwright.config.ts`.
 
 Both run headless. `HEADED=1 npm run e2e:fast` puts the windows back.
 
+### Live sites
+
+The offline suite never goes to the network: every test serves the fixtures out of the
+repository. `tests/e2e/youtube.spec.ts` runs one set of assertions over a page shaped the way
+YouTube delivers — AV1 picture in mp4, Opus sound in WebM, two SourceBuffers — records it, opens
+the editor, cuts two seconds out by timecode and reads the file back with ffprobe. That leg runs
+by default and needs nothing but the repository.
+
+The same assertions can be pointed at the real thing, and that leg is kept out of the default run:
+
+```bash
+TAILCUT_LIVE=1 npx playwright test youtube
+```
+
+It watches a real YouTube page for twenty-five seconds and then does exactly what the offline leg
+does. An automated browser with an empty profile gets a short buffer — on the order of twenty
+seconds — so it proves the road and not the depth: a real DASH init with an edit list of its own,
+whatever codec the day serves, and a real page title in the file name.
+
+A failure there is a reason to look, not a reason to hold a release: the page belongs to somebody
+else and changes more often than the test does. A failure in the offline leg is ours.
+
 Test fixtures are generated once with `tools/make-fixtures.sh` and committed;
 ffmpeg is only needed to regenerate them. `ffprobe`, shipped with ffmpeg, is
 required by `npm test`: one check plays the assembled MP4 through it.

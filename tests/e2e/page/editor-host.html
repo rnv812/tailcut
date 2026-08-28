@@ -1,0 +1,92 @@
+<!doctype html>
+<meta charset="utf-8" />
+<!--
+  A player whose recording has a hole in it, and both tracks with it.
+
+  The second segment of each track is simply never appended: what the extension collects is two
+  runs with a gap between them, which is what the editor is for. Made this way and not by seeking
+  about, because the hole then has exactly the shape the test talks about — the picture is missing
+  2.000 seconds and the sound 1.9969, and those two numbers are the case §8.2 collapses by the
+  smaller of the two.
+-->
+<meta
+  http-equiv="Content-Security-Policy"
+  content="default-src 'self'; frame-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; media-src blob:"
+/>
+<title>test player with a hole</title>
+<!--
+  Muted, with controls, six hundred and forty wide: muted is the one kind of playback a browser
+  starts without a click, the controls are what tells triage a player from a banner, and anything
+  under three hundred and twenty pixels triage refuses outright.
+-->
+<video id="v" controls muted width="640" style="background:#000"></video>
+<script>
+  const BASE = '/fixtures/h264'
+  /** Segments one and three of each track. Two is the hole. */
+  const VIDEO = ['00001', '00003']
+  const AUDIO = ['00001', '00003']
+  /**
+   * Where the playable material stops and where it starts again.
+   *
+   * `from` is under the two seconds of picture on purpose: the sound of segment one runs out at
+   * 1.9505, and an element plays only as far as both of its tracks go. Waiting for 2.0 would be
+   * waiting for a moment that never arrives.
+   */
+  const HOLE = { from: 1.9, to: 4 }
+
+  window.tc = { failure: null, jumps: 0 }
+  window.allAppended = false
+
+  const video = document.getElementById('v')
+  const mediaSource = new MediaSource()
+  video.src = URL.createObjectURL(mediaSource)
+
+  const fetchBytes = async (url) => (await fetch(url)).arrayBuffer()
+
+  const append = (buffer, bytes) =>
+    new Promise((resolve, reject) => {
+      buffer.addEventListener('updateend', resolve, { once: true })
+      buffer.addEventListener('error', () => reject(new Error('appendBuffer failed')), {
+        once: true,
+      })
+      buffer.appendBuffer(bytes)
+    })
+
+  mediaSource.addEventListener('sourceopen', async () => {
+    try {
+      const picture = mediaSource.addSourceBuffer('video/mp4; codecs="avc1.4d401e"')
+      const sound = mediaSource.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"')
+
+      await append(picture, await fetchBytes(`${BASE}/init-stream0.m4s`))
+      await append(sound, await fetchBytes(`${BASE}/init-stream1.m4s`))
+
+      for (const n of VIDEO) await append(picture, await fetchBytes(`${BASE}/chunk-stream0-${n}.m4s`))
+      for (const n of AUDIO) await append(sound, await fetchBytes(`${BASE}/chunk-stream1-${n}.m4s`))
+
+      // Otherwise the element waits at the last frame for a continuation that is not coming.
+      mediaSource.endOfStream()
+      window.allAppended = true
+    } catch (error) {
+      // Without this the failure sinks into a rejected promise and the test waits out its timeout
+      // knowing only that nothing happened.
+      window.tc.failure = String(error)
+    }
+  })
+
+  // The player steps over the hole itself, the way a real one does. Left alone the element stalls
+  // at the end of the first run, and a stalled element earns no watched seconds — triage would
+  // never promote the session, and the test would fail for a reason that has nothing to do with
+  // what it is about.
+  //
+  // `waiting` as well as `timeupdate`: timeupdate stops the moment the element runs dry, so on a
+  // machine where the last one lands before 1.9 the jump would never be made from it alone.
+  const stepOver = () => {
+    if (video.currentTime >= HOLE.from && video.currentTime < HOLE.to) {
+      video.currentTime = HOLE.to
+      window.tc.jumps++
+    }
+  }
+
+  video.addEventListener('timeupdate', stepOver)
+  video.addEventListener('waiting', stepOver)
+</script>
