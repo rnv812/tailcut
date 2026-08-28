@@ -9,6 +9,7 @@ import {
   type Surface,
   type TimelineGesture,
 } from '../../core/timeline/gesture'
+import type { Hover } from '../../core/timeline/hover'
 import type { Lane } from '../../core/timeline/lanes'
 import {
   METRICS,
@@ -20,7 +21,7 @@ import {
   type WaveformInput,
 } from '../../core/timeline/layout'
 import type { SnapSet, SnapTarget } from '../../core/timeline/snap'
-import type { Viewport } from '../../core/timeline/view'
+import { xToTime, type Viewport } from '../../core/timeline/view'
 import { PALETTE, paintScene } from './draw'
 
 export interface TimelineProps {
@@ -41,6 +42,8 @@ export interface TimelineProps {
   onResize: (widthPx: number) => void
   /** Everything the pointer decides, decided in one place; the component only relays it. */
   onGesture: (gesture: TimelineGesture) => void
+  /** Where the pointer stands over the strip; null when it has left or a drag is under way. */
+  onHover?: (hover: Hover | null) => void
 }
 
 export function Timeline(props: TimelineProps) {
@@ -180,6 +183,32 @@ export function Timeline(props: TimelineProps) {
       window.addEventListener('pointerup', up)
     }
 
+    let hoverFrame = 0
+    let hovering: Hover | null = null
+
+    const reportHover = (): void => {
+      hoverFrame = 0
+      latest.current.onHover?.(hovering)
+    }
+
+    // A pointer reports faster than the screen redraws, and every report of it costs a seek at
+    // the other end. One a frame, and the last position wins.
+    const scheduleHover = (next: Hover | null): void => {
+      hovering = next
+      if (!hoverFrame) hoverFrame = requestAnimationFrame(reportHover)
+    }
+
+    const hover = (event: MouseEvent): void => {
+      if (drag.current) {
+        scheduleHover(null)
+        return
+      }
+      const x = event.clientX - element.getBoundingClientRect().left
+      scheduleHover({ xPx: x, time: xToTime(latest.current.view, x) })
+    }
+
+    const leave = (): void => scheduleHover(null)
+
     const wheel = (event: WheelEvent): void => {
       const box = element.getBoundingClientRect()
       const gesture = onWheel({
@@ -196,9 +225,14 @@ export function Timeline(props: TimelineProps) {
 
     element.addEventListener('wheel', wheel, { passive: false })
     element.addEventListener('pointerdown', down)
+    element.addEventListener('pointermove', hover)
+    element.addEventListener('pointerleave', leave)
     return () => {
       element.removeEventListener('wheel', wheel)
       element.removeEventListener('pointerdown', down)
+      element.removeEventListener('pointermove', hover)
+      element.removeEventListener('pointerleave', leave)
+      if (hoverFrame) cancelAnimationFrame(hoverFrame)
       release()
     }
   }, [])

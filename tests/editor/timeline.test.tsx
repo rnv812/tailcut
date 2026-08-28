@@ -2,6 +2,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render } from 'preact'
 import { Timeline } from '../../src/editor/timeline/timeline'
+import type { Hover } from '../../src/core/timeline/hover'
 import type { Lane } from '../../src/core/timeline/lanes'
 import { METRICS, rowTop, sceneHeight } from '../../src/core/timeline/layout'
 import { snapSet } from '../../src/core/timeline/snap'
@@ -19,6 +20,7 @@ interface Call {
 }
 
 let calls: Call[] = []
+const hovers: Array<Hover | null> = []
 
 /** The recording context every canvas of the test gets: happy-dom has no 2d context of its own. */
 function installContext(): void {
@@ -92,6 +94,7 @@ let host: HTMLDivElement
 
 beforeEach(() => {
   calls = []
+  hovers.length = 0
   installContext()
   installWidth(900)
   host = document.createElement('div')
@@ -116,6 +119,7 @@ const props = () => ({
   snapping: true,
   onResize: () => {},
   onGesture: () => {},
+  onHover: (hover: Hover | null) => hovers.push(hover),
 })
 
 describe('Timeline', () => {
@@ -351,5 +355,64 @@ describe('Timeline', () => {
 
     expect(calls.some((call) => call.style === PALETTE.fill.snap)).toBe(false)
     expect(calls.some((call) => call.text === 'keyframe')).toBe(false)
+  })
+
+  it('reports where the pointer is, once a frame', async () => {
+    render(<Timeline {...props()} />, host)
+    await nextFrame()
+    hovers.length = 0
+
+    const canvas = host.querySelector('canvas')!
+    // A pointer worth its price reports faster than the screen redraws; three moves inside one
+    // frame have to cost one report, and it has to be the last of them.
+    canvas.dispatchEvent(at('pointermove', 100, 40))
+    canvas.dispatchEvent(at('pointermove', 200, 40))
+    canvas.dispatchEvent(at('pointermove', 300, 40))
+    await nextFrame()
+
+    expect(hovers).toHaveLength(1)
+    // 300 px into the canvas, and not the 340 px into the page the event carries: what is
+    // reported is a place in the material, and the strip does not start at the edge of the tab.
+    expect(hovers[0]!.xPx).toBe(300)
+    // 0.05 s a pixel at the opening scale of the stand.
+    expect(hovers[0]!.time).toBeCloseTo(15, 9)
+  })
+
+  it('drops the report it had scheduled when it is taken off the page', async () => {
+    render(<Timeline {...props()} />, host)
+    await nextFrame()
+    hovers.length = 0
+
+    const canvas = host.querySelector('canvas')!
+    canvas.dispatchEvent(at('pointermove', 300, 40))
+    render(null, host)
+    await nextFrame()
+
+    // The report is a frame behind the pointer, and a timeline can leave the page inside that
+    // frame — a clip closed, a panel swapped. A report that lands afterwards asks for a seek on
+    // behalf of a strip nobody is looking at any more.
+    expect(hovers).toEqual([])
+  })
+
+  it('has nothing to show while a handle is being dragged, and nothing once the pointer leaves', async () => {
+    const clips = [{ id: 'c1', name: 'One', in: 5, out: 10, selected: true }]
+    const frames = Float64Array.from({ length: 121 }, (_, i) => i * 0.5)
+    render(<Timeline {...props()} clips={clips} frames={frames} />, host)
+    await nextFrame()
+
+    // The out handle of the clip, at 10 s and so at 200 px: the same grip the snap test takes.
+    const canvas = host.querySelector('canvas')!
+    const y = rowTop(METRICS, 1, 0) + 9
+    canvas.dispatchEvent(press(200, y))
+    hovers.length = 0
+    canvas.dispatchEvent(at('pointermove', 240, y))
+    await nextFrame()
+    expect(hovers).toEqual([null])
+
+    window.dispatchEvent(at('pointerup', 240, y))
+    hovers.length = 0
+    canvas.dispatchEvent(at('pointerleave', 240, y))
+    await nextFrame()
+    expect(hovers).toEqual([null])
   })
 })
