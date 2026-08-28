@@ -11,7 +11,9 @@ import { sampleEntryBytes, videoSampleEntry } from '../../src/core/iso/entry'
 import { parseInit } from '../../src/core/iso/init'
 import { planClip } from '../../src/core/export/plan'
 import { assembleMp4 } from '../../src/core/export/assemble'
+import { createRunner } from '../../src/core/export/run'
 import { ByteMap, clipSourceOf } from '../../src/core/export/source'
+import { concatBytes } from '../../src/core/iso/writer'
 import type { TrackKind } from '../../src/shared/types'
 
 const read = (path: string): Uint8Array => new Uint8Array(readFileSync(path))
@@ -195,6 +197,51 @@ test('a clip across a collapsed hole plays straight through', async () => {
   expect(played.error).toBeNull()
   expect(played.ended).toBe(true)
   expect(played.duration).toBeCloseTo(4, 1)
+  expect(played.frameColours).toBeGreaterThan(1)
+  expect(played.audioBytes).toBeGreaterThan(0)
+})
+
+/**
+ * The same material as one stretch of bytes, at the addresses `material()` hands out.
+ *
+ * The runner reads slices and not samples, and a slice merges everything that touches — so one of
+ * them spans the seam between two segments. `ByteMap` refuses exactly that, and rightly: it
+ * answers about samples, and a sample never crosses a segment it was indexed out of. A snapshot
+ * has no such seam, because its segments lie one after another in one file, and that is what this
+ * is: the same bytes at the same addresses, readable straight through.
+ */
+const FLAT = concatBytes([
+  ...[1, 2, 3].map((n) => read(`tests/fixtures/h264/chunk-stream0-0000${n}.m4s`)),
+  ...[1, 2, 3, 4].map((n) => read(`tests/fixtures/h264/chunk-stream1-0000${n}.m4s`)),
+])
+
+test('a clip written through the export runner, in many slices, plays in a browser', async () => {
+  const { source } = material()
+  const plan = planClip(source!, { in: 1, out: 4, sound: true })
+
+  let saved: Uint8Array | null = null
+  const runner = createRunner(
+    {
+      read: async (at) => FLAT.subarray(at.at, at.at + at.length),
+      save: async (file) => {
+        saved = file
+      },
+    },
+    // A slice small enough to force dozens of reads: the boundaries then fall between samples all
+    // over the clip, which is exactly where a wrong one would put half a frame in the file.
+    { sliceBytes: 16 * 1024 },
+  )
+
+  runner.enqueue([{ clipId: 'c1', name: 'slices', fileName: 'slices.mp4', plan }])
+  await runner.settled()
+
+  expect(runner.queue().jobs[0]!.error ?? null, 'the runner refused the clip').toBeNull()
+  expect(saved, 'the runner saved nothing').not.toBeNull()
+  const played = await playInBrowser(onDisk('e2e-runner-slices.mp4', saved!))
+
+  expect(played.error).toBeNull()
+  expect(played.ended).toBe(true)
+  expect(played.duration).toBeCloseTo(3, 1)
   expect(played.frameColours).toBeGreaterThan(1)
   expect(played.audioBytes).toBeGreaterThan(0)
 })

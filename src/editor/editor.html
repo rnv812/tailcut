@@ -78,6 +78,27 @@
               z-index: 3; }
   .tc-thumb-time { text-align: center; font-variant-numeric: tabular-nums; color: #cdd5df; }
 
+  .tc-export h2 { margin: 16px 0 6px; }
+  .tc-export > button { padding: 5px 12px; border: 1px solid #3a3f47; border-radius: 6px;
+                        background: none; color: #e8eaed; font: inherit; cursor: pointer; }
+  .tc-export > button:disabled { opacity: 0.5; cursor: default; }
+  .tc-export p { margin: 6px 0 0; font-size: 11px; }
+  .tc-jobs { list-style: none; margin: 8px 0 0; padding: 0; }
+  .tc-job { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 5px 0;
+            border-bottom: 1px solid #1b1f24; }
+  .tc-job-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+                 white-space: nowrap; }
+  .tc-job-state { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+                  color: #9aa0a6; }
+  /* Four states and four colours: a row that finished and a row that failed must not be told
+     apart by their text alone, because the text is the thing being skimmed past. */
+  .tc-job.running .tc-job-state { color: #4c8dff; }
+  .tc-job.done .tc-job-state { color: #6fbf73; }
+  .tc-job.failed .tc-job-state { color: #ff6b6b; }
+  .tc-job-error { flex-basis: 100%; color: #ffb3b3; font-size: 11px; }
+  .tc-job button { padding: 1px 6px; border: 1px solid #3a3f47; border-radius: 5px;
+                   background: none; color: #e8eaed; font: inherit; cursor: pointer; }
+
   .tc-help { position: fixed; inset: 0; background: rgba(8, 10, 12, 0.72);
              display: flex; align-items: center; justify-content: center; z-index: 10; }
   .tc-help-sheet { background: #14161a; border: 1px solid #2b3038; border-radius: 10px;

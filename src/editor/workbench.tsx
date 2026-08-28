@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from 'preact/hooks'
 import { newProject } from '../core/edit/project'
 import { newSession } from '../core/edit/session'
+import { EMPTY_QUEUE, type Queue } from '../core/export/queue'
+import { createRunner } from '../core/export/run'
+import type { ClipSource } from '../core/export/plan'
 import { STILL, shuttleAdvance, shuttleLabel, type ShuttleState, shuttled } from '../core/edit/shuttle'
 import type { Material, MaterialTrack } from '../core/snapshot/material'
 import type { SnapshotReader } from '../core/snapshot/read'
@@ -8,7 +11,9 @@ import type { Hover } from '../core/timeline/hover'
 import type { ClipBand } from '../core/timeline/layout'
 import { snapSet } from '../core/timeline/snap'
 import { HelpSheet } from './help'
+import { downloadIo, openClipSource, planOf, requestsFor } from './export/exporter'
 import { Clips } from './inspector/clips'
+import { ExportQueue } from './inspector/queue'
 import { Player } from './player/player'
 import { deriveMaterial } from './source/media'
 import type { Preview } from './source/preview'
@@ -83,6 +88,26 @@ export function Workbench({ reader, material, preview }: WorkbenchProps) {
   const [playing, setPlaying] = useState(false)
   const [shuttle, setShuttle] = useState<ShuttleState>(STILL)
   const [help, setHelp] = useState(false)
+
+  // The queue is outside the project and outside the history on purpose: a file handed to the
+  // browser cannot be taken back, so Ctrl+Z has no business touching this.
+  const [queue, setQueue] = useState<Queue>(EMPTY_QUEUE)
+  const [source, setSource] = useState<ClipSource | null>(null)
+  const runner = useMemo(() => createRunner(downloadIo(reader)), [reader])
+
+  useEffect(() => runner.subscribe(setQueue), [runner])
+
+  useEffect(() => {
+    let alive = true
+    void openClipSource(reader, material).then((opened) => {
+      if (alive) setSource(opened)
+    })
+    return () => {
+      alive = false
+    }
+  }, [reader, material])
+
+  const selected = doc.clips.find((clip) => clip.id === ui.selectedClipId)
 
   useEffect(() => {
     const job = startWaveform(reader, material, setWave)
@@ -257,6 +282,16 @@ export function Workbench({ reader, material, preview }: WorkbenchProps) {
           playhead={ui.playhead}
           fps={fps}
           dispatch={store.dispatch}
+        />
+
+        <ExportQueue
+          queue={queue}
+          ready={source !== null}
+          clips={doc.clips.length}
+          estimate={selected && source ? planOf(source, selected).bytes : null}
+          onExport={() => source && runner.enqueue(requestsFor(source, doc.clips))}
+          onRetry={(id) => runner.retry(id)}
+          onCancel={(id) => runner.cancel(id)}
         />
 
         <h2>Clip</h2>
