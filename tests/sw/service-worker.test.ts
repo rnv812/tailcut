@@ -125,8 +125,27 @@ async function importWorker() {
   return import('../../src/sw/service-worker')
 }
 
+/**
+ * The same worker with the road to the tab replaced by a refusal.
+ *
+ * Everything under badgeTextFor swallows its own errors today, so a failure has to be put there
+ * to be answered: what this pins is that the worker survives one, not that one is waiting. A
+ * service worker has nobody to hand an unhandled rejection to — the browser writes it into the
+ * extension's error list and wakes the worker to do it.
+ */
+async function importWorkerThatCannotAsk(failure: Error) {
+  vi.resetModules()
+  vi.doMock('../../src/shared/frames', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('../../src/shared/frames')>()),
+    listTabSessions: () => Promise.reject(failure),
+  }))
+  return import('../../src/sw/service-worker')
+}
+
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.doUnmock('../../src/shared/frames')
+  vi.resetModules()
 })
 
 describe('installation', () => {
@@ -245,6 +264,19 @@ describe('recounting the badge', () => {
     // The tab manages to close while the poll is running: setBadgeText refuses with a promise,
     // and an unhandled rejection would wake the worker with an error message.
     await expect(chrome.fire()).resolves.toBeUndefined()
+  })
+
+  it('does not let a failure below it out as an unhandled rejection', async () => {
+    const chrome = installChrome()
+    await importWorkerThatCannotAsk(new Error('the frames of the tab could not be asked'))
+
+    // Nothing on the way to the tab throws today: every step below has a catch of its own. That
+    // is a property of the code under this one and not a promise it can make for itself, and the
+    // alarm listener is the last place a rejection can be answered before the browser sees it.
+    await expect(chrome.fire()).resolves.toBeUndefined()
+
+    // And the badge says what is known, which after a failure is nothing.
+    expect(chrome.badgeText).toEqual([{ tabId: 7, text: '' }])
   })
 
   it('counts a recording that lives in a frame the page only embeds', async () => {

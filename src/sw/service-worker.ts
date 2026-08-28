@@ -35,8 +35,18 @@ export function formatBadge(seconds: number): string {
  * popup that now has something to show.
  */
 async function badgeTextFor(tabId: number): Promise<string> {
-  const answer = await listTabSessions(tabId)
-  return formatBadge(answer.sessions[0]?.duration ?? 0)
+  try {
+    const answer = await listTabSessions(tabId)
+    return formatBadge(answer.sessions[0]?.duration ?? 0)
+  } catch {
+    // Every step below has a catch of its own, so nothing reaches this today — and that is a
+    // property of the code down there rather than a promise this one can make. Here is the last
+    // place a failure can be answered: a service worker has nobody to hand a rejection to, and an
+    // unhandled one goes into the extension's error list and wakes the worker to put it there.
+    // Nothing is known about the tab after a failure, and an empty badge is what nothing looks
+    // like.
+    return ''
+  }
 }
 
 chrome.runtime.onInstalled.addListener(() => {
