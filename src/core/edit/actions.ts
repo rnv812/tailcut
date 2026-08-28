@@ -23,7 +23,7 @@ export type Action =
   | { type: 'seek'; time: number }
   | { type: 'zoom'; atPx: number; factor: number }
   | { type: 'pan'; dxPx: number }
-  | { type: 'trim'; id: string; edge: 'in' | 'out'; time: number }
+  | { type: 'trim'; id: string; edge: 'in' | 'out'; time: number; typed?: boolean }
   | { type: 'selectClip'; id: string | null }
   | { type: 'step'; frames: number }
   | { type: 'skip'; seconds: number }
@@ -295,7 +295,11 @@ const STEPS: ReadonlySet<Action['type']> = new Set([
  * anybody telling the history that a gesture began or ended: the key comes out of the action.
  */
 export function undoModeOf(action: Action): UndoMode {
-  if (action.type === 'trim') return { kind: 'merge', key: `trim:${action.id}:${action.edge}` }
+  // A typed value is one act and one step; a dragged one is hundreds of events that have to
+  // become a single step, and they are told apart by the action itself and by nothing else.
+  if (action.type === 'trim') {
+    return action.typed ? { kind: 'step' } : { kind: 'merge', key: `trim:${action.id}:${action.edge}` }
+  }
   if (action.type === 'renameClip') return { kind: 'merge', key: `rename:${action.id}` }
   return STEPS.has(action.type) ? { kind: 'step' } : { kind: 'skip' }
 }

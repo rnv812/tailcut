@@ -25,6 +25,23 @@ describe('formatTimecode', () => {
     // 0.999 of a second at 24 is the twenty-third frame, not the twenty-fourth.
     expect(formatTimecode(0.999, 24)).toBe('00:00:00:23')
     expect(formatTimecode(0.9999999, 24)).toBe('00:00:00:23')
+
+    // A nanosecond under a whole second is that second — the same slack that puts a time on the
+    // frame boundary it stands on. Counting the seconds and the frames apart would answer it with
+    // a frame field of 24, which is a timecode no clock shows.
+    expect(formatTimecode(1 - 1e-9, 24)).toBe('00:00:01:00')
+  })
+
+  it('shows the frame a time stands exactly on, whatever the arithmetic left behind', () => {
+    // `10 + 1/25` is not the double the literal `10.04` is, and taking the leftover of a second
+    // apart put nearly half of all frame boundaries one frame low: a playhead sitting on frame
+    // 251 read 00:00:10:00, and a field that spelled it out and read it back moved by nothing.
+    expect(formatTimecode(10 + 1 / 25, 25)).toBe('00:00:10:01')
+
+    for (let frame = 0; frame < 25; frame++) {
+      const shown = String(frame).padStart(2, '0')
+      expect(formatTimecode(83 + frame / 25, 25), `frame ${frame}`).toBe(`00:01:23:${shown}`)
+    }
   })
 
   it('counts a fractional rate at its whole one', () => {

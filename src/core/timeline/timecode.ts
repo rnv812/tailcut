@@ -11,11 +11,26 @@ export function timecodeRate(fps: number): number {
   return Number.isFinite(fps) && fps >= 1 ? Math.round(fps) : FALLBACK_RATE
 }
 
+/**
+ * How far a time may sit below a frame boundary and still be counted as standing on it.
+ *
+ * A millionth of a frame — forty nanoseconds at 25 — and it is not a rounding of the timecode
+ * but a repair of the arithmetic that produced the time. Frame boundaries are `n / fps`, and the
+ * double nearest that number is as often just under it as just over: `10 + 1/25` is smaller than
+ * the true 10.04 by 1e-15. Counted with a bare floor, nearly half of all boundaries came out one
+ * frame low. No real time lands inside forty nanoseconds of a boundary by accident.
+ */
+const BOUNDARY_SLACK = 1e-6
+
 export function formatTimecode(seconds: number, fps: number): string {
   const rate = timecodeRate(fps)
   const total = Number.isFinite(seconds) && seconds > 0 ? seconds : 0
-  const whole = Math.floor(total)
-  const frame = Math.min(rate - 1, Math.floor((total - whole) * rate))
+
+  // Counted in frames throughout rather than as «seconds, and then the leftover»: the leftover
+  // carries the whole error of the subtraction, and the frame field is where it shows.
+  const frames = Math.floor(total * rate + BOUNDARY_SLACK)
+  const whole = Math.floor(frames / rate)
+  const frame = frames - whole * rate
 
   const two = (value: number): string => String(value).padStart(2, '0')
   return `${two(Math.floor(whole / 3600))}:${two(Math.floor(whole / 60) % 60)}:${two(whole % 60)}:${two(frame)}`

@@ -491,4 +491,17 @@ describe('undoModeOf', () => {
       key: 'rename:c1',
     })
   })
+
+  it('keeps a typed trim out of the drag it would otherwise join', () => {
+    // A drag of one handle is hundreds of trims and one step of history, and that is right. A
+    // value typed into the inspector is one deliberate act: joined to the drag before it, Ctrl+Z
+    // would take back both and land on a value the user never saw.
+    expect(undoModeOf({ type: 'trim', id: 'c1', edge: 'in', time: 1 })).toEqual({
+      kind: 'merge',
+      key: 'trim:c1:in',
+    })
+    expect(undoModeOf({ type: 'trim', id: 'c1', edge: 'in', time: 1, typed: true })).toEqual({
+      kind: 'step',
+    })
+  })
 })
