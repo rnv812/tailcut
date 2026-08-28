@@ -1,5 +1,8 @@
-import { locateMovie, type RangeRead, type RangeReader } from '../core/iso/locate'
+import { PROBE_BYTES, locateMovie, type RangeRead, type RangeReader } from '../core/iso/locate'
 import { plainFileOf, type OpenedFile } from '../core/export/plain'
+import { matroskaFileOf } from '../core/export/matroska'
+import { beginsLikeMatroska, locateSegment } from '../core/webm/locate'
+import { indexClusters } from '../core/webm/whole'
 
 /**
  * Reading pieces of somebody else's file, from the one place in the extension that is allowed to.
@@ -182,27 +185,92 @@ async function prefixOf(
 }
 
 /**
- * Opens an ordinary file: finds its movie box, indexes it, and hands back the reader its material
- * will come through.
+ * Opens an ordinary file, in whichever of the two containers the web delivers it in, and hands
+ * back the reader its material will come through.
  *
- * The whole cost of learning what a file holds — two ranged requests of a few kilobytes on the
- * ordinary layout, one where the movie box was written at the front. Null when the file cannot be
- * read at all: an address that has expired, a host that refuses the range and hides its tables
- * behind the material, bytes that are not an mp4.
+ * Which container it is, is settled by the first four bytes of the front of the file — `1A 45 DF
+ * A3` is a Matroska and anything else is tried as an mp4 — and that front is read once and lent
+ * to whichever walk follows. Both walks would otherwise begin by probing the same eight kilobytes
+ * they have just been handed, and an mp4 would pay a whole extra request for the privilege of
+ * being told it is not a Matroska.
+ *
+ * What the two then cost is not the same, and the difference belongs to the containers rather
+ * than to this code. An mp4 states every sample of every track in the tables of its movie box:
+ * two ranged reads of a few kilobytes, and the file is indexed with no material touched. A
+ * Matroska has no such table anywhere — a frame is described by the block header immediately in
+ * front of it — so its clusters have to be walked, and walking them means reading them. See
+ * src/core/webm/whole.ts, where that cost is bounded and stated.
+ *
+ * Null when the file cannot be read at all: an address that has expired, a host that refuses the
+ * range and hides the tables behind the material, a Matroska past the ceiling, bytes that are
+ * neither container.
  */
 export async function openPlainFile(url: string, options: LoaderOptions = {}): Promise<OpenedFile | null> {
   const read = rangeReaderFor(url, options)
 
   try {
-    const found = await locateMovie(read)
-    if (!found) return null
+    const front = await read(0, PROBE_BYTES)
+    const withFront = lending(read, front)
 
-    const file = plainFileOf(found.moov, found.total)
+    const file = beginsLikeMatroska(front.bytes)
+      ? await openMatroska(withFront, front.total)
+      : await openMovie(withFront)
+
     return file ? { file, read } : null
   } catch {
     // Every refusal a read can answer with — an expired signed URL, a CORS answer from a host no
     // permission covers, a server that will not range. There is no half-open file: either the
     // tables are in hand or this source is one the extension cannot offer.
     return null
+  }
+}
+
+/** An mp4: the movie box, and the six tables of every track in it. */
+async function openMovie(read: RangeReader): Promise<OpenedFile['file'] | null> {
+  const found = await locateMovie(read)
+  return found ? plainFileOf(found.moov, found.total) : null
+}
+
+/**
+ * A Matroska: the head, then every frame of every cluster.
+ *
+ * The last read is the one that describes the picture — a vpcC is written out of the first
+ * keyframe, because a Matroska says nothing about the shape of a VP8 or VP9 stream and the
+ * bitstream is the only place the answer exists. One read per picture track, of one frame.
+ */
+async function openMatroska(read: RangeReader, total: number): Promise<OpenedFile['file'] | null> {
+  const found = await locateSegment(read)
+  if (!found) return null
+
+  const frames = await indexClusters(read, found)
+  if (!frames) return null
+
+  return await matroskaFileOf(found.head, frames, found.total || total, async (at) => {
+    const answer = await read(at.at, at.length)
+    return answer.bytes.byteLength >= at.length ? answer.bytes : null
+  })
+}
+
+/**
+ * A reader with the front of the file already in hand.
+ *
+ * Anything that lies inside what has been read is answered out of it; everything else goes to the
+ * host. The one subtlety is a file shorter than the probe: the answer came back short because
+ * there is no more of it, and a request past its end must be answered with what there is rather
+ * than sent to the host to be answered the same way again.
+ */
+function lending(read: RangeReader, front: RangeRead): RangeReader {
+  const held = front.bytes
+  const complete = held.byteLength < PROBE_BYTES
+
+  return async (at, length) => {
+    if (at >= 0 && (at + length <= held.byteLength || (complete && at <= held.byteLength))) {
+      return {
+        bytes: held.subarray(at, Math.min(at + length, held.byteLength)),
+        total: front.total,
+      }
+    }
+
+    return await read(at, length)
   }
 }

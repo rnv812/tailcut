@@ -44,12 +44,19 @@ const close = (server: Server): Promise<void> =>
     server.close(() => resolve())
   })
 
+/** What a file is served as, by the extension it is named with. */
+const CONTENT_TYPES: Record<string, string> = { '.mp4': 'video/mp4', '.webm': 'video/webm' }
+
 /**
  * Serves the files of `tests/fixtures/plain` and answers ranged reads properly.
  *
  * No `Access-Control-Allow-Origin` on purpose. A media element needs none to play a file, and a
  * `fetch` from the page is refused without one — which is the refusal the extension frame is
  * there to get around, and which plain.spec.ts checks for rather than takes on trust.
+ *
+ * The content type is taken from the name because it has to be right: a `<video>` given a
+ * Matroska under `video/mp4` refuses to play it, and the whole of what these tests watch is a
+ * browser really playing a file.
  */
 export async function serveMedia(): Promise<Host> {
   const host: Host = { origin: '', asked: [], served: 0, close: async () => {} }
@@ -67,10 +74,12 @@ export async function serveMedia(): Promise<Host> {
       return
     }
 
+    const contentType = CONTENT_TYPES[path.extname(name).toLowerCase()] ?? 'video/mp4'
+
     const match = /^bytes=(\d+)-(\d*)$/.exec(range ?? '')
     if (!match) {
       response.writeHead(200, {
-        'content-type': 'video/mp4',
+        'content-type': contentType,
         'content-length': String(file.byteLength),
         'accept-ranges': 'bytes',
       })
@@ -84,7 +93,7 @@ export async function serveMedia(): Promise<Host> {
     const part = file.subarray(from, to + 1)
 
     response.writeHead(206, {
-      'content-type': 'video/mp4',
+      'content-type': contentType,
       'content-length': String(part.byteLength),
       // The one field a reader can trust on a 206: `Accept-Ranges` is not reliably present on one.
       'content-range': `bytes ${from}-${to}/${file.byteLength}`,

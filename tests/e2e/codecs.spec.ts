@@ -94,6 +94,30 @@ const OPUS: Feed = {
   chunks: numbered('webm', 1, 4, 'webm'),
 }
 
+/**
+ * Picture in WebM, VP8 — the older half of the pair the plain web still serves.
+ *
+ * Declared as a page declares it, which is the bare word and not the long form: VP8 has one bit
+ * depth, one subsampling and one colour space, so there is nothing in the string for a `vp08`
+ * sample entry to be built out of and nothing that has to be.
+ */
+const VP8: Feed = {
+  mime: 'video/webm; codecs="vp8"',
+  init: '/fixtures/webm-vp8/init-stream0.webm',
+  chunks: numbered('webm-vp8', 0, 3, 'webm'),
+}
+
+/**
+ * Sound in WebM, Vorbis — the other half of it, and the one codec here that reaches an mp4 by a
+ * convention rather than by a standard: `mp4a` with an object type of 0xDD and the three setup
+ * headers under it. See src/core/vorbis/mp4.ts.
+ */
+const VORBIS: Feed = {
+  mime: 'audio/webm; codecs="vorbis"',
+  init: '/fixtures/webm-vp8/init-stream1.webm',
+  chunks: numbered('webm-vp8', 1, 3, 'webm'),
+}
+
 interface Case {
   name: string
   feeds: Feed[]
@@ -117,6 +141,7 @@ const CODEC_BOX: Record<string, string> = {
   avc3: 'avcC',
   hev1: 'hvcC',
   hvc1: 'hvcC',
+  vp08: 'vpcC',
   vp09: 'vpcC',
   av01: 'av1C',
   mp4a: 'esds',
@@ -236,6 +261,25 @@ const CASES: Case[] = [
     seconds: [5.9, 6.1],
     audioTracks: 1,
     frameSize: null,
+  },
+  {
+    name: 'vp8 (webm) + vorbis (webm)',
+    feeds: [VP8, VORBIS],
+    streams: [
+      ['video', 'vp8'],
+      ['audio', 'vorbis'],
+    ],
+    // 60 frames of picture at ten a second. The sound comes to 257 read back, and two things
+    // stand between that and the 259 packets the segments hold: the clip is cut to the picture,
+    // which starts a moment after the sound does, and ffprobe reports one fewer than the file
+    // holds because the first packet of a Vorbis stream produces no samples at all — its
+    // transform is lapped and there is no window in front of it to overlap with. The source webm
+    // is counted one short the same way.
+    frames: [60, 257],
+    offered: '0:06',
+    seconds: [5.9, 6.1],
+    audioTracks: 1,
+    frameSize: [256, 144],
   },
   {
     name: 'vp9 (webm), no sound',

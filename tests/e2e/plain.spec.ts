@@ -68,53 +68,58 @@ const boundedReads = (host: Host): string[] =>
  * such a file was ever intercepted, so the freeze fetches it, exactly as the save does, and puts
  * it in the snapshot whole for the editor to read the tables out of.
  */
-test('Edit opens the editor over an ordinary file and counts its frames', async () => {
-  // Eight seconds of watching, a freeze that fetches the material, and a decoder that has to
-  // read the assembled clip before the player can step through it.
-  test.setTimeout(90_000)
+for (const [container, source] of [
+  ['an mp4', 'watched.mp4'],
+  ['a Matroska', 'watched.webm'],
+] as const) {
+  test(`Edit opens the editor over ${container} and counts its frames`, async () => {
+    // Eight seconds of watching, a freeze that fetches the material, and a decoder that has to
+    // read the assembled clip before the player can step through it.
+    test.setTimeout(90_000)
 
-  const { context, page, popup, media, state } = await watchPartway('watched.mp4')
-  const held = state.buffered[0]![1]
+    const { context, page, popup, media, state } = await watchPartway(source)
+    const held = state.buffered[0]![1]
 
-  try {
-    const opened = context.waitForEvent('page')
-    await popup.getByRole('button', { name: 'Edit' }).click()
+    try {
+      const opened = context.waitForEvent('page')
+      await popup.getByRole('button', { name: 'Edit' }).click()
 
-    const editor = await opened
-    await editor.waitForLoadState('domcontentloaded')
+      const editor = await opened
+      await editor.waitForLoadState('domcontentloaded')
 
-    expect(
-      new URL(editor.url()).searchParams.get('s'),
-      'Edit did not open the editor over a snapshot',
-    ).toBeTruthy()
+      expect(
+        new URL(editor.url()).searchParams.get('s'),
+        'Edit did not open the editor over a snapshot',
+      ).toBeTruthy()
 
-    // No complaint on the screen: the four the editor knows are all about a snapshot it cannot
-    // read, and this one was written a moment ago.
-    await expect(editor.getByTestId('failure')).toHaveCount(0)
+      // No complaint on the screen: the four the editor knows are all about a snapshot it cannot
+      // read, and this one was written a moment ago.
+      await expect(editor.getByTestId('failure')).toHaveCount(0)
 
-    // The preview is assembled out of the file, so the count is a fact about the material and
-    // not about the index: the fixture runs at ten frames a second.
-    const count = editor.getByTestId('frame-count')
-    await expect(count).toBeVisible({ timeout: 30_000 })
-    const frames = Number(await count.textContent())
-    expect(frames).toBeGreaterThan(60)
-    expect(Math.abs(frames / 10 - held), 'the editor holds a different length than was watched')
-      .toBeLessThan(1.5)
+      // The preview is assembled out of the file, so the count is a fact about the material and
+      // not about the index: the fixture runs at ten frames a second.
+      const count = editor.getByTestId('frame-count')
+      await expect(count).toBeVisible({ timeout: 30_000 })
+      const frames = Number(await count.textContent())
+      expect(frames).toBeGreaterThan(60)
+      expect(Math.abs(frames / 10 - held), 'the editor holds a different length than was watched')
+        .toBeLessThan(1.5)
 
-    // And it plays: the element reads the clip the plan and the writer produced, and a step
-    // moves the readout by exactly one frame.
-    await editor.waitForFunction(() => (document.querySelector('video')?.readyState ?? 0) >= 2)
-    await expect(editor.getByTestId('timecode')).toHaveText('00:00:00:00')
-    await editor.getByTestId('next').click()
-    await expect(editor.getByTestId('frame')).toHaveText('2')
-    await expect(editor.getByTestId('timecode')).toHaveText('00:00:00:01')
-  } finally {
-    await popup.close().catch(() => {})
-    await page.close().catch(() => {})
-    await context.close()
-    await media.close()
-  }
-})
+      // And it plays: the element reads the clip the plan and the writer produced, and a step
+      // moves the readout by exactly one frame.
+      await editor.waitForFunction(() => (document.querySelector('video')?.readyState ?? 0) >= 2)
+      await expect(editor.getByTestId('timecode')).toHaveText('00:00:00:00')
+      await editor.getByTestId('next').click()
+      await expect(editor.getByTestId('frame')).toHaveText('2')
+      await expect(editor.getByTestId('timecode')).toHaveText('00:00:00:01')
+    } finally {
+      await popup.close().catch(() => {})
+      await page.close().catch(() => {})
+      await context.close()
+      await media.close()
+    }
+  })
+}
 
 for (const [layout, file] of [
   ['at the end of the file', 'watched.mp4'],
@@ -213,4 +218,103 @@ for (const [layout, file] of [
       await media.close()
     }
   })
+}
+
+/**
+ * The other container an ordinary file arrives in.
+ *
+ * A plain WebM was detected, listed and then honestly refused until now: the reader was written
+ * for the segmented shape MSE delivers, where a cluster arrives on its own, and a complete
+ * Matroska spreads its frames through clusters with no sample table anywhere to read instead.
+ * Both rows here are whole files read by ranges out of the extension frame, cut to what the
+ * element held, and written out as mp4.
+ *
+ * The pair is the point. VP9 and Opus are the codecs the captured path already converts, so that
+ * row proves the reading. VP8 and Vorbis are the pair an imageboard serves, and neither had ever
+ * been written into an mp4 by this program — nor, on the static evidence, could be: Chromium
+ * answers `canPlayType('video/mp4; codecs="vp08.00.10.08"')` with an empty string and says the
+ * same of Vorbis. That evidence is wrong for the path a saved file takes, and this row is what
+ * says so: the file is played to its end in a browser that has never heard of this extension,
+ * with pixels out of the picture decoder and bytes out of the sound one.
+ */
+for (const [name, file, codecs] of [
+  ['VP9 and Opus', 'watched.webm', ['vp9', 'opus']],
+  ['VP8 and Vorbis', 'watched-vp8.webm', ['vp8', 'vorbis']],
+] as const) {
+  test(`saves a whole Matroska of ${name}`, async () => {
+    test.setTimeout(150_000)
+
+    const { context, page, popup, media, state } = await watchPartway(file)
+
+    try {
+      expect(state.currentTime).toBeGreaterThan(6)
+      expect(state.duration).toBeCloseTo(20, 1)
+      expect(state.buffered).toHaveLength(1)
+      expect(state.buffered[0]![0]).toBe(0)
+      const held = state.buffered[0]![1]
+
+      const shown = await promised(popup)
+      const saved = await saveAll(page, popup)
+      const reads = boundedReads(media)
+
+      // The same promise the mp4 rows are held to: the popup offered the stretch that passed
+      // through the player, and the file delivers exactly that.
+      expect(shown.seconds).toBeGreaterThan(6)
+      expect(Math.abs(shown.seconds - held)).toBeLessThan(1.5)
+
+      const probed = probeFile(saved)
+      const duration = Number(probed.format.duration)
+
+      expect(probed.streams.map((stream) => stream.codec_type)).toEqual(['video', 'audio'])
+      expect(probed.streams.map((stream) => stream.codec_name)).toEqual([...codecs])
+      expect(Math.abs(duration - shown.seconds)).toBeLessThan(1)
+      expect(Math.abs(duration - held)).toBeLessThan(1)
+
+      // Every frame read and every frame decoded, with nothing said about either.
+      const frames = Number(
+        probed.streams.find((stream) => stream.codec_type === 'video')!.nb_read_frames,
+      )
+      expect(frames).toBeGreaterThan(duration * 9)
+      decodeFile(saved)
+
+      // And played to the end in a browser that has never heard of this extension — which for
+      // these two codecs inside an mp4 is the whole of the evidence that it can be done.
+      const played = await playInBrowser(saved)
+      expect(played.error).toBeNull()
+      expect(played.ended, 'the saved file did not play through to its end').toBe(true)
+      expect(played.reached).toBeGreaterThan(duration - 0.5)
+      expect(played.videoBytes).toBeGreaterThan(0)
+      expect(played.audioBytes, 'no sound reached the decoder').toBeGreaterThan(0)
+      expect(played.frameColours, 'the picture decoded to a flat field').toBeGreaterThan(1)
+
+      // What it cost, stated rather than assumed. A Matroska has no sample table: the only
+      // description of a frame is the block header in front of it, so the clusters have to be
+      // walked and walking them means reading them. So the index is one pass over the file, the
+      // save is one more read of the clip's own bytes, and the whole thing comes to under twice
+      // the file — against two reads of a few kilobytes for an mp4 of the same material.
+      expect(reads[0], 'the head was not the first thing read').toBe('bytes=0-8191')
+
+      const asked = reads.reduce((sum, range) => {
+        const match = /^bytes=(\d+)-(\d+)$/.exec(range)!
+        return sum + Number(match[2]) - Number(match[1]) + 1
+      }, 0)
+      const size = state.duration > 0 ? await sizeOf(media.origin, file) : 0
+
+      expect(asked).toBeGreaterThan(size)
+      expect(asked, 'the file was read more times over than the index and the clip').toBeLessThan(
+        size * 2.2,
+      )
+    } finally {
+      await popup.close().catch(() => {})
+      await context.close()
+      await media.close()
+    }
+  })
+}
+
+/** How long the fixture is, asked of the host the same way anything else asks it. */
+async function sizeOf(origin: string, file: string): Promise<number> {
+  const answer = await fetch(`${origin}/${file}`, { headers: { Range: 'bytes=0-0' } })
+  await answer.arrayBuffer()
+  return Number(/\/(\d+)$/.exec(answer.headers.get('content-range') ?? '')?.[1] ?? 0)
 }

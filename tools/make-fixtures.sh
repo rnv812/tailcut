@@ -108,6 +108,25 @@ ffmpeg -y -i "$work/source-webm.webm" -c copy -f dash -seg_duration 2 \
 rm -rf "$out/webm" && mkdir -p "$out/webm"
 cp "$work"/webm/*.webm "$out/webm/"
 
+# The same split of the older pair: VP8 and Vorbis, which a page may open a SourceBuffer for just
+# as readily as it may serve them as a file. The ingest boundary converts both into an mp4 now
+# (src/core/webm/to-iso.ts), and this is what it is measured against: a Vorbis init whose
+# CodecPrivate is 3.3 kB of setup headers, and a VP8 one that states nothing about its stream at
+# all beyond the frame size.
+ffmpeg -y -f lavfi -i "color=c=#202040:s=256x144:r=10:d=6" \
+       -f lavfi -i "sine=frequency=440:duration=6" \
+       -vf "drawbox=x='mod(t*60\,220)':y='60+40*sin(t)':w=30:h=30:color=orange:t=fill" \
+       -c:v libvpx -b:v 60k -g 20 -keyint_min 20 -pix_fmt yuv420p \
+       -c:a libvorbis -q:a 0 -ar 22050 -ac 1 \
+       -shortest "$work/source-webm-vp8.webm"
+
+mkdir -p "$work/webm-vp8"
+ffmpeg -y -i "$work/source-webm-vp8.webm" -c copy -f dash -seg_duration 2 \
+       -use_template 0 -use_timeline 0 -single_file 0 -dash_segment_type webm \
+       "$work/webm-vp8/out.mpd"
+rm -rf "$out/webm-vp8" && mkdir -p "$out/webm-vp8"
+cp "$work"/webm-vp8/*.webm "$out/webm-vp8/"
+
 # A muxed buffer: one init describing both tracks, and media segments carrying a traf for each.
 #
 # Every other set here is split the way DASH delivers it — a SourceBuffer per kind, one ISO track
@@ -344,4 +363,37 @@ ffmpeg -y -f lavfi -i "color=c=#202040:s=256x144:r=10:d=6" \
        -metadata:s:a:0 language=eng -metadata:s:a:1 language=rus \
        -shortest -f mp4 "$out/plain/two-sound.mp4"
 
-ls -la "$out/h264" "$out/minute" "$out/vp9" "$out/av1" "$out/webm" "$out/muxed" "$out/muxed-edits" "$out/multi" "$out/cenc" "$out/plain"
+# The same twenty seconds again, as a complete Matroska — the other container an ordinary file
+# arrives in, and the one our reader was written only for the segmented shape of.
+#
+# The pair is here because the two rows of it answer different questions. A whole Matroska has no
+# sample table at all: where an mp4 states every sample of every track in six tables a few
+# kilobytes long, a Matroska states each frame in the block header immediately in front of it, so
+# the head of the file yields the Tracks and nothing more and the frames have to be walked. Both
+# rows exercise that walk; what they differ in is what the frames turn into on the way out.
+#
+# `watched.webm` is VP9 and Opus: the two codecs the converter already writes into an mp4, and
+# the row that proves the walk itself. `watched-vp8.webm` is VP8 and Vorbis — measured on an
+# imageboard thread, where the file was exactly this pair — and it is the row that proves the two
+# older codecs can be described in an mp4 at all. Both are 20 seconds for the same reason the mp4
+# pair is: triage gives a player six seconds before it calls it a player, and a file that ends at
+# the threshold cannot be watched partway through.
+#
+# The bitrates are chosen to keep the two inside fifty kilobytes apiece, which is what the mp4 of
+# the same material costs. Vorbis is given -q:a 0 rather than a bitrate because libvorbis refuses
+# the low ones outright.
+ffmpeg -y -f lavfi -i "color=c=#202040:s=256x144:r=10:d=20" \
+       -f lavfi -i "sine=frequency=440:duration=20" \
+       -vf "drawbox=x='mod(t*60\,220)':y='60+40*sin(t)':w=30:h=30:color=orange:t=fill" \
+       -c:v libvpx-vp9 -b:v 40k -g 20 -keyint_min 20 -pix_fmt yuv420p \
+       -c:a libopus -b:a 16k -ac 1 \
+       -shortest "$out/plain/watched.webm"
+
+ffmpeg -y -f lavfi -i "color=c=#202040:s=256x144:r=10:d=20" \
+       -f lavfi -i "sine=frequency=440:duration=20" \
+       -vf "drawbox=x='mod(t*60\,220)':y='60+40*sin(t)':w=30:h=30:color=orange:t=fill" \
+       -c:v libvpx -b:v 40k -g 20 -keyint_min 20 -pix_fmt yuv420p \
+       -c:a libvorbis -q:a 0 -ar 22050 -ac 1 \
+       -shortest "$out/plain/watched-vp8.webm"
+
+ls -la "$out/h264" "$out/minute" "$out/vp9" "$out/av1" "$out/webm" "$out/webm-vp8" "$out/muxed" "$out/muxed-edits" "$out/multi" "$out/cenc" "$out/plain"

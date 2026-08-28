@@ -7,6 +7,9 @@ import {
 } from '../../src/core/codec/audio'
 import { audioSampleEntry, videoSampleEntry, type SampleEntry } from '../../src/core/iso/entry'
 import { ingestInit } from '../../src/core/container'
+import { buildAudioInit } from '../../src/core/iso/build'
+import { parseInit as parseWebmInit } from '../../src/core/webm/init'
+import { vorbisSampleEntry } from '../../src/core/vorbis/mp4'
 
 const fixture = (path: string): Uint8Array => new Uint8Array(readFileSync(`tests/fixtures/${path}`))
 
@@ -146,6 +149,35 @@ describe('audioDecoderConfig', () => {
     // The rate the encoder saw is not thrown away: it lives on in the header, little-endian.
     const seen = config.description!
     expect(seen[12]! | (seen[13]! << 8) | (seen[14]! << 16) | (seen[15]! << 24)).toBe(16_000)
+  })
+
+  it('describes the Vorbis of a whole Matroska', () => {
+    const older = fixture('plain/watched-vp8.webm')
+    const track = parseWebmInit(older)!.tracks.find((one) => one.kind === 'audio')!
+    const entry = audioSampleEntry(
+      buildAudioInit({
+        trackId: 1,
+        timescale: track.sampleRate!,
+        sampleEntry: vorbisSampleEntry({
+          channels: track.channels!,
+          sampleRate: track.sampleRate!,
+          setup: track.codecPrivate!,
+        }),
+      }),
+    )!
+
+    const config = audioDecoderConfig(entry)!
+
+    // Not `mp4a.40.something`: the entry is an mp4a because Vorbis has no box of its own, and a
+    // reader that stopped at the four letters would tell the decoder it was about to be handed
+    // AAC and then hand it Vorbis. What settles it is the object type inside the esds.
+    expect(config.codec).toBe('vorbis')
+    expect(config.numberOfChannels).toBe(1)
+    expect(config.sampleRate).toBe(22_050)
+    // The three setup headers as the container carried them, which is the form Chromium asks for
+    // — measured: `AudioDecoder.isConfigSupported` answers true for this pair and refuses the
+    // same codec with no description at all.
+    expect(config.description).toEqual(track.codecPrivate)
   })
 
   it('refuses what it cannot describe instead of guessing', () => {

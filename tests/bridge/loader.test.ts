@@ -1,9 +1,19 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { ReadRefused, rangeReaderFor, totalFromContentRange } from '../../src/bridge/loader'
+import {
+  ReadRefused,
+  openPlainFile,
+  rangeReaderFor,
+  totalFromContentRange,
+} from '../../src/bridge/loader'
 import { locateMovie } from '../../src/core/iso/locate'
+import { topLevelBoxes } from '../../src/core/iso/reader'
 
 const whole = new Uint8Array(readFileSync('tests/fixtures/plain/whole.mp4'))
+/** The same six seconds of nothing in the other container a plain file arrives in. */
+const matroska = new Uint8Array(readFileSync('tests/fixtures/plain/watched.webm'))
+/** VP8 and Vorbis, which is what an imageboard hands over. */
+const older = new Uint8Array(readFileSync('tests/fixtures/plain/watched-vp8.webm'))
 
 /** A Response takes a view over a plain ArrayBuffer and not one that might be shared memory. */
 const bodyOf = (bytes: Uint8Array): ArrayBuffer =>
@@ -159,5 +169,69 @@ describe('rangeReaderFor', () => {
     await expect(
       rangeReaderFor('https://cdn.example/clip.mp4', { fetch: broken })(0, 16),
     ).rejects.toBeInstanceOf(ReadRefused)
+  })
+})
+
+describe('openPlainFile', () => {
+  const open = (file: Uint8Array, mode: 'ranges' | 'whole' = 'ranges') => {
+    const host = server(file, mode)
+    return {
+      host,
+      opened: openPlainFile('https://cdn.example/clip', { fetch: host.call }),
+    }
+  }
+
+  it('opens an ordinary mp4 in the two requests it always cost', async () => {
+    // The container is settled by the first four bytes of the same probe the mp4 walk needed
+    // anyway, so learning that a file is not a Matroska costs nothing at all. This number is the
+    // whole of that claim: a sniff of its own would have made it three.
+    const { host, opened } = open(whole)
+
+    const file = (await opened)!.file
+    expect(file.tracks.map((track) => track.kind)).toEqual(['video', 'audio'])
+    expect(host.asked.map((one) => one.range)).toEqual(['bytes=0-8191', 'bytes=14681-18002'])
+  })
+
+  it('opens a whole Matroska and indexes every frame of it', async () => {
+    const { opened } = open(matroska)
+    const file = (await opened)!.file
+
+    expect(file.codecs).toEqual(['V_VP9', 'A_OPUS'])
+    expect(file.tracks.map((track) => track.samples.length)).toEqual([200, 1001])
+    expect(file.durationSeconds).toBeCloseTo(20, 1)
+    expect(file.total).toBe(matroska.byteLength)
+    expect(file.refusedTracks).toBe(false)
+  })
+
+  it('opens the older pair an imageboard serves', async () => {
+    const file = (await open(older).opened)!.file
+
+    expect(file.codecs).toEqual(['V_VP8', 'A_VORBIS'])
+    expect(topLevelBoxes(file.tracks[0]!.sampleEntry)[0]!.type).toBe('vp08')
+    expect(topLevelBoxes(file.tracks[1]!.sampleEntry)[0]!.type).toBe('mp4a')
+  })
+
+  it('hands back the reader the tables were found with, ready for the save', async () => {
+    const { host, opened } = open(matroska)
+    const found = (await opened)!
+
+    const asked = host.asked.length
+    const answer = await found.read(0, 4)
+
+    expect(answer.bytes).toEqual(matroska.subarray(0, 4))
+    expect(host.asked.length).toBe(asked + 1)
+  })
+
+  it('gives nothing for bytes that are neither container', async () => {
+    const nonsense = new Uint8Array(4096)
+    nonsense.set(new TextEncoder().encode('not a video at all'), 0)
+
+    expect(await open(nonsense).opened).toBeNull()
+  })
+
+  it('gives nothing when the read is refused outright', async () => {
+    const failing = (async () => new Response('gone', { status: 404 })) as unknown as typeof fetch
+
+    expect(await openPlainFile('https://cdn.example/clip', { fetch: failing })).toBeNull()
   })
 })

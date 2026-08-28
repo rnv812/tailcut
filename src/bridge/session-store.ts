@@ -792,10 +792,12 @@ export class SessionStore {
    *
    * Another silence the popup owes a sentence for. A file is opened only after triage has said
    * somebody is really watching it, so this means exactly one thing: a video was watched and
-   * there is nothing to offer for it. Measured live on an imageboard thread, where the material
-   * is webm and has no movie box to walk to, and on addresses that had expired between the
-   * element fetching them and the save. Without it the popup answers such a page with "nothing
-   * recorded yet" — the words for a page that holds no video at all.
+   * there is nothing to offer for it. Measured on addresses that had expired between the element
+   * fetching them and the save. Without it the popup answers such a page with "nothing recorded
+   * yet" — the words for a page that holds no video at all.
+   *
+   * The imageboard thread this was first measured on no longer lands here: its file is a whole
+   * WebM of VP8 and Vorbis, and both the container and the two codecs are read now.
    */
   get unreadableFile(): boolean {
     for (const state of this.plainSources.values()) if (state.unreadable) return true

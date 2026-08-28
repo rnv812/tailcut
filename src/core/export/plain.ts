@@ -11,6 +11,11 @@ import { clipSourceFrom, movieTracksOf } from './source'
  * is made — which is what lets the popup state the length and the weight of a save without
  * fetching anything, and lets the tests of both be run without a server.
  *
+ * Where that index comes from is the container's business and not this module's: an mp4 states it
+ * in a movie box (`plainFileOf` below), and a Matroska has none to state, so its frames are walked
+ * instead (src/core/export/matroska.ts). What both hand over is the same `PlainFile`, and nothing
+ * from here on asks which it was.
+ *
  * ## What is offered, and why it is the buffered part
  *
  * The file is whole and reachable, so the material the viewer never watched is reachable too.
@@ -43,7 +48,12 @@ export interface PlainFile {
   total: number
   /** Every track of it that could be indexed, in the order the movie box declares them. */
   tracks: SourceTrack[]
-  /** Four-letter codes of what it holds: the second component of the merge key (§6.1). */
+  /**
+   * What it holds, in the names its own container gives them: the second component of the merge
+   * key (§6.1). Four-letter sample entry codes out of an mp4, CodecID strings out of a Matroska —
+   * `avc1` and `mp4a` beside `V_VP8` and `A_VORBIS`. The key only has to tell one file from
+   * another under the same address, and either name does that.
+   */
   codecs: string[]
   /** How long the whole file is, out of its own tables. */
   durationSeconds: number

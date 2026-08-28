@@ -1,5 +1,6 @@
 import type { SampleEntry } from '../iso/entry'
 import { OPUS_SAMPLE_RATE } from '../opus/packets'
+import { VORBIS_OBJECT_TYPE } from '../vorbis/mp4'
 
 /**
  * What an AudioDecoder has to be told. Structurally an `AudioDecoderConfig`, built without
@@ -38,15 +39,24 @@ function descriptorAt(bytes: Uint8Array, at: number): Descriptor | null {
   return { tag, body: bytes.subarray(cursor, end) }
 }
 
+/** What the DecoderConfigDescriptor of an esds says: which codec, and how to start it. */
+interface DecoderConfig {
+  /** objectTypeIndication: 0x40 is MPEG-4 audio, 0xDD is the Vorbis convention. */
+  objectType: number
+  /** The DecoderSpecificInfo behind it, or null where the descriptor carries none. */
+  specific: Uint8Array | null
+}
+
 /**
- * The AudioSpecificConfig an esds carries, which is what an AAC decoder cannot work without.
+ * The decoder configuration an esds carries: the object type, and the setup bytes under it.
  *
- * Measured: handed a rate and a channel count that do not match the material and no description,
- * Chromium decodes thousands of frames, reports no error, and puts out something whose envelope
- * correlates with the source at 0.037. The description overrides a wrong configuration outright,
- * so it is not an optimisation — it is the difference between sound and rubbish.
+ * The object type matters as much as the setup does, and one file in the fixtures is the reason:
+ * a Vorbis track inside an mp4 is declared as `mp4a` because Vorbis has no sample entry of its
+ * own (src/core/vorbis/mp4.ts), so the four letters of the box say AAC and only this byte says
+ * otherwise. Read no further than the letters, the decoder is told to expect AAC and then handed
+ * Vorbis codebooks.
  */
-export function audioSpecificConfig(esds: Uint8Array): Uint8Array | null {
+function decoderConfigOf(esds: Uint8Array): DecoderConfig | null {
   // esds is a full box: a version and three bytes of flags in front of the descriptor.
   const es = descriptorAt(esds.subarray(4), 0)
   if (!es || es.tag !== 0x03) return null
@@ -62,7 +72,23 @@ export function audioSpecificConfig(esds: Uint8Array): Uint8Array | null {
 
   // objectTypeIndication, streamType and buffer size, then two bitrates: thirteen bytes.
   const specific = descriptorAt(decoder.body, 13)
-  return specific && specific.tag === 0x05 && specific.body.length ? specific.body : null
+
+  return {
+    objectType: decoder.body[0] ?? 0,
+    specific: specific && specific.tag === 0x05 && specific.body.length ? specific.body : null,
+  }
+}
+
+/**
+ * The AudioSpecificConfig an esds carries, which is what an AAC decoder cannot work without.
+ *
+ * Measured: handed a rate and a channel count that do not match the material and no description,
+ * Chromium decodes thousands of frames, reports no error, and puts out something whose envelope
+ * correlates with the source at 0.037. The description overrides a wrong configuration outright,
+ * so it is not an optimisation — it is the difference between sound and rubbish.
+ */
+export function audioSpecificConfig(esds: Uint8Array): Uint8Array | null {
+  return decoderConfigOf(esds)?.specific ?? null
 }
 
 /** The audio object type, escape form included. */
@@ -122,11 +148,25 @@ export function audioDecoderConfig(entry: SampleEntry): AudioDecoderSetup | null
 
   if (entry.format === 'mp4a') {
     const esds = entry.children.get('esds')
-    const config = esds ? audioSpecificConfig(esds) : null
-    if (!config || !(entry.sampleRate > 0)) return null
+    const declared = esds ? decoderConfigOf(esds) : null
+    if (!declared?.specific || !(entry.sampleRate > 0)) return null
+
+    // Vorbis under an mp4a, which is the only place an mp4 has for it. The description is the
+    // three setup headers exactly as the Matroska carried them, which is the form Chromium asks
+    // for: measured, `AudioDecoder.isConfigSupported` answers true for this pair and refuses the
+    // same codec with no description at all.
+    if (declared.objectType === VORBIS_OBJECT_TYPE) {
+      return {
+        codec: 'vorbis',
+        description: declared.specific,
+        numberOfChannels: entry.channels,
+        sampleRate: entry.sampleRate,
+      }
+    }
+
     return {
-      codec: `mp4a.40.${objectType(config)}`,
-      description: config,
+      codec: `mp4a.40.${objectType(declared.specific)}`,
+      description: declared.specific,
       numberOfChannels: entry.channels,
       sampleRate: entry.sampleRate,
     }

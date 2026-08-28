@@ -141,10 +141,12 @@ export interface IngestedInit {
  * do: better a buffer that never opens a track than a track that can never be saved.
  *
  * `mime` is the type the page passed to addSourceBuffer, verbatim and untrusted. An mp4 needs
- * none of it — its init segment describes itself — and a WebM picture track needs nothing else:
+ * none of it — its init segment describes itself — and a WebM VP9 picture needs nothing else:
  * Matroska does not carry what a vp09 sample entry has to state, and the codec string does. See
  * src/core/vp9/codec.ts for why that source and not the bitstream, and for what an absent or
- * unreadable string leads to.
+ * unreadable string leads to. The other three the converter takes need none of it either: Opus
+ * and Vorbis are described by their CodecPrivate, and a VP8 stream has one shape and nothing to
+ * be told about (src/core/vp8/mp4.ts).
  */
 export function ingestInit(bytes: Uint8Array, mime?: string): IngestedInit | null {
   const detected = detectInit(bytes)

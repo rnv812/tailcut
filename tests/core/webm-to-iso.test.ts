@@ -4,6 +4,7 @@ import { webmToIso } from '../../src/core/webm/to-iso'
 import { parseInit as parseWebmInit } from '../../src/core/webm/init'
 import { parseInit } from '../../src/core/iso/init'
 import { parseFragment } from '../../src/core/iso/fragment'
+import { parseClusters } from '../../src/core/webm/fragment'
 import { boxBody, findBox, topLevelBoxes } from '../../src/core/iso/reader'
 import { OPUS_SAMPLE_RATE } from '../../src/core/opus/packets'
 import type { InitInfo } from '../../src/shared/types'
@@ -15,6 +16,11 @@ const load = (path: string): Uint8Array => new Uint8Array(readFileSync(`tests/fi
 
 const opusInit = parseWebmInit(load('webm/init-stream1.webm'))!
 const vp9Init = parseWebmInit(load('webm/init-stream0.webm'))!
+
+/** The pair a page may open a SourceBuffer for as readily as it may serve it as a file. */
+const VP8_TYPE = 'video/webm; codecs="vp8"'
+const vorbisInit = parseWebmInit(load('webm-vp8/init-stream1.webm'))!
+const vp8Init = parseWebmInit(load('webm-vp8/init-stream0.webm'))!
 
 /** Four media segments of the Opus track: 0…1.961, 1.981…3.961, 3.981…5.961 and one last frame. */
 const audioSegments = [1, 2, 3, 4].map((n) => load(`webm/chunk-stream1-0000${n}.webm`))
@@ -68,8 +74,9 @@ describe('webmToIso: what it takes and what it refuses', () => {
   })
 
   it('refuses a WebM track in a codec written here for neither container', () => {
-    const vp8 = { ...vp9Init.tracks[0]!, codec: 'V_VP8' }
-    expect(webmToIso({ tracks: [vp8] }, 'video/webm; codecs="vp8"')).toBeNull()
+    // Theora, which a Matroska may legally carry and an mp4 has no place for at all.
+    const theora = { ...vp9Init.tracks[0]!, codec: 'V_THEORA' }
+    expect(webmToIso({ tracks: [theora] }, 'video/webm; codecs="theora"')).toBeNull()
   })
 
   it('refuses an init that declares more than one track', () => {
@@ -335,5 +342,133 @@ describe('webmToIso: picture segments across', () => {
     const source = Uint8Array.from(videoSegments[0]!)
     video.segment(source)
     expect([...source]).toEqual([...videoSegments[0]!])
+  })
+})
+
+/**
+ * The two older codecs, which this converter refused until an imageboard's file made the case.
+ *
+ * They are here for the same reason VP9 and Opus are: a page is free to open a SourceBuffer for
+ * either, and a track refused at this boundary is a whole kind of media missing from the saved
+ * file. Both are legal in an mp4 and both play — see src/core/vp8/mp4.ts and
+ * src/core/vorbis/mp4.ts, where the measurements are.
+ */
+describe('webmToIso: the older pair', () => {
+  const vorbis = webmToIso(vorbisInit)!
+  const vp8 = webmToIso(vp8Init, VP8_TYPE)!
+
+  it('takes a Vorbis track, which needs nothing the init segment does not carry', () => {
+    expect(vorbisInit.tracks[0]!.codec).toBe('A_VORBIS')
+    expect(vorbis).not.toBeNull()
+
+    expect(parseInit(vorbis.initBytes)).toEqual({
+      tracks: [
+        {
+          trackId: 1,
+          kind: 'audio',
+          // The rate the material was encoded at: Vorbis decodes at what it was fed.
+          timescale: 22_050,
+          codec: 'mp4a',
+          width: 0,
+          height: 0,
+          defaultSampleDuration: 0,
+        },
+      ],
+    })
+  })
+
+  it('refuses a Vorbis track with no setup headers to describe it', () => {
+    const bare = { tracks: [{ ...vorbisInit.tracks[0]!, codecPrivate: undefined }] }
+    expect(webmToIso(bare)).toBeNull()
+  })
+
+  it('takes a VP8 track, which has one shape and nothing to be told about it', () => {
+    // The argument that makes a VP9 track wait for a codec string does not reach VP8: the format
+    // has one bit depth, one subsampling and one colour space, so there is nothing about the
+    // shape of the stream for a declaration to get wrong.
+    expect(vp8Init.tracks[0]!.codec).toBe('V_VP8')
+    expect(webmToIso(vp8Init, VP8_TYPE)).not.toBeNull()
+    expect(webmToIso(vp8Init, 'video/webm')).not.toBeNull()
+    expect(webmToIso(vp8Init)).not.toBeNull()
+  })
+
+  it('declares the VP8 picture as vp08 with the frame size the container stated', () => {
+    expect(parseInit(vp8.initBytes)).toEqual({
+      tracks: [
+        {
+          trackId: 1,
+          kind: 'video',
+          timescale: 1000,
+          codec: 'vp08',
+          width: 256,
+          height: 144,
+          defaultSampleDuration: 0,
+        },
+      ],
+    })
+  })
+
+  it('refuses a VP8 track whose frame size the container never stated', () => {
+    const sizeless = { tracks: [{ ...vp8Init.tracks[0]!, width: 0, height: 0 }] }
+    expect(webmToIso(sizeless, VP8_TYPE)).toBeNull()
+  })
+
+  it('carries the segments of both across with no seam between them', () => {
+    for (const [name, converter, chunks] of [
+      ['vorbis', vorbis, [1, 2, 3].map((n) => load(`webm-vp8/chunk-stream1-0000${n}.webm`))],
+      ['vp8', vp8, [1, 2, 3].map((n) => load(`webm-vp8/chunk-stream0-0000${n}.webm`))],
+    ] as const) {
+      const across = chunks.map((bytes) => converter.segment(bytes)!)
+
+      expect(across.every(Boolean), `a ${name} segment came back empty`).toBe(true)
+      // Where the material starts is the container's business and not zero: this muxer puts the
+      // first picture frame 23 ms in and the first packet of sound at the head.
+      expect(across[0]!.start).toBeLessThan(0.05)
+
+      for (let i = 1; i < across.length; i++) {
+        // Where one segment stops, the next starts. The picture lands on it exactly — a coded
+        // picture track runs at a constant rate, so the step between the last two frames is the
+        // length of the last one. The sound does not, and cannot: nothing a reader can get at
+        // cheaply states how long a Vorbis packet is, and the shortest step the container shows
+        // stands in for it. What that comes to is measured here rather than waved at — one tick
+        // of the Matroska timeline, which is a millisecond — and it is understated on purpose:
+        // an overlap would have the sound gain a millisecond per segment, and nothing downstream
+        // takes one back.
+        const seam = across[i]!.start - across[i - 1]!.end
+        expect(seam, `the ${name} track overlaps itself`).toBeGreaterThanOrEqual(0)
+        expect(seam, `a seam in the ${name} track`).toBeLessThanOrEqual(name === 'vp8' ? 0 : 0.001)
+      }
+
+      expect(across[across.length - 1]!.end).toBeGreaterThan(5.9)
+    }
+  })
+
+  it('marks the keyframes of the VP8 picture and nothing else', () => {
+    const fragment = vp8.segment(load('webm-vp8/chunk-stream0-00001.webm'))!
+    const trun = findBox(fragment.bytes, ['moof', 'traf', 'trun'])!
+    const body = view(boxBody(fragment.bytes, trun))
+    const count = body.getUint32(4)
+    const flags = Array.from({ length: count }, (_unused, i) => body.getUint32(12 + i * 12 + 8))
+
+    // A key frame at the head of the segment and nineteen behind it that a seek must not land on
+    // — the same two words the VP9 track states, because the flags are the container's and not
+    // the codec's.
+    expect(flags[0]).toBe(0x02000000)
+    expect([...new Set(flags.slice(1))]).toEqual([0x01010000])
+  })
+
+  it('carries every Vorbis packet over, whole and in order', () => {
+    const bytes = load('webm-vp8/chunk-stream1-00001.webm')
+    const fragment = vorbis.segment(bytes)!
+    const mdat = topLevelBoxes(fragment.bytes).find((box) => box.type === 'mdat')!
+    const payload = boxBody(fragment.bytes, mdat)
+
+    const frames = parseClusters(bytes).flatMap((cluster) => cluster.frames)
+    let at = 0
+    for (const frame of frames) {
+      expect(payload.subarray(at, at + frame.data.byteLength)).toEqual(frame.data)
+      at += frame.data.byteLength
+    }
+    expect(at).toBe(payload.byteLength)
   })
 })

@@ -1,8 +1,10 @@
 import { buildAudioInit, buildFragment, buildVideoInit, type Sample } from '../iso/build'
 import { opusSampleEntry } from '../opus/mp4'
 import { OPUS_SAMPLE_RATE, packetSamples, parseOpusHead } from '../opus/packets'
+import { vp8Config, vp8SampleEntry } from '../vp8/mp4'
 import { vp9Config } from '../vp9/codec'
 import { vp9SampleEntry } from '../vp9/mp4'
+import { vorbisSampleEntry } from '../vorbis/mp4'
 import { parseClusters, type Frame } from './fragment'
 import type { InitInfo, TrackInfo } from '../../shared/types'
 
@@ -20,16 +22,24 @@ import type { InitInfo, TrackInfo } from '../../shared/types'
  * single-format. The registry, the timeline, the selection of material and the muxer all go on
  * seeing nothing but ISO BMFF, and none of them grows a branch per container.
  *
- * Two codecs, and a stream in any other is refused by CodecID rather than guessed at: a track
+ * Four codecs, and a stream in any other is refused by CodecID rather than guessed at: a track
  * opened here that could never be written would swallow its segments one by one and end up as a
  * stream of nothing inside a file that claims to have one. The same refusal catches a VP9 track
  * whose shape this program cannot describe — see src/core/vp9/codec.ts for what those are and
  * where the description comes from.
+ *
+ * Two of the four are the older pair, and they are here because a plain file made the case for
+ * them: an imageboard's video is VP8 with Vorbis, both are legal inside an mp4, and both play —
+ * the measurements are in src/core/vp8/mp4.ts and src/core/vorbis/mp4.ts. What is true of them
+ * over a whole file is true of them over a SourceBuffer, so the boundary takes them here as well
+ * rather than leaving a page that opens one short of a whole kind of media.
  */
 
 /** The Matroska CodecIDs this converter reads. */
 const OPUS_CODEC_ID = 'A_OPUS'
+const VORBIS_CODEC_ID = 'A_VORBIS'
 const VP9_CODEC_ID = 'V_VP9'
+const VP8_CODEC_ID = 'V_VP8'
 
 /**
  * track_ID of the converted track inside its own init segment. The number only has to be a legal
@@ -110,7 +120,9 @@ export function webmToIso(info: InitInfo, mime?: string): WebmToIso | null {
   if (!(track.timescale > 0)) return null
 
   if (track.codec === OPUS_CODEC_ID) return opusTrack(track)
+  if (track.codec === VORBIS_CODEC_ID) return vorbisTrack(track)
   if (track.codec === VP9_CODEC_ID) return vp9Track(track, mime)
+  if (track.codec === VP8_CODEC_ID) return vp8Track(track, mime)
   return null
 }
 
@@ -145,6 +157,93 @@ function opusTrack(track: TrackInfo): WebmToIso | null {
   }
 }
 
+/**
+ * A Vorbis track, which needs nothing the init segment does not already carry.
+ *
+ * Its three setup headers are in the CodecPrivate, which is where a Matroska keeps them and the
+ * only place they exist; the rate and the channel count are in the Audio element beside it. So
+ * unlike a VP9 picture, a Vorbis track can be described in full the moment its init lands, and
+ * there is nothing here to refuse for want of a codec string.
+ */
+function vorbisTrack(track: TrackInfo): WebmToIso | null {
+  // A stream whose codebooks never arrived cannot be started at all, whatever else is known.
+  if (!track.codecPrivate || track.codecPrivate.byteLength === 0) return null
+
+  const rate = track.sampleRate ?? 0
+  const channels = track.channels ?? 0
+  if (!(rate > 0 && channels > 0)) return null
+
+  const conversion: Conversion = {
+    trackNumber: track.trackId,
+    // Matroska ticks to mp4 ticks. Vorbis decodes at the rate it was encoded at, and the track is
+    // timed in that rate — where Opus is fixed at 48 kHz whatever it was fed.
+    scale: rate / track.timescale,
+    timescale: rate,
+    statesSync: false,
+    // A Vorbis packet does not state its own length anywhere a reader can get at cheaply: the
+    // window size is in the setup headers and which window this packet used is a mode number
+    // whose width is only known after the codebooks have been read. So the container's own
+    // timeline answers instead — and the answer is the *shortest* step the packets of this
+    // fragment went at, not the last of them.
+    //
+    // The shortest, because the tail must not overrun. Matroska writes its timestamps in whole
+    // milliseconds and a Vorbis packet is not a whole number of them — 1024 samples at 22 050 Hz
+    // is 46.44 — so the steps come out 46, 47, 46, and the last of them is as likely to be the
+    // long one as the short one. Overstated by a millisecond, the fragment ends after the next
+    // one begins, and nothing downstream corrects that: `planTrack` widens a sample to close a
+    // hole and never narrows one, so the sound would gain a millisecond per fragment and drift
+    // away from the picture. Understated, it leaves a gap that shows and that the seam
+    // arithmetic already knows what to do with.
+    tail: (_frame, ticks) => {
+      let shortest = 0
+      for (let i = 1; i < ticks.length; i++) {
+        const step = ticks[i]! - ticks[i - 1]!
+        if (step > 0 && (shortest === 0 || step < shortest)) shortest = step
+      }
+      return shortest
+    },
+  }
+
+  return {
+    initBytes: buildAudioInit({
+      trackId: ISO_TRACK_ID,
+      timescale: rate,
+      sampleEntry: vorbisSampleEntry({ channels, sampleRate: rate, setup: track.codecPrivate }),
+    }),
+    info: { tracks: [{ ...track, trackId: ISO_TRACK_ID, timescale: rate }] },
+    segment: (bytes) => convertSegment(bytes, conversion),
+  }
+}
+
+/**
+ * A VP8 track, which is described without waiting for anything.
+ *
+ * The one thing a VP9 track has to be told — what shape its samples are — VP8 does not have: one
+ * bit depth, one subsampling, one colour space, and the version that remains is read by a decoder
+ * out of every frame. So there is no refusal here for a page that said nothing, and no guess
+ * either: see vp8Config.
+ */
+function vp8Track(track: TrackInfo, mime: string | undefined): WebmToIso | null {
+  if (!(track.width > 0 && track.height > 0)) return null
+
+  const timescale = Math.round(track.timescale)
+  if (!(timescale > 0)) return null
+
+  const conversion = pictureConversion(track, timescale)
+
+  return {
+    initBytes: buildVideoInit({
+      trackId: ISO_TRACK_ID,
+      timescale,
+      width: track.width,
+      height: track.height,
+      sampleEntry: vp8SampleEntry(vp8Config(mime, track.width, track.height), track.width, track.height),
+    }),
+    info: { tracks: [{ ...track, trackId: ISO_TRACK_ID, timescale }] },
+    segment: (bytes) => convertSegment(bytes, conversion),
+  }
+}
+
 function vp9Track(track: TrackInfo, mime: string | undefined): WebmToIso | null {
   // The sample entry and the track header both state the frame size, and a picture of no size is
   // not something either of them can describe.
@@ -162,24 +261,7 @@ function vp9Track(track: TrackInfo, mime: string | undefined): WebmToIso | null 
   const timescale = Math.round(track.timescale)
   if (!(timescale > 0)) return null
 
-  const scale = timescale / track.timescale
-
-  const conversion: Conversion = {
-    trackNumber: track.trackId,
-    scale,
-    timescale,
-    statesSync: true,
-    // A SimpleBlock states no duration and a picture frame carries none inside it either. What
-    // the container does give is the step the frames go at: a BlockGroup that stated a
-    // BlockDuration is believed, and otherwise the distance between the last two frames stands in
-    // for it. At the constant frame rate a coded picture track runs at, that step is exact.
-    tail: (frame, ticks) => {
-      if (frame.duration > 0) return Math.round(frame.duration * scale)
-      const last = ticks[ticks.length - 1]
-      const before = ticks[ticks.length - 2]
-      return last !== undefined && before !== undefined ? last - before : 0
-    },
-  }
+  const conversion = pictureConversion(track, timescale)
 
   return {
     initBytes: buildVideoInit({
@@ -196,6 +278,34 @@ function vp9Track(track: TrackInfo, mime: string | undefined): WebmToIso | null 
   }
 }
 
+/**
+ * How a picture track's times cross over, which is the same for both of the two written here.
+ *
+ * Neither VP8 nor VP9 reorders its frames, so a block's timestamp is both when the frame is shown
+ * and when it is decoded, and the samples state their own sync flag because a seek that lands on
+ * a frame predicted from one nobody decoded shows the wrong picture or none.
+ */
+function pictureConversion(track: TrackInfo, timescale: number): Conversion {
+  const scale = timescale / track.timescale
+
+  return {
+    trackNumber: track.trackId,
+    scale,
+    timescale,
+    statesSync: true,
+    // A SimpleBlock states no duration and a picture frame carries none inside it either. What
+    // the container does give is the step the frames go at: a BlockGroup that stated a
+    // BlockDuration is believed, and otherwise the distance between the last two frames stands in
+    // for it. At the constant frame rate a coded picture track runs at, that step is exact.
+    tail: (frame, ticks) => {
+      if (frame.duration > 0) return Math.round(frame.duration * scale)
+      const last = ticks[ticks.length - 1]
+      const before = ticks[ticks.length - 2]
+      return last !== undefined && before !== undefined ? last - before : 0
+    },
+  }
+}
+
 function convertSegment(bytes: Uint8Array, conversion: Conversion): ConvertedSegment | null {
   const frames: Frame[] = []
   for (const cluster of parseClusters(bytes)) {
@@ -209,8 +319,8 @@ function convertSegment(bytes: Uint8Array, conversion: Conversion): ConvertedSeg
   // Blocks of one cluster are written in decode order, but a segment may hold several clusters
   // and a page may deliver them in any order it likes. Sorted here so that the trun states the
   // samples in the order their times run: otherwise a difference between two timestamps — which
-  // is what the durations below are — could come out negative. Sorting is safe for both codecs
-  // this converter takes: neither Opus nor VP9 reorders, so presentation order is decode order.
+  // is what the durations below are — could come out negative. Sorting is safe for every codec
+  // this converter takes: none of the four reorders, so presentation order is decode order.
   frames.sort((a, b) => a.timestamp - b.timestamp)
 
   const ticks = frames.map((frame) => Math.round(frame.timestamp * conversion.scale))

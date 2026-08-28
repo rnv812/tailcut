@@ -78,10 +78,14 @@ const UNREACHABLE_BESIDE = 'Another player on this page is out of reach and was 
  *
  * The fourth silence, and it needs a sentence for the same reason the others do. A file is only
  * ever opened after triage has said somebody is really watching it, so this means a video was
- * watched and there is nothing to offer for it: the material is in a container with no movie box
- * — webm, measured live on an imageboard thread — or the address has expired, or the host will
- * not answer a ranged read. "Nothing recorded on this page yet" are the words for a page with no
- * video at all, and over a file just watched to the end they read as a defect.
+ * watched and there is nothing to offer for it: the address has expired, or the host will not
+ * answer a ranged read, or the bytes are in neither of the two containers this program reads.
+ * "Nothing recorded on this page yet" are the words for a page with no video at all, and over a
+ * file just watched to the end they read as a defect.
+ *
+ * A plain WebM used to be the commonest way to land here — measured live on an imageboard thread
+ * — and is not any more: a whole Matroska is now read by ranges like an mp4, VP8 and Vorbis
+ * included (src/core/webm/locate.ts, src/core/export/matroska.ts).
  */
 const UNREADABLE = 'tailcut could not read the video file on this page, so nothing of it was saved.'
 

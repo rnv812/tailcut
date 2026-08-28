@@ -11,6 +11,10 @@ import type { Vp9Config } from './codec'
  *
  * The counterpart of opusSampleEntry next door, and it exists for the same reason: the coded
  * frames cross containers unaltered and only the description around them has to be written afresh.
+ *
+ * The same binding covers VP8 under the fourcc 'vp08', with the identical configuration record
+ * behind it, so the writing of the entry is shared: see vpCodecSampleEntry below and
+ * src/core/vp8/mp4.ts for the older codec's half of it.
  */
 
 /** Seventy-two dots per inch, as the 16.16 fixed-point number every visual sample entry states. */
@@ -34,8 +38,23 @@ const COMPRESSOR_NAME = zeroes(32)
  * disagree.
  */
 export function vp9SampleEntry(config: Vp9Config, width: number, height: number): Uint8Array {
+  return vpCodecSampleEntry('vp09', config, width, height)
+}
+
+/**
+ * The same entry under either of the two names the binding gives it.
+ *
+ * 'vp09' and 'vp08' differ in the four letters and in nothing else: one VisualSampleEntry, one
+ * vpcC, and the frames of either codec inside the mdat untouched.
+ */
+export function vpCodecSampleEntry(
+  format: 'vp08' | 'vp09',
+  config: Vp9Config,
+  width: number,
+  height: number,
+): Uint8Array {
   return boxOf(
-    'vp09',
+    format,
     zeroes(6),
     u16(1), // data_reference_index: the one entry of the dref, the file itself
     u16(0, 0), // pre_defined, reserved
