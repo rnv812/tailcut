@@ -130,3 +130,58 @@ test('dragging the material moves it under the hand', async ({ page }) => {
   const after = await page.evaluate(() => (window as unknown as Stand).tcView())
   expect(after.start).toBeCloseTo(before.start + 100 * before.scale, 3)
 })
+
+type Handles = {
+  tcClips: () => { id: string; in: number; out: number }[]
+  tcXAt: (time: number) => number
+  tcHandle: (id: string, edge: 'in' | 'out') => { x: number; y: number }
+}
+
+/** Drags the given handle of the given clip to the given time and returns the clip afterwards. */
+async function dragHandle(
+  page: Page,
+  id: string,
+  edge: 'in' | 'out',
+  toTime: number,
+  modifier?: 'Alt',
+): Promise<{ id: string; in: number; out: number }> {
+  const box = (await page.locator('canvas').boundingBox())!
+  const from = await page.evaluate(
+    ([clip, side]) => (window as unknown as Handles).tcHandle(clip as string, side as 'in' | 'out'),
+    [id, edge],
+  )
+  const x = await page.evaluate((time) => (window as unknown as Handles).tcXAt(time), toTime)
+
+  await page.mouse.move(box.x + from.x, box.y + from.y)
+  await page.mouse.down()
+  if (modifier) await page.keyboard.down(modifier)
+  await page.mouse.move(box.x + x, box.y + from.y, { steps: 4 })
+  await page.mouse.up()
+  if (modifier) await page.keyboard.up(modifier)
+
+  return page.evaluate(
+    (clip) => (window as unknown as Handles).tcClips().find((candidate) => candidate.id === clip)!,
+    id,
+  )
+}
+
+test('the out handle catches the keyframe it was dragged near', async ({ page }) => {
+  await openHost(page)
+
+  const clip = await dragHandle(page, 'c3', 'out', 31.95)
+
+  // Keyframes stand every two seconds in the stand: 32 is the one nearby.
+  expect(clip.out).toBeCloseTo(32, 6)
+})
+
+test('alt lets the handle go where it likes, but still on a frame', async ({ page }) => {
+  await openHost(page)
+
+  const clip = await dragHandle(page, 'c3', 'out', 31.95, 'Alt')
+
+  // It went, and it went where the hand was: a handle that never moved is also a handle that
+  // never caught the keyframe, and that is not what this test is asking about.
+  expect(clip.out).toBeGreaterThan(31.5)
+  expect(Math.abs(clip.out - 32)).toBeGreaterThan(0.001)
+  expect(Math.abs(clip.out * 25 - Math.round(clip.out * 25))).toBeLessThan(1e-6)
+})
