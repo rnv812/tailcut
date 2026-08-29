@@ -64,6 +64,60 @@ async function onDisk(context: BrowserContext, extensionId: string): Promise<num
 /** Longer than the batch interval: whatever was gathered before a switch has landed by now. */
 const BATCH_SETTLED_MS = 3_000
 
+test('the settings page reads and writes what the rest of the extension does', async () => {
+  const { context, extensionId } = await launchWithExtension()
+
+  try {
+    const options = await openExtensionPage(context, extensionId, 'options/options.html')
+
+    // The bundle loaded and drew. A page whose script Chrome refused is blank, and blank is what
+    // a missing entry point, a bundle in the wrong format and a bare specifier all look like —
+    // none of which the unit set of the page can see, because there is no build in it.
+    await expect(options.getByTestId('group-title')).toHaveText([
+      'Recording',
+      'Video detection',
+      'History',
+      'Export',
+    ])
+
+    // Out of the index and not out of navigator.storage.estimate(). A fresh profile has recorded
+    // nothing, and the browser's own estimate never answers zero: it answered 10 GiB with a real
+    // ceiling of 200 MB (§7.4).
+    await expect(options.getByTestId('volume')).toHaveText('0 KB')
+
+    // A number the setting does not take, typed the way a person types it. `min` and `max` on the
+    // field are advice this browser does not enforce on a typed value — which is the whole reason
+    // the page holds it itself.
+    await options.getByTestId('keep-days').fill('9999')
+    await expect(options.getByTestId('limit-note')).toContainText('1 to 90 days')
+    await expect(options.getByTestId('keep-days')).toHaveValue('90')
+
+    await options.getByTestId('mode-off').check()
+
+    // Under the one key everything else reads, and read back through the real store.
+    await expect(async () => {
+      const stored = await options.evaluate(async () => {
+        const address = '/shared/settings-store.js'
+        const { readSettings }: typeof import('../../src/shared/settings-store') =
+          await import(address)
+        return await readSettings()
+      })
+      expect(stored.recording.mode).toBe('off')
+      expect(stored.history.keepDays).toBe(90)
+    }).toPass({ timeout: 10_000 })
+
+    // And a change made somewhere else reaches the page while it stands open: the popup has
+    // quick switches of its own (§9.2) and they write the same key.
+    await setSettings(context, extensionId, {
+      history: { toDisk: false, keepDays: 30, ceilingBytes: 4 * 1024 ** 3 },
+    })
+    await expect(options.getByTestId('to-disk')).not.toBeChecked()
+    await expect(options.getByTestId('keep-days')).toHaveValue('30')
+  } finally {
+    await context.close()
+  }
+})
+
 test('switching recording off stops the copying, and switching it back on resumes it', async () => {
   // Three windows of eight to ten seconds, in real time, plus a browser: the default of thirty
   // seconds is for tests that watch nothing.
