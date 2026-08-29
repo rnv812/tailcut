@@ -104,7 +104,7 @@ function finished(tx: IDBTransaction): Promise<void> {
 let open: Promise<IDBDatabase> | undefined
 
 export function openHistoryDb(): Promise<IDBDatabase> {
-  open ??= new Promise<IDBDatabase>((resolve, reject) => {
+  const opening: Promise<IDBDatabase> = (open ??= new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION)
     request.onupgradeneeded = () => {
       const db = request.result
@@ -127,7 +127,22 @@ export function openHistoryDb(): Promise<IDBDatabase> {
         db.createObjectStore(TOTALS, { keyPath: 'id' })
       }
     }
-    request.onsuccess = () => resolve(request.result)
+    request.onsuccess = () => {
+      const db = request.result
+      // Somebody else wants the store at a version this context does not know, or wants it gone.
+      // A connection left open blocks that for as long as the context holding it lives, and one
+      // of the contexts is the service worker: it opens the index on every sweep and lives on
+      // for minutes afterwards, so an upgrade or a delete would hang for the whole browser and
+      // not for one page. Measured as a test that stopped finishing: the deleteDatabase in
+      // tests/e2e/history-db.spec.ts waited out its thirty seconds the day the sweeper arrived.
+      db.onversionchange = () => {
+        db.close()
+        // Only while this is still the connection everybody is handed: a newer one was opened by
+        // whoever came after the upgrade, and it is not this handler's to drop.
+        if (open === opening) open = undefined
+      }
+      resolve(db)
+    }
     request.onerror = () => reject(request.error)
   }).catch((cause) => {
     // A failed open must not be remembered as the answer for the life of the context: private
@@ -135,9 +150,9 @@ export function openHistoryDb(): Promise<IDBDatabase> {
     // deserves its own attempt.
     open = undefined
     throw cause
-  })
+  }))
 
-  return open
+  return opening
 }
 
 function transaction(db: IDBDatabase, stores: string[], mode: IDBTransactionMode): IDBTransaction {

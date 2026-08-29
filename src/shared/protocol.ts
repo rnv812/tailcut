@@ -459,28 +459,75 @@ export interface SaveResult {
   detail?: string
 }
 
-export function isPageToBridge(value: unknown): value is PageToBridge {
-  if (typeof value !== 'object' || value === null) return false
-  const type = (value as { type?: unknown }).type
-  return (
-    type === 'tc:append' ||
-    type === 'tc:source' ||
-    type === 'tc:worker' ||
-    type === 'tc:duration' ||
-    type === 'tc:plain' ||
-    type === 'tc:sound'
-  )
+/**
+ * Checks of a protocol union, one per kind of message, keyed by the `type` that names it.
+ *
+ * The keys are the union, and that is the whole of why the table exists: a variant added to the
+ * union leaves it short of a key, and the build stops here. A guard written as a list of `===` is
+ * complete only on the day it is written. The message added to that union next compiles, is sent,
+ * and is dropped on arrival by the guard nobody remembered to teach about it — leaving whatever
+ * sends it doing nothing at all, with nothing red anywhere to say so.
+ */
+export type Checks<M extends { type: string }> = {
+  [K in M['type']]: (message: Record<string, unknown>) => boolean
 }
 
-export function isTabToExtension(value: unknown): value is TabToExtension {
-  if (typeof value !== 'object' || value === null) return false
-  return (value as { type?: unknown }).type === 'tc:recording'
+/**
+ * The guard of a union, out of its table of checks.
+ *
+ * A kind the table does not name is not of this union. Every one of these stands where messages
+ * of several protocols arrive at one listener, and answering somebody else's message is worse
+ * than failing to answer our own.
+ */
+export function guarding<M extends { type: string }>(checks: Checks<M>) {
+  const table = checks as Record<string, ((message: Record<string, unknown>) => boolean) | undefined>
+  return (value: unknown): value is M => {
+    if (typeof value !== 'object' || value === null) return false
+    const message = value as Record<string, unknown>
+    return typeof message.type === 'string' && (table[message.type]?.(message) ?? false)
+  }
 }
 
-export function isExtensionToTab(value: unknown): value is ExtensionToTab {
-  if (typeof value !== 'object' || value === null) return false
-  const message = value as { type?: unknown; key?: unknown }
-  if (message.type === 'tc:list') return true
-  if (typeof message.key !== 'string') return false
-  return message.type === 'tc:save' || message.type === 'tc:edit'
-}
+/** A request that names a session: the key is the whole of the address it carries. */
+const named = (message: Record<string, unknown>): boolean => typeof message.key === 'string'
+
+export const isPageToBridge = guarding<PageToBridge>({
+  'tc:append': () => true,
+  'tc:source': () => true,
+  'tc:worker': () => true,
+  'tc:duration': () => true,
+  'tc:plain': () => true,
+  'tc:sound': () => true,
+})
+
+export const isTabToExtension = guarding<TabToExtension>({ 'tc:recording': () => true })
+
+export const isExtensionToTab = guarding<ExtensionToTab>({
+  'tc:list': () => true,
+  'tc:save': named,
+  'tc:edit': named,
+})
+
+/**
+ * What another context of the extension asks the service worker to do.
+ *
+ * Deletion has one owner (see src/sw/sweeper.ts), so everything that wants something removed asks
+ * rather than removes. `tc:sweep` is a nudge — the writer sends it when storage answered that it
+ * is full, and the popup after a deletion whose undo has expired — and `tc:clear` is the button
+ * of §9.4 beside the volume indicator.
+ */
+export type ExtensionToWorker =
+  /**
+   * `full` — storage refused a write, and it refused below the ceiling of §7.4: the browser is
+   * within its rights, the storage is best-effort, and a sweep that only looks at our own ceiling
+   * would find nothing to free. Sent by the writer and by nobody else; the popup's nudge after a
+   * deletion carries no such claim.
+   */
+  | { type: 'tc:sweep'; full?: boolean }
+  | { type: 'tc:clear' }
+
+/** `full` is a claim and not an address: a nudge without it is still a nudge. */
+export const isExtensionToWorker = guarding<ExtensionToWorker>({
+  'tc:sweep': () => true,
+  'tc:clear': () => true,
+})

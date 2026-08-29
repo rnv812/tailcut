@@ -211,12 +211,14 @@ describe('сборка', () => {
   })
 
   it('ships the modules a page of the extension imports by address at run time', async () => {
-    // Both are imported from a page of the extension by address — `import('/shared/history-db.js')`
-    // in the popup and the sweeper, `import('/shared/settings-store.js')` on the settings page —
-    // and Chrome resolves that against dist. Neither is reachable through another entry point in
-    // a form Chrome could load: the bridge bundles its own copy of both, and a bundled copy is
-    // not a file. Without an entry point apiece the import fails at run time with nothing to say.
-    for (const entry of ['shared/history-db', 'shared/settings-store']) {
+    // All three are imported from a page of the extension by address — `import('/shared/history-db.js')`
+    // in the popup and the tests of the index, `import('/shared/settings-store.js')` on the
+    // settings page, `import('/sw/sweeper.js')` by the end-to-end run that asks for a repair with
+    // no grace — and Chrome resolves that against dist. None is reachable through another entry
+    // point in a form Chrome could load: the bridge and the service worker bundle their own copies,
+    // and a bundled copy is not a file. Without an entry point apiece the import fails at run time
+    // with nothing to say.
+    for (const entry of ['shared/history-db', 'shared/settings-store', 'sw/sweeper']) {
       const options = await optionsFor(entry)
       expect(options.format, `${entry}: a page imports it as a module`).toBe('esm')
       expect(existsSync(`dist/${entry}.js`), `dist/${entry}.js is missing`).toBe(true)

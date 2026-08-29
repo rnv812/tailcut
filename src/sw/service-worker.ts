@@ -1,5 +1,21 @@
 import { MAIN_FRAME, listTabSessions, type FramedSession } from '../shared/frames'
-import { isTabToExtension } from '../shared/protocol'
+import {
+  dropSessionRows,
+  dropSnapshotRow,
+  listSessions,
+  listSnapshots,
+  markStorageFull,
+} from '../shared/history-db'
+import { clearStorage } from '../shared/history-opfs'
+import { isExtensionToWorker, isTabToExtension } from '../shared/protocol'
+import {
+  ORPHAN_GRACE_MS,
+  SWEEP_ALARM,
+  SWEEP_PERIOD_MINUTES,
+  liveIo,
+  repair,
+  sweep,
+} from './sweeper'
 
 /**
  * Как часто пересчитывается бейдж активной вкладки. Через будильник, а не через setInterval:
@@ -110,12 +126,43 @@ async function recount(tabId: number): Promise<void> {
   await chrome.action.setBadgeText({ tabId, text }).catch(() => undefined)
 }
 
+/**
+ * The repair, asked for and let go of.
+ *
+ * Whatever goes wrong inside it is answered here, for the reason badgeTextFor gives: a service
+ * worker has nobody to hand a rejection to, and an unhandled one goes into the extension's error
+ * list and wakes the worker to put it there. There is nothing to be done about a repair that
+ * could not run — the index is believed until the next start, which is when it is checked again.
+ */
+const repairQuietly = (): void => {
+  // The grace is passed rather than left to the default, so that "a file younger than this is not
+  // an orphan" is readable here, where the repair is asked for.
+  void repair(liveIo(), ORPHAN_GRACE_MS).catch(() => undefined)
+}
+
 chrome.runtime.onInstalled.addListener(() => {
   chrome.action.setBadgeBackgroundColor({ color: '#4c8dff' })
   chrome.alarms.create(BADGE_ALARM, { periodInMinutes: POLL_INTERVAL_MINUTES })
+  chrome.alarms.create(SWEEP_ALARM, { periodInMinutes: SWEEP_PERIOD_MINUTES })
+  // An update is a start like any other: the index may name pieces of a build that wrote them
+  // differently, and the walk that finds out costs a second, once.
+  repairQuietly()
+})
+
+// The browser has started. This is the one moment the index is checked against the disk: after a
+// crash they disagree, and everything else in the program believes the index.
+chrome.runtime.onStartup.addListener(() => {
+  repairQuietly()
 })
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === SWEEP_ALARM) {
+    // Swallowed here for the same reason the repair's failure is: nothing can be done about a
+    // pass that would not run, and the next one is a minute away.
+    await sweep(liveIo()).catch(() => undefined)
+    return
+  }
+
   if (alarm.name !== BADGE_ALARM) return
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
@@ -126,6 +173,11 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 })
 
 /**
+ * Everything any part of the extension sends the worker arrives here, and two protocols meet in
+ * it: a request from another context of the extension (`ExtensionToWorker` — sweep, clear), taken
+ * by the branch at the top, and the word a frame says about itself, which the rest of this
+ * describes.
+ *
  * A frame of a tab says it has something recorded in it.
  *
  * Chrome signs the message with where it came from, so the frame is the frame that sent it and
@@ -139,7 +191,32 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
  * the popup. Whichever tab it is in, active or not — a badge is set per tab, and one counted now
  * is one already right when the user comes back to that tab.
  */
-chrome.runtime.onMessage.addListener((message, sender) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (isExtensionToWorker(message)) {
+    if (message.type === 'tc:sweep') {
+      // A refusal by the browser comes first and separately: it lowers the effective ceiling to
+      // below what is occupied, so that the sweep below has something to take, and it puts the
+      // interface into the state §11 promises for this — "disk full" said out loud rather than a
+      // retry every thirty seconds that nobody can see.
+      void (message.full ? markStorageFull(Date.now()) : Promise.resolve())
+        .then(() => sweep(liveIo()))
+        .catch(() => undefined)
+      return false
+    }
+    // Everything, gone: the files first and the index after, so that a failure halfway leaves
+    // orphans for the repair rather than rows promising material that is not there.
+    void clearStorage()
+      .then(async () => {
+        for (const row of await listSessions(Number.MAX_SAFE_INTEGER, true)) {
+          await dropSessionRows(row.id)
+        }
+        for (const row of await listSnapshots()) await dropSnapshotRow(row.id)
+      })
+      .then(() => sendResponse({ ok: true }))
+      .catch(() => sendResponse({ ok: false }))
+    return true
+  }
+
   if (!isTabToExtension(message)) return false
 
   const tabId = sender.tab?.id

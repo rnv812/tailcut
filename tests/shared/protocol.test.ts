@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   editorUrl,
   isExtensionToTab,
+  isExtensionToWorker,
   isPageToBridge,
   isSnapshotId,
   isTabToExtension,
@@ -9,6 +10,7 @@ import {
   snapshotPath,
   type BridgeToPage,
   type ExtensionToTab,
+  type ExtensionToWorker,
   type PageToBridge,
   type TabToExtension,
 } from '../../src/shared/protocol'
@@ -221,6 +223,87 @@ describe('isTabToExtension', () => {
     const value: unknown = { type: 'tc:recording' }
     if (!isTabToExtension(value)) throw new Error('expected tc:recording')
     expect(value.type).toBe('tc:recording')
+  })
+})
+
+/**
+ * One message of every kind `PageToBridge` and `TabToExtension` describe.
+ *
+ * Exhaustive by type, and that is what the shape is for: a variant added to a union leaves the
+ * table short of a key and `npm run typecheck` red, and a variant whose guard was not taught about
+ * it leaves the assertion below red as well. Between the two there is no way to add a message to
+ * the protocol and keep every set green while the message is thrown away on arrival.
+ *
+ * `accepted` above is what a hand-kept list becomes: `tc:sound` is a kind of `PageToBridge` and
+ * has never been in it.
+ */
+const sound: PageToBridge = {
+  type: 'tc:sound',
+  sourceId: 'sound:https://cdn.example/track.m4a',
+  url: 'https://cdn.example/track.m4a',
+  durationSeconds: 184.2,
+  buffered: [[0, 184.2]],
+  playing: true,
+}
+
+const everyPageToBridge: { [K in PageToBridge['type']]: Extract<PageToBridge, { type: K }> } = {
+  'tc:append': append,
+  'tc:source': source,
+  'tc:worker': worker,
+  'tc:duration': duration,
+  'tc:plain': plain,
+  'tc:sound': sound,
+}
+
+const everyTabToExtension: { [K in TabToExtension['type']]: Extract<TabToExtension, { type: K }> } = {
+  'tc:recording': { type: 'tc:recording' },
+}
+
+const everyExtensionToTab: { [K in ExtensionToTab['type']]: Extract<ExtensionToTab, { type: K }> } = {
+  'tc:list': { type: 'tc:list' },
+  'tc:save': { type: 'tc:save', key: 'https://site.example/watch|avc1|inf' },
+  'tc:edit': { type: 'tc:edit', key: 'https://site.example/watch|avc1|inf' },
+}
+
+describe('a guard knows every kind its own union describes', () => {
+  it.each(Object.entries(everyPageToBridge))('isPageToBridge takes %s', (_type, message) => {
+    expect(isPageToBridge(message)).toBe(true)
+  })
+
+  it.each(Object.entries(everyExtensionToTab))('isExtensionToTab takes %s', (_type, message) => {
+    expect(isExtensionToTab(message)).toBe(true)
+  })
+
+  it.each(Object.entries(everyTabToExtension))('isTabToExtension takes %s', (_type, message) => {
+    expect(isTabToExtension(message)).toBe(true)
+  })
+})
+
+const everyExtensionToWorker: {
+  [K in ExtensionToWorker['type']]: Extract<ExtensionToWorker, { type: K }>
+} = {
+  'tc:sweep': { type: 'tc:sweep', full: true },
+  'tc:clear': { type: 'tc:clear' },
+}
+
+describe('isExtensionToWorker', () => {
+  it.each(Object.entries(everyExtensionToWorker))('takes %s', (_type, message) => {
+    expect(isExtensionToWorker(message)).toBe(true)
+  })
+
+  // The service worker hears everything every part of the extension sends: what a tab announces
+  // about itself, what the popup asks a tab for, and the answers travelling back. Acting on one
+  // of those as if it were a request to sweep is acting on somebody else's message.
+  it.each([
+    ['null', null],
+    ['a string', 'tc:sweep'],
+    ['a function with a fitting type', Object.assign(() => {}, { type: 'tc:sweep' })],
+    ['an object without a type', { full: true }],
+    ["somebody else's type", { type: 'tc:ping' }],
+    ['the word that a frame is recording', { type: 'tc:recording' }],
+    ['a request addressed to a tab', { type: 'tc:list' }],
+  ])('turns %s away', (_name, value) => {
+    expect(isExtensionToWorker(value)).toBe(false)
   })
 })
 

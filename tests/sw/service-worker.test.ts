@@ -1,5 +1,6 @@
-import { describe, it, expect, afterEach, vi } from 'vitest'
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import type { SessionSummary } from '../../src/shared/protocol'
+import { ORPHAN_GRACE_MS, SWEEP_ALARM } from '../../src/sw/sweeper'
 
 const summary = (duration: number): SessionSummary => ({
   key: 'https://site.example/watch|avc1|inf',
@@ -19,7 +20,11 @@ type BadgeText = { tabId?: number; text: string }
 type Sent = { tabId: number; message: unknown; options: unknown }
 /** What Chrome puts on a message of a content script: the tab and the frame it came from. */
 type Sender = { tab: { id: number }; frameId: number }
-type MessageListener = (message: unknown, sender: Sender) => unknown
+type MessageListener = (
+  message: unknown,
+  sender: Sender,
+  sendResponse: (answer: unknown) => void,
+) => unknown
 
 /**
  * The active tab of a neighbouring window. A user has several windows open, and Chrome lists tabs
@@ -60,6 +65,7 @@ function installChrome(
   const badgeColor: unknown[] = []
   const sent: Sent[] = []
   const installed: Array<() => void> = []
+  const started: Array<() => void> = []
   const alarmFired: Array<(alarm: { name: string }) => Promise<void> | void> = []
   const messaged: MessageListener[] = []
   const tabClosed: Array<(tabId: number) => void> = []
@@ -75,6 +81,7 @@ function installChrome(
   vi.stubGlobal('chrome', {
     runtime: {
       onInstalled: { addListener: (fn: () => void) => installed.push(fn) },
+      onStartup: { addListener: (fn: () => void) => started.push(fn) },
       onMessage: { addListener: (fn: MessageListener) => messaged.push(fn) },
     },
     scripting: {
@@ -120,6 +127,30 @@ function installChrome(
     install: () => {
       for (const listener of installed) listener()
     },
+    /** The browser has started: the one moment the index is checked against the disk. */
+    start: () => {
+      for (const listener of started) listener()
+    },
+    /**
+     * A message from another context of the extension — the popup, the writer in a frame —
+     * rather than from a content script announcing itself.
+     *
+     * Gives back what the listener answered and whether it held the channel open to answer late,
+     * because those are two different promises to the sender: `true` says a reply is coming, and
+     * a sender awaiting one that never comes is the port closing under it.
+     */
+    ask: async (message: unknown) => {
+      let answer: unknown
+      let held = false
+      const reply = (value: unknown) => {
+        answer = value
+      }
+      for (const listener of messaged) {
+        if (listener(message, { tab: { id: 7 }, frameId: TOP }, reply) === true) held = true
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      return { answer, held }
+    },
     fire: async (name = 'tc:badge') => {
       for (const listener of alarmFired) await listener({ name })
     },
@@ -129,14 +160,16 @@ function installChrome(
      * The tab and the frame come from Chrome and not from the message: a page can write neither.
      */
     announce: async (frameId: number, tabId = 7) => {
-      for (const listener of messaged) listener({ type: 'tc:recording' }, { tab: { id: tabId }, frameId })
+      for (const listener of messaged) {
+        listener({ type: 'tc:recording' }, { tab: { id: tabId }, frameId }, () => undefined)
+      }
       // The listener answers nothing and counts the badge on its own time; the count is a round
       // trip to the tab, and the test has to let it finish.
       await new Promise((resolve) => setTimeout(resolve, 0))
     },
     /** The same, with a message of somebody else's making. */
     announceRaw: async (message: unknown, frameId: number, tabId = 7) => {
-      for (const listener of messaged) listener(message, { tab: { id: tabId }, frameId })
+      for (const listener of messaged) listener(message, { tab: { id: tabId }, frameId }, () => undefined)
       await new Promise((resolve) => setTimeout(resolve, 0))
     },
     /** Chrome says the tab is gone. */
@@ -154,9 +187,81 @@ function installChrome(
   }
 }
 
+/**
+ * What the worker asked of the sweeper and of the index, in the order it asked.
+ *
+ * The service worker is wiring and nothing else: what sweeping and repairing actually do is
+ * settled in tests/sw/sweeper.test.ts against fakes of the disk. Here the two are replaced
+ * outright, because the real ones open IndexedDB and walk OPFS, and neither exists in a runner —
+ * and because the order is the thing worth pinning. A refusal by the browser has to lower the
+ * ceiling *before* the sweep, or the pass it starts finds nothing over a ceiling nobody reached.
+ */
+const asked = {
+  log: [] as string[],
+  repairs: [] as number[],
+  /** What sweeping or repairing refuses with; null — it works. */
+  fail: null as Error | null,
+}
+
+const SESSION_ROWS = [{ id: 'kept' }, { id: 'gone' }]
+const SNAPSHOT_ROWS = [{ id: 'snap' }]
+
+/**
+ * The sweeper and the index, replaced. `liveIo` gives back nothing at all: the doubles below
+ * never look at it, and the real one would reach for IndexedDB the moment it was built.
+ */
+function mockStorage() {
+  vi.doMock('../../src/sw/sweeper', () => ({
+    SWEEP_ALARM,
+    SWEEP_PERIOD_MINUTES: 1,
+    ORPHAN_GRACE_MS,
+    liveIo: () => ({}),
+    sweep: async () => {
+      asked.log.push('sweep')
+      if (asked.fail) throw asked.fail
+      return { freed: 0, sessions: 0, pieces: 0, snapshots: 0 }
+    },
+    repair: async (_io: unknown, graceMs: number) => {
+      asked.log.push('repair')
+      asked.repairs.push(graceMs)
+      if (asked.fail) throw asked.fail
+      return { rows: 0, orphans: 0 }
+    },
+  }))
+
+  vi.doMock('../../src/shared/history-db', () => ({
+    markStorageFull: async (now: number) => void asked.log.push(`full:${now > 0}`),
+    listSessions: async () => SESSION_ROWS,
+    listSnapshots: async () => SNAPSHOT_ROWS,
+    dropSessionRows: async (id: string) => void asked.log.push(`drop:${id}`),
+    dropSnapshotRow: async (id: string) => void asked.log.push(`drop-snapshot:${id}`),
+  }))
+
+  vi.doMock('../../src/shared/history-opfs', () => ({
+    clearStorage: async () => void asked.log.push('clear'),
+  }))
+}
+
 async function importWorker() {
   vi.resetModules()
+  mockStorage()
   return import('../../src/sw/service-worker')
+}
+
+/** Runs `work` with an ear on rejections nobody caught, and gives back what escaped. */
+async function looseRejections(work: () => void): Promise<unknown[]> {
+  const loose: unknown[] = []
+  const listen = (reason: unknown) => loose.push(reason)
+  process.on('unhandledRejection', listen)
+  try {
+    work()
+    // An unhandled rejection is reported at the end of the turn the promise was rejected in, so
+    // the turn has to be let go of first.
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  } finally {
+    process.off('unhandledRejection', listen)
+  }
+  return loose
 }
 
 /**
@@ -169,6 +274,7 @@ async function importWorker() {
  */
 async function importWorkerThatCannotAsk(failure: Error) {
   vi.resetModules()
+  mockStorage()
   vi.doMock('../../src/shared/frames', async (importOriginal) => ({
     ...(await importOriginal<typeof import('../../src/shared/frames')>()),
     listTabSessions: () => Promise.reject(failure),
@@ -176,9 +282,18 @@ async function importWorkerThatCannotAsk(failure: Error) {
   return import('../../src/sw/service-worker')
 }
 
+beforeEach(() => {
+  asked.log = []
+  asked.repairs = []
+  asked.fail = null
+})
+
 afterEach(() => {
   vi.unstubAllGlobals()
   vi.doUnmock('../../src/shared/frames')
+  vi.doUnmock('../../src/sw/sweeper')
+  vi.doUnmock('../../src/shared/history-db')
+  vi.doUnmock('../../src/shared/history-opfs')
   vi.resetModules()
 })
 
@@ -190,8 +305,7 @@ describe('installation', () => {
     chrome.install()
 
     expect(chrome.badgeColor).toEqual([{ color: '#4c8dff' }])
-    expect(chrome.alarms).toHaveLength(1)
-    expect(chrome.alarms[0]!.name).toBe('tc:badge')
+    expect(chrome.alarms.map((alarm) => alarm.name)).toContain('tc:badge')
   })
 
   it('sets a repeating alarm: the recount outlives the sleep of the worker', async () => {
@@ -202,11 +316,156 @@ describe('installation', () => {
 
     // A one-shot alarm (delayInMinutes/when) would set the badge exactly once, and a setInterval
     // would fall asleep with the worker after half a minute of idling.
-    const options = chrome.alarms[0]!.options as { periodInMinutes?: number }
+    const badge = chrome.alarms.find((alarm) => alarm.name === 'tc:badge')!
+    const options = badge.options as { periodInMinutes?: number }
     expect(options.periodInMinutes, 'the alarm does not repeat').toBeGreaterThan(0)
     expect(options.periodInMinutes, 'the badge lags the recording by over half a minute').toBeLessThan(
       0.5,
     )
+  })
+
+  it('sets the alarm that wakes the sweeper too, and sets it repeating', async () => {
+    const chrome = installChrome()
+    await importWorker()
+
+    chrome.install()
+
+    // The keeping and the ceiling of §7.4 must not depend on whether a tab is open, and the
+    // sweeper is the one context that exists when none is. Without an alarm of its own it would
+    // run only when something nudged it — that is, only while somebody was recording.
+    const sweeping = chrome.alarms.find((alarm) => alarm.name === SWEEP_ALARM)
+    expect(sweeping, 'nothing wakes the sweeper on its own').toBeDefined()
+    const options = sweeping!.options as { periodInMinutes?: number }
+    expect(options.periodInMinutes, 'the sweep does not repeat').toBeGreaterThan(0)
+  })
+
+  it('checks the index against the disk when the browser starts', async () => {
+    const chrome = installChrome()
+    await importWorker()
+
+    chrome.start()
+    await Promise.resolve()
+
+    // After a crash the index and the disk disagree, and everything else in the program believes
+    // the index. The grace is passed at the call rather than left to the default, so that the
+    // delay is readable where the repair is asked for.
+    expect(asked.repairs).toEqual([ORPHAN_GRACE_MS])
+  })
+
+  it('checks it on an install and an update as well', async () => {
+    const chrome = installChrome()
+    await importWorker()
+
+    chrome.install()
+    await Promise.resolve()
+
+    // An update is a start like any other: the index may name pieces of a build that wrote them
+    // differently.
+    expect(asked.repairs).toEqual([ORPHAN_GRACE_MS])
+  })
+
+  it('lets no failure of the repair out as an unhandled rejection', async () => {
+    const chrome = installChrome()
+    await importWorker()
+    asked.fail = new Error('the index would not open')
+
+    const loose = await looseRejections(() => chrome.start())
+
+    // A service worker has nobody to hand a rejection to: an unhandled one goes into the
+    // extension's error list and wakes the worker to put it there. There is nothing to be done
+    // about a repair that would not run — the next start checks again.
+    expect(loose, 'a rejection escaped into the browser').toEqual([])
+  })
+})
+
+describe('sweeping', () => {
+  it('sweeps when its alarm goes off, and counts no badge for it', async () => {
+    const chrome = installChrome()
+    await importWorker()
+
+    await chrome.fire(SWEEP_ALARM)
+
+    expect(asked.log).toEqual(['sweep'])
+    // Two alarms and one listener, which must not count the badge on this one: it would ask the
+    // active tab for a list every minute the sweeper woke, and put the answer on that tab. Two
+    // things keep it from happening — the sweep branch returns, and the badge asks for its own
+    // name — and this stays green while either of them does.
+    expect(chrome.sent).toEqual([])
+    expect(chrome.badgeText).toEqual([])
+  })
+
+  it('does not sweep on the alarm that counts the badge', async () => {
+    const chrome = installChrome()
+    await importWorker()
+
+    await chrome.fire()
+
+    expect(asked.log).toEqual([])
+  })
+
+  it('lets no failure of a sweep out as an unhandled rejection', async () => {
+    const chrome = installChrome()
+    await importWorker()
+    asked.fail = new Error('the disk would not answer')
+
+    // The alarm listener is the last place a rejection can be answered before the browser sees
+    // it, and the next pass is a minute away.
+    await expect(chrome.fire(SWEEP_ALARM)).resolves.toBeUndefined()
+  })
+
+  it('lowers the ceiling before sweeping when the writer says storage refused it', async () => {
+    const chrome = installChrome()
+    await importWorker()
+
+    const { held } = await chrome.ask({ type: 'tc:sweep', full: true })
+
+    // The order is the whole of it. A refusal below our own ceiling leaves `bytes - ceiling`
+    // negative, so a sweep started first finds nothing to take and the writer is refused again in
+    // thirty seconds — for ever, and without a word in the interface (§11).
+    expect(asked.log).toEqual(['full:true', 'sweep'])
+    // Nothing is answered, and the channel must not be held: a listener returning true would
+    // leave the writer waiting on a reply that never comes.
+    expect(held, 'the channel was held open over an answer nobody sends').toBe(false)
+  })
+
+  it('takes a nudge that claims nothing as a nudge', async () => {
+    const chrome = installChrome()
+    await importWorker()
+
+    // The popup sends one after a deletion whose undo has expired. It has not been refused
+    // anything, and lowering the ceiling on its word would throw away recordings nobody asked to
+    // lose.
+    await chrome.ask({ type: 'tc:sweep' })
+
+    expect(asked.log).toEqual(['sweep'])
+  })
+
+  it('clears the files first and the rows after, and answers when it is done', async () => {
+    const chrome = installChrome()
+    await importWorker()
+
+    const { answer, held } = await chrome.ask({ type: 'tc:clear' })
+
+    // Rows first would leave rows promising material that is not there if the wipe stopped
+    // halfway; files first leaves orphans, and the repair takes those.
+    expect(asked.log).toEqual(['clear', 'drop:kept', 'drop:gone', 'drop-snapshot:snap'])
+    // The button of §9.4 waits on this: without the channel held open the popup would be told
+    // the port closed under it.
+    expect(held).toBe(true)
+    expect(answer).toEqual({ ok: true })
+  })
+
+  it('is not moved by a message that belongs to somebody else', async () => {
+    const chrome = installChrome()
+    await importWorker()
+
+    // Everything every part of the extension sends arrives here: what a tab announces about
+    // itself, what the popup asks a tab for, and the answers travelling back.
+    for (const message of [{ type: 'tc:ping' }, { type: 'tc:list' }, { type: 'tc:recording' }]) {
+      await chrome.ask(message)
+    }
+
+    expect(asked.log).toEqual([])
   })
 })
 
