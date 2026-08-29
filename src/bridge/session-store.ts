@@ -791,6 +791,34 @@ export type PlainOpener = (url: string) => Promise<OpenedFile | null>
  */
 export type SoundOpener = (url: string, seconds: number) => Promise<OpenedSound | null>
 
+/**
+ * A piece of material has just landed on the map of a session: everything the history needs to
+ * write it down, said once, at the moment it happened.
+ *
+ * Said and not asked, because asking would mean walking the maps of every session on a timer and
+ * working out what is new since the last walk — a diff of megabytes to find the eight that
+ * arrived. It carries the init segment of its track on every call, and the writer decides whether
+ * that init is new to the disk: the registry has no idea what is on the disk and must not start
+ * keeping one.
+ *
+ * A chunk the map refused is not reported at all. A second viewing of the same stretch produces a
+ * matching interval (§6.3), the map drops it, and reporting it would put a copy of the same bytes
+ * on disk and count it twice in the length of the session.
+ */
+export interface ChunkStored {
+  /** Merge key of the session (§6.1): what the index finds a session on disk by. */
+  key: string
+  page: { url: string; title: string; createdAt: number; lastSeenAt: number }
+  track: {
+    representation: string
+    bufferId: string
+    kinds: TrackKind[]
+    info: InitInfo
+    initBytes: Uint8Array
+  }
+  chunk: Chunk
+}
+
 export interface StoreOptions {
   openPlain?: PlainOpener
   openSound?: SoundOpener
@@ -806,6 +834,11 @@ export interface StoreOptions {
    * the popup, and never counted on the button.
    */
   onFileRead?: () => void
+  /**
+   * A chunk was taken onto a map. The history writes it down; a build with no writer records
+   * nothing and behaves exactly as the registry did before this stage.
+   */
+  onChunk?: (event: ChunkStored) => void
 }
 
 /** Everything the registry keeps about one ordinary file the page is playing. */
@@ -892,11 +925,13 @@ export class SessionStore {
   private readonly openPlain?: PlainOpener
   private readonly openSound?: SoundOpener
   private readonly onFileRead?: () => void
+  private readonly onChunk?: (event: ChunkStored) => void
 
   constructor(options: StoreOptions = {}) {
     this.openPlain = options.openPlain
     this.openSound = options.openSound
     this.onFileRead = options.onFileRead
+    this.onChunk = options.onChunk
   }
 
   /**
@@ -1302,7 +1337,7 @@ export class SessionStore {
     // piece") compares only segments of one stream, as it was meant to. Inside one buffer two
     // appends with the same start really are one segment appended twice: a muxed segment carries
     // all of its tracks in one call.
-    this.trackFor(session, header).map.insert(chunk)
+    if (this.trackFor(session, header).map.insert(chunk)) this.stored(session, header, chunk)
     session.lastSeenAt = input.now
   }
 
@@ -1324,6 +1359,27 @@ export class SessionStore {
     const track: Track = { ...header, map: new PtsMap() }
     session.tracks.push(track)
     return track
+  }
+
+  /** Tells whoever is writing the history that this piece is now part of this session. */
+  private stored(session: StoredSession, header: TrackHeader, chunk: Chunk): void {
+    this.onChunk?.({
+      key: session.key,
+      page: {
+        url: session.url,
+        title: session.title,
+        createdAt: session.createdAt,
+        lastSeenAt: session.lastSeenAt,
+      },
+      track: {
+        representation: header.representation,
+        bufferId: header.bufferId,
+        kinds: header.kinds,
+        info: header.info,
+        initBytes: header.initBytes,
+      },
+      chunk,
+    })
   }
 
   /**
@@ -1729,7 +1785,7 @@ export class SessionStore {
 
     for (const { header, chunks } of held.material.values()) {
       const track = this.trackFor(session, header)
-      for (const chunk of chunks) track.map.insert(chunk)
+      for (const chunk of chunks) if (track.map.insert(chunk)) this.stored(session, header, chunk)
     }
 
     // The session is no younger for the time it spent out of sight: it was opened when its first

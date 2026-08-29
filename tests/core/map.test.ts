@@ -179,6 +179,24 @@ describe('PtsMap.insert', () => {
     expect(map.totalBytes()).toBe(0)
     expect(map.span()).toBeNull()
   })
+
+  it('answers whether it took the chunk: the history writes down only what it took', () => {
+    const map = new PtsMap()
+
+    // Material the map did not hold, and a longer variant of what it now does: something on the
+    // map changed both times, so both belong on the disk.
+    expect(map.insert(chunk(0, 2, 10))).toBe(true)
+    expect(map.insert(chunk(0, 3, 15))).toBe(true)
+
+    // A second viewing of the same stretch (§6.3) — plainly and with the microscopic shift of
+    // the start a site gives it. The map keeps what it had, and a copy of those bytes has no
+    // business going to the disk or being counted in the length of the session twice.
+    expect(map.insert(chunk(0, 3, 15))).toBe(false)
+    expect(map.insert(chunk(0.0005, 3, 15))).toBe(false)
+
+    // And nothing at all of a chunk that lasts no time.
+    expect(map.insert(chunk(5, 5))).toBe(false)
+  })
 })
 
 describe('PtsMap.runs', () => {

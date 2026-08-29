@@ -19,8 +19,16 @@ export class PtsMap {
   /** Всегда отсортирован по start. */
   private chunks: Chunk[] = []
 
-  insert(chunk: Chunk): void {
-    if (chunk.end <= chunk.start) return
+  /**
+   * Кладёт кусок на карту и отвечает, взяла ли его.
+   *
+   * Ответ появился ради писателя истории: повторный просмотр даёт совпадающий интервал (§6.3),
+   * карта его отбрасывает, и без этого ответа тот же материал уезжал бы на диск второй раз и
+   * считался бы в длительности сессии дважды. Замена более длинным вариантом — тоже «взяла»:
+   * на карте теперь лежит другой кусок, и он на диске нужен.
+   */
+  insert(chunk: Chunk): boolean {
+    if (chunk.end <= chunk.start) return false
 
     const at = this.lowerBound(chunk.start)
 
@@ -31,11 +39,15 @@ export class PtsMap {
       if (!existing) continue
       if (Math.abs(existing.start - chunk.start) >= SAME_CHUNK_TOLERANCE_SECONDS) continue
       // Оставляем более длинный вариант.
-      if (chunk.end > existing.end) this.chunks[i] = chunk
-      return
+      if (chunk.end > existing.end) {
+        this.chunks[i] = chunk
+        return true
+      }
+      return false
     }
 
     this.chunks.splice(at, 0, chunk)
+    return true
   }
 
   runs(): Run[] {

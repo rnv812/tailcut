@@ -5,6 +5,7 @@ import {
   SessionStore,
   selectMaterial,
   summarize,
+  type ChunkStored,
   type Session,
 } from '../../src/bridge/session-store'
 import { sessionKey } from '../../src/core/session-key'
@@ -2402,5 +2403,47 @@ describe('SessionStore: a track that did not arrive in mp4', () => {
     store.append({ ...videoBuffer, bytes: webmAudioSegs[0]! })
 
     expect(store.list()[0]!.tracks[0]!.map.runs()).toEqual([])
+  })
+})
+
+describe('the history hook', () => {
+  it('reports a chunk once, and a repeat of it not at all', () => {
+    const seen: ChunkStored[] = []
+    const store = new SessionStore({ onChunk: (event) => seen.push(event) })
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: videoSegs[0]! })
+    store.append({ ...page, bytes: videoSegs[1]! })
+
+    expect(seen.map((event) => [event.chunk.start, event.chunk.end])).toEqual([
+      [0, 2],
+      [2, 4],
+    ])
+    expect(seen[0]!.key).toBe(store.list()[0]!.key)
+    // The init of the track travels on every call: the writer decides what is new to the disk,
+    // and the registry has no idea what is on it.
+    expect(seen[0]!.track.initBytes.byteLength).toBe(init.byteLength)
+
+    // The same segment again: a second viewing of one stretch, which the map drops.
+    store.append({ ...page, bytes: videoSegs[0]! })
+    expect(seen).toHaveLength(2)
+  })
+
+  it('reports material that came back from probation', () => {
+    const seen: ChunkStored[] = []
+    const store = new SessionStore({ onChunk: (event) => seen.push(event) })
+    store.append({ ...page, bytes: init })
+    store.dropPending('s1')
+    store.append({ ...page, bytes: videoSegs[0]! })
+    store.append({ ...page, bytes: videoSegs[1]! })
+
+    // Nothing while the verdict stands: material under review is out of every list and out of
+    // every save, and it has no business on the disk either.
+    expect(seen).toHaveLength(0)
+
+    store.promotePending('s1')
+    expect(seen.map((event) => [event.chunk.start, event.chunk.end])).toEqual([
+      [0, 2],
+      [2, 4],
+    ])
   })
 })
