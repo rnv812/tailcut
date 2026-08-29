@@ -89,8 +89,24 @@ export class HistoryWriter {
    * exactly one caller — `rekey` (Task 4), which runs on an event and can land inside that await.
    */
   private claimed = new Set<string>()
-  /** Session key → representations whose init segment is on disk already. */
-  private landed = new Map<string, Set<string>>()
+  /**
+   * Session key → representations whose init segment is on disk or on its way to it.
+   *
+   * "On its way" is the whole of the difference and it is not a nicety. A site hands out the init
+   * of a track in the first second of playback and never repeats it, so the init has to travel
+   * again with the next batch if the batch carrying it was lost — which is why this used to be
+   * filled in after the write, in the continuation. But the batches are cut synchronously, and a
+   * burst cuts the second one before the first has landed: the mark was not there yet, and the
+   * init went down a second time. Measured on the disk — 1658 bytes more than had been handed
+   * over, two copies of the init of the fixture — and unseen by the set, which waited between
+   * batches.
+   *
+   * So the claim is made where the batch is cut and given back if that batch did not land. The
+   * cost is one batch of a burst going down with no init in front of it when the batch that was
+   * carrying it fails; the next one brings it. What is bought is the promise `HistoryTrack.init`
+   * makes to everything downstream — one init per track, in one place the index can name.
+   */
+  private carried = new Map<string, Set<string>>()
   private queue: Promise<void> = Promise.resolve()
 
   constructor(private readonly io: HistoryIo) {}
@@ -120,11 +136,12 @@ export class HistoryWriter {
     const representation = event.track.representation
     const item: BatchItem = { representation, chunk: event.chunk }
 
-    // The init goes with the first material of its track that this writer sends down, and is
-    // marked as landed only once the batch carrying it has actually landed: a site gives its init
-    // segments out in the first second of playback and never repeats them, so an init lost with a
-    // failed batch has to travel again with the next one or the material is unreadable for good.
-    if (!this.landed.get(event.key)?.has(representation) && !pending.attached.has(representation)) {
+    // The init goes with the first material of its track that this writer sends down, and with
+    // nothing after that: the claim is made when the batch is cut, and given back only if that
+    // batch failed to land. Sites give their init segments out in the first second of playback and
+    // never repeat them, so an init lost with a failed batch has to travel again with the next one
+    // or the material is unreadable for good.
+    if (!this.carried.get(event.key)?.has(representation) && !pending.attached.has(representation)) {
       item.init = event.track.initBytes
       pending.attached.add(representation)
       pending.bytes += event.track.initBytes.byteLength
@@ -169,32 +186,47 @@ export class HistoryWriter {
     const bytes = concatBytes(layout.parts)
     const sample = pending.sample
 
-    // Said here, synchronously, and not inside the continuation below: from this line until the
-    // identity lands in `opened` the index may be answering, and to anything reading `opened`
-    // alone this key looks like a key that has never written a byte. `rekey` reads it (Task 4).
+    // Both of these are said here, synchronously, and not inside the continuation below, because
+    // the next batch is cut in a turn the continuation has not run in yet.
+    //
+    // `claimed`: from this line until the identity lands in `opened` the index may be answering,
+    // and to anything reading `opened` alone this key looks like a key that has never written a
+    // byte. `rekey` reads it (Task 4).
+    //
+    // `carried`: this batch is taking the init segments of `layout.inits` down with it, and the
+    // next batch of a burst must not take them down again.
     this.claimed.add(key)
+    const carried = this.carried.get(key) ?? new Set<string>()
+    for (const init of layout.inits) carried.add(init.representation)
+    this.carried.set(key, carried)
 
     this.queue = this.queue
       .then(async () => {
-        const id = this.opened.get(key) ?? (await this.io.open(sample))
-        if (!id) return
-        this.opened.set(key, id)
+        let landed = false
+        try {
+          const id = this.opened.get(key) ?? (await this.io.open(sample))
+          if (!id) return
+          this.opened.set(key, id)
 
-        const answer = await this.io.write(piecePath(id, file), bytes.buffer as ArrayBuffer)
-        if (answer.type !== 'written') {
-          if (answer.quota) {
-            this.quietUntil = this.io.now() + QUOTA_BACKOFF_MS
-            this.io.sweep()
+          const answer = await this.io.write(piecePath(id, file), bytes.buffer as ArrayBuffer)
+          if (answer.type !== 'written') {
+            if (answer.quota) {
+              this.quietUntil = this.io.now() + QUOTA_BACKOFF_MS
+              this.io.sweep()
+            }
+            return
           }
-          return
+
+          // The row after the file, never before it: a row is a promise that the bytes are there.
+          await this.io.record(id, layout.piece, layout.inits, sample)
+          landed = true
+        } finally {
+          // The claim is given back by the batch that did not keep it, whichever way it failed —
+          // an index that would not open the session, a refused write, a throw out of `record`.
+          // The init then travels again with the next batch, which is the only place it can come
+          // from: the page handed it over once and will not do it again.
+          if (!landed) for (const init of layout.inits) carried.delete(init.representation)
         }
-
-        // The row after the file, never before it: a row is a promise that the bytes are there.
-        await this.io.record(id, layout.piece, layout.inits, sample)
-
-        const landed = this.landed.get(key) ?? new Set<string>()
-        for (const init of layout.inits) landed.add(init.representation)
-        this.landed.set(key, landed)
       })
       .catch(() => {
         // Nothing here may reject: this queue is the only thing chaining the batches, and a

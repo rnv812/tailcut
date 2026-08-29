@@ -18,7 +18,23 @@ export interface HistoryTrack {
   bufferId: string
   kinds: TrackKind[]
   info: InitInfo
-  /** Where the init segment of this track went; a track has exactly one, written once. */
+  /**
+   * Where the init segment of this track went. A track has exactly one, and the index names one
+   * place for it.
+   *
+   * That is kept by the writer rather than by anything here: it claims the init of a track in the
+   * same turn it cuts the batch that carries it, and gives the claim back only if that batch
+   * failed to land (`HistoryWriter` in src/bridge/history-writer.ts). The claim used to be made
+   * after the write instead, and a burst — two batches cut before the first had landed — sent the
+   * init down twice.
+   *
+   * One case is left in which the same init can be placed a second time, and it is written here
+   * rather than assumed away: two merge keys gathering at once and merging into one session (§6.1),
+   * where each side had already claimed the init of its own tracks. Whoever fills this in keeps the
+   * first place an init landed in and ignores every later one — otherwise which of the two the
+   * index names would be decided by the order they landed in. The spare copy costs a few hundred
+   * bytes inside a piece that is material anyway, and nothing ever reads it.
+   */
   init: PlacedIn
 }
 

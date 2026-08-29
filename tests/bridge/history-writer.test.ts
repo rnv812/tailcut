@@ -160,6 +160,57 @@ describe('HistoryWriter', () => {
     ])
   })
 
+  it('sends the init once through a burst that leaves no pause between batches', async () => {
+    const { io, written, rows } = fakeIo()
+    const writer = new HistoryWriter(io)
+
+    // Nothing is awaited between the two: both batches are cut in one turn, so the first is still
+    // on the queue — its file unwritten, its row unrecorded — while the second is laid out. The
+    // test above cannot see this because it waits, and the disk showed it plainly: 1658 bytes more
+    // on disk than had been handed over, which is exactly two copies of the init of the fixture.
+    writer.take(event(0, HISTORY_BATCH_BYTES))
+    writer.take(event(2, HISTORY_BATCH_BYTES))
+    await settle()
+
+    expect(written.map((one) => one.bytes)).toEqual([16 + HISTORY_BATCH_BYTES, HISTORY_BATCH_BYTES])
+    // And the index hears of the init once. `HistoryTrack.init` holds one place and one only, so a
+    // second row placing the same init in another file would make which of the two the index keeps
+    // a matter of the order they landed in.
+    expect(rows.flatMap((row) => row.inits)).toEqual([
+      { representation: 'video:avc1:1920x1080', at: 0, length: 16 },
+    ])
+  })
+
+  it('brings the init back when the batch carrying it was lost inside a burst', async () => {
+    let fail = true
+    const { io, written } = fakeIo({
+      write: async (_path, bytes) => {
+        if (fail) {
+          fail = false
+          return { type: 'failed', id: 0, error: 'no', quota: false }
+        }
+        return { type: 'written', id: 0, bytes: bytes.byteLength }
+      },
+    })
+    const writer = new HistoryWriter(io)
+
+    // The claim is given up when the batch holding it does not land, and this is the price of
+    // making it at all: the second batch of the burst was cut while the first still looked like it
+    // would land, so it goes down without an init in front of it and is unreadable until the third
+    // brings one. The batch after the failure is where the init comes back.
+    writer.take(event(0, HISTORY_BATCH_BYTES))
+    writer.take(event(2, HISTORY_BATCH_BYTES))
+    await settle()
+    writer.take(event(4, HISTORY_BATCH_BYTES))
+    await settle()
+
+    expect(written.map((one) => one.bytes)).toEqual([
+      16 + HISTORY_BATCH_BYTES,
+      HISTORY_BATCH_BYTES,
+      16 + HISTORY_BATCH_BYTES,
+    ])
+  })
+
   it('drops the batch when storage is full, asks for room, and waits before trying again', async () => {
     const { io, written, sweeps, tick } = fakeIo({
       write: async () => ({ type: 'failed', id: 0, error: 'QuotaExceededError', quota: true }),
