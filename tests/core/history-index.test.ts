@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { coveredWith, historyIndexOf, secondsOf } from '../../src/core/history/index'
+import { SAME_CHUNK_TOLERANCE_SECONDS } from '../../src/core/timeline/map'
 import type { HistoryPiece, HistoryTrack } from '../../src/core/history/layout'
 
 const video: HistoryTrack = {
@@ -146,6 +147,31 @@ describe('historyIndexOf', () => {
     expect(track.chunks.map((chunk) => chunk.start)).toEqual([0, 2, 4])
     // The first one written wins: it is the one the earlier reader already knows.
     expect(track.chunks[1]!.data).toEqual({ at: 180, length: 80 })
+  })
+
+  it('drops it by the tolerance the live map inserts by, and not by a copy of that number', () => {
+    // Two frames writing one video do not write the same start twice: each of them read the time
+    // out of its own segment, and the two differ in the last digits. So the rule is a tolerance,
+    // and the tolerance is `PtsMap`'s own — the fixture is built out of the exported constant so
+    // that moving it moves both sides at once. A second copy of the number in the history would
+    // hold this test just as well while it agreed, and stop agreeing with no test to say so.
+    const near = SAME_CHUNK_TOLERANCE_SECONDS / 2
+    const far = SAME_CHUNK_TOLERANCE_SECONDS * 2
+    const written = (file: string, start: number): HistoryPiece => ({
+      file,
+      bytes: 100,
+      until: start + 2,
+      writtenAt: 30,
+      parts: [{ representation: video.representation, start, end: start + 2, at: 0, length: 100 }],
+    })
+
+    const chunks = (...extra: HistoryPiece[]) =>
+      historyIndexOf(session, [...pieces, ...extra], meta)
+        .index.tracks.find((one) => one.representation === video.representation)!
+        .chunks.map((chunk) => chunk.start)
+
+    expect(chunks(written('bbbb-000000.tcm', 2 + near)), 'a repeat off by a rounding was kept as a second piece').toEqual([0, 2, 4])
+    expect(chunks(written('bbbb-000001.tcm', 2 + far)), 'a piece of its own was dropped as a repeat').toEqual([0, 2, 2 + far, 4])
   })
 
   it('leaves a track with no material out instead of describing an empty one', () => {

@@ -40,15 +40,10 @@ const history = new HistoryWriter({
   open: (event) =>
     openSession(event.key, event.page).catch(() => null),
   record: (id, piece, tracks, event) =>
-    recordPiece(id, piece, tracks, {
-      ...event,
-      // The largest player seen by the time the piece landed, and not only by the time its chunks
-      // were cut: a page that hands over its whole video in the first second appends everything
-      // before the watcher has measured anything at all. The stamp on the event is what is left
-      // when the session is no longer in this frame — a key that has moved since the batch was
-      // gathered (see SessionStore.widthOf).
-      widthPx: Math.max(event.widthPx, store.widthOf(event.key)),
-    }).catch(() => undefined),
+    recordPiece(id, piece, tracks, event).catch(() => undefined),
+  // The one thing about a live session the writer asks for at the moment a piece lands. Why it is
+  // asked then, and why the stamp the chunks carry is kept beside the answer, is in HistoryIo.
+  liveWidth: (key) => store.widthOf(key),
   rename: (id, event) =>
     renameSession(id, event.to, event.page)
       .then(() => undefined)

@@ -12,8 +12,16 @@ export function continuesRun(lastEnd: number, start: number): boolean {
   return start - lastEnd <= GAP_TOLERANCE_SECONDS
 }
 
-/** Совпадение начал с такой точностью означает тот же самый кусок. */
-const SAME_CHUNK_TOLERANCE_SECONDS = 0.001
+/**
+ * Совпадение начал с такой точностью означает тот же самый кусок.
+ *
+ * Exported because the history joins the same pieces by the same rule a second time, over the
+ * rows of the index rather than over the material (`historyIndexOf` in `src/core/history/index.ts`):
+ * two frames writing one video write their own copy of the overlap, and the reader opened over
+ * the pieces must see what the map of a live session sees. A second constant of the same value
+ * would be a rule that holds until somebody moves one of the two.
+ */
+export const SAME_CHUNK_TOLERANCE_SECONDS = 0.001
 
 export class PtsMap {
   /** Всегда отсортирован по start. */

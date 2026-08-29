@@ -57,6 +57,22 @@ export interface HistoryIo {
    * happened to close the batch.
    */
   record(id: string, piece: HistoryPiece, tracks: HistoryTrack[], event: ChunkStored): Promise<void>
+  /**
+   * The largest player the session under this key is being watched in right now, in CSS pixels;
+   * 0 — nothing stands under that key in this frame any more.
+   *
+   * Asked when a piece has landed, which is the latest moment there is, and asked because the
+   * stamp the chunks carry is regularly older than the measurement: a player is measured half a
+   * second into the page at the earliest, and a site that hands over its whole video in the first
+   * second has cut every chunk it will ever cut before then. Stamped alone, such a session would
+   * lie on the disk at a width of nothing and be swept as worthless (§7.3).
+   *
+   * It answers 0 rather than the truth in one ordinary case, and that is why the stamp is kept
+   * beside it: the key of a session moves while it is being recorded (§6.1), and a batch gathered
+   * under the old one lands after the move — see `rekey`, where the batch travels and the event
+   * that signs it keeps the key it was gathered under.
+   */
+  liveWidth(key: string): number
   /** The session on disk is known by another merge key from now on; the row moves, the files do not. */
   rename(id: string, event: SessionRekeyed): Promise<void>
   /** Storage is full and somebody has to make room. */
@@ -350,7 +366,12 @@ export class HistoryWriter {
           }
 
           // The row after the file, never before it: a row is a promise that the bytes are there.
-          await this.io.record(id, layout.piece, tracks, sample)
+          //
+          // Signed with the largest player known now and not only with the one the chunks were
+          // stamped with: both halves are needed, and each of them is the whole answer in a case
+          // the other cannot reach — see HistoryIo.liveWidth.
+          const widthPx = Math.max(sample.widthPx, this.io.liveWidth(sample.key))
+          await this.io.record(id, layout.piece, tracks, { ...sample, widthPx })
           landed = true
         } finally {
           // The claim is given back by the batch that did not keep it, whichever way it failed —

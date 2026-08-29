@@ -1,11 +1,8 @@
 import { SNAPSHOT_VERSION, type SnapshotIndex, type SnapshotTrack, type Store } from '../snapshot/format'
-import { continuesRun } from '../timeline/map'
+import { continuesRun, SAME_CHUNK_TOLERANCE_SECONDS } from '../timeline/map'
 import { piecePath } from '../../shared/history-files'
 import type { HistoryPiece, HistoryTrack } from './layout'
 import type { Located } from '../../shared/types'
-
-/** Two pieces of one stretch this close together are one piece, as PtsMap counts it. */
-const SAME_CHUNK_TOLERANCE_SECONDS = 0.001
 
 /** Everything about a session that is not its material: what the index row holds. */
 export interface HistoryFacts {
@@ -140,8 +137,10 @@ export function historyIndexOf(
     const kept: typeof chunks = []
     for (const chunk of chunks) {
       const last = kept[kept.length - 1]
-      // The same rule PtsMap inserts by: a matching start is a second copy of one piece, and the
-      // one already there was written first.
+      // The same rule PtsMap inserts by, and the same constant it inserts by: a matching start is
+      // a second copy of one piece, and the one already there was written first. A copy of the
+      // number here would let the disk and the live session disagree about what "the same piece"
+      // means, silently, on the day one of the two is moved.
       if (last && Math.abs(last.start - chunk.start) < SAME_CHUNK_TOLERANCE_SECONDS) continue
       kept.push(chunk)
     }

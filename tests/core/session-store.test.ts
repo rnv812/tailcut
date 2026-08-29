@@ -2588,6 +2588,25 @@ describe('the size of the player a session was watched in', () => {
     expect(store.list()).toHaveLength(1)
   })
 
+  it('is not left deaf by one: the session opened after a NaN still gets the width', () => {
+    const store = new SessionStore()
+
+    // The width of an element that never reached the layout is NaN — getBoundingClientRect gives
+    // a rect of nothing and the watcher rounds it — and it arrives here before this source has a
+    // session, which is the ordinary order (see sawPlayer). The two assertions above cannot see
+    // what happens to it, because a live session guards its own width with a comparison of its
+    // own; this is the half that only the source's own memory answers. Kept there, the NaN would
+    // be greater than nothing and smaller than nothing: every measurement after it would read as
+    // no news, and the session below would open at a width of zero.
+    store.sawPlayer('s1', Number.NaN)
+    store.sawPlayer('s1', 1280)
+    store.sawPlayer('s1', Number.NaN)
+
+    store.append({ ...page, bytes: init })
+
+    expect(store.list()[0]!.widthPx).toBe(1280)
+  })
+
   it('takes a measurement made before the session existed', () => {
     const seen: ChunkStored[] = []
     const store = new SessionStore({ onChunk: (event) => seen.push(event) })

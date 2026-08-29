@@ -788,8 +788,8 @@ const plainVideo = (overrides: Record<string, unknown> = {}) =>
   fakeVideo({ src: CLIP_URL, currentSrc: CLIP_URL, duration: 9.48, ...overrides })
 
 /** The same file as a muted looping preview with no controls: ten of those eighteen pages. */
-const plainBanner = () =>
-  plainVideo({ muted: true, loop: true, controls: false, box: box(160, 90) })
+const plainBanner = (overrides: Record<string, unknown> = {}) =>
+  plainVideo({ muted: true, loop: true, controls: false, box: box(160, 90), ...overrides })
 
 /** Puts an element on the page without naming any stream for it: a plain file has none. */
 function stand(element: FakeVideo, root: FakeRoot = documentRoot): FakeVideo {
@@ -973,6 +973,29 @@ describe('the watcher and an ordinary file', () => {
     tick(13)
 
     expect(watcher.seen).toEqual([{ sourceId: CLIP_ID, verdict: 'promote' }])
+  })
+
+  it('does not let a wide banner speak for the file the narrow player is playing', async () => {
+    const watcher = await startWatcher()
+
+    // A page shaped the way the rule is written against: a mute autoplaying loop across the whole
+    // width of it, and below that the player the reader started, at the smallest size triage will
+    // take at all. Both point at the same file.
+    //
+    // Which of them speaks is decided by the verdict and the watching, and by nothing else — the
+    // width is deliberately no part of it (see Standing in the watcher). Let size in and this
+    // page is the case that breaks: the banner is six times the player and is refused outright as
+    // decoration, so the account of the file would become its account, and a file that is being
+    // watched right now would be refused instead of recorded.
+    stand(plainBanner({ box: box(1920, 1080) }))
+    stand(plainVideo({ buffered: ranges([0, 9.48]), box: box(320, 180) }))
+
+    tick(13)
+
+    expect(watcher.seen).toEqual([{ sourceId: CLIP_ID, verdict: 'promote' }])
+    // And the size that goes out is the player's. One file, one account of it: a width taken from
+    // the banner would describe an element nobody watched (§7.3).
+    expect(watcher.players).toEqual([{ sourceId: CLIP_ID, widthPx: 320 }])
   })
 
   it('refuses the file an element has moved on from', async () => {

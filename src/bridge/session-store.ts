@@ -1825,8 +1825,16 @@ export class SessionStore {
    * would never be repeated.
    */
   sawPlayer(sourceId: string, widthPx: number): void {
-    if (!(widthPx > 0)) return
-    if (widthPx <= (this.playerWidths.get(sourceId) ?? 0)) return
+    // News and nothing else, in one comparison written this way round on purpose. A width no
+    // larger than the one already held changes nothing; zero and anything below it are that case
+    // too; and NaN — what an element that never reached the layout measures out as — fails the
+    // comparison and is refused rather than stored. Refusing it matters: nothing is greater than
+    // NaN, so a NaN kept here would answer "not news" to every measurement after it, and the
+    // session this source opens later would start out of `join` at a width of nothing.
+    //
+    // Two guards stood here, the first of them "greater than zero". It said nothing this line
+    // does not: the only case it answered on its own was the NaN, and it answered it twice.
+    if (!(widthPx > (this.playerWidths.get(sourceId) ?? 0))) return
     this.playerWidths.set(sourceId, widthPx)
 
     const source = this.sources.get(sourceId)

@@ -51,6 +51,7 @@ function fakeIo(overrides: Partial<HistoryIo> = {}) {
       rows.push({ id, piece, tracks, event })
       await overrides.record?.(id, piece, tracks, event)
     },
+    liveWidth: (key) => overrides.liveWidth?.(key) ?? 0,
     rename: async (id, event) => {
       renamed.push([id, event.to])
     },
@@ -97,6 +98,12 @@ const of = (track: ChunkStored['track'], start: number, bytes: number): ChunkSto
 })
 
 const event = (start: number, bytes: number): ChunkStored => of(VIDEO, start, bytes)
+
+/** The same chunk, cut at a moment when the player had already been measured (§7.3). */
+const watched = (start: number, bytes: number, widthPx: number): ChunkStored => ({
+  ...event(start, bytes),
+  widthPx,
+})
 
 /** A track as the index remembers it, minus the place its init landed in. */
 const facts = ({ initBytes: _bytes, ...track }: ChunkStored['track']) => track
@@ -183,6 +190,36 @@ describe('HistoryWriter', () => {
       { ...facts(VIDEO), init: { file, at: 0, length: 16 } },
       { ...facts(AUDIO), init: { file, at: 1_016, length: 24 } },
     ])
+  })
+
+  it('signs a piece with the player the frame is watching in now, not with the one its chunks knew', async () => {
+    // A site that hands over its whole video in the first second has cut every chunk it will ever
+    // cut before the watcher has measured anything: half a second is the earliest a player is
+    // measured at, and these chunks are stamped with nothing. Asked again where the piece lands —
+    // the latest moment there is — the frame knows the answer.
+    const { io, rows } = fakeIo({ liveWidth: () => 1_280 })
+    const writer = new HistoryWriter(io)
+
+    writer.take(event(0, HISTORY_BATCH_BYTES))
+    await settle()
+
+    expect(rows[0]!.event.widthPx, 'the row went down under a width of nothing').toBe(1_280)
+  })
+
+  it('keeps the width its chunks carried when the frame has nothing left to say about them', async () => {
+    // The other half of the same rule, and an ordinary case rather than a defensive one: the key
+    // of a session moves while it is being recorded (§6.1), the batch gathered under the old one
+    // lands after the move, and the event that signs the row keeps the key it was gathered under.
+    // Nothing stands under that key any more, so the frame answers nothing — and what the chunks
+    // were stamped with is the whole of what is known about the player. It is a real number: a
+    // session re-keyed after a while of watching was measured long before it moved.
+    const { io, rows } = fakeIo({ liveWidth: () => 0 })
+    const writer = new HistoryWriter(io)
+
+    writer.take(watched(0, HISTORY_BATCH_BYTES, 640))
+    await settle()
+
+    expect(rows[0]!.event.widthPx, 'the measurement went down with the key it was made under').toBe(640)
   })
 
   it('sends the init of a track once, and again if the batch carrying it was lost', async () => {

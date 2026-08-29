@@ -36,6 +36,12 @@
     '/fixtures/h264/chunk-stream0-00002.m4s',
     '/fixtures/h264/chunk-stream0-00003.m4s',
   ]
+  /**
+   * The next six seconds, in another representation of the picture: what an ABR player switches
+   * to (§6.2). Another init and a segment that carries on where the three above stop.
+   */
+  const NEXT_INIT = '/fixtures/minute/init-stream0.m4s'
+  const NEXT = '/fixtures/minute/chunk-stream0-00002.m4s'
 
   const video = document.getElementById('v')
   const mediaSource = new MediaSource()
@@ -47,25 +53,57 @@
 
   window.appended = 0
 
+  const fetchBytes = async (url) => (await fetch(url)).arrayBuffer()
+
+  const append = (buffer, into) =>
+    new Promise((resolve) => {
+      into.addEventListener('updateend', resolve, { once: true })
+      into.appendBuffer(buffer)
+    })
+
+  /** The buffer of the picture, kept so that the page can go on feeding it after playback began. */
+  let picture
+
   mediaSource.addEventListener('sourceopen', async () => {
-    const sb = mediaSource.addSourceBuffer('video/mp4; codecs="avc1.4d401e"')
+    picture = mediaSource.addSourceBuffer('video/mp4; codecs="avc1.4d401e"')
 
-    const append = (buffer) =>
-      new Promise((resolve) => {
-        sb.addEventListener('updateend', resolve, { once: true })
-        sb.appendBuffer(buffer)
-      })
-
-    const fetchBytes = async (url) => (await fetch(url)).arrayBuffer()
-
-    await append(await fetchBytes(INIT))
+    await append(await fetchBytes(INIT), picture)
     window.appended++
 
     for (const url of SEGMENTS) {
-      await append(await fetchBytes(url))
+      await append(await fetchBytes(url), picture)
       window.appended++
     }
 
     window.allAppended = true
   })
+
+  /*
+    Two things this page does only when it is asked, so that everything already written against it
+    goes on seeing what it always saw: appended once, looped, nothing new ever arriving.
+  */
+
+  /**
+   * The same stretch handed over a second time, init and all: a rewatch, a seek back, a player
+   * refilling its buffer (§6.3). Not one byte of it is new material.
+   */
+  window.tcAppendAgain = async () => {
+    await append(await fetchBytes(INIT), picture)
+    for (const url of SEGMENTS) await append(await fetchBytes(url), picture)
+  }
+
+  /**
+   * Six more seconds of picture, in another representation and long after the first three
+   * segments: the quality switch of §6.2, into the buffer that is already playing.
+   *
+   * The one thing here that is material the session did not have before, so the only way to ask
+   * whether what arrives after a session has been re-keyed lands in the row of what arrived
+   * before it. A second SourceBuffer would have been the other way and Chrome refuses it: once
+   * media has been appended, `addSourceBuffer` throws QuotaExceededError.
+   */
+  window.tcAppendMore = async () => {
+    await append(await fetchBytes(NEXT_INIT), picture)
+    await append(await fetchBytes(NEXT), picture)
+    window.moreAppended = true
+  }
 </script>

@@ -71,7 +71,6 @@ export interface SnapshotRow {
 export interface TotalsRow {
   id: string
   bytes: number
-  sessions: number
   /**
    * The ceiling this program is actually keeping to, when the browser has proved it cannot have
    * the one from the settings; 0 — nothing has refused us.
@@ -258,14 +257,23 @@ export async function recordPiece(
   const row: HistoryPieceRow = { ...piece, sessionId }
   await promised(sessions.put(next))
   await promised(tx.objectStore(PIECES).put(row))
-  await addTotals(tx, piece.bytes, session.bytes === 0 ? 1 : 0)
+  await addTotals(tx, piece.bytes)
   await finished(tx)
 }
 
-const NO_TOTALS: TotalsRow = { id: TOTALS_KEY, bytes: 0, sessions: 0, cappedBytes: 0, fullAt: 0 }
+const NO_TOTALS: TotalsRow = { id: TOTALS_KEY, bytes: 0, cappedBytes: 0, fullAt: 0 }
 
-/** Moves the running total inside a transaction that is already open. */
-async function addTotals(tx: IDBTransaction, bytes: number, sessions: number): Promise<void> {
+/**
+ * Moves the running total inside a transaction that is already open.
+ *
+ * Bytes and nothing else. A count of the sessions was kept here beside them and is gone: it was
+ * added under a condition and taken away without one, so a session whose pieces had all been
+ * evicted was counted twice and one deleted before its first piece landed subtracted a unit it
+ * had never added. Nothing read it — neither the popup, which shows the volume (§9.2), nor the
+ * sweeper, which works off `bytes` — so what stood here was a number that could only be wrong.
+ * The count of what is on disk is `listSessions().length`, worked out where it is wanted.
+ */
+async function addTotals(tx: IDBTransaction, bytes: number): Promise<void> {
   const store = tx.objectStore(TOTALS)
   const current = ((await promised(store.get(TOTALS_KEY))) as TotalsRow | undefined) ?? NO_TOTALS
   await promised(
@@ -273,7 +281,6 @@ async function addTotals(tx: IDBTransaction, bytes: number, sessions: number): P
       ...current,
       id: TOTALS_KEY,
       bytes: Math.max(0, current.bytes + bytes),
-      sessions: Math.max(0, current.sessions + sessions),
     }),
   )
 }
@@ -455,7 +462,7 @@ export async function dropSessionRows(id: string): Promise<void> {
   for (const key of (await promised(pieces.index('sessionId').getAllKeys(id))) as IDBValidKey[]) {
     await promised(pieces.delete(key))
   }
-  await addTotals(tx, -row.bytes, -1)
+  await addTotals(tx, -row.bytes)
   await finished(tx)
 }
 
@@ -495,7 +502,7 @@ export async function dropPieceRows(id: string, files: readonly string[]): Promi
       }),
     )
   }
-  await addTotals(tx, -freed, 0)
+  await addTotals(tx, -freed)
   await finished(tx)
   return freed
 }
@@ -504,7 +511,7 @@ export async function recordSnapshot(row: SnapshotRow): Promise<void> {
   const db = await openHistoryDb()
   const tx = transaction(db, [SNAPSHOTS, TOTALS], 'readwrite')
   await promised(tx.objectStore(SNAPSHOTS).put(row))
-  await addTotals(tx, row.bytes, 0)
+  await addTotals(tx, row.bytes)
   await finished(tx)
 }
 
@@ -524,6 +531,6 @@ export async function dropSnapshotRow(id: string): Promise<void> {
     return
   }
   await promised(store.delete(id))
-  await addTotals(tx, -row.bytes, 0)
+  await addTotals(tx, -row.bytes)
   await finished(tx)
 }

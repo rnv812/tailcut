@@ -274,6 +274,15 @@ test('the index a bridge frame writes is the index every other context reads', a
   }
 })
 
+/** The index as it stands, read from a page of the extension — which is what a reader here is. */
+const indexOn = (reader: Page) =>
+  reader.evaluate(async () => {
+    const address = '/shared/history-db.js'
+    const { listSessions, readTotals }: typeof import('../../src/shared/history-db') =
+      await import(address)
+    return { sessions: await listSessions(), totals: await readTotals() }
+  })
+
 test('what a tab recorded is in the index after that tab is gone', async () => {
   const { context, extensionId } = await launchWithExtension()
 
@@ -281,20 +290,16 @@ test('what a tab recorded is in the index after that tab is gone', async () => {
     const page = await context.newPage()
     await watchOn(page, 'player.html', 'https://one.test/watch', 12)
     const title = await page.title()
-    await page.close()
 
     const reader = await openExtensionPage(context, extensionId, 'popup/popup.html')
-    const listed = await reader.evaluate(async () => {
-      const address = '/shared/history-db.js'
-      const { listSessions, readTotals }: typeof import('../../src/shared/history-db') =
-        await import(address)
-      return { sessions: await listSessions(), totals: await readTotals() }
-    })
+    const listed = await indexOn(reader)
 
     expect(listed.sessions).toHaveLength(1)
     expect(listed.sessions[0]!.title).toBe(title)
-    // Six seconds of material and no more, however long the page looped it: a second viewing of
-    // one stretch is the same stretch (§6.3), and the length of a session says so.
+    // Six seconds of material out of twelve seconds of watching: a length is media time and never
+    // wall clock. The page holds one clip and looped it through, and a session that counted the
+    // watching would say twice what it can offer — which is the number the popup shows and the
+    // stretch the editor opens over.
     expect(listed.sessions[0]!.seconds).toBeGreaterThan(4)
     expect(listed.sessions[0]!.seconds).toBeLessThan(8)
     expect(listed.sessions[0]!.bytes).toBeGreaterThan(0)
@@ -305,18 +310,15 @@ test('what a tab recorded is in the index after that tab is gone', async () => {
     expect(listed.sessions[0]!.widthPx).toBe(640)
     expect(listed.totals.bytes).toBe(listed.sessions[0]!.bytes)
 
+    await page.close()
+
     // The same video in a second tab is the same session (§6.1): one row, one directory, and the
     // material of both tabs in it.
     const again = await context.newPage()
     await watchOn(again, 'player.html', 'https://one.test/watch', 12)
     await again.close()
 
-    const after = await reader.evaluate(async () => {
-      const address = '/shared/history-db.js'
-      const { listSessions }: typeof import('../../src/shared/history-db') =
-        await import(address)
-      return listSessions()
-    })
+    const after = (await indexOn(reader)).sessions
     expect(after).toHaveLength(1)
     expect(after[0]!.id).toBe(listed.sessions[0]!.id)
     // And the material of the second tab is in it. Its frame has a map of its own, so it wrote
@@ -332,9 +334,62 @@ test('what a tab recorded is in the index after that tab is gone', async () => {
 })
 
 /**
+ * §6.3 on the whole road, and not on the map alone.
+ *
+ * A page hands the same stretch over twice as a matter of course — a rewatch, a seek back, a
+ * player refilling a buffer it had let go of — and the fixture does it on demand: the same init
+ * and the same three segments, a second time, into the buffer that is playing. None of it is new
+ * material and none of it may reach the disk. Written down, the same seconds would be paid for
+ * twice in the volume the popup shows and counted twice in the length of the session.
+ *
+ * The map that feeds the writer is what refuses them (`PtsMap.insert` answers whether it took the
+ * chunk), and the unit set states that rule over the map. What this adds is the road: the hook
+ * copies those bytes, the registry judges them, and the writer must be told nothing at all.
+ */
+test('a stretch handed over a second time is not written down a second time', async () => {
+  const { context, extensionId } = await launchWithExtension()
+
+  try {
+    const page = await context.newPage()
+    await watchOn(page, 'player.html', 'https://one.test/watch', 10)
+
+    const reader = await openExtensionPage(context, extensionId, 'popup/popup.html')
+    const before = await indexOn(reader)
+    expect(before.sessions, 'setup: nothing was recorded to hand over again').toHaveLength(1)
+    expect(before.sessions[0]!.bytes).toBeGreaterThan(0)
+
+    await page.evaluate(() =>
+      (window as unknown as { tcAppendAgain(): Promise<void> }).tcAppendAgain(),
+    )
+    // Longer than the tail the writer gathers a batch for, so that a piece this produced would
+    // have landed rather than be still in hand.
+    await page.waitForTimeout(4_000)
+    const after = await indexOn(reader)
+    await page.close()
+
+    expect(after.sessions[0]!.bytes, 'a second viewing went to disk a second time').toBe(
+      before.sessions[0]!.bytes,
+    )
+    expect(after.sessions[0]!.seconds).toBe(before.sessions[0]!.seconds)
+    expect(after.totals.bytes, 'the volume grew for material that was already there').toBe(
+      before.totals.bytes,
+    )
+  } finally {
+    await context.close()
+  }
+})
+
+/**
  * The key of this session changes while it is being recorded: the page states the length of the
  * video a moment after the first segments have gone down (§6.1, and it is what a player does).
  * One video, one row — the halves must not end up apart.
+ *
+ * So the page is made to have two halves. It states the length long after its picture has landed,
+ * and then goes on delivering: six more seconds in another representation, which is the quality
+ * switch of §6.2 and the ordinary thing for a player to do a moment after it has read its
+ * manifest. Without that second half there is nothing here that could come apart — the picture is
+ * on disk before the move and stays there whatever the row is called afterwards, and the test
+ * would be saying only that a rename renames.
  */
 test('a session whose key changes on the fly stays one row', async () => {
   const { context, extensionId } = await launchWithExtension()
@@ -349,6 +404,12 @@ test('a session whose key changes on the fly stays one row', async () => {
       const source = (window as unknown as { tcPlayerSource?: MediaSource }).tcPlayerSource
       if (source) source.duration = 6.845
     })
+    await page.waitForTimeout(3_000)
+
+    // The second half, after the move and after the row that holds the first half is on disk.
+    await page.evaluate(() =>
+      (window as unknown as { tcAppendMore(): Promise<void> }).tcAppendMore(),
+    )
     await page.waitForTimeout(6_000)
     await page.close()
 
@@ -363,6 +424,11 @@ test('a session whose key changes on the fly stays one row', async () => {
     expect(sessions, 'the halves of one video ended up in two rows').toHaveLength(1)
     // Under the key the length gave it, not the one that said `live`: the row followed.
     expect(sessions[0]!.key).toMatch(/\|7$/)
+    // And the second half is in that row. Six seconds of picture arrived before the move and six
+    // after it; a row holding only what came first would say six, and a second row for the rest
+    // is what the assertion above would then be counting.
+    expect(sessions[0]!.seconds, 'the material written after the move went elsewhere').toBeGreaterThan(8)
+    expect(sessions[0]!.tracks.length, 'the switch after the move opened no track here').toBe(2)
   } finally {
     await context.close()
   }

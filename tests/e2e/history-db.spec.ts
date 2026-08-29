@@ -195,7 +195,6 @@ test('what a landed piece leaves in the index: bytes summed, seconds joined, one
       'bbbbbbbb-000000.tcm',
     ])
     expect(got.totals.bytes).toBe(1_016 + 1_016 + 500)
-    expect(got.totals.sessions, 'a session was counted once per piece').toBe(1)
     expect(got.afterOrphan, 'an orphan piece was written into the totals').toEqual(got.totals)
   })
 })
@@ -383,7 +382,6 @@ test('pieces and whole sessions go out with the volume they took', async () => {
     expect(got.gone).toBeUndefined()
     expect(got.noPieces).toEqual([])
     expect(got.emptied.bytes).toBe(0)
-    expect(got.emptied.sessions).toBe(0)
     expect(got.stillEmpty, 'a session was subtracted from the totals twice').toEqual(got.emptied)
   })
 })
