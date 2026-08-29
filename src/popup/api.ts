@@ -6,6 +6,7 @@ import {
   saveInFrame,
   type FramedSession,
 } from '../shared/frames'
+import { hostOf } from '../shared/format'
 import { editorUrl, historyUrl } from '../shared/protocol'
 import type {
   EditResult,
@@ -320,14 +321,6 @@ export async function pauseThisTab(on: boolean): Promise<void> {
 }
 
 // One place for the numbers people read: the popup and the settings page show the same ones, and
-// two copies of "how big is a megabyte" is how they come to disagree.
-export { formatBytes, formatDuration, formatWhen } from '../shared/format'
-
-/** The page address in a form fit for the line under the title; an unreadable one — empty. */
-export function hostOf(url: string): string {
-  try {
-    return new URL(url).host
-  } catch {
-    return ''
-  }
-}
+// two copies of "how big is a megabyte" is how they come to disagree. `hostOf` is there for the
+// same reason and came back here as a re-export, because the popup has always asked api for it.
+export { formatBytes, formatDuration, formatWhen, hostOf } from '../shared/format'

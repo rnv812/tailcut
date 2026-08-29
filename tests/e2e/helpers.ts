@@ -82,38 +82,77 @@ const SHARED_ARGS = [
 ]
 
 /**
+ * The three arguments Playwright passes to keep Chrome from throttling work it thinks is idle.
+ *
+ * Spelled out here for the same reason `DISABLE_DEFAULT` is: `ignoreDefaultArgs` takes a default
+ * back by exact string. These three are separate arguments rather than one list, so taking them
+ * back costs three strings and no filtering.
+ */
+export const THROTTLING_OFF = [
+  '--disable-background-timer-throttling',
+  '--disable-backgrounding-occluded-windows',
+  '--disable-renderer-backgrounding',
+]
+
+export interface LaunchOptions {
+  /**
+   * A profile to reuse. OPFS and IndexedDB live in the profile, so two launches over one
+   * directory are the same browser started twice — which is the only honest way to test that a
+   * recording outlives the browser and that the repair runs at start-up.
+   */
+  userDataDir?: string
+  /**
+   * Leave Chrome's throttling of background work switched on.
+   *
+   * Playwright turns three of them off by default — background timers, occluded windows and
+   * backgrounded renderers — so the whole suite runs in a browser where a hidden cross-origin
+   * frame keeps its timers. Every user runs in one where it does not: measured, such a frame's
+   * timers are clamped to 1 Hz.
+   */
+  throttled?: boolean
+}
+
+/**
  * One launch for both modes. Everything apart from the two arguments that load the extension has
  * to match: the overhead measurement in `overhead.spec.ts` compares these two launches against
  * each other, and any other difference in the settings it would put down to the extension.
  */
-async function launch(args: string[]): Promise<BrowserContext> {
-  const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tailcut-'))
+async function launch(args: string[], options: LaunchOptions = {}): Promise<BrowserContext> {
+  // A profile that was handed in belongs to the caller: it is the point of the launch — the same
+  // directory opened twice — and this must neither invent it nor throw it away afterwards.
+  const borrowed = options.userDataDir !== undefined
+  const userDataDir = options.userDataDir ?? (await fs.mkdtemp(path.join(os.tmpdir(), 'tailcut-')))
   const context = await chromium.launchPersistentContext(userDataDir, {
     headless: HEADLESS,
     channel: CHANNEL,
     args: [...SHARED_ARGS, ...args],
-    ignoreDefaultArgs: [DISABLE_DEFAULT],
+    ignoreDefaultArgs: options.throttled ? [DISABLE_DEFAULT, ...THROTTLING_OFF] : [DISABLE_DEFAULT],
     acceptDownloads: true,
   })
 
   // A profile weighs megabytes and a run of the suite launches dozens: without the cleaning up,
   // gigabytes gather in the temporary directory over a month, and the first to notice is
   // `overhead.spec.ts` — a clogged /tmp moves the numbers it measures.
-  context.on('close', () => {
-    // The event arrives before the browser has finished writing the profile out, hence the
-    // retries; a failure is swallowed on purpose — tidying up is no reason to fail a test.
-    void fs.rm(userDataDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
-      .catch(() => {})
-  })
+  if (!borrowed) {
+    context.on('close', () => {
+      // The event arrives before the browser has finished writing the profile out, hence the
+      // retries; a failure is swallowed on purpose — tidying up is no reason to fail a test.
+      void fs.rm(userDataDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
+        .catch(() => {})
+    })
+  }
 
   return context
 }
 
-export async function launchWithExtension(): Promise<{
+export async function launchWithExtension(options: LaunchOptions = {}): Promise<{
   context: BrowserContext
   extensionId: string
 }> {
-  const context = await launch([`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`])
+  const context = await launch(
+    [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`],
+    options,
+  )
 
   let [sw] = context.serviceWorkers()
   if (!sw) sw = await context.waitForEvent('serviceworker')

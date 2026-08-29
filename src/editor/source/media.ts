@@ -10,6 +10,7 @@ import {
   type Lane,
   type Span,
 } from '../../core/timeline/lanes'
+import { hostOf } from '../../shared/format'
 import type { Preview } from './preview'
 
 export interface EditorMaterial {
@@ -24,15 +25,6 @@ export interface EditorMaterial {
   gaps: Span[]
   /** The holes of every lane, as targets to stick to: two near edges are two chances to hit. */
   snapGaps: Span[]
-}
-
-/** The site a recording was watched on, as a template writes it. An address that is not one: ''. */
-function hostOf(url: string): string {
-  try {
-    return new URL(url).host
-  } catch {
-    return ''
-  }
 }
 
 /**

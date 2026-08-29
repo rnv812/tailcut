@@ -1,8 +1,26 @@
 /**
- * Numbers as a person reads them. Shared, because three surfaces show the same numbers: the popup
- * shows a recording's length and weight, the settings page shows a buffer, a ceiling and the
- * volume in use, and the editor names a clip by its length.
+ * Numbers as a person reads them, and the one address they read beside those. Shared, because
+ * three surfaces show the same things: the popup shows a recording's length, weight and site, the
+ * settings page shows a buffer, a ceiling and the volume in use, and the editor names a clip by
+ * its length and by the site it was watched on.
  */
+
+/**
+ * The page address in a form fit for the line under a title, and for the `{host}` of a name
+ * template; an address that is not one — the empty string.
+ *
+ * Here rather than beside either caller, and that was learnt the hard way: the popup had it and
+ * the editor grew a second copy of the same four lines, in a file that cannot import the popup's
+ * (that one drags `chrome` in with it). Two copies of "what is the host of this" is how two
+ * surfaces come to disagree about a port number.
+ */
+export function hostOf(url: string): string {
+  try {
+    return new URL(url).host
+  } catch {
+    return ''
+  }
+}
 
 /** A length in seconds as m:ss, and as h:mm:ss once there is an hour of it. */
 export function formatDuration(seconds: number): string {

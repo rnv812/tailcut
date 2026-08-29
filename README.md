@@ -4,8 +4,18 @@ Clip already-buffered video from any site and save it as MP4.
 
 ## Status
 
-Stage 1 of 5 — capture. The extension intercepts MSE segments, keeps a sliding
-window indexed by media time, and saves the buffered material as a single MP4.
+Stage 3 of 5 — history and settings. What a tab records is written to disk in
+batches of eight megabytes, in sealed pieces the writer never comes back to, and
+survives the tab, the browser and an update: the popup lists what was watched,
+pins what should stay, deletes with an undo, and opens any of it in the editor
+without copying a byte. A settings page holds the four groups of §9.4 —
+what to record, what counts as a video, what to keep and how to export — and a
+change to any of them reaches a recording that is already running, without a
+reload.
+
+Under all of it is what the first two stages built: the extension intercepts MSE
+segments, keeps a sliding window indexed by media time, and cuts clips out of it
+in an editor that never re-encodes a frame.
 
 An ordinary `<video src>` is recorded as well, and it is the commoner case off
 the video platforms: eighteen of twenty-one live pages that delivered any video
@@ -27,7 +37,7 @@ underneath rather than from the video. Where the pairing cannot be made — the 
 or two of them playing with nothing to say which belongs to the picture — the clip is silent and
 the popup says that instead. Only as much of the track as the picture is long is ever fetched.
 
-Editing, disk history, re-encoding and extra sources land in later stages. See
+Re-encoding and extra sources land in later stages. See
 `docs/superpowers/specs/2026-08-22-tailcut-design.md`.
 
 ## Development
@@ -109,3 +119,17 @@ invitation to look at what changed on the synchronous path.
 A page tailcut has refused outright — protected media — costs nothing after the
 refusal: the registry tells the hook, and the copying stops where it starts
 rather than at the far end of a message.
+
+Writing to disk is measured the same way and by the same rule, in
+`tests/e2e/history-cost.spec.ts`: a page plays for twenty-five seconds while
+handing the extension a hundred and thirty megabytes of material — the rate of a
+4K stream, which is what it takes for the eight-mebibyte batch to go down again
+and again rather than dribble out on its two-second tail — and the page must lose
+nothing by it: no dropped frames, no long tasks on its main thread, and a median
+`appendBuffer` under a millisecond. The test asserts the sizes of the pieces on
+disk as well as their number, because a measurement that passes over quarter-
+megabyte writes says nothing about the write it claims to price. The frame of the
+extension is a process of its own and the writing worker another, so none of it
+shares a thread with the page; on the development machine the three numbers come
+out 0, 0 and a median of 0 ms — a page's own clock cannot resolve a call the
+table above prices at 30–45 µs — and they are the same with no writing at all.
