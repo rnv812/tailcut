@@ -9,7 +9,7 @@ import {
   type SessionList,
   type SessionSummary,
 } from '../shared/protocol'
-import { siteAllows } from '../shared/settings'
+import { memoryCeilingFor, siteAllows } from '../shared/settings'
 import { liveSettings } from '../shared/settings-store'
 import { HistoryWriter, historyWorker } from './history-writer'
 import { openPlainFile, openSoundFile } from './loader'
@@ -247,24 +247,14 @@ setInterval(announceRecording, ANNOUNCE_INTERVAL_MS)
  */
 const EVICT_INTERVAL_MS = 2_000
 
-/**
- * Largest amount of material one document keeps in memory, across every session of its frame.
- *
- * The buffer length bounds each session; this bounds their number. At the default of three
- * minutes and an ordinary 1080p bitrate one session is about 135 MB, so this is room for three of
- * them and a little — a page that opens sessions without end (a feed, an autoplaying playlist)
- * stops here instead of taking the tab down with it.
- *
- * It is not a setting. §9.4 has no field for it, and asking a user to tune a number they cannot
- * see would be worse than choosing one: what they can see and do tune is the buffer length, which
- * is the other half of the same arithmetic. It is per document, because a registry lives in a
- * frame and a frame can see neither its neighbours nor other tabs (§7.2).
- */
-const MEMORY_CEILING_BYTES = 512 * 1024 * 1024
-
+// Both halves of §7.2 off one setting, read afresh on every tick: the buffer length each session
+// is trimmed to, and the ceiling the document as a whole is held under — which is that same
+// length turned into bytes plus room for the other sessions (see `memoryCeilingFor`). A ceiling
+// that did not move with the setting promised a length the frame then refused to keep.
 setInterval(() => {
-  store.trimToBuffer(settings.get().recording.bufferSeconds)
-  store.dropOverCeiling(MEMORY_CEILING_BYTES, Date.now())
+  const bufferSeconds = settings.get().recording.bufferSeconds
+  store.trimToBuffer(bufferSeconds)
+  store.dropOverCeiling(memoryCeilingFor(bufferSeconds), Date.now())
 }, EVICT_INTERVAL_MS)
 
 /**

@@ -344,10 +344,13 @@ export async function markStorageFull(now: number): Promise<void> {
 }
 
 /**
- * Forgets that refusal. Called by the repair at start-up and by nothing else: a full disk is a
- * fact about a machine at a moment, the user may have swept the disk since, and one attempt per
- * start of the browser is a cheap way to find out. If it is still full, the next batch says so
- * within half a minute.
+ * Forgets that refusal.
+ *
+ * Two callers, and both of them for the same reason: the mark is a fact about a machine at a
+ * moment, and the moment can pass. The repair at start-up forgets it because the user may have
+ * swept the disk since, and one attempt per start of the browser is a cheap way to find out; the
+ * wipe of §9.4 forgets it because there is nothing left on the disk for the browser to have
+ * refused. If it is still full, the next batch says so within half a minute.
  */
 export async function clearStorageFull(): Promise<void> {
   const db = await openHistoryDb()

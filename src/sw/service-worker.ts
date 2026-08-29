@@ -1,5 +1,6 @@
 import { MAIN_FRAME, listTabSessions, type FramedSession } from '../shared/frames'
 import {
+  clearStorageFull,
   dropSessionRows,
   dropSnapshotRow,
   listSessions,
@@ -229,6 +230,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           await dropSessionRows(row.id)
         }
         for (const row of await listSnapshots()) await dropSnapshotRow(row.id)
+        // And the refusal the index remembers, last of all. It is a fact about material that is
+        // no longer there: the browser said no over a store that is now empty, and the mark left
+        // behind would put "disk full" back over nothing at the next reading of the index. The
+        // page hides that banner the moment it asks for the wipe, so the lie would keep until
+        // then — see the button in src/options/options.tsx.
+        await clearStorageFull()
       })
       .then(() => sendResponse({ ok: true }))
       .catch(() => sendResponse({ ok: false }))

@@ -9,7 +9,7 @@ import {
 } from '../core/container'
 import { SegmentStream } from '../core/stream'
 import { PtsMap } from '../core/timeline/map'
-import { victimsFor } from '../core/history/value'
+import { evictionOrder, victimsFor, type Valued } from '../core/history/value'
 import { durationToken, normalizeUrl, sessionKey } from '../core/session-key'
 import {
   cutPlain,
@@ -1660,9 +1660,15 @@ export class SessionStore {
       // walking the sources, because the position is the session's own end — a file feeding no
       // session has no end of its own to be measured from, and a rejection the session has not
       // outgrown takes it out of the registry altogether (see syncPlain).
+      //
+      // Every source feeding the session, and not the first of them. The merge key normalises the
+      // address, so two elements playing `clip.mp4#t=0` and `clip.mp4#t=30` are one key and two
+      // sources of it. Trimmed by the first alone, the second went on reporting the whole file,
+      // the next poll wrote that back onto the session, and the material eviction had just taken
+      // came back — against the check beside this one and against this very comment.
       const floor = newest - windowSeconds
-      const state = [...this.plainSources.values()].find((one) => one.key === session.key)
-      if (state) {
+      for (const state of this.plainSources.values()) {
+        if (state.key !== session.key) continue
         if (floor > state.floor) state.floor = floor
         state.buffered = clampSpans(state.buffered, state.floor)
         if (session.plain) session.plain.buffered = state.buffered
@@ -1680,11 +1686,26 @@ export class SessionStore {
   }
 
   /**
-   * Drops whole sessions, cheapest first, until what is held fits under the ceiling (§7.2).
+   * Brings what this frame holds back under the ceiling (§7.2).
    *
-   * Whole sessions and not the oldest runs of each: the runs are already trimmed to the buffer
-   * length, and taking more off every session would break the promise of the setting evenly
-   * across all of them instead of keeping it for the ones worth keeping.
+   * Whole sessions first, cheapest by §7.3 first, and not the oldest runs of each: the runs are
+   * already trimmed to the buffer length, and taking more off every session would break the
+   * promise of the setting evenly across all of them instead of keeping it for the ones worth
+   * keeping.
+   *
+   * Only what holds memory is weighed here at all, because memory is what this ceiling is made
+   * of. An ordinary file (§5.6) keeps an index of material the browser fetched and this frame
+   * never saw, so it weighs nothing — and weighing nothing, with no tracks to take a length or a
+   * soundtrack from either, it used to stand first in the queue by every signal there is. It went
+   * first and freed not one byte, and it could not come back afterwards: the watcher speaks about
+   * a file only when what it says changes, so the popup lost a recording that was still playing.
+   *
+   * The most valuable of the rest is never offered, however far over the ceiling the frame is.
+   * Dropping the last session standing frees the whole recording and leaves the user with none of
+   * it, and that is what a long buffer used to run into every few minutes: one 1080p session
+   * passes a flat 512 MiB at about eleven minutes, so a half-hour buffer meant losing everything
+   * and starting again, over and over, while the slider went on promising half an hour. Such a
+   * session is shortened instead — see `trimToCeiling`.
    *
    * Nothing here knows about pins, and that is not an oversight: a pin is about the history on
    * disk, which this ceiling has nothing to do with. What is pinned is on the disk and outlives
@@ -1694,18 +1715,63 @@ export class SessionStore {
     const over = this.heldBytes() - ceilingBytes
     if (over <= 0) return
 
-    const held = [...this.sessions.values()].map((session) => ({
-      id: session.key,
-      pinned: false,
-      usedAt: 0,
-      lastSeenAt: session.lastSeenAt,
-      seconds: session.tracks[0]?.map.duration() ?? 0,
-      sound: session.tracks.some((track) => track.kinds.includes('audio')),
-      widthPx: session.widthPx,
-      bytes: session.tracks.reduce((total, track) => total + track.map.totalBytes(), 0),
-    }))
+    const held: Valued[] = []
+    for (const session of this.sessions.values()) {
+      const bytes = session.tracks.reduce((total, track) => total + track.map.totalBytes(), 0)
+      if (bytes === 0) continue
 
-    for (const victim of victimsFor(held, now, over)) this.sessions.delete(victim.id)
+      held.push({
+        id: session.key,
+        pinned: false,
+        usedAt: 0,
+        lastSeenAt: session.lastSeenAt,
+        seconds: session.tracks[0]?.map.duration() ?? 0,
+        sound: session.tracks.some((track) => track.kinds.includes('audio')),
+        widthPx: session.widthPx,
+        bytes,
+      })
+    }
+
+    const offered = evictionOrder(held, now).slice(0, -1)
+    for (const victim of victimsFor(offered, now, over)) this.sessions.delete(victim.id)
+
+    this.trimToCeiling(ceilingBytes)
+  }
+
+  /**
+   * Shortens a session that is over the ceiling on its own, instead of taking it whole.
+   *
+   * Reached only where dropping cannot help: the offer above holds back the most valuable session
+   * whatever the shortfall, so either the drops brought the frame under the ceiling and every
+   * session here is already inside it, or one session is left and it is bigger than the ceiling
+   * by itself. That happens where the material comes in faster than the reference rate the
+   * ceiling is sized at — 4K against `REFERENCE_BITS_PER_SECOND` — and the answer to it is a
+   * shorter recording, not none.
+   *
+   * The window is worked out from what the session actually weighs per second, so one pass lands
+   * about on the ceiling and the tick two seconds later corrects whatever the segment boundaries
+   * left over. It is a window and not a byte budget, exactly as the buffer length is: a session
+   * with a hole in it gives up more than the arithmetic asks for, because what lies further back
+   * than the window goes whether the hole is counted or not. A ceiling with room for nothing at
+   * all takes the session after all: an empty one would sit in the popup offering a recording of
+   * zero seconds.
+   */
+  private trimToCeiling(ceilingBytes: number): void {
+    for (const [key, session] of this.sessions) {
+      let bytes = 0
+      let newest = 0
+      let seconds = 0
+      for (const track of session.tracks) {
+        bytes += track.map.totalBytes()
+        newest = Math.max(newest, track.map.span()?.end ?? 0)
+        seconds = Math.max(seconds, track.map.duration())
+      }
+      if (bytes <= ceilingBytes || !(seconds > 0)) continue
+
+      const fits = (seconds * Math.max(0, ceilingBytes)) / bytes
+      for (const track of session.tracks) track.map.evict(fits, newest)
+      if (session.tracks.every((track) => track.map.totalBytes() === 0)) this.sessions.delete(key)
+    }
   }
 
   /**

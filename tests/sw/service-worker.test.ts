@@ -88,6 +88,7 @@ function installChrome(
   const address = options.url === undefined ? 'https://site.example/watch' : options.url
   let failure: Error | null = null
   let badgeFailure: Error | null = null
+  let tabGone: Error | null = null
 
   vi.stubGlobal('chrome', {
     runtime: {
@@ -121,7 +122,10 @@ function installChrome(
       },
     },
     tabs: {
-      get: async (id: number) => ({ id, ...(address === null ? {} : { url: address }) }),
+      get: async (id: number) => {
+        if (tabGone) throw tabGone
+        return { id, ...(address === null ? {} : { url: address }) }
+      },
       query: async (info: QueryInfo = {}) => [
         ...(info.currentWindow ? [] : [OTHER_WINDOW_TAB]),
         ...(info.active ? [] : [BACKGROUND_TAB]),
@@ -202,6 +206,10 @@ function installChrome(
     breakBadge: () => {
       badgeFailure = new Error('No tab with id: 7.')
     },
+    /** The same tab, gone one step earlier: chrome.tabs.get refuses to say anything about it. */
+    breakTabLookup: () => {
+      tabGone = new Error('No tab with id: 7.')
+    },
   }
 }
 
@@ -253,6 +261,7 @@ function mockStorage() {
     listSnapshots: async () => SNAPSHOT_ROWS,
     dropSessionRows: async (id: string) => void asked.log.push(`drop:${id}`),
     dropSnapshotRow: async (id: string) => void asked.log.push(`drop-snapshot:${id}`),
+    clearStorageFull: async () => void asked.log.push('clear-full'),
   }))
 
   vi.doMock('../../src/shared/history-opfs', () => ({
@@ -465,8 +474,17 @@ describe('sweeping', () => {
     const { answer, held } = await chrome.ask({ type: 'tc:clear' })
 
     // Rows first would leave rows promising material that is not there if the wipe stopped
-    // halfway; files first leaves orphans, and the repair takes those.
-    expect(asked.log).toEqual(['clear', 'drop:kept', 'drop:gone', 'drop-snapshot:snap'])
+    // halfway; files first leaves orphans, and the repair takes those. The refusal the index
+    // remembers goes last and it has to go: "disk full" is a fact about material that is no
+    // longer there, and left behind it comes back over an empty store on the next reload — the
+    // page hides the banner on the spot, so nobody sees it happen until then.
+    expect(asked.log).toEqual([
+      'clear',
+      'drop:kept',
+      'drop:gone',
+      'drop-snapshot:snap',
+      'clear-full',
+    ])
     // The button of §9.4 waits on this: without the channel held open the popup would be told
     // the port closed under it.
     expect(held).toBe(true)
@@ -615,6 +633,22 @@ describe('recounting the badge', () => {
 
     expect(chrome.sent).toEqual([])
     expect(chrome.badgeText).toEqual([])
+  })
+
+  it('does not fall over on a tab that closed before it could be asked about', async () => {
+    const chrome = installChrome()
+    chrome.breakTabLookup()
+    await importWorker()
+
+    // The first of the two things under the badge that refuse with a promise: chrome.tabs.get
+    // over a tab that closed while the poll was running. Nothing is known about it afterwards —
+    // not even whether the site is one the user records — and an empty badge is what nothing
+    // looks like. An unhandled rejection here would go into the extension's error list and wake
+    // the worker to put it there.
+    await expect(chrome.fire()).resolves.toBeUndefined()
+
+    expect(chrome.sent, 'a tab that is gone was asked for its sessions').toEqual([])
+    expect(chrome.badgeText).toEqual([{ tabId: 7, text: '' }])
   })
 
   it('does not fall over on a tab that closed', async () => {

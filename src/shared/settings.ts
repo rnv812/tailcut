@@ -91,6 +91,53 @@ export const LIMITS = {
   minWidthPx: { min: 0, max: 1_920 },
 } as const
 
+/**
+ * What a second of an ordinary 1080p stream weighs, in bits: 6 Mbit/s, the rate the large sites
+ * serve it at.
+ *
+ * One number in one place, because two things read it and they must not come to disagree: the
+ * settings page shows what a buffer of the chosen length will cost in memory (until the history
+ * has a real rate to offer, which is better), and the frame sizes its own memory ceiling by it.
+ * A page promising three minutes for 135 MB beside a frame that would keep 512 MB whatever the
+ * setting said is exactly the disagreement this removes.
+ */
+export const REFERENCE_BITS_PER_SECOND = 6_000_000
+
+/**
+ * Room a document keeps for the sessions beside the one the buffer length promises.
+ *
+ * The other half of `memoryCeilingFor`, and the half that does what the ceiling exists for: a
+ * page opening sessions without end — a feed, an autoplaying playlist — stops here instead of
+ * taking the tab down with it. Three more buffers of the default length at the reference rate,
+ * which is where the flat 512 MiB that stood in the frame before came from.
+ */
+export const SPARE_MEMORY_BYTES = 384 * 1024 ** 2
+
+/**
+ * The most one document keeps in memory across every session of its frame, at this buffer length.
+ *
+ * Derived from the setting and not a constant beside it, and that is the whole point. The buffer
+ * length bounds each session; this bounds their number — and a flat ceiling can only bound their
+ * number at one length. At 512 MiB an ordinary 1080p session passes the ceiling on its own at
+ * about eleven minutes, and past that a user who asked for half an hour was losing the whole
+ * recording every few minutes instead of keeping the half hour they set. The first term is the
+ * promise of the setting, the second is room for the others.
+ *
+ * The rate is the reference one and not what this user actually records: the frame would have to
+ * measure itself to know, and a ceiling that moved with the material it is meant to bound would
+ * be arguing with itself. A stream above the reference rate is answered further down instead —
+ * `SessionStore.dropOverCeiling` shortens the one session that is over the ceiling by itself
+ * rather than throwing it away, and the settings page says what will be kept (§9.4).
+ *
+ * It is not a setting of its own. §9.4 has no field for it, and asking a user to tune a number
+ * they cannot see would be worse than deriving one from the number they can. It is per document,
+ * because a registry lives in a frame and a frame can see neither its neighbours nor other tabs
+ * (§7.2).
+ */
+export function memoryCeilingFor(bufferSeconds: number): number {
+  return (Math.max(0, bufferSeconds) * REFERENCE_BITS_PER_SECOND) / 8 + SPARE_MEMORY_BYTES
+}
+
 const clamp = (value: number, limit: { min: number; max: number }): number =>
   Math.min(Math.max(value, limit.min), limit.max)
 

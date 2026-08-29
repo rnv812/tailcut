@@ -32,7 +32,14 @@ const PAGE = 'https://example.test/article'
 const TITLE = 'An article with a video in it'
 const CLIP = 'https://cdn.example/clip.mp4'
 const OTHER = 'https://cdn.example/other.mp4'
+/** The same file behind an anchor: one merge key, because `normalizeUrl` drops the hash. */
+const ANCHORED = `${CLIP}#t=30`
 const SOURCE = `plain:${CLIP}`
+
+/** A page playing a stream through MediaSource, for the frame to hold captured material of. */
+const STREAM = 'https://site.example/watch?v=abc'
+const captureInit = new Uint8Array(readFileSync('tests/fixtures/h264/init-stream0.m4s'))
+const captureSeg = new Uint8Array(readFileSync('tests/fixtures/h264/chunk-stream0-00001.m4s'))
 
 /** The file states 60 frames at 10240 ticks with 1024 apiece: six seconds of picture. */
 const LENGTH = 6
@@ -475,6 +482,64 @@ describe('what an ordinary file promises, and what it delivers', () => {
     page.says({ buffered: [[0, LENGTH]], now: 3000 })
     await page.store.settled()
     expect(summarize(page.store.list()[0]!).duration).toBeCloseTo(kept, 5)
+  })
+
+  it('gives up that material for every element playing the file, not the first of them', async () => {
+    const page = registry({ [CLIP]: whole, [ANCHORED]: whole })
+
+    // One file, two elements, addresses that differ only past the hash: `normalizeUrl` drops the
+    // anchor, so this is one merge key and one session fed by two plain sources.
+    page.says({ url: CLIP })
+    page.says({ url: ANCHORED })
+    page.store.promotePending(SOURCE)
+    page.store.promotePending(`plain:${ANCHORED}`)
+    await page.store.settled()
+    expect(page.store.list(), 'setup: the two elements did not meet in one session').toHaveLength(1)
+
+    page.store.trimToBuffer(2, LENGTH)
+    const kept = summarize(page.store.list()[0]!).duration
+    expect(kept).toBeCloseTo(2, 0)
+
+    // And it stays given up. Trimmed by the first source alone, the second went on reporting the
+    // whole file, the next poll wrote that back onto the session, and the material eviction had
+    // taken came back — which is exactly what the check above it and the comment beside it say
+    // cannot happen.
+    page.says({ url: ANCHORED, buffered: [[0, LENGTH]], now: 3000 })
+    await page.store.settled()
+    expect(summarize(page.store.list()[0]!).duration).toBeCloseTo(kept, 5)
+  })
+
+  it('is not taken by a memory ceiling it weighs nothing against', async () => {
+    const page = registry()
+
+    page.says()
+    page.store.promotePending(SOURCE)
+    await page.store.settled()
+    // The material of an ordinary file is on a server: the browser fetched it and this frame
+    // never saw a byte, so the registry holds an index of it and nothing else.
+    expect(page.store.heldBytes()).toBe(0)
+
+    // A captured session beside it, which is where every byte this frame holds actually is. The
+    // ceiling is a byte below that, so it has to free something and the two are what it chooses
+    // between.
+    const stream = { sourceId: 'mse1', bufferId: 'b1', url: STREAM, title: 'A stream', now: 1000 }
+    page.store.append({ ...stream, bytes: captureInit })
+    page.store.append({ ...stream, bytes: captureSeg })
+    const bytes = page.store.heldBytes()
+    expect(bytes, 'setup: nothing was captured to weigh against').toBeGreaterThan(0)
+
+    page.store.dropOverCeiling(bytes - 1, 2_000)
+
+    // Weighed by its tracks, of which it has none, the file stood first in the queue by every
+    // signal §7.3 has — no length, no sound, no weight. It went first, freed not one byte, and
+    // the shortfall then took the captured session with it. Nor could it come back: the watcher
+    // speaks about a file only when what it says changes, so the popup lost a video that was
+    // still playing and would not hear of it again.
+    const kinds = page.store.list().map((session) => (session.plain ? 'file' : 'captured'))
+    expect(kinds.sort(), 'the ceiling took a session that was holding no memory').toEqual([
+      'captured',
+      'file',
+    ])
   })
 
   it('measures the buffer from the end of its own material when no position is given', async () => {

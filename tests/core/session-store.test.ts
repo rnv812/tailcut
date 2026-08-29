@@ -2900,4 +2900,48 @@ describe('trimming and the memory ceiling', () => {
     expect(store.get(corner.key)).toBeUndefined()
     expect(store.get(big.key)).toBeDefined()
   })
+
+  it('shortens the last session standing instead of taking the whole recording', () => {
+    const store = new SessionStore()
+    const session = watch(store, { sourceId: 's1', url: 'https://a.example/x' }, 60) // 0…120 s
+    const bytes = store.heldBytes()
+
+    // Room for half of what it holds and nothing else in the frame to give. Dropped whole, the
+    // user is left with nothing and the next segment starts the recording again from zero — which
+    // is what a buffer longer than the ceiling used to mean every few minutes.
+    store.dropOverCeiling(bytes / 2, page.now)
+
+    expect(store.get(session.key), 'the only recording in the frame was thrown away').toBeDefined()
+    expect(store.heldBytes()).toBeLessThanOrEqual(bytes / 2)
+    // Half the bytes is half the material: the window is worked out from what the session weighs
+    // per second, so what is kept is the newest half and not some fraction of a fraction.
+    expect(held(store, session)).toBeCloseTo(60, 0)
+    expect(store.get(session.key)!.tracks[0]!.map.span()!.end).toBeCloseTo(120, 5)
+  })
+
+  it('shortens the one that is over the ceiling by itself, after the cheap ones have gone', () => {
+    const store = new SessionStore()
+    const meagre = watch(store, { sourceId: 's1', url: 'https://z.example/x' }, 4)
+    const watched = watch(store, { sourceId: 's2', url: 'https://a.example/y' }, 60)
+    const kept = store.get(watched.key)!.tracks[0]!.map.totalBytes()
+
+    // Below what the valuable one holds on its own: the cheap one goes first — that is the order
+    // of §7.3 — and the shortfall that is left cannot be covered by dropping anything at all.
+    store.dropOverCeiling(kept / 2, page.now)
+
+    expect(store.get(meagre.key)).toBeUndefined()
+    expect(store.get(watched.key)).toBeDefined()
+    expect(held(store, watched)).toBeCloseTo(60, 0)
+  })
+
+  it('takes a session the ceiling leaves no room for at all', () => {
+    const store = new SessionStore()
+    const session = watch(store, { sourceId: 's1', url: 'https://a.example/x' }, 4)
+
+    store.dropOverCeiling(0, page.now)
+
+    // Shortening it to nothing would leave a session in the popup offering a recording of zero
+    // seconds. There is no room for a buffer of any length here, so there is no session either.
+    expect(store.get(session.key)).toBeUndefined()
+  })
 })

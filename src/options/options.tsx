@@ -5,6 +5,8 @@ import { formatBytes, formatSeconds } from '../shared/format'
 import {
   DEFAULTS,
   LIMITS,
+  REFERENCE_BITS_PER_SECOND,
+  memoryCeilingFor,
   merge,
   presetNamed,
   presetOf,
@@ -13,13 +15,6 @@ import {
   type Settings,
 } from '../shared/settings'
 import { readSettings, watchSettings, writeSettings } from '../shared/settings-store'
-
-/**
- * What a recording costs per second when there is no history to measure: 6 Mbit/s, which is
- * 1080p at the rate the large sites serve it. Shown only until the user has recorded anything at
- * all, after which the number comes from what they actually watch.
- */
-export const DEFAULT_BITS_PER_SECOND = 6_000_000
 
 /** How long a slider waits before its value is stored; see the note on writing below. */
 const SETTLE_MS = 300
@@ -34,7 +29,10 @@ export function bitsPerSecondOf(
     bytes += session.bytes
     seconds += session.seconds
   }
-  return seconds > 0 ? (bytes * 8) / seconds : DEFAULT_BITS_PER_SECOND
+  // Nothing recorded yet: 6 Mbit/s, an ordinary 1080p, which is the same number the frame sizes
+  // its memory ceiling by. One place for it, so that what this page promises and what the frame
+  // keeps cannot become two opinions.
+  return seconds > 0 ? (bytes * 8) / seconds : REFERENCE_BITS_PER_SECOND
 }
 
 /** What a buffer of this length will hold in memory at this rate, in bytes. */
@@ -232,18 +230,22 @@ export function HostRows(props: {
 }
 
 /**
- * Asks the service worker to throw away everything on disk.
+ * Asks the service worker to throw away everything on disk, and says whether it did.
  *
  * Deletion has one owner, and it is the sweeper in the service worker (src/sw/sweeper.ts): a
  * page that removed files itself would be a second writer racing the first over the same
- * directories.
+ * directories. The answer is carried back rather than swallowed: the worker refuses when the
+ * wipe stops halfway — a file another handle is holding open, an index that would not open — and
+ * a page that drew a zero over that would be reporting a deletion that did not happen.
  */
-async function askToClear(): Promise<void> {
+async function askToClear(): Promise<boolean> {
   try {
-    await chrome.runtime.sendMessage({ type: 'tc:clear' })
+    const answer: unknown = await chrome.runtime.sendMessage({ type: 'tc:clear' })
+    return (answer as { ok?: unknown } | undefined)?.ok === true
   } catch {
     // The extension was reloaded under this page, or there is no worker to hear it. Nothing was
     // cleared, and an unhandled rejection here would reach no further than this tab's console.
+    return false
   }
 }
 
@@ -252,7 +254,9 @@ export function Options() {
   const [volume, setVolume] = useState<number | null>(null)
   /** Storage refused a write below the ceiling below: see the row it is shown in. */
   const [full, setFull] = useState(false)
-  const [rate, setRate] = useState(DEFAULT_BITS_PER_SECOND)
+  /** The last wipe was refused, and what is on disk is whatever it was; see the button. */
+  const [clearRefused, setClearRefused] = useState(false)
+  const [rate, setRate] = useState(REFERENCE_BITS_PER_SECOND)
   /** What sliders and fields have moved and not yet stored, by control, oldest touched first. */
   const waiting = useRef(new Map<string, (current: Settings) => Settings>())
   const settle = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
@@ -341,7 +345,21 @@ export function Options() {
   }
 
   const preset = presetOf(settings.detection)
+  /** What one video of this length costs in memory at the rate this user actually records. */
   const expected = memoryFor(settings.recording.bufferSeconds, rate)
+  /** And the most the frame will hold of it, across every session of one document (§7.2). */
+  const ceiling = memoryCeilingFor(settings.recording.bufferSeconds)
+  /**
+   * How much of that length will really be kept, where the ceiling comes first: the setting is
+   * sized at an ordinary 1080p, and a stream well above that rate reaches the ceiling before it
+   * reaches the length. Zero — the whole of it is held, and there is nothing to warn about.
+   *
+   * Said rather than hidden, and said in seconds. The frame shortens such a session instead of
+   * throwing it away (`SessionStore.dropOverCeiling`), so the recording is real — it is just not
+   * as long as the slider, and a slider promising a length nothing will keep is the one thing
+   * this row must not do.
+   */
+  const keptSeconds = expected > ceiling ? (ceiling * 8) / rate : 0
 
   return (
     <main>
@@ -385,6 +403,8 @@ export function Options() {
         />
         <p class="note" data-testid="buffer-cost">
           About {formatBytes(expected)} of memory per video at what you have been recording.
+          {keptSeconds > 0 &&
+            ` A tab holds ${formatBytes(ceiling)} of that, so about ${formatSeconds(keptSeconds)} will be kept.`}
         </p>
 
         <HostRows
@@ -530,12 +550,31 @@ export function Options() {
               Disk full — keeping what fits
             </span>
           )}
+          {clearRefused && (
+            // A wipe that did not happen, said where it was asked for. Drawing a zero over it
+            // would report a deletion the disk knows nothing about, and the next reload would
+            // put the volume back with no explanation of where it had been.
+            <span class="note refused" data-testid="clear-refused">
+              Nothing was cleared
+            </span>
+          )}
           <button
             data-testid="clear"
             onClick={() => {
-              void askToClear()
-              setVolume(0)
-              setFull(false)
+              void askToClear().then(async (cleared) => {
+                setClearRefused(!cleared)
+                if (cleared) {
+                  setVolume(0)
+                  setFull(false)
+                  return
+                }
+                // Refused, and a wipe can stop halfway: what is left is read back rather than
+                // guessed at, and the mark of a refused write with it.
+                const now = await readTotals().catch(() => null)
+                if (!now) return
+                setVolume(now.bytes)
+                setFull(now.fullAt > 0)
+              })
             }}
           >
             Clear

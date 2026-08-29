@@ -7,7 +7,13 @@ import { movieTracksOf } from '../../src/core/export/source'
 import { isSnapshotId, snapshotPath } from '../../src/shared/protocol'
 import { decodeFooter, decodeIndex, FOOTER_BYTES } from '../../src/core/snapshot/format'
 import type { BridgeToPage, EditResult, SessionList, SessionSummary } from '../../src/shared/protocol'
-import { SETTINGS_KEY, type Settings } from '../../src/shared/settings'
+import {
+  LIMITS,
+  REFERENCE_BITS_PER_SECOND,
+  SETTINGS_KEY,
+  memoryCeilingFor,
+  type Settings,
+} from '../../src/shared/settings'
 import { writeSettings } from '../../src/shared/settings-store'
 
 /** An ordinary complete file, the shape a page delivers when it uses no MediaSource at all. */
@@ -2369,5 +2375,29 @@ describe('the frame keeps the buffer length and the memory ceiling on its own cl
     expect(ceiling).toBeGreaterThan(128 * 1024 * 1024)
     expect(win.list()).toHaveLength(1)
     expect(win.list()[0]!.duration).toBe(2)
+  })
+
+  it('raises the ceiling with the buffer, so the length the user set can be held', async () => {
+    vi.useFakeTimers()
+    const win = await loadBridge()
+    const { SessionStore } = await import('../../src/bridge/session-store')
+    const drops = vi.spyOn(SessionStore.prototype, 'dropOverCeiling')
+
+    win.context()
+    // The longest buffer the setting takes, which the slider of §9.4 offers.
+    await win.settings((current) => ({
+      ...current,
+      recording: { ...current.recording, bufferSeconds: LIMITS.bufferSeconds.max },
+    }))
+
+    vi.advanceTimersByTime(2_000)
+
+    // A flat ceiling is a promise the frame then refuses to keep: at 512 MiB one ordinary 1080p
+    // session passes it at about eleven minutes, and half an hour of buffer meant the recording
+    // being thrown away and begun again every few minutes while the page showed the length as
+    // set. The ceiling is that length in bytes plus room for the other sessions of the frame.
+    const [ceiling] = drops.mock.calls.at(-1)!
+    expect(ceiling).toBe(memoryCeilingFor(LIMITS.bufferSeconds.max))
+    expect(ceiling).toBeGreaterThan((LIMITS.bufferSeconds.max * REFERENCE_BITS_PER_SECOND) / 8)
   })
 })

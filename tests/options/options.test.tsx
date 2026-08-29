@@ -1,14 +1,15 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render } from 'preact'
-import { DEFAULTS, LIMITS, merge, type Settings } from '../../src/shared/settings'
 import {
-  DEFAULT_BITS_PER_SECOND,
-  Options,
-  bitsPerSecondOf,
-  held,
-  memoryFor,
-} from '../../src/options/options'
+  DEFAULTS,
+  LIMITS,
+  REFERENCE_BITS_PER_SECOND,
+  memoryCeilingFor,
+  merge,
+  type Settings,
+} from '../../src/shared/settings'
+import { Options, bitsPerSecondOf, held, memoryFor } from '../../src/options/options'
 
 /**
  * The settings page against fakes of the two things it reads: the store of settings and the
@@ -418,7 +419,70 @@ describe('the settings page', () => {
     expect(sent).toEqual([{ type: 'tc:clear' }])
     expect(textAt('volume')).toBe('0 KB')
     expect(at('disk-full')).toBeNull()
+    expect(at('clear-refused')).toBeNull()
     vi.unstubAllGlobals()
+  })
+
+  it('says so when the wipe was refused, instead of drawing a zero over it', async () => {
+    // The worker answers `ok: false` when the wipe stopped halfway — a file another handle holds
+    // open, an index that would not open. Drawn as a success, the page reports a deletion the
+    // disk knows nothing about, and the volume comes back at the next reload with no explanation.
+    vi.stubGlobal('chrome', {
+      runtime: { sendMessage: async () => ({ ok: false }) },
+    })
+    totals = { ...totals, cappedBytes: 1_800_000_000, fullAt: Date.now() }
+    await draw()
+
+    await click('clear')
+
+    expect(textAt('clear-refused')).toContain('Nothing was cleared')
+    // And what is shown is what the index says now, read back rather than guessed at.
+    expect(textAt('volume')).toContain('2.00 GB')
+    expect(textAt('disk-full')).toContain('Disk full')
+    vi.unstubAllGlobals()
+  })
+
+  it('says the same when there is no worker to hear it at all', async () => {
+    // The extension was reloaded under this page: sendMessage refuses with a promise. Nothing was
+    // cleared then either, and the answer on screen has to be the same one.
+    vi.stubGlobal('chrome', {
+      runtime: {
+        sendMessage: async () => {
+          throw new Error('Could not establish connection.')
+        },
+      },
+    })
+    await draw()
+
+    await click('clear')
+
+    expect(textAt('clear-refused')).toContain('Nothing was cleared')
+    expect(textAt('volume')).toContain('2.00 GB')
+    vi.unstubAllGlobals()
+  })
+
+  it('says how much of a long buffer a tab will actually keep', async () => {
+    // 450 MB over five minutes is 12 Mbit/s, twice the rate the ceiling is sized at, and half an
+    // hour of it is more than one document holds. Silent, the slider promised half an hour and
+    // the frame kept a third of it — and used to lose the recording altogether every few minutes
+    // getting there.
+    stored = merge({ ...DEFAULTS, recording: { ...DEFAULTS.recording, bufferSeconds: 1_800 } })
+    await draw()
+
+    const ceiling = memoryCeilingFor(1_800)
+    const kept = (ceiling * 8) / ((450_000_000 * 8) / 300)
+    expect(textAt('buffer-cost')).toContain('2.51 GB')
+    expect(textAt('buffer-cost')).toContain(`${Math.round(kept / 60)} min`)
+  })
+
+  it('says nothing of the sort while the whole of the buffer fits', async () => {
+    // The ordinary case, and it has to stay quiet: three minutes at that same 12 Mbit/s is 270 MB
+    // against a ceiling of half a gigabyte, so the length on the slider is the length that will
+    // be there. A warning under every buffer is a warning nobody reads.
+    await draw()
+
+    expect(textAt('buffer-cost')).toContain('257.5 MB')
+    expect(textAt('buffer-cost'), 'a buffer that fits was called short').not.toContain('will be kept')
   })
 
   it('shows what waits for the re-encoding path as disabled, with the reason beside it', async () => {
@@ -502,10 +566,10 @@ describe('the expected cost of a buffer', () => {
   })
 
   it('is 1080p while nothing has been recorded', () => {
-    expect(bitsPerSecondOf([])).toBe(DEFAULT_BITS_PER_SECOND)
+    expect(bitsPerSecondOf([])).toBe(REFERENCE_BITS_PER_SECOND)
     // And a session that covers no time at all is nothing recorded too: the first batch of a
     // session lands with its seconds still at zero, and bytes over zero is not a rate.
-    expect(bitsPerSecondOf([{ bytes: 8_000_000, seconds: 0 }])).toBe(DEFAULT_BITS_PER_SECOND)
+    expect(bitsPerSecondOf([{ bytes: 8_000_000, seconds: 0 }])).toBe(REFERENCE_BITS_PER_SECOND)
   })
 
   it('turns a length and a rate into bytes', () => {

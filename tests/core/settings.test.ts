@@ -3,6 +3,9 @@ import { BALANCED, LOOSE, STRICT } from '../../src/core/triage'
 import {
   DEFAULTS,
   LIMITS,
+  REFERENCE_BITS_PER_SECOND,
+  SPARE_MEMORY_BYTES,
+  memoryCeilingFor,
   merge,
   presetOf,
   presetNamed,
@@ -187,5 +190,45 @@ describe('siteAllows', () => {
     // against, and a recording nobody can turn off from the settings page is worse than none.
     expect(siteAllows(with_({}), '')).toBe(false)
     expect(siteAllows(with_({}), 'about:blank')).toBe(false)
+  })
+})
+
+describe('memoryCeilingFor', () => {
+  /** What one buffer of this length weighs at the rate the ceiling is sized at. */
+  const oneBuffer = (seconds: number) => (seconds * REFERENCE_BITS_PER_SECOND) / 8
+
+  it('holds room for the buffer the user set, at every length the setting takes', () => {
+    // The whole of the defect this exists for. A flat 512 MiB is passed by one ordinary 1080p
+    // session at about eleven minutes, so at any longer setting the frame threw the recording
+    // away and began again — while the slider went on offering half an hour.
+    for (const seconds of [LIMITS.bufferSeconds.min, 180, 900, LIMITS.bufferSeconds.max]) {
+      expect(
+        memoryCeilingFor(seconds),
+        `a buffer of ${seconds} s would not fit under the ceiling`,
+      ).toBeGreaterThan(oneBuffer(seconds))
+    }
+  })
+
+  it('is what stood in the frame before it, at the default of §7.4', () => {
+    // The number it replaces was 512 MiB, chosen as room for three default buffers and a little.
+    // The default has to stay where it was: this is a ceiling that follows the setting, not a
+    // ceiling raised for everybody.
+    const before = 512 * 1024 * 1024
+    expect(memoryCeilingFor(DEFAULTS.recording.bufferSeconds)).toBeGreaterThan(before * 0.95)
+    expect(memoryCeilingFor(DEFAULTS.recording.bufferSeconds)).toBeLessThan(before * 1.05)
+  })
+
+  it('keeps room for the other sessions of the frame at every length', () => {
+    // The half that bounds their number: without it a page opening session after session would
+    // be held to one buffer, and the ceiling would be doing the buffer length's job twice.
+    expect(memoryCeilingFor(180) - oneBuffer(180)).toBe(SPARE_MEMORY_BYTES)
+    expect(memoryCeilingFor(1_800) - oneBuffer(1_800)).toBe(SPARE_MEMORY_BYTES)
+  })
+
+  it('answers the spare alone for a length of nothing', () => {
+    // Nothing here reads a setting: `merge` holds the buffer inside LIMITS long before this. What
+    // this refuses is arithmetic below zero, which would put the ceiling under the spare.
+    expect(memoryCeilingFor(0)).toBe(SPARE_MEMORY_BYTES)
+    expect(memoryCeilingFor(-60)).toBe(SPARE_MEMORY_BYTES)
   })
 })
