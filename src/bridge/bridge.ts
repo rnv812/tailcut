@@ -1,10 +1,14 @@
 import { sanitizeFileName } from '../core/export/naming'
 import { planSnapshot, type SnapshotMeta } from '../core/snapshot/build'
 import {
+  isExtensionToTab,
   isPageToBridge,
   snapshotPath,
+  type BridgeAnswer,
   type BridgeToPage,
   type EditResult,
+  type ExtensionToTab,
+  type PauseResult,
   type SaveResult,
   type SessionList,
   type SessionSummary,
@@ -112,9 +116,18 @@ const settings = liveSettings((next) => {
  */
 let contextKnown = false
 
-/** Whether this page is recorded at all, by the mode and the two lists (§9.4). */
+/**
+ * The quick switch of the popup: this page, this visit.
+ *
+ * Not a setting and nowhere near storage — a pause that outlived the tab it was meant for would
+ * be a switch the user cannot find again — so it lives here, in the frame, and a reload puts the
+ * page back under the settings.
+ */
+let pausedByHand = false
+
+/** Whether this page is recorded at all: the mode, the two lists (§9.4) and the quick switch. */
 function recordingHere(): boolean {
-  return siteAllows(settings.get(), pageContext.url)
+  return !pausedByHand && siteAllows(settings.get(), pageContext.url)
 }
 
 /**
@@ -321,16 +334,12 @@ function summaries(): SessionSummary[] {
  * network first. That is also why the emptiness of a session is answered before any of it starts:
  * a save that cannot produce a file must say so at once and not after a round trip.
  */
-async function save(key: string, port: MessagePort | undefined): Promise<void> {
+async function save(key: string): Promise<SaveResult> {
   const session = store.get(key)
 
   // Triage may have evicted the session and the page may have reloaded while the popup was open:
   // the popup key then points at nothing.
-  if (!session) {
-    const missing: SaveResult = { ok: false, reason: 'gone' }
-    port?.postMessage(missing)
-    return
-  }
+  if (!session) return { ok: false, reason: 'gone' }
 
   // A session made of init segments alone has nothing to cut, and neither has one whose second
   // buffer is yet to bring a fragment, nor a file the element has not held a whole frame of. Told
@@ -338,11 +347,7 @@ async function save(key: string, port: MessagePort | undefined): Promise<void> {
   // registry and recording, and "it may be gone from the page" would send the user looking for a
   // loss that never happened.
   const plan = planSave(session)
-  if (plan.bytes === 0) {
-    const empty: SaveResult = { ok: false, reason: 'empty' }
-    port?.postMessage(empty)
-    return
-  }
+  if (plan.bytes === 0) return { ok: false, reason: 'empty' }
 
   // A Blob only takes a view over a plain ArrayBuffer, while Uint8Array allows shared memory by
   // type. Both writers allocate the buffer themselves and neither is shared.
@@ -354,7 +359,7 @@ async function save(key: string, port: MessagePort | undefined): Promise<void> {
   // it could not read. Said in the words of a refused download rather than of an empty session:
   // the recording is there, and what failed was turning it into a file.
   if (!file) {
-    const unread: SaveResult = {
+    return {
       ok: false,
       reason: 'refused',
       detail:
@@ -362,39 +367,118 @@ async function save(key: string, port: MessagePort | undefined): Promise<void> {
           ? 'the file could not be read'
           : 'the recorded material could not be read',
     }
-    port?.postMessage(unread)
-    return
   }
 
   const url = URL.createObjectURL(new Blob([file], { type: 'video/mp4' }))
 
-  chrome.downloads.download(
-    {
-      url,
-      filename: `${sanitizeFileName(session.title)}.mp4`,
-      // Said out loud rather than left to the default. Two sessions of one page share a title as
-      // a matter of course — a feed leaves one behind per video — and so do two long titles that
-      // differ only past the length limit; overwriting would take the first file away without a
-      // word, and prompting would stop a save the user has already asked for.
-      conflictAction: 'uniquify',
-    },
-    (downloadId) => {
-      const failed = downloadId === undefined
-      // Read for two reasons. Unread, Chrome writes about it to the console itself and the frame
-      // fills with "Unchecked runtime.lastError" — errors of the extension by the look of them.
-      // And it is the only account of what actually went wrong: no space, no permission, a name
-      // the file system will not take. Answered as a plain "false", the last of those reached the
-      // user as "this recording may be gone from the page" while it sat in the registry recording
-      // on.
-      const detail = failed ? chrome.runtime.lastError?.message : undefined
+  // Awaited rather than answered from inside the callback: the one way out of a request is the
+  // value it returns. What may not move out of the callback is the failure — chrome.runtime
+  // .lastError lives exactly as long as the call, and read after an await it is already gone,
+  // while Chrome writes "Unchecked runtime.lastError" into the console of this frame instead.
+  return await new Promise<SaveResult>((done) =>
+    chrome.downloads.download(
+      {
+        url,
+        filename: `${sanitizeFileName(session.title)}.mp4`,
+        // Said out loud rather than left to the default. Two sessions of one page share a title
+        // as a matter of course — a feed leaves one behind per video — and so do two long titles
+        // that differ only past the length limit; overwriting would take the first file away
+        // without a word, and prompting would stop a save the user has already asked for.
+        conflictAction: 'uniquify',
+      },
+      (downloadId) => {
+        const failed = downloadId === undefined
+        // The only account of what actually went wrong: no space, no permission, a name the file
+        // system will not take. Answered as a plain "false", the last of those reached the user
+        // as "this recording may be gone from the page" while it sat in the registry recording on.
+        const detail = failed ? chrome.runtime.lastError?.message : undefined
 
-      setTimeout(() => URL.revokeObjectURL(url), failed ? 0 : REVOKE_DELAY_MS)
+        setTimeout(() => URL.revokeObjectURL(url), failed ? 0 : REVOKE_DELAY_MS)
 
-      const result: SaveResult = failed ? { ok: false, reason: 'refused' } : { ok: true }
-      if (detail) result.detail = detail
-      port?.postMessage(result)
-    },
+        const result: SaveResult = failed ? { ok: false, reason: 'refused' } : { ok: true }
+        if (detail) result.detail = detail
+        done(result)
+      },
+    ),
   )
+}
+
+/**
+ * The one way out of a request of the popup, and it posts.
+ *
+ * Every path through here ends in postMessage: the answer of the handler, or a refusal in place
+ * of whatever it threw. The asker is already waiting — the content script has told Chrome an
+ * answer is coming and holds the channel open — so a handler that stopped without a value and a
+ * handler that never ran are the same silence to it, and that silence is a button whose label
+ * never changes. Caught on tc:pause, which answered nothing at all; the same hole stood open on
+ * tc:save and tc:edit, where only a thrown error could fall into it.
+ */
+async function answer(request: ExtensionToTab, port: MessagePort | undefined): Promise<void> {
+  let reply: BridgeAnswer
+  try {
+    reply = await replyTo(request)
+  } catch (cause) {
+    // In the words of a refused save, which the popup already reads, and with what broke in it:
+    // "refused" with no detail sends the reader to the console of a frame they cannot open.
+    reply = { ok: false, reason: 'refused', detail: String(cause) }
+  }
+  port?.postMessage(reply)
+}
+
+/**
+ * What each kind of request is answered with.
+ *
+ * A switch over the union and not a chain of ifs: a kind added to ExtensionToTab without an
+ * answer leaves this function able to end without returning one, and `npm run typecheck` says so
+ * here — the same trick, and the same reason, as the guard table of the protocol.
+ */
+function replyTo(request: ExtensionToTab): Promise<BridgeAnswer> {
+  switch (request.type) {
+    case 'tc:list':
+      return Promise.resolve(listing())
+    // The file is put together here and not in the popup: the bytes live in this frame, and
+    // pushing megabytes through extension messages would copy them twice and through JSON.
+    case 'tc:save':
+      return save(request.key)
+    // Edit does not build a file: it writes the material out as it stands and hands back the name
+    // of it. The editor is a tab of its own and reads the snapshot from storage, so it survives
+    // this page being closed — which is the whole reason the snapshot exists.
+    case 'tc:edit':
+      return freeze(request.key)
+    // The quick switch of the popup: this page, this visit. It overrides the mode in one
+    // direction only — a page the settings do not record is not started by it — because the
+    // switch says "stop", and a button that could turn recording on where the settings say no
+    // would be a way round the settings.
+    case 'tc:pause':
+      return Promise.resolve(pause(request.on))
+  }
+}
+
+/** The quick switch, applied. Answered with the state and not with "done": see PauseResult. */
+function pause(on: boolean): PauseResult {
+  pausedByHand = on
+  applyRecordingMode()
+  return { ok: true, paused: pausedByHand }
+}
+
+/**
+ * What this frame has gathered, in the shape the popup asks for it.
+ *
+ * Through the declared union rather than directly: postMessage accepts anything, and a reply that
+ * silently drifted away from SessionList would only show up at the receiver.
+ */
+function listing(): SessionList {
+  const list: SessionList = { sessions: summaries() }
+  // Why there is nothing here, when there is nothing here. A protected page and a page with no
+  // video on it look the same in an empty list, and the two are owed different sentences.
+  if (store.encrypted) list.encrypted = true
+  if (unreachable) list.unreachable = true
+  // A file was watched and could not be read — an address that had expired, a host that will not
+  // range. A fourth silence with a sentence of its own, for the same reason as the other two.
+  if (store.unreadableFile) list.unreadableFile = true
+  // And the one state here that is not about material at all: see PauseResult.
+  if (pausedByHand) list.paused = true
+  return list
 }
 
 /**
@@ -522,37 +606,10 @@ window.addEventListener('message', (event: MessageEvent) => {
   }
 
   // Requests from the popup arrive through a port: chrome.runtime.sendMessage does not reach
-  // this iframe, it is addressed to the content script.
-  if (data?.type === 'tc:list') {
-    // Through the declared union rather than directly: postMessage accepts anything, and a reply
-    // that silently drifted away from BridgeToPage would only show up at the receiver.
-    const list: SessionList = { sessions: summaries() }
-    // Why there is nothing here, when there is nothing here. A protected page and a page with no
-    // video on it look the same in an empty list, and the two are owed different sentences.
-    if (store.encrypted) list.encrypted = true
-    if (unreachable) list.unreachable = true
-    // A file was watched and could not be read — an address that had expired, a host that will
-    // not range. A fourth silence with a sentence of its own, for the same reason as the other two.
-    if (store.unreadableFile) list.unreadableFile = true
-
-    const reply: BridgeToPage = list
-    event.ports[0]?.postMessage(reply)
-    return
-  }
-
-  // The file is put together here and not in the popup: the bytes live in this frame, and
-  // pushing megabytes through extension messages would copy them twice and through JSON.
-  if (data?.type === 'tc:save') {
-    void save(String(data.key), event.ports[0])
-    return
-  }
-
-  // Edit does not build a file: it writes the material out as it stands and hands back the name
-  // of it. The editor is a tab of its own and reads the snapshot from storage, so it survives
-  // this page being closed — which is the whole reason the snapshot exists.
-  if (data?.type === 'tc:edit') {
-    const port = event.ports[0]
-    void freeze(String(data.key)).then((result) => port?.postMessage(result))
+  // this iframe, it is addressed to the content script. Through the declared guard and not by
+  // the type alone: postMessage takes anything, and a request half made is not a request.
+  if (isExtensionToTab(data)) {
+    void answer(data, event.ports[0])
     return
   }
 

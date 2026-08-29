@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   editorUrl,
+  historyUrl,
   isExtensionToTab,
   isExtensionToWorker,
   isPageToBridge,
@@ -167,6 +168,11 @@ describe('isExtensionToTab', () => {
     ["somebody else's type", { type: 'tc:ping' }],
     ['a save without a key', { type: 'tc:save' }],
     ['a save with a non-string key', { type: 'tc:save', key: 42 }],
+    // The one request of this union that carries a claim rather than an address, and the claim is
+    // what it is acted on: a pause with nothing in it would be read as "start recording again" by
+    // every reader that takes `on` for a boolean.
+    ['a pause that says nothing', { type: 'tc:pause' }],
+    ['a pause whose claim is a word', { type: 'tc:pause', on: 'true' }],
     // The page's side: these messages travel through window.postMessage and reach the content
     // script by another road. Recognise them here and the popup would get the answer to a request
     // that was never its own.
@@ -263,6 +269,7 @@ const everyExtensionToTab: { [K in ExtensionToTab['type']]: Extract<ExtensionToT
   'tc:list': { type: 'tc:list' },
   'tc:save': { type: 'tc:save', key: 'https://site.example/watch|avc1|inf' },
   'tc:edit': { type: 'tc:edit', key: 'https://site.example/watch|avc1|inf' },
+  'tc:pause': { type: 'tc:pause', on: true },
 }
 
 describe('a guard knows every kind its own union describes', () => {
@@ -321,6 +328,18 @@ describe('addresses of the snapshot and the editor', () => {
   it('opens the editor by the name of the snapshot', () => {
     expect(editorUrl('0f2c7d1e-4b0a-4a3f-9c2e-9b5a1d6f8c31')).toBe(
       'editor/editor.html?s=0f2c7d1e-4b0a-4a3f-9c2e-9b5a1d6f8c31',
+    )
+  })
+
+  it('opens the history of a session by a door of its own', () => {
+    // A second door and not the same one: `?s=` is a snapshot file written for one editing, `?h=`
+    // is a recording of the history, whose material is the pieces on disk. Told apart in the
+    // address, because the editor has to know which of the two it is opening over.
+    expect(historyUrl('0f2c7d1e-4b0a-4a3f-9c2e-9b5a1d6f8c31')).toBe(
+      'editor/editor.html?h=0f2c7d1e-4b0a-4a3f-9c2e-9b5a1d6f8c31',
+    )
+    expect(historyUrl('0f2c7d1e-4b0a-4a3f-9c2e-9b5a1d6f8c31')).not.toBe(
+      editorUrl('0f2c7d1e-4b0a-4a3f-9c2e-9b5a1d6f8c31'),
     )
   })
 

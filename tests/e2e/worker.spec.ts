@@ -420,9 +420,10 @@ test('a page whose policy forbids blob workers keeps its worker and is told it c
   // unrecordable, and the popup asks the tab once, when it opens.
   await page.waitForTimeout(UNNAMED_MS)
   const popup = await openPopupOn(context, page, extensionId)
-  await expect(popup.locator('body')).toHaveText(
+  await expect(popup.getByTestId('nothing')).toHaveText(
     'tailcut cannot reach the player on this page, so nothing of it was recorded.',
   )
+  await expect(popup.getByTestId('save'), 'a page out of reach was offered for saving').toHaveCount(0)
 
   await close(context)
 })
@@ -443,9 +444,10 @@ test('a page that requires trusted addresses keeps its worker, and is told the s
 
   await page.waitForTimeout(UNNAMED_MS)
   const popup = await openPopupOn(context, page, extensionId)
-  await expect(popup.locator('body')).toHaveText(
+  await expect(popup.getByTestId('nothing')).toHaveText(
     'tailcut cannot reach the player on this page, so nothing of it was recorded.',
   )
+  await expect(popup.getByTestId('save'), 'a page out of reach was offered for saving').toHaveCount(0)
 
   await close(context)
 })
@@ -466,9 +468,10 @@ test('a worker built before the first task is left alone, and the page says so',
   // than showing the words that mean "wait a little longer".
   await page.waitForTimeout(UNNAMED_MS)
   const popup = await openPopupOn(context, page, extensionId)
-  await expect(popup.locator('body')).toHaveText(
+  await expect(popup.getByTestId('nothing')).toHaveText(
     'tailcut cannot reach the player on this page, so nothing of it was recorded.',
   )
+  await expect(popup.getByTestId('save'), 'a page out of reach was offered for saving').toHaveCount(0)
 
   await close(context)
 })

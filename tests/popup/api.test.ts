@@ -1,5 +1,52 @@
-import { describe, it, expect, afterEach, vi } from 'vitest'
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import type { SessionSummary } from '../../src/shared/protocol'
+import { DEFAULTS, merge, type Settings } from '../../src/shared/settings'
+
+/**
+ * The index of what is on disk and the store of settings, replaced outright: the first wants
+ * IndexedDB and the second chrome.storage, and a runner has neither. Everything between them and
+ * the answer this file checks is the real thing.
+ */
+let indexed: Array<Record<string, unknown>> = []
+/** The limits the api asked the index for, in order: the popup shows a page and not a database. */
+const asked: number[] = []
+let totals = { id: 'totals', bytes: 0, cappedBytes: 0, fullAt: 0 }
+/** An index the browser will not open at all: private browsing, a store it refused. */
+let indexRefuses = false
+const pinned: Array<[string, boolean]> = []
+const stamped: Array<[string, number]> = []
+
+let stored: Settings = DEFAULTS
+const written: Settings[] = []
+
+vi.mock('../../src/shared/history-db', () => ({
+  listSessions: async (limit: number) => {
+    asked.push(limit)
+    if (indexRefuses) throw new Error('the store would not open')
+    return indexed
+  },
+  readTotals: async () => {
+    if (indexRefuses) throw new Error('the store would not open')
+    return totals
+  },
+  setPinned: async (id: string, on: boolean) => {
+    pinned.push([id, on])
+  },
+  setDeleted: async (id: string, at: number) => {
+    stamped.push([id, at])
+  },
+}))
+
+vi.mock('../../src/shared/settings-store', () => ({
+  readSettings: async () => stored,
+  writeSettings: async (edit: (current: Settings) => Settings) => {
+    const before = stored
+    await Promise.resolve()
+    stored = merge(edit(before))
+    written.push(stored)
+    return stored
+  },
+}))
 
 const PAGE_URL = 'https://site.example/watch?v=abc'
 
@@ -80,7 +127,7 @@ type Injected = { tabId?: number; allFrames?: boolean }
  */
 function installChrome(
   options: {
-    tabs?: Array<{ id?: number }>
+    tabs?: Array<{ id?: number; url?: string }>
     /** What each frame of the tab answers a list request with, by frame number. */
     frames?: Record<number, unknown>
     /** Frames that hear the request and never answer it. */
@@ -95,7 +142,7 @@ function installChrome(
 ) {
   const sent: Sent[] = []
   const injected: Injected[] = []
-  let tabs = options.tabs ?? [{ id: 7 }]
+  let tabs: Array<{ id?: number; url?: string }> = options.tabs ?? [{ id: 7, url: PAGE_URL }]
   let frames: Record<number, unknown> =
     options.frames ??
     ({ [TOP]: 'listReply' in options ? options.listReply : { sessions: [summary] } })
@@ -105,7 +152,11 @@ function installChrome(
     'editReply' in options ? options.editReply : { ok: true, snapshotId: SNAPSHOT }
   let failure: Error | null = null
 
+  /** Tabs the popup opened: the editor over a snapshot, and the editor over the history. */
+  const created: Array<{ url: string }> = []
+
   vi.stubGlobal('chrome', {
+    runtime: { getURL: (path: string) => `chrome-extension://tailcut/${path}` },
     scripting: {
       executeScript: async (details: { target?: { tabId?: number; allFrames?: boolean } }) => {
         injected.push({ tabId: details.target?.tabId, allFrames: details.target?.allFrames })
@@ -124,6 +175,9 @@ function installChrome(
         ...(info.active ? [] : [BACKGROUND_TAB]),
         ...tabs,
       ],
+      create: async (options: { url: string }) => {
+        created.push(options)
+      },
       sendMessage: async (tabId: number, message: unknown, opts: { frameId?: number } = {}) => {
         sent.push({ tabId, message, options: opts })
         if (failure) throw failure
@@ -141,6 +195,7 @@ function installChrome(
   return {
     sent,
     injected,
+    created,
     /** The user switched tabs while the popup was open. */
     switchTo: (id: number | undefined) => {
       tabs = [{ id }]
@@ -166,6 +221,17 @@ async function importApi() {
   vi.resetModules()
   return import('../../src/popup/api')
 }
+
+beforeEach(() => {
+  indexed = []
+  asked.length = 0
+  totals = { id: 'totals', bytes: 0, cappedBytes: 0, fullAt: 0 }
+  indexRefuses = false
+  pinned.length = 0
+  stamped.length = 0
+  stored = DEFAULTS
+  written.length = 0
+})
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -688,5 +754,208 @@ describe('hostOf', () => {
     const { hostOf } = await importApi()
 
     expect(hostOf(url)).toBe(expected)
+  })
+})
+
+/** A row of the index, as the index keeps one: the popup reads eight of these fields and no more. */
+const indexRow = (over: Record<string, unknown> = {}) => ({
+  id: 'h1',
+  key: 'https://old.example/v|avc1|240',
+  url: 'https://old.example/v',
+  title: 'Yesterday',
+  createdAt: 1_699_800_000_000,
+  lastSeenAt: 1_699_900_000_000,
+  pinned: false,
+  usedAt: 0,
+  deletedAt: 0,
+  bytes: 90_000_000,
+  covered: [{ start: 0, end: 240 }],
+  seconds: 240,
+  widthPx: 640,
+  sound: true,
+  tracks: [],
+  ...over,
+})
+
+describe('the history the popup shows', () => {
+  it('takes its rows out of the index and asks for a page of them', async () => {
+    indexed = [indexRow(), indexRow({ id: 'h2', key: 'k2', title: 'The day before' })]
+    installChrome()
+    const { historyRows } = await importApi()
+
+    // Straight out of the index and in the order it answers — newest first, which is the order
+    // the popup lists them in. Nothing is computed here and nothing walks the disk: §9.2 promises
+    // a popup that opens instantly, and a browser can hold a thousand of these rows.
+    expect(await historyRows()).toEqual([
+      {
+        id: 'h1',
+        key: 'https://old.example/v|avc1|240',
+        title: 'Yesterday',
+        url: 'https://old.example/v',
+        seconds: 240,
+        bytes: 90_000_000,
+        lastSeenAt: 1_699_900_000_000,
+        pinned: false,
+      },
+      expect.objectContaining({ id: 'h2', title: 'The day before' }),
+    ])
+    // A page of them and not everything there is: the popup is 340 pixels wide.
+    expect(asked).toEqual([20])
+  })
+
+  it('shows an empty history where the index would not open, rather than nothing at all', async () => {
+    indexRefuses = true
+    installChrome()
+    const { historyRows, storageInUse } = await importApi()
+
+    // Private browsing, a store the browser refused, a profile with nothing written yet. An empty
+    // history is what nothing looks like, and it is not worth a message beside the recording of
+    // the page — but a rejection here would take the whole popup down with it.
+    expect(await historyRows()).toEqual([])
+    expect(await storageInUse()).toEqual({ bytes: 0, full: false })
+  })
+
+  it('counts the volume out of the index and says when the browser has refused a write', async () => {
+    totals = { id: 'totals', bytes: 1_610_612_736, cappedBytes: 1_449_551_462, fullAt: 1_700_000_000_000 }
+    installChrome()
+    const { storageInUse } = await importApi()
+
+    // Never navigator.storage.estimate(): with a real ceiling of 200 MB forced on it, that call
+    // went on reporting 10 GiB while the write failed at 128 MB (§7.4). The sum in the index is
+    // the only number that is true.
+    expect(await storageInUse()).toEqual({ bytes: 1_610_612_736, full: true })
+  })
+
+  it('marks a recording deleted at a moment, and takes that moment back on an undo', async () => {
+    installChrome()
+    const { deleteHistory, undoDelete, pinHistory } = await importApi()
+
+    await deleteHistory('h1')
+    await undoDelete('h1')
+    await pinHistory('h1', true)
+
+    // Marked and not removed: §9.2 answers a deletion with an undo in a toast rather than with a
+    // confirmation, so the row has to be out of every list at once and recoverable while the
+    // toast is up. The files are the sweeper's business, half a minute later.
+    const [deleted, undone] = stamped
+    expect(deleted![0]).toBe('h1')
+    expect(deleted![1], 'a deletion was written down as a flag rather than as a moment')
+      .toBeGreaterThan(1_700_000_000_000)
+    expect(undone).toEqual(['h1', 0])
+    expect(pinned).toEqual([['h1', true]])
+  })
+
+  it('opens a recording of the history by the second door of the editor', async () => {
+    const chrome = installChrome()
+    const { openHistoryEditor } = await importApi()
+
+    await openHistoryEditor('h1')
+
+    // `?h=` and not `?s=`: a snapshot is a file written for one editing, a history session is the
+    // pieces on disk and the rows over them, and nothing is copied to open it.
+    expect(chrome.created).toEqual([
+      { url: 'chrome-extension://tailcut/editor/editor.html?h=h1' },
+    ])
+  })
+})
+
+describe('the switches under the history', () => {
+  it('reads whether this site is recorded out of the settings as they stand', async () => {
+    installChrome()
+    const { siteRecorded } = await importApi()
+
+    expect(await siteRecorded(PAGE_URL)).toBe(true)
+
+    stored = merge({ recording: { ...DEFAULTS.recording, deny: ['site.example'] } })
+    expect(await siteRecorded(PAGE_URL)).toBe(false)
+  })
+
+  it('forbids the site in the deny list while every site is recorded', async () => {
+    installChrome()
+    const { setSiteRecorded } = await importApi()
+
+    await setSiteRecorded(PAGE_URL, false)
+
+    expect(written.at(-1)!.recording.deny).toEqual(['site.example'])
+    expect(written.at(-1)!.recording.allow, 'the allow list is not what "all sites" reads').toEqual([])
+  })
+
+  it('allows the site in the allow list while only listed sites are recorded', async () => {
+    stored = merge({ recording: { ...DEFAULTS.recording, mode: 'allowlist' } })
+    installChrome()
+    const { setSiteRecorded } = await importApi()
+
+    await setSiteRecorded(PAGE_URL, true)
+
+    // The only reading of "record here" that means the same thing in both modes: in `All sites`
+    // it is the deny list that decides, in `Allowlist` the allow list, and writing the wrong one
+    // would be a switch that moves and changes nothing.
+    expect(written.at(-1)!.recording.allow).toEqual(['site.example'])
+    expect(written.at(-1)!.recording.deny).toEqual([])
+  })
+
+  it('takes the site off the list it was on rather than putting it on twice', async () => {
+    stored = merge({ recording: { ...DEFAULTS.recording, deny: ['site.example', 'other.example'] } })
+    installChrome()
+    const { setSiteRecorded } = await importApi()
+
+    await setSiteRecorded(PAGE_URL, true)
+
+    expect(written.at(-1)!.recording.deny).toEqual(['other.example'])
+  })
+
+  it('writes nothing at all for an address that names no site', async () => {
+    installChrome()
+    const { setSiteRecorded } = await importApi()
+
+    // about:blank, a chrome:// page, a tab Chrome tells the extension nothing about. There is no
+    // host to put on a list, and a settings write that stored the empty string would be an entry
+    // the settings page shows and nobody can match.
+    await setSiteRecorded('', false)
+    await setSiteRecorded('about:blank', false)
+
+    expect(written).toEqual([])
+  })
+
+  it('pauses every frame of the tab, each addressed, and stores nothing', async () => {
+    const chrome = installChrome({
+      frames: { [TOP]: { sessions: [] }, [EMBED]: { sessions: [embedded] } },
+    })
+    const { pauseThisTab } = await importApi()
+
+    await pauseThisTab(true)
+
+    // Every frame, because the player may be in an embed: a pause that missed it would be a
+    // button that does nothing on exactly the pages where the recording is not obvious.
+    expect(chrome.sent).toEqual([
+      { tabId: 7, message: { type: 'tc:pause', on: true }, options: { frameId: TOP } },
+      { tabId: 7, message: { type: 'tc:pause', on: true }, options: { frameId: EMBED } },
+    ])
+    // And nothing is stored: the pause is about this page until it is reloaded, and a setting
+    // that outlived the tab it was meant for would be a switch the user cannot find again.
+    expect(written).toEqual([])
+  })
+
+  it('lets a frame that cannot be reached refuse without taking the pause down', async () => {
+    const chrome = installChrome({ frames: { [TOP]: undefined, [EMBED]: { sessions: [embedded] } } })
+    const { pauseThisTab } = await importApi()
+
+    // about:blank, a sandboxed frame, a data: document: there is nothing in it to pause, and the
+    // frame that holds the player is still owed the message.
+    await expect(pauseThisTab(true)).resolves.toBeUndefined()
+    expect(chrome.sent).toHaveLength(2)
+  })
+
+  it('says where the tab stands, out of the same answer that named it', async () => {
+    const chrome = installChrome()
+    const { pageUrl, listSessions } = await importApi()
+
+    await listSessions()
+    expect(await pageUrl()).toBe(PAGE_URL)
+
+    // Asked once and remembered, like the identifier beside it: the active tab does change under
+    // an open popup, and a switch thrown at the site of another tab is a setting nobody meant.
+    chrome.switchTo(9)
+    expect(await pageUrl()).toBe(PAGE_URL)
   })
 })

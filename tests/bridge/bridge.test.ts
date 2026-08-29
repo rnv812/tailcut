@@ -6,7 +6,13 @@ import { boxBody, childBoxes, topLevelBoxes } from '../../src/core/iso/reader'
 import { movieTracksOf } from '../../src/core/export/source'
 import { isSnapshotId, snapshotPath } from '../../src/shared/protocol'
 import { decodeFooter, decodeIndex, FOOTER_BYTES } from '../../src/core/snapshot/format'
-import type { BridgeToPage, EditResult, SessionList, SessionSummary } from '../../src/shared/protocol'
+import type {
+  BridgeToPage,
+  EditResult,
+  ExtensionToTab,
+  SessionList,
+  SessionSummary,
+} from '../../src/shared/protocol'
 import {
   LIMITS,
   REFERENCE_BITS_PER_SECOND,
@@ -247,6 +253,8 @@ function installWindow(referrer = REFERRER, stored?: unknown) {
   /** Blobs the bridge handed out addresses for, and the revoked addresses — one per download. */
   const blobs = new Map<string, Blob>()
   const revoked: string[] = []
+  /** Chrome itself is unavailable at the download: the failure the save path never catches. */
+  let downloadThrows = false
   /** The download id; undefined — Chrome refused, as it does when writing is forbidden. */
   let downloadId: number | undefined = 1
   /** What Chrome puts into runtime.lastError when it refuses; empty — it said nothing. */
@@ -343,6 +351,10 @@ function installWindow(referrer = REFERRER, stored?: unknown) {
     },
     downloads: {
       download(options: Download, done: (id?: number) => void) {
+        // Chrome refusing is one thing and Chrome throwing is another: the second is the path
+        // where a handler stops without a value at all, and the popup is owed an answer on it too.
+        if (downloadThrows) throw new Error('downloads are unavailable')
+
         downloads.push(options)
         lastError = downloadId === undefined ? { message: failureMessage } : undefined
         lastErrorRead = false
@@ -369,16 +381,23 @@ function installWindow(referrer = REFERRER, stored?: unknown) {
     parent,
     top,
     deliver,
-    /** Asks the bridge the way the popup does: through a message channel. */
-    answer(): SessionList {
+    /**
+     * Asks the bridge the way the popup does: through a message channel.
+     *
+     * Awaited, because the answer is: every request of the popup leaves the bridge by one road,
+     * and that road is written for the requests that have to build a file first (see `answer` in
+     * src/bridge/bridge.ts). A list is ready the moment it is asked for and still travels it.
+     */
+    async answer(): Promise<SessionList> {
       const reply = port()
       deliver({ type: 'tc:list' }, { ports: [reply] })
+      await Promise.resolve()
       expect(reply.received, 'the bridge did not answer the session list request').toHaveLength(1)
       return reply.received[0] as SessionList
     },
     /** The sessions out of that answer, which is what most of this set is about. */
-    list(): Summary[] {
-      return this.answer().sessions
+    async list(): Promise<Summary[]> {
+      return (await this.answer()).sessions
     },
     /** Hands the bridge a segment the way the content script sends it. */
     append(bytes: Uint8Array, sourceId = 's1', bufferId = 'b1'): void {
@@ -449,6 +468,10 @@ function installWindow(referrer = REFERRER, stored?: unknown) {
     /** The storage refuses the write: no quota left, a handle it would not open. */
     refuseStorage(): void {
       storageTakes = false
+    },
+    /** Chrome itself throws at the download: the failure the save path never catches. */
+    breakDownloads(): void {
+      downloadThrows = true
     },
     downloads,
     revoked,
@@ -570,7 +593,7 @@ describe('the bridge puts segments into the session registry', () => {
   it('returns an empty list from an empty registry', async () => {
     const win = await loadBridge()
 
-    expect(win.list()).toEqual([])
+    expect(await win.list()).toEqual([])
   })
 
   it('opens a session under the address and title of the page on an init', async () => {
@@ -579,7 +602,7 @@ describe('the bridge puts segments into the session registry', () => {
 
     win.append(initBytes)
 
-    expect(win.list()).toEqual([
+    expect(await win.list()).toEqual([
       {
         key: keyFor(PAGE_URL),
         url: PAGE_URL,
@@ -601,10 +624,10 @@ describe('the bridge puts segments into the session registry', () => {
 
     // Fixture: two seconds per fragment, both in a row — four seconds of clip, and all of it
     // reaches the file.
-    expect(win.list()).toMatchObject([
+    expect(await win.list()).toMatchObject([
       { duration: 4, bytes: seg1Bytes.byteLength + seg2Bytes.byteLength },
     ])
-    expect(win.list()[0]!.omits).toBeUndefined()
+    expect((await win.list())[0]!.omits).toBeUndefined()
   })
 
   it('signs a summary with the moment material last reached it', async () => {
@@ -613,7 +636,7 @@ describe('the bridge puts segments into the session registry', () => {
 
     win.append(initBytes)
     win.append(seg1Bytes)
-    const afterFirst = win.list()[0]!.lastAt
+    const afterFirst = (await win.list())[0]!.lastAt
 
     const before = Date.now()
     win.append(seg2Bytes)
@@ -624,7 +647,7 @@ describe('the bridge puts segments into the session registry', () => {
     // of two frames can be put in order by, so it has to mean the arrival of material and not
     // the opening of the session — the popup calls the head of the list the recording being
     // watched right now.
-    const lastAt = win.list()[0]!.lastAt
+    const lastAt = (await win.list())[0]!.lastAt
     expect(lastAt).toBeGreaterThanOrEqual(before)
     expect(lastAt).toBeLessThanOrEqual(after)
     expect(lastAt).toBeGreaterThanOrEqual(afterFirst)
@@ -643,7 +666,7 @@ describe('the bridge puts segments into the session registry', () => {
     // The popup draws the file from this summary. Six seconds from start to end would promise
     // material that does not exist — between the 2nd and the 4th second the registry is empty —
     // and four seconds would promise both pieces where a save writes one continuous clip.
-    expect(win.list()).toEqual([
+    expect(await win.list()).toEqual([
       {
         key: keyFor(PAGE_URL),
         url: PAGE_URL,
@@ -664,7 +687,7 @@ describe('the bridge puts segments into the session registry', () => {
 
     win.append(initBytes)
 
-    const summary = win.list()[0]!
+    const summary = (await win.list())[0]!
 
     // key is the handle the popup asks the registry for this session with. The page address is
     // not one: the referral marks are cut out of the key and the codecs are appended to it, so a
@@ -680,7 +703,7 @@ describe('the bridge puts segments into the session registry', () => {
     // travel the same road: should one outrun the context, the session must stay recognisable.
     win.append(initBytes)
 
-    expect(win.list()).toMatchObject([{ url: REFERRER, title: '' }])
+    expect(await win.list()).toMatchObject([{ url: REFERRER, title: '' }])
   })
 
   it('signs an already open session with the title that arrives later', async () => {
@@ -690,14 +713,14 @@ describe('the bridge puts segments into the session registry', () => {
     // arrives without a navigation at all.
     win.context(PAGE_URL, '')
     win.append(initBytes)
-    expect(win.list()).toMatchObject([{ title: '' }])
+    expect(await win.list()).toMatchObject([{ title: '' }])
 
     win.context(PAGE_URL, PAGE_TITLE)
 
     // The bridge is told the title, so the sessions of that page must carry it: otherwise the
     // popup shows "Untitled" for a video that has a perfectly good name, and the saved file is
     // named after nothing.
-    expect(win.list()).toMatchObject([{ title: PAGE_TITLE }])
+    expect(await win.list()).toMatchObject([{ title: PAGE_TITLE }])
   })
 
   it('names the file after the title that arrived after the session opened', async () => {
@@ -724,7 +747,7 @@ describe('the bridge puts segments into the session registry', () => {
     win.deliver({ type: 'tc:context', url: new URL(PAGE_URL), title: 42 })
     win.append(initBytes)
 
-    expect(win.list()).toMatchObject([{ url: PAGE_URL, title: '42' }])
+    expect(await win.list()).toMatchObject([{ url: PAGE_URL, title: '42' }])
   })
 
   it('records nothing at all under an address that is not one', async () => {
@@ -737,7 +760,7 @@ describe('the bridge puts segments into the session registry', () => {
     win.deliver({ type: 'tc:context', url: { href: PAGE_URL }, title: 42 })
     win.append(initBytes)
 
-    expect(win.list()).toEqual([])
+    expect(await win.list()).toEqual([])
     expect(win.switches()).toEqual([false])
   })
 
@@ -751,7 +774,7 @@ describe('the bridge puts segments into the session registry', () => {
     // The first player goes on playing: its fragment has to land in its own session.
     win.append(seg1Bytes, 's1')
 
-    expect(win.list().map((s) => [s.url, s.duration])).toEqual(
+    expect((await win.list()).map((s) => [s.url, s.duration])).toEqual(
       expect.arrayContaining([
         [PAGE_URL, 2],
         ['https://site.example/watch?v=second', 0],
@@ -772,7 +795,7 @@ describe('the bridge puts segments into the session registry', () => {
     win.append(initBytes, 's2')
 
     // The session time is the bridge clock: without it the popup order is the insertion order.
-    expect(win.list().map((s) => s.title)).toEqual(['Second', 'First'])
+    expect((await win.list()).map((s) => s.title)).toEqual(['Second', 'First'])
   })
 
   it('keys a session by the length the page stated for its media source', async () => {
@@ -783,7 +806,7 @@ describe('the bridge puts segments into the session registry', () => {
 
     // The length is the third component of the merge key (§6.1). Without it two videos of a feed
     // whose address does not change are one session and one unplayable file.
-    expect(win.list().map((s) => s.key)).toEqual([
+    expect((await win.list()).map((s) => s.key)).toEqual([
       sessionKey({ url: PAGE_URL, codecs: ['avc1'], durationSeconds: 23.581 }),
     ])
   })
@@ -802,7 +825,7 @@ describe('the bridge puts segments into the session registry', () => {
     win.append(initBytes, 's2')
     win.append(seg1Bytes, 's2')
 
-    expect(win.list(), 'two clips of the feed came out as one session').toHaveLength(2)
+    expect(await win.list(), 'two clips of the feed came out as one session').toHaveLength(2)
   })
 
   it('does not answer the sender of a stated length', async () => {
@@ -832,7 +855,7 @@ describe('the bridge and foreign messages', () => {
     const sender = win.deliver(data)
 
     expect(sender.posts, 'the bridge answered a message of a foreign type').toEqual([])
-    expect(win.list()).toEqual([])
+    expect(await win.list()).toEqual([])
   })
 
   const junk: [string, Uint8Array][] = [
@@ -849,7 +872,7 @@ describe('the bridge and foreign messages', () => {
     expect(() => win.append(bytes)).not.toThrow()
     win.append(initBytes)
 
-    expect(win.list(), 'the bridge stopped taking segments after junk').toHaveLength(1)
+    expect(await win.list(), 'the bridge stopped taking segments after junk').toHaveLength(1)
   })
 
   it('does not break on a list request without a channel to answer through', async () => {
@@ -858,7 +881,7 @@ describe('the bridge and foreign messages', () => {
     win.append(initBytes)
 
     expect(() => win.deliver({ type: 'tc:list' })).not.toThrow()
-    expect(win.list(), 'the registry suffered from a request without a port').toHaveLength(1)
+    expect(await win.list(), 'the registry suffered from a request without a port').toHaveLength(1)
   })
 
   it('answers tc:list into the channel alone, not into the sender window', async () => {
@@ -868,6 +891,9 @@ describe('the bridge and foreign messages', () => {
 
     const reply = port()
     const sender = win.deliver({ type: 'tc:list' }, { ports: [reply] })
+    // Every request of the popup leaves the bridge by the one road written for the requests that
+    // have to build something first, so even a ready-made list is posted a turn later.
+    await Promise.resolve()
 
     // The session list is a watch history. An answer into the window would hand it to any page
     // that thinks of sending the bridge a tc:list.
@@ -889,7 +915,7 @@ describe('the bridge takes triage verdicts', () => {
 
     verdict(win, 's1', 'reject')
 
-    expect(win.list()).toEqual([])
+    expect(await win.list()).toEqual([])
   })
 
   it('does not touch the session of a neighbour on a rejection of one source', async () => {
@@ -903,7 +929,7 @@ describe('the bridge takes triage verdicts', () => {
     // first has to leave the second alone.
     verdict(win, 's1', 'reject')
 
-    expect(win.list().map((s) => s.title)).toEqual(['Second'])
+    expect((await win.list()).map((s) => s.title)).toEqual(['Second'])
   })
 
   it('protects a session from a later rejection on promotion', async () => {
@@ -916,7 +942,7 @@ describe('the bridge takes triage verdicts', () => {
     // A pause or the element leaving the screen: recording freezes, what was collected stays.
     verdict(win, 's1', 'reject')
 
-    expect(win.list()).toMatchObject([{ duration: 2 }])
+    expect(await win.list()).toMatchObject([{ duration: 2 }])
   })
 
   it('returns recording to a screened-out source on a hold', async () => {
@@ -925,13 +951,13 @@ describe('the bridge takes triage verdicts', () => {
 
     verdict(win, 's1', 'reject')
     win.append(initBytes, 's1')
-    expect(win.list(), 'setup: there must be no session after a rejection').toEqual([])
+    expect(await win.list(), 'setup: there must be no session after a rejection').toEqual([])
 
     verdict(win, 's1', 'hold')
     win.append(initBytes, 's1')
     win.append(seg1Bytes, 's1')
 
-    expect(win.list()).toMatchObject([{ duration: 2 }])
+    expect(await win.list()).toMatchObject([{ duration: 2 }])
   })
 
   it('does not answer the sender of a verdict', async () => {
@@ -960,14 +986,14 @@ describe('the bridge refuses a page that plays encrypted media', () => {
     win.context()
     win.append(initBytes, 's1')
     win.append(seg1Bytes, 's1')
-    expect(win.list(), 'setup: the material has to be in the registry first').toHaveLength(1)
+    expect(await win.list(), 'setup: the material has to be in the registry first').toHaveLength(1)
 
     encrypted(win)
 
     // The refusal comes in on its own and not through a verdict. On a page whose element the
     // watcher cannot reach — tv.apple.com plays inside a shadow root — no verdict is ever spoken,
     // and the promise "we do not record protected media" would rest on nothing.
-    expect(win.list()).toEqual([])
+    expect(await win.list()).toEqual([])
   })
 
   it('refuses a page whose segments arrive encrypted, told by nobody', async () => {
@@ -979,8 +1005,8 @@ describe('the bridge refuses a page that plays encrypted media', () => {
     win.append(cencInitBytes, 's1')
     win.append(seg1Bytes, 's1')
 
-    expect(win.list()).toEqual([])
-    expect(win.answer().encrypted).toBe(true)
+    expect(await win.list()).toEqual([])
+    expect((await win.answer()).encrypted).toBe(true)
   })
 
   it('keeps nothing the page appends after it', async () => {
@@ -991,7 +1017,7 @@ describe('the bridge refuses a page that plays encrypted media', () => {
     win.append(initBytes, 's1')
     win.append(seg1Bytes, 's1')
 
-    expect(win.list()).toEqual([])
+    expect(await win.list()).toEqual([])
   })
 
   it('has nothing left to hand a save', async () => {
@@ -999,7 +1025,7 @@ describe('the bridge refuses a page that plays encrypted media', () => {
     win.context()
     win.append(initBytes, 's1')
     win.append(seg1Bytes, 's1')
-    const key = win.list()[0]!.key
+    const key = (await win.list())[0]!.key
 
     encrypted(win)
     const reply = await win.save(key)
@@ -1015,7 +1041,7 @@ describe('the bridge refuses a page that plays encrypted media', () => {
     const win = await loadBridge()
     win.context()
 
-    expect(win.answer().encrypted, 'setup: nothing has been said about this page yet').toBe(
+    expect((await win.answer()).encrypted, 'setup: nothing has been said about this page yet').toBe(
       undefined,
     )
 
@@ -1023,7 +1049,7 @@ describe('the bridge refuses a page that plays encrypted media', () => {
 
     // An empty list is the same emptiness on a page with no video and on a page that may not be
     // recorded, and the user is owed the difference in words.
-    expect(win.answer().encrypted).toBe(true)
+    expect((await win.answer()).encrypted).toBe(true)
   })
 
   it('leaves an ordinary page unprotected in the answer', async () => {
@@ -1032,8 +1058,8 @@ describe('the bridge refuses a page that plays encrypted media', () => {
     win.append(initBytes, 's1')
     win.append(seg1Bytes, 's1')
 
-    expect(win.answer().encrypted).toBe(undefined)
-    expect(win.answer().sessions).toHaveLength(1)
+    expect((await win.answer()).encrypted).toBe(undefined)
+    expect((await win.answer()).sessions).toHaveLength(1)
   })
 
   it('does not answer the sender of tc:encrypted', async () => {
@@ -1094,7 +1120,7 @@ describe('the bridge refuses a page that plays encrypted media', () => {
     win.append(initBytes, 's1')
     win.append(seg1Bytes, 's1')
     encrypted(win)
-    win.answer()
+    await win.answer()
 
     // Repeating it would put a message on every append of a page that is already refused, which
     // is the very traffic this is here to end.
@@ -1108,7 +1134,7 @@ describe('the bridge refuses a page that plays encrypted media', () => {
     win.context()
     win.append(initBytes, 's1')
     win.append(seg1Bytes, 's1')
-    win.answer()
+    await win.answer()
 
     // The word that this frame is recording goes out beside the handshake and belongs there: the
     // page is being recorded, which is the opposite of refused.
@@ -1125,7 +1151,7 @@ describe('a page holding a player the extension could not reach', () => {
     const win = await loadBridge()
     win.context()
 
-    expect(win.answer().unreachable, 'setup: nothing has been said about this page yet').toBe(
+    expect((await win.answer()).unreachable, 'setup: nothing has been said about this page yet').toBe(
       undefined,
     )
 
@@ -1134,7 +1160,7 @@ describe('a page holding a player the extension could not reach', () => {
     // be able to tell that apart from a page with nothing worth recording on it.
     win.deliver({ type: 'tc:unreachable' })
 
-    expect(win.answer().unreachable).toBe(true)
+    expect((await win.answer()).unreachable).toBe(true)
   })
 
   it('goes on offering what it did record beside it', async () => {
@@ -1147,7 +1173,7 @@ describe('a page holding a player the extension could not reach', () => {
 
     // A page can hold both: one player in the main world and another in a worker out of reach.
     // The recording of the first is not taken away by the refusal of the second.
-    const answer = win.answer()
+    const answer = await win.answer()
     expect(answer.sessions).toHaveLength(1)
     expect(answer.unreachable).toBe(true)
   })
@@ -1162,6 +1188,7 @@ describe('BridgeToPage describes everything the bridge sends', () => {
 
     const reply = port()
     win.deliver({ type: 'tc:list' }, { ports: [reply] })
+    await Promise.resolve()
 
     // The bridge sends through two channels: to the parent window and into the port of the
     // request. Both ends are gathered here because one type is declared for both: a message sent
@@ -1187,7 +1214,7 @@ describe('BridgeToPage describes everything the bridge sends', () => {
     const refusal: BridgeToPage = { type: 'tc:refused' }
     const recording: BridgeToPage = { type: 'tc:recording' }
     const record: BridgeToPage = { type: 'tc:record', on: false }
-    const list: BridgeToPage = win.answer()
+    const list: BridgeToPage = await win.answer()
 
     expect([
       variantOf(handshake),
@@ -1596,8 +1623,7 @@ describe('the bridge saves what it collected as a file', () => {
 
     const reply = port()
     const sender = win.deliver({ type: 'tc:save', key: keyFor(PAGE_URL) }, { ports: [reply] })
-    await Promise.resolve()
-    await Promise.resolve()
+    for (let turn = 0; turn < 6; turn++) await Promise.resolve()
 
     // An answer into the window would tell any page that the extension has something on it.
     expect(sender.posts, 'the save answer went into the page window').toEqual([])
@@ -1755,7 +1781,7 @@ describe('the bridge tells apart the buffers of one media source', () => {
     // Six seconds is what can be cut out: the picture holds 0…6, the sound 0…6.0232. The
     // fragments of the sound counted by the timescale of the picture would stretch the same six
     // seconds into twenty-two.
-    expect(win.list()).toEqual([
+    expect(await win.list()).toEqual([
       {
         key: keyFor(PAGE_URL, ['avc1', 'mp4a']),
         url: PAGE_URL,
@@ -1775,7 +1801,7 @@ describe('the bridge tells apart the buffers of one media source', () => {
 
     // On one shared map the first fragment of the picture and the first fragment of the sound
     // both start at zero, and the deduplication rule of the map destroys one of them.
-    expect(win.list()[0]!.bytes).toBe(allBytes)
+    expect((await win.list())[0]!.bytes).toBe(allBytes)
   })
 
   it('saves both tracks of a two-track session, described by one moov', async () => {
@@ -1847,7 +1873,7 @@ describe('the bridge and a page playing an ordinary file', () => {
     // The page said it is playing a file; nothing was fetched and nothing is offered. Ten of the
     // eighteen measured pages that deliver a plain file hold nothing but muted looping previews.
     expect(host.asked).toEqual([])
-    expect(win.list()).toEqual([])
+    expect(await win.list()).toEqual([])
   })
 
   it('says in the answer that a file it was watching could not be read', async () => {
@@ -1863,7 +1889,7 @@ describe('the bridge and a page playing an ordinary file', () => {
     // Somebody watched a video and there is nothing to offer for it. Answered with an empty list
     // alone, the popup says "nothing recorded on this page yet" — the words for a page that holds
     // no video at all — and the user waits for a recording that is never coming.
-    const answer = win.answer()
+    const answer = await win.answer()
     expect(answer.sessions).toEqual([])
     expect(answer.unreadableFile).toBe(true)
   })
@@ -1877,7 +1903,7 @@ describe('the bridge and a page playing an ordinary file', () => {
     win.deliver({ type: 'tc:verdict', sourceId: SOURCE, verdict: 'promote' })
     await settle()
 
-    expect(win.answer().unreadableFile).toBe(undefined)
+    expect((await win.answer()).unreadableFile).toBe(undefined)
   })
 
   it('turns a promoted file into a session the popup can save', async () => {
@@ -1893,7 +1919,7 @@ describe('the bridge and a page playing an ordinary file', () => {
     // material. Not a byte of the material itself until somebody asks for a file.
     expect(host.asked).toEqual(['bytes=0-8191', 'bytes=14681-18002'])
 
-    const [session] = win.list()
+    const [session] = await win.list()
     expect(session).toBeDefined()
     // Signed with the page, like any other session, and keyed by the address of the material.
     expect(session!.url).toBe(PAGE_URL)
@@ -1934,7 +1960,7 @@ describe('the bridge and a page playing an ordinary file', () => {
       win.deliver({ type: 'tc:verdict', sourceId: SOURCE, verdict: 'promote' })
       await settle()
 
-      return { host, win, key: win.list()[0]!.key }
+      return { host, win, key: (await win.list())[0]!.key }
     }
 
     it('writes the file into the snapshot, with the tables the editor reads', async () => {
@@ -2005,7 +2031,7 @@ describe('the bridge and a page playing an ordinary file', () => {
       win.deliver({ type: 'tc:verdict', sourceId: SOURCE, verdict: 'promote' })
       await settle()
 
-      const key = win.list()[0]!.key
+      const key = (await win.list())[0]!.key
       const before = host.asked.length
       const reply = await win.edit(key)
       await settle()
@@ -2038,7 +2064,7 @@ describe('the bridge and a page playing an ordinary file', () => {
     win.deliver({ type: 'tc:verdict', sourceId: SOURCE, verdict: 'promote' })
     await settle()
 
-    const key = win.list()[0]!.key
+    const key = (await win.list())[0]!.key
     // The host goes away between the listing and the button — an expired signed URL, a session
     // that ended. The recording is still there and what failed was fetching it, so the words are
     // those of a refused download and not those of an empty session.
@@ -2158,7 +2184,7 @@ describe('the word that this frame is recording', () => {
     // afterwards, so the read landing is the last moment there is to say anything at all. Without
     // it a file watched to the end is recorded, offered in the popup, and never counted.
     expect(notices(win)).toEqual([{ type: 'tc:recording' }])
-    expect(win.list()).toHaveLength(1)
+    expect(await win.list()).toHaveLength(1)
   })
 })
 
@@ -2204,8 +2230,8 @@ describe('the recording switch of §9.4', () => {
     // Switched off on `settings.ready` instead, the frame would have paused intake over an empty
     // address, and letting the readers go on the way back in would have taken this init with it:
     // the session would be unreadable for good over a message ordering.
-    expect(win.list()).toHaveLength(1)
-    expect(win.list()[0]!.bytes).toBeGreaterThan(0)
+    expect(await win.list()).toHaveLength(1)
+    expect((await win.list())[0]!.bytes).toBeGreaterThan(0)
   })
 
   it('records nothing on a page the settings forbid, and says so once', async () => {
@@ -2216,14 +2242,14 @@ describe('the recording switch of §9.4', () => {
     win.append(seg1Bytes)
 
     expect(win.switches()).toEqual([false])
-    expect(win.list(), 'a forbidden page was recorded all the same').toEqual([])
+    expect(await win.list(), 'a forbidden page was recorded all the same').toEqual([])
   })
 
   it('turns the recording back on inside the page when the user allows the site again', async () => {
     const win = await loadBridge(REFERRER, denying('site.example'))
     win.context()
     win.append(initBytes)
-    expect(win.list(), 'setup: the page was recorded while it was forbidden').toEqual([])
+    expect(await win.list(), 'setup: the page was recorded while it was forbidden').toEqual([])
 
     await win.settings((current) => ({
       ...current,
@@ -2236,7 +2262,7 @@ describe('the recording switch of §9.4', () => {
     // No reload and no navigation: the settings page is a tab of its own, and a user who changes
     // a setting while a video is playing is changing it about that video.
     expect(win.switches()).toEqual([false, true])
-    expect(win.list()).toHaveLength(1)
+    expect(await win.list()).toHaveLength(1)
   })
 
   it('stops the recording inside the page when the user forbids the site', async () => {
@@ -2244,7 +2270,7 @@ describe('the recording switch of §9.4', () => {
     win.context()
     win.append(initBytes)
     win.append(seg1Bytes)
-    const before = win.list()[0]!
+    const before = (await win.list())[0]!
 
     await win.settings((current) => ({
       ...current,
@@ -2255,7 +2281,7 @@ describe('the recording switch of §9.4', () => {
 
     // What was recorded stays exactly where it was (§7.2): a switch is not an erasure, and the
     // user who turns recording off over a video they have been watching still has that video.
-    const after = win.list()
+    const after = await win.list()
     expect(win.switches()).toEqual([true, false])
     expect(after).toHaveLength(1)
     expect(after[0]!.bytes).toBe(before.bytes)
@@ -2267,7 +2293,7 @@ describe('the recording switch of §9.4', () => {
     win.context()
     win.append(initBytes)
     win.append(seg1Bytes)
-    const before = win.list()[0]!
+    const before = (await win.list())[0]!
 
     await win.settings((current) => ({
       ...current,
@@ -2287,7 +2313,7 @@ describe('the recording switch of §9.4', () => {
     // more than the init and seg1 together, so "heavier than before" is also what a registry
     // wiped on the switch and refilled by the next segment would say. What tells the two apart is
     // that the material before the switch is still in the total.
-    const after = win.list()
+    const after = await win.list()
     expect(after).toHaveLength(1)
     expect(after[0]!.bytes).toBe(before.bytes + seg2Bytes.byteLength)
     expect(after[0]!.duration).toBe(before.duration + 2)
@@ -2373,8 +2399,8 @@ describe('the frame keeps the buffer length and the memory ceiling on its own cl
     // Room for several sessions of a default buffer, and not a number that would empty the frame
     // every two seconds: the two lines under it are what that would look like from the outside.
     expect(ceiling).toBeGreaterThan(128 * 1024 * 1024)
-    expect(win.list()).toHaveLength(1)
-    expect(win.list()[0]!.duration).toBe(2)
+    expect(await win.list()).toHaveLength(1)
+    expect((await win.list())[0]!.duration).toBe(2)
   })
 
   it('raises the ceiling with the buffer, so the length the user set can be held', async () => {
@@ -2399,5 +2425,142 @@ describe('the frame keeps the buffer length and the memory ceiling on its own cl
     const [ceiling] = drops.mock.calls.at(-1)!
     expect(ceiling).toBe(memoryCeilingFor(LIMITS.bufferSeconds.max))
     expect(ceiling).toBeGreaterThan((LIMITS.bufferSeconds.max * REFERENCE_BITS_PER_SECOND) / 8)
+  })
+})
+
+/**
+ * One request of each kind the popup can send.
+ *
+ * A table over the union rather than a list, so that a kind added to ExtensionToTab and forgotten
+ * here does not compile — the same reason the guards of the protocol are tables.
+ */
+const everyRequest: { [K in ExtensionToTab['type']]: Extract<ExtensionToTab, { type: K }> } = {
+  'tc:list': { type: 'tc:list' },
+  'tc:save': { type: 'tc:save', key: keyFor(PAGE_URL) },
+  'tc:edit': { type: 'tc:edit', key: keyFor(PAGE_URL) },
+  'tc:pause': { type: 'tc:pause', on: true },
+}
+
+describe('a request that came with a port is answered', () => {
+  /** Turns enough for the longest of them: a freeze writes through a worker of its own. */
+  const settled = async () => {
+    for (let turn = 0; turn < 8; turn++) await Promise.resolve()
+  }
+
+  // The content script holds the channel open — its listener returns true — so the asker waits
+  // for as long as the channel lives. A handler that returns without posting is not a quick "no":
+  // it is a popup whose button never changes its label, and that reads as a dead extension rather
+  // than as a bug. Caught on tc:pause, which answered nothing at all.
+  it.each(Object.entries(everyRequest))('answers %s', async (kind, request) => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+
+    const reply = port()
+    win.deliver(request, { ports: [reply] })
+    await settled()
+
+    expect(reply.received, `the bridge left ${kind} unanswered`).toHaveLength(1)
+  })
+
+  // The path no branch remembers: the handler returned no value because it threw. To the asker
+  // that is the same silence, and the same button.
+  it('answers a request whose handler threw', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+    win.breakDownloads()
+
+    const reply = port()
+    win.deliver({ type: 'tc:save', key: keyFor(PAGE_URL) }, { ports: [reply] })
+    await settled()
+
+    expect(reply.received).toHaveLength(1)
+    expect(reply.received[0]).toMatchObject({ ok: false, reason: 'refused' })
+  })
+})
+
+/**
+ * The quick switch of §9.2: the one switch in the program that is not a setting.
+ *
+ * It is about this visit to this page — it lives in the frame, never in storage — and a reload
+ * puts the page back under the settings, which is what "quick" is supposed to mean.
+ */
+describe('the quick switch of the popup', () => {
+  /** Presses it the way the popup does: through the content script, with a port to answer into. */
+  const pause = async (win: Awaited<ReturnType<typeof loadBridge>>, on: boolean) => {
+    const reply = port()
+    win.deliver({ type: 'tc:pause', on }, { ports: [reply] })
+    await Promise.resolve()
+    return reply.received[0] as { ok: boolean; paused: boolean }
+  }
+
+  it('stops the recording of this page, and answers with the state it is in now', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+    const before = (await win.list())[0]!
+
+    expect(await pause(win, true)).toEqual({ ok: true, paused: true })
+
+    win.append(seg2Bytes)
+
+    // Answered with the state and not with "done", because the popup draws a label out of it: a
+    // bare acknowledgement would leave the button saying "Pause" over a paused page.
+    //
+    // And what was recorded stays exactly where it was (§7.2), as it does under the settings: a
+    // switch is not an erasure, and the hook is told to stop copying at all.
+    const after = await win.list()
+    expect(win.switches()).toEqual([true, false])
+    expect(after[0]!.bytes).toBe(before.bytes)
+    expect(after[0]!.duration).toBe(before.duration)
+  })
+
+  it('says in the list that it is paused, so a second opening does not offer it again', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+
+    expect((await win.answer()).paused, 'setup: a page nobody paused').toBeUndefined()
+    await pause(win, true)
+
+    // The pause lives in the frame and nowhere else, so the list is the only thing that can tell
+    // a popup opened a second time about it — and a button offering to pause a paused page would
+    // turn the recording back on.
+    expect((await win.answer()).paused).toBe(true)
+  })
+
+  it('starts the recording again when it is taken back', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+    await pause(win, true)
+
+    expect(await pause(win, false)).toEqual({ ok: true, paused: false })
+
+    win.append(seg1Bytes)
+
+    expect(win.switches()).toEqual([true, false, true])
+    expect((await win.list())[0]!.bytes).toBeGreaterThan(0)
+  })
+
+  it('never starts a recording the settings forbid', async () => {
+    const win = await loadBridge(REFERRER, {
+      recording: { mode: 'all', bufferSeconds: 180, allow: [], deny: ['site.example'] },
+    })
+    win.context()
+
+    // The switch says "stop", and it overrides the mode in one direction only: a button that
+    // could turn recording on where the settings say no would be a way round the settings.
+    expect(await pause(win, false)).toEqual({ ok: true, paused: false })
+
+    win.append(initBytes)
+    win.append(seg1Bytes)
+
+    expect(win.switches()).toEqual([false])
+    expect(await win.list(), 'a forbidden page was recorded by way of the quick switch').toEqual([])
   })
 })

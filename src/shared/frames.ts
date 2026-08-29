@@ -153,6 +153,10 @@ export async function listTabSessions(
     if (reply.unreachable) merged.unreachable = true
     if (reply.unreadableFile) merged.unreadableFile = true
 
+    // A pause is a fact about a document, like the two above: a player paused inside an embed is
+    // paused, whichever frame said so.
+    if (reply.paused) merged.paused = true
+
     // A frame of an older build, or an answer that is not one at all: it may not take the rest of
     // the tab's list down with it.
     if (!Array.isArray(reply.sessions)) continue
@@ -193,6 +197,22 @@ export function saveInFrame(
 ): Promise<SaveResult | undefined> {
   const request: ExtensionToTab = { type: 'tc:save', key }
   return chrome.tabs.sendMessage(tabId, request, { frameId })
+}
+
+/**
+ * Tells every frame of a tab to stop recording, or to start again.
+ *
+ * Every frame and not the main one: the player may be in an embed, and a pause that missed it
+ * would be a button that does nothing on exactly the pages where the recording is not obvious.
+ */
+export async function pauseInFrame(tabId: number, on: boolean): Promise<void> {
+  const request: ExtensionToTab = { type: 'tc:pause', on }
+  const frames = await framesOf(tabId)
+  await Promise.all(
+    frames.map((frameId) =>
+      chrome.tabs.sendMessage(tabId, request, { frameId }).catch(() => undefined),
+    ),
+  )
 }
 
 /**

@@ -2,10 +2,11 @@ import {
   MAIN_FRAME,
   editInFrame,
   listTabSessions,
+  pauseInFrame,
   saveInFrame,
   type FramedSession,
 } from '../shared/frames'
-import { editorUrl } from '../shared/protocol'
+import { editorUrl, historyUrl } from '../shared/protocol'
 import type {
   EditResult,
   Omission,
@@ -14,6 +15,11 @@ import type {
   SessionList,
   SessionSummary,
 } from '../shared/protocol'
+// The index of what is on disk, read here and nowhere else in the popup: the markup is handed
+// rows, and what a row is made of is this file's business.
+import { listSessions as listHistory, readTotals, setDeleted, setPinned } from '../shared/history-db'
+import { siteAllows } from '../shared/settings'
+import { readSettings, writeSettings } from '../shared/settings-store'
 
 // The answer is described by the protocol and not by the popup: let the two descriptions drift
 // apart and the popup would read fields the bridge does not send, showing undefined in silence.
@@ -57,12 +63,34 @@ let boundTabId: number | undefined
  */
 let listed: FramedSession[] = []
 
+/**
+ * Where that tab stands; empty until it has been asked, and on a tab that answered no address.
+ *
+ * Read off the same answer as the identifier and not asked for separately: the popup is bound to
+ * one tab for as long as it is open, and a second query could come back about another.
+ */
+let boundUrl = ''
+
 async function targetTabId(): Promise<number | undefined> {
   if (boundTabId !== undefined) return boundTabId
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
   boundTabId = tab?.id
+  boundUrl = tab?.url ?? ''
   return boundTabId
+}
+
+/**
+ * The address of the page the popup was opened over.
+ *
+ * The page's own and not a session's. A session carries the address of the frame it was gathered
+ * in, which for an embedded player is the site the video comes from rather than the site the user
+ * is on — and the switch below the history is about the site the user is on. Empty where Chrome
+ * says nothing: a tab of another extension, a page opened before the installation.
+ */
+export async function pageUrl(): Promise<string> {
+  await targetTabId()
+  return boundUrl
 }
 
 /**
@@ -148,6 +176,124 @@ export async function editSession(key: string): Promise<EditResult> {
 /** Opens the editor over one snapshot in a tab of its own. */
 export async function openEditor(snapshotId: string): Promise<void> {
   await chrome.tabs.create({ url: chrome.runtime.getURL(editorUrl(snapshotId)) })
+}
+
+/** One recording of the history, as a row of the popup needs it. */
+export interface HistoryRow {
+  id: string
+  key: string
+  title: string
+  url: string
+  seconds: number
+  bytes: number
+  lastSeenAt: number
+  pinned: boolean
+}
+
+/**
+ * What is on disk, newest first.
+ *
+ * Straight out of the index, from the popup itself: the popup is a document of the extension
+ * origin and the index is one IndexedDB read away. Nothing is computed and nothing is walked —
+ * §9.2 promises a popup that opens instantly, and this is what keeps that promise true now that
+ * there is a disk to be tempted by.
+ */
+export async function historyRows(limit = 20): Promise<HistoryRow[]> {
+  try {
+    const sessions = await listHistory(limit)
+    return sessions.map((session) => ({
+      id: session.id,
+      key: session.key,
+      title: session.title,
+      url: session.url,
+      seconds: session.seconds,
+      bytes: session.bytes,
+      lastSeenAt: session.lastSeenAt,
+      pinned: session.pinned,
+    }))
+  } catch {
+    // No index yet, or a store the browser would not open. An empty history is what nothing
+    // looks like, and it is not worth a message beside the recording of this page.
+    return []
+  }
+}
+
+export const pinHistory = (id: string, pinned: boolean) => setPinned(id, pinned)
+
+/**
+ * Marks a session deleted. The files go with the sweeper, half a minute later.
+ *
+ * Marked rather than removed, because §9.2 answers a deletion with an undo in a toast instead of
+ * a confirmation dialogue: the row has to be out of every list at once and recoverable for as
+ * long as the toast can be on screen. Closing the popup settles it — the user deleted it — and
+ * the sweeper does the rest.
+ */
+export const deleteHistory = (id: string) => setDeleted(id, Date.now())
+export const undoDelete = (id: string) => setDeleted(id, 0)
+
+/**
+ * Occupied volume, as the index has it. Never navigator.storage.estimate() — see §7.4.
+ *
+ * `full` is the other half of the promise §11 makes about a full disk: the browser may refuse a
+ * write below our own ceiling, and when it has, the popup says so instead of showing a number
+ * that looks like everything is fine while the writer retries every thirty seconds.
+ */
+export async function storageInUse(): Promise<{ bytes: number; full: boolean }> {
+  try {
+    const totals = await readTotals()
+    return { bytes: totals.bytes, full: totals.fullAt > 0 }
+  } catch {
+    return { bytes: 0, full: false }
+  }
+}
+
+/** Opens the editor over a recording of the history, in a tab of its own. */
+export async function openHistoryEditor(id: string): Promise<void> {
+  await chrome.tabs.create({ url: chrome.runtime.getURL(historyUrl(id)) })
+}
+
+/** Is this site recorded at all, by the settings as they stand? */
+export async function siteRecorded(url: string): Promise<boolean> {
+  return siteAllows(await readSettings(), url)
+}
+
+/**
+ * Switches recording on or off for the site of this address.
+ *
+ * Writes the deny list in `All sites` mode and the allow list in `Allowlist` mode, which is the
+ * only reading of "record here" that means the same thing in both. In `Off` mode there is nothing
+ * to switch — the toggle is disabled and says why.
+ */
+export async function setSiteRecorded(url: string, on: boolean): Promise<void> {
+  const host = hostOf(url)
+  if (!host) return
+
+  await writeSettings((current) => {
+    const recording = { ...current.recording }
+    if (recording.mode === 'allowlist') {
+      recording.allow = on
+        ? [...recording.allow.filter((one) => one !== host), host]
+        : recording.allow.filter((one) => one !== host)
+    } else {
+      recording.deny = on
+        ? recording.deny.filter((one) => one !== host)
+        : [...recording.deny.filter((one) => one !== host), host]
+    }
+    return { ...current, recording }
+  })
+}
+
+/**
+ * Stops the recording in this tab until the page is reloaded.
+ *
+ * Nothing is stored: it is about this page and this visit, and a setting that outlived the tab it
+ * was meant for would be a switch the user could not find again. The bridge of every frame is
+ * told, because the player may be in an embed.
+ */
+export async function pauseThisTab(on: boolean): Promise<void> {
+  const tabId = await targetTabId()
+  if (tabId === undefined) return
+  await pauseInFrame(tabId, on).catch(() => undefined)
 }
 
 // One place for the numbers people read: the popup and the settings page show the same ones, and

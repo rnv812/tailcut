@@ -251,11 +251,20 @@ window.addEventListener('message', async (event: MessageEvent) => {
 chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
   if (!isExtensionToTab(message)) return false
 
-  ensureBridge().then((iframe) => {
-    const channel = new MessageChannel()
-    channel.port1.onmessage = (event: MessageEvent) => sendResponse(event.data)
-    iframe.contentWindow?.postMessage(message, '*', [channel.port2])
-  })
+  ensureBridge()
+    .then((iframe) => {
+      const channel = new MessageChannel()
+      channel.port1.onmessage = (event: MessageEvent) => sendResponse(event.data)
+
+      // No window to ask: a frame taken out of the document under us, or one the browser has not
+      // finished putting in. Answered with the nothing that a frame without a content script in
+      // it answers — the callers already read that as "could not be reached" — because this
+      // listener has said an answer is coming, and silence is the one thing it may not send.
+      if (!iframe.contentWindow) return sendResponse(undefined)
+
+      iframe.contentWindow.postMessage(message, '*', [channel.port2])
+    })
+    .catch(() => sendResponse(undefined))
 
   // true holds the reply channel open: the bridge does not answer at once, and a channel that
   // closed would hand the asker undefined before the bridge had even seen the request.

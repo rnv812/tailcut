@@ -1,6 +1,85 @@
 // @vitest-environment happy-dom
-import { describe, it, expect, afterEach, vi } from 'vitest'
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import type { Omission, SaveResult, SessionSummary } from '../../src/shared/protocol'
+import { DEFAULTS, merge, type Settings } from '../../src/shared/settings'
+import type { HistoryRow } from '../../src/popup/api'
+
+/**
+ * What the index of the history holds, and what the store of settings holds.
+ *
+ * Both are replaced outright: the real index wants IndexedDB and the real store wants
+ * chrome.storage, and a runner has neither. Nothing between them and the markup is replaced —
+ * the popup is checked from the row the index gave it to the line the user reads.
+ */
+let rows: HistoryRow[] = []
+
+/**
+ * What the index says is on disk while a test says nothing else about it: a gigabyte and a half,
+ * which is 1.50 GB in the binary units this program counts in.
+ */
+const IN_USE = { bytes: 1_610_612_736, full: false }
+let inUse = { ...IN_USE }
+
+/** Every pin and unpin the popup asked for, and every deletion and undo, in order. */
+const pinned: Array<[string, boolean]> = []
+const deleted: string[] = []
+const undone: string[] = []
+
+let stored: Settings = DEFAULTS
+const written: Settings[] = []
+
+/**
+ * The row as the index keeps it, out of the row the popup needs.
+ *
+ * The index knows a great deal more about a session than the popup shows — when it was opened,
+ * when it was last cut from, which stretches of media time it covers, which tracks are in it —
+ * and the popup is entitled to none of it. Padded here rather than left out, so that a popup
+ * that started reading one of those fields would be reading a made-up value out of a fake
+ * instead of quietly working.
+ */
+const asStored = (row: HistoryRow) => ({
+  ...row,
+  createdAt: row.lastSeenAt,
+  usedAt: 0,
+  deletedAt: 0,
+  covered: [{ start: 0, end: row.seconds }],
+  widthPx: 640,
+  sound: true,
+  tracks: [],
+})
+
+vi.mock('../../src/shared/history-db', () => ({
+  listSessions: async (limit: number) => rows.slice(0, limit).map(asStored),
+  readTotals: async () => ({
+    id: 'totals',
+    bytes: inUse.bytes,
+    cappedBytes: 0,
+    // How a refusal by the browser is written down: the moment it happened, and never a flag.
+    fullAt: inUse.full ? 1_700_000_000_000 : 0,
+  }),
+  setPinned: async (id: string, on: boolean) => {
+    pinned.push([id, on])
+  },
+  // One call for both, and the argument is what tells them apart: a deletion is a moment and an
+  // undo is that moment taken back.
+  setDeleted: async (id: string, at: number) => {
+    ;(at ? deleted : undone).push(id)
+  },
+}))
+
+vi.mock('../../src/shared/settings-store', () => ({
+  readSettings: async () => stored,
+  // Through `merge` and in two steps with a turn between them, exactly as the real store runs:
+  // it reads what is stored, applies the edit to that and stores the result. Written as one step
+  // the fake would hide every race between two writes in flight at once.
+  writeSettings: async (edit: (current: Settings) => Settings) => {
+    const before = stored
+    await Promise.resolve()
+    stored = merge(edit(before))
+    written.push(stored)
+    return stored
+  },
+}))
 
 /**
  * The freshest session of the tab: the list comes newest first, and this is the one the popup is
@@ -29,7 +108,30 @@ const older: SessionSummary = {
   lastAt: 1_699_999_000_000,
 }
 
+/**
+ * A recording of the history: another day, another page, and nothing at all to do with the tab
+ * that is open now. The popup shows it because it is on disk, which is the whole of this stage.
+ */
+const row: HistoryRow = {
+  id: 'h1',
+  key: 'https://old.example/v|avc1|240',
+  title: 'Yesterday',
+  url: 'https://old.example/v',
+  seconds: 240,
+  bytes: 90_000_000,
+  lastSeenAt: 1_699_900_000_000,
+  pinned: false,
+}
+
 type Sent = { tabId: number; message: unknown }
+
+/**
+ * Everything the popup sent the tab, oldest first.
+ *
+ * At the level of the file rather than of one mounting, because what a click sends has to be
+ * read after the popup that sent it has been thrown away and stood up again.
+ */
+const sent: Sent[] = []
 
 /** The answer of the tab: a list of summaries, or silence — the tab has not answered yet. */
 type Reply = {
@@ -40,6 +142,8 @@ type Reply = {
   unreadableFile?: boolean
   /** The tab says this page plays media that is encrypted. */
   encrypted?: boolean
+  /** The tab says recording in it is stopped by hand until the page is reloaded. */
+  paused?: boolean
   save?: SaveResult
 } | 'silent'
 
@@ -48,7 +152,6 @@ type Reply = {
  * module stays the real one — the whole road from the tab's answer to the markup is checked.
  */
 function installChrome(reply: Reply) {
-  const sent: Sent[] = []
   const created: Array<{ url: string }> = []
   // The save answer is mutable: the same popup saves more than once, and the second attempt may
   // well go through where the first did not.
@@ -65,7 +168,10 @@ function installChrome(reply: Reply) {
   vi.stubGlobal('chrome', {
     runtime: { getURL: (path: string) => `chrome-extension://tailcut/${path}` },
     tabs: {
-      query: async () => [{ id: 7 }],
+      // With the address of the page in it. The quick switch below the history is about the site
+      // the tab stands on, and no answer of the tab says where that is: an embedded player
+      // reports the address of the embed, which is a different site from the page around it.
+      query: async () => [{ id: 7, url: fresh.url }],
       create: async (options: { url: string }) => {
         created.push(options)
       },
@@ -83,6 +189,7 @@ function installChrome(reply: Reply) {
           unreachable: reply.unreachable,
           unreadableFile: reply.unreadableFile,
           encrypted: reply.encrypted,
+          paused: reply.paused,
         })
       },
     },
@@ -142,8 +249,38 @@ async function click(element: Element): Promise<void> {
   await flush()
 }
 
+/**
+ * Stands the popup up over a page that is recording, which is the ordinary state of the tab the
+ * history sits under: what is on disk is shown below what the page is doing now.
+ */
+const draw = () => mount({ sessions: [fresh] })
+
+/**
+ * Lets the promises a click started land, and the popup redraw on what they answered.
+ *
+ * Microtasks and nothing else, on purpose. Preact renders on a microtask and puts its effects
+ * off until the next frame, and what a click promises is the call it makes — the re-reading the
+ * popup does afterwards is a second thing, and a set that waited for it would stop being able to
+ * say which of the two sent what.
+ */
+const settle = async () => {
+  for (let turn = 0; turn < 12; turn++) await Promise.resolve()
+}
+
+beforeEach(() => {
+  rows = []
+  inUse = { ...IN_USE }
+  pinned.length = 0
+  deleted.length = 0
+  undone.length = 0
+  written.length = 0
+  stored = DEFAULTS
+  sent.length = 0
+})
+
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.useRealTimers()
 })
 
 describe('the popup', () => {
@@ -158,8 +295,12 @@ describe('the popup', () => {
 
     // An empty list differs from "no answer yet": without that fork the popup reads the fields of
     // a summary that does not exist, the render throws, and it stays in "Loading…" for good.
-    expect(bodyText()).toBe('Nothing recorded on this page yet.')
+    //
+    // The sentence and not the whole of the body: below it stand the history and the switches
+    // for the page, which are there whether or not this page is recording anything.
+    expect(textAt('nothing')).toBe('Nothing recorded on this page yet.')
     expect(at('title'), 'the popup shows a summary where there are none').toBeNull()
+    expect(at('save'), 'a page with nothing on it was offered for saving').toBeNull()
   })
 
   it('says a protected page cannot be recorded, rather than showing the same emptiness', async () => {
@@ -169,10 +310,11 @@ describe('the popup', () => {
     // "nothing recorded yet", the user waits for a recording that is never coming and takes a
     // deliberate refusal for a defect — which is exactly what the survey found on every protected
     // page it opened.
-    expect(bodyText()).toBe(
+    expect(textAt('nothing')).toBe(
       'This page plays protected video, which tailcut does not record. Nothing of it was kept.',
     )
     expect(at('save'), 'a protected page must not be offered for saving').toBeNull()
+    expect(at('title'), 'the popup shows a summary where there are none').toBeNull()
   })
 
   it('says that before it says a page is empty or out of reach', async () => {
@@ -195,7 +337,10 @@ describe('the popup', () => {
     // The page plays its video out of a worker the extension was not allowed to wrap: nothing of
     // it was recorded and nothing ever will be. "Nothing recorded yet" would promise a wait that
     // will never end.
-    expect(bodyText()).toBe('tailcut cannot reach the player on this page, so nothing of it was recorded.')
+    expect(textAt('nothing')).toBe(
+      'tailcut cannot reach the player on this page, so nothing of it was recorded.',
+    )
+    expect(at('save'), 'a page out of reach was offered for saving').toBeNull()
   })
 
   it('says it beside the session it did record', async () => {
@@ -222,10 +367,11 @@ describe('the popup', () => {
     // address had expired, or its host will not answer a ranged read. Measured live on an
     // imageboard thread, where "nothing recorded on this page yet" was the whole of the answer
     // over a file that had just been watched to the end.
-    expect(bodyText()).toBe(
+    expect(textAt('nothing')).toBe(
       'tailcut could not read the video file on this page, so nothing of it was saved.',
     )
     expect(at('save'), 'there is nothing to save and no button to press').toBeNull()
+    expect(at('title'), 'the popup shows a summary where there are none').toBeNull()
   })
 
   it('says it beside the session it did read', async () => {
@@ -623,5 +769,173 @@ describe('Edit', () => {
 
     expect(editButton().disabled).toBe(true)
     expect(saveButton().disabled).toBe(true)
+  })
+})
+
+describe('history', () => {
+  it('lists what is on disk under what the page is recording now', async () => {
+    inUse = { bytes: 1_610_612_736, full: false }
+    rows = [
+      { id: 'h1', key: 'other|k', title: 'Yesterday', url: 'https://old.example/v', seconds: 240, bytes: 90_000_000, lastSeenAt: Date.now() - 86_400_000, pinned: false },
+    ]
+    await draw()
+
+    expect(document.querySelector('[data-testid="history-title"]')!.textContent).toBe('Yesterday')
+    expect(document.querySelector('[data-testid="history-length"]')!.textContent).toBe('4:00')
+  })
+
+  it('leaves out what the tab is already showing above', async () => {
+    // One video, one merge key, two places it could be listed from. Two rows leading to two
+    // different places would be the same recording pretending to be two.
+    rows = [{ ...row, key: fresh.key }]
+    await draw()
+    expect(document.querySelectorAll('[data-testid="history-row"]')).toHaveLength(0)
+  })
+
+  it('pins and unpins a session', async () => {
+    rows = [row]
+    await draw()
+    document.querySelector<HTMLButtonElement>('[data-testid="history-pin"]')!.click()
+    await settle()
+    expect(pinned).toEqual([['h1', true]])
+  })
+
+  it('takes a row away at once and offers to put it back', async () => {
+    rows = [row]
+    await draw()
+    document.querySelector<HTMLButtonElement>('[data-testid="history-delete"]')!.click()
+    await settle()
+
+    expect(deleted).toEqual(['h1'])
+    expect(document.querySelectorAll('[data-testid="history-row"]')).toHaveLength(0)
+
+    const toast = document.querySelector('[data-testid="undo"]')!
+    expect(toast.textContent).toContain('Deleted')
+    toast.querySelector<HTMLButtonElement>('button')!.click()
+    await settle()
+
+    expect(undone).toEqual(['h1'])
+    expect(document.querySelectorAll('[data-testid="history-row"]')).toHaveLength(1)
+  })
+
+  it('shows the volume in use out of the index', async () => {
+    await draw()
+    expect(document.querySelector('[data-testid="in-use"]')!.textContent).toContain('1.50 GB')
+    expect(document.querySelector('[data-testid="in-use"]')!.textContent).not.toContain('full')
+  })
+
+  it('says when the disk is full, rather than a number that looks like all is well', async () => {
+    inUse = { bytes: 1_610_612_736, full: true }
+    await draw()
+    expect(document.querySelector('[data-testid="in-use"]')!.textContent).toContain('Disk full')
+  })
+
+  it('switches recording off for this site, and says which site', async () => {
+    await draw()
+    const toggle = document.querySelector<HTMLInputElement>('[data-testid="site-toggle"]')!
+    expect(document.querySelector('[data-testid="site-name"]')!.textContent).toBe('site.example')
+    toggle.click()
+    await settle()
+    expect(written.at(-1)!.recording.deny).toEqual(['site.example'])
+  })
+
+  it('pauses this page without touching the settings', async () => {
+    await draw()
+    document.querySelector<HTMLButtonElement>('[data-testid="pause-tab"]')!.click()
+    await settle()
+    // A message to the tab and nothing stored: a pause is about this page until it is reloaded,
+    // and a setting that outlived the tab it was meant for would be a switch nobody can find.
+    expect(sent.at(-1)).toMatchObject({ message: { type: 'tc:pause', on: true } })
+    expect(written).toHaveLength(0)
+  })
+})
+
+describe('the history and the switches under it', () => {
+  it('shows no history at all when there is nothing on disk', async () => {
+    rows = []
+    await draw()
+
+    // A heading over an empty list is a promise of something that is not there. On a browser
+    // that has recorded nothing the popup stays what it was: the page, and what to do with it.
+    expect(at('history')).toBeNull()
+  })
+
+  it('opens a recording of the history in an editor of its own', async () => {
+    rows = [row]
+    const chrome = await draw()
+
+    await click(at('history-open')!)
+
+    // By the second door of the editor and not by the first: `?h=` is a session of the history,
+    // whose material is the pieces on disk, and `?s=` is a snapshot file written for one editing.
+    expect(chrome.created).toEqual([
+      { url: 'chrome-extension://tailcut/editor/editor.html?h=h1' },
+    ])
+  })
+
+  it('unpins a session it shows as pinned', async () => {
+    rows = [{ ...row, pinned: true }]
+    await draw()
+
+    // The button says what the row is, and pressing it says the opposite: written as a plain
+    // "pin", it would be a button that cannot be taken back and a recording eviction never
+    // touches again.
+    expect(textAt('history-pin')).toBe('Pinned')
+    document.querySelector<HTMLButtonElement>('[data-testid="history-pin"]')!.click()
+    await settle()
+
+    expect(pinned).toEqual([['h1', false]])
+  })
+
+  it('says this page is paused because the frame said so, not because a button was pressed', async () => {
+    // A popup opened a second time over a page that is already paused. The pause lives in the
+    // frame and nowhere else, so the answer of the frame is the only thing that knows of it —
+    // and a button offering to pause a paused page would turn the recording back on.
+    await mount({ sessions: [fresh], paused: true })
+
+    expect(textAt('pause-tab')).toBe('Resume on this page')
+    document.querySelector<HTMLButtonElement>('[data-testid="pause-tab"]')!.click()
+    await settle()
+
+    expect(sent.at(-1)).toMatchObject({ message: { type: 'tc:pause', on: false } })
+  })
+
+  it('keeps the rows the user did not delete', async () => {
+    const other: HistoryRow = {
+      ...row,
+      id: 'h2',
+      key: 'https://old.example/w|avc1|60',
+      title: 'The one to keep',
+    }
+    rows = [row, other]
+    await draw()
+
+    document.querySelectorAll<HTMLButtonElement>('[data-testid="history-delete"]')[0]!.click()
+    await settle()
+
+    // One row goes and the other stays, and the toast names the one that went: a toast reading
+    // "Deleted" over a list that lost a row is no undo at all if it cannot say which row.
+    expect(allAt('history-row')).toHaveLength(1)
+    expect(textAt('history-title')).toBe('The one to keep')
+    expect(textAt('undo')).toContain('Yesterday')
+    expect(deleted).toEqual(['h1'])
+  })
+
+  it('takes the undo away when the time to change one’s mind is up', async () => {
+    // The window in which a deletion can be called off is the toast, and it is not for ever: the
+    // sweeper takes the files half a minute later, and an undo left on screen past that would be
+    // a button promising back what is already gone.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    rows = [row]
+    await draw()
+
+    document.querySelector<HTMLButtonElement>('[data-testid="history-delete"]')!.click()
+    await settle()
+    expect(at('undo'), 'setup: nothing was offered back').not.toBeNull()
+
+    await vi.advanceTimersByTimeAsync(6_000)
+    await settle()
+
+    expect(at('undo')).toBeNull()
   })
 })

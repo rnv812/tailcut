@@ -25,6 +25,18 @@ export function editorUrl(id: string): string {
 }
 
 /**
+ * Address of the editor over a recording of the history.
+ *
+ * A second door beside `editorUrl`, and the difference is where the material is. A snapshot is a
+ * file written by the freeze of a page that is open; a history session is the pieces on disk and
+ * the rows that describe them, and nothing is copied to open it. The identifier is checked by the
+ * same `isSnapshotId` — both are minted by `crypto.randomUUID` and both go straight into a path.
+ */
+export function historyUrl(id: string): string {
+  return `${EDITOR_PATH}?h=${encodeURIComponent(id)}`
+}
+
+/**
  * Is this a name the extension itself minted?
  *
  * The identifier travels through the address bar of the editor tab, and from there straight into
@@ -306,6 +318,14 @@ export interface SessionList {
    * that was read and another that was not.
    */
   unreadableFile?: boolean
+  /**
+   * Recording in this frame is stopped by hand, until the page is reloaded.
+   *
+   * Said in the list because the popup draws its button out of the list it asks for anyway: the
+   * pause lives in the frame and nowhere else — it is about this visit — and a popup opened a
+   * second time would otherwise offer to pause a page that is already paused.
+   */
+  paused?: boolean
 }
 
 /**
@@ -385,10 +405,11 @@ export interface RecordingSwitch {
 /**
  * Everything the bridge sends outwards and nothing besides. There are two channels and the union
  * describes both: the handshake, the refusal, the recording switch and the word that this frame
- * is recording go to the window that inserted the bridge, and the answer to a list request only
- * into the MessageChannel port that came with it. A message not described here is an undeclared
- * part of the protocol: the receiver does not know of it, and the next reader of the code learns
- * of it from the bridge implementation rather than from the type.
+ * is recording go to the window that inserted the bridge, and the answer to a request of the
+ * popup only into the MessageChannel port that came with it — one of the four `BridgeAnswer`
+ * names, by the kind of request that asked. A message not described here is an undeclared part
+ * of the protocol: the receiver does not know of it, and the next reader of the code learns of it
+ * from the bridge implementation rather than from the type.
  */
 export type BridgeToPage =
   | { type: 'tc:ready' }
@@ -422,6 +443,14 @@ export type ExtensionToTab =
   | { type: 'tc:list' }
   | { type: 'tc:save'; key: string }
   | { type: 'tc:edit'; key: string }
+  /**
+   * Stop, or start again, recording in this frame — until the page is reloaded.
+   *
+   * The quick switch of §9.2, and the one switch in the program that is not a setting: it is
+   * about this visit to this page. It reaches the frames rather than storage, and a reload puts
+   * the page back under the settings, which is what "quick" is supposed to mean.
+   */
+  | { type: 'tc:pause'; on: boolean }
 
 /**
  * What the content script of a tab sends the service worker of its own accord.
@@ -458,6 +487,29 @@ export interface SaveResult {
   /** What Chrome answered when it refused; absent when it said nothing, and on the other two. */
   detail?: string
 }
+
+/** What the bridge answers tc:pause with: the state this frame is in now, not an acknowledgement. */
+export interface PauseResult {
+  ok: true
+  paused: boolean
+}
+
+/**
+ * The answer to each kind of request, by the kind that asked for it.
+ *
+ * A table over the union rather than a bare union of answers, and for the reason the guards are
+ * tables (see Checks): a kind added to ExtensionToTab without a line here does not compile, and
+ * the compiler says so in the protocol rather than in a button that never changes its label.
+ */
+interface AnswerTo {
+  'tc:list': SessionList
+  'tc:save': SaveResult
+  'tc:edit': EditResult
+  'tc:pause': PauseResult
+}
+
+/** Everything that travels back through the port of a request, and nothing besides. */
+export type BridgeAnswer<K extends ExtensionToTab['type'] = ExtensionToTab['type']> = AnswerTo[K]
 
 /**
  * Checks of a protocol union, one per kind of message, keyed by the `type` that names it.
@@ -506,6 +558,8 @@ export const isExtensionToTab = guarding<ExtensionToTab>({
   'tc:list': () => true,
   'tc:save': named,
   'tc:edit': named,
+  /** The one message of this union carrying a claim rather than an address. */
+  'tc:pause': (message) => typeof message.on === 'boolean',
 })
 
 /**

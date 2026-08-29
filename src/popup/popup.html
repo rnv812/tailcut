@@ -3,8 +3,10 @@
 <title>tailcut</title>
 <style>
   /* The height is floored: without it the popup opens as a "Loading…" strip and jumps when the
-     tab's answer arrives. */
-  body { margin: 0; width: 340px; min-height: 118px; background: #15171a; color: #e8eaed;
+     tab's answer arrives. Raised from 118 when the footer went in — a summary, the history and
+     the two switches rest at about 243 px, and the floor is there to open near that rather than
+     at the height of one line. */
+  body { margin: 0; width: 340px; min-height: 180px; background: #15171a; color: #e8eaed;
          font: 13px/1.4 system-ui, sans-serif; }
   .top { padding: 10px 12px; border-bottom: 1px solid #26292e; }
   .pad { padding: 12px; }
@@ -35,6 +37,48 @@
          background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
   .row:hover:enabled { background: #1e2126; }
   .row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* What is on disk, below what the page is doing now and separated from it the way "Recent"
+     is. A row is three things — what it is, how long it is, and what may be done with it — and
+     the length has to stay in one place while the titles beside it vary in width. */
+  .history { padding: 8px 6px 10px; border-top: 1px solid #26292e; }
+  .history-row { gap: 6px; padding: 2px 6px; align-items: center; }
+  .history-row:hover { background: #1e2126; }
+  .history-open { flex: 1; min-width: 0; display: grid; gap: 0 10px; padding: 4px 0;
+                  grid-template-columns: minmax(0, 1fr) auto;
+                  grid-template-areas: "title length" "host length";
+                  border: 0; background: none; color: inherit; font: inherit;
+                  text-align: left; cursor: pointer; }
+  .history-open > :nth-child(1) { grid-area: title; }
+  .history-open > :nth-child(2) { grid-area: host; overflow: hidden;
+                                  text-overflow: ellipsis; white-space: nowrap; }
+  .history-open > :nth-child(3) { grid-area: length; align-self: center; }
+  /* Pin and Delete: quiet enough not to compete with "Save all" above, and a pinned row says so
+     in colour — it is the one state of a recording the user set by hand. */
+  .pin, .quiet { padding: 3px 8px; border: 1px solid #3a3f47; border-radius: 6px;
+                 background: none; color: #9aa0a6; font: inherit; font-size: 11px;
+                 white-space: nowrap; cursor: pointer; }
+  .pin:hover, .quiet:hover { color: #e8eaed; }
+  /* One width for both words: pressing it must not move the row it is in, and "Pinned" is the
+     wider of the two. */
+  .pin { min-width: 54px; text-align: center; }
+  .pin.on { border-color: #4c8dff; color: #4c8dff; }
+  /* The undo of a deletion: a strip under the rows rather than a dialogue over them (§9.2). It
+     stands where the row stood and leaves the list where it is. */
+  .toast { display: flex; gap: 8px; align-items: center; justify-content: space-between;
+           margin: 6px 6px 0; padding: 6px 8px; border-radius: 6px; background: #23262b; }
+  .toast span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+  .toast button { padding: 3px 10px; border: 0; border-radius: 5px; background: #4c8dff;
+                  color: #0b0d10; font: inherit; font-size: 11px; font-weight: 600;
+                  cursor: pointer; }
+  /* Two rows of two: the switch for the site beside the pause for the page, and the volume in
+     use beside the way into the settings. */
+  .footer { display: grid; grid-template-columns: 1fr auto; gap: 8px 10px;
+            align-items: center; padding: 8px 12px 10px; border-top: 1px solid #26292e; }
+  .switch { display: flex; gap: 6px; align-items: center; min-width: 0; cursor: pointer; }
+  .switch input { margin: 0; accent-color: #4c8dff; }
+  .switch span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .switch b { font-weight: 500; }
+  .footer .quiet { justify-self: end; }
 </style>
 <body></body>
 <script type="module" src="popup.js"></script>

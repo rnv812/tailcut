@@ -1,14 +1,25 @@
 import { render } from 'preact'
 import { useEffect, useState } from 'preact/hooks'
 import {
+  deleteHistory,
   editSession,
   formatBytes,
   formatDuration,
+  historyRows,
   hostOf,
   listSessions,
   openEditor,
+  openHistoryEditor,
+  pageUrl,
+  pauseThisTab,
+  pinHistory,
   saveAll,
+  setSiteRecorded,
+  siteRecorded,
+  storageInUse,
+  undoDelete,
   type EditResult,
+  type HistoryRow,
   type Omission,
   type SaveFailure,
   type SaveResult,
@@ -133,6 +144,132 @@ function complaintFor(failure: SaveResult): string {
   return failure.detail ? `${said} ${failure.detail}` : said
 }
 
+/** How long the undo of a deletion stays on screen. The sweeper waits longer than this. */
+const UNDO_MS = 6_000
+
+function History(props: { rows: HistoryRow[]; hide: Set<string>; onChanged: () => void }) {
+  const [deleted, setDeleted] = useState<HistoryRow | null>(null)
+  const shown = props.rows.filter((row) => !props.hide.has(row.key) && row.id !== deleted?.id)
+
+  useEffect(() => {
+    if (!deleted) return
+    const timer = setTimeout(() => setDeleted(null), UNDO_MS)
+    return () => clearTimeout(timer)
+  }, [deleted])
+
+  if (!shown.length && !deleted) return null
+
+  return (
+    <div class="history" data-testid="history">
+      <div class="muted label">History</div>
+
+      {shown.map((row) => (
+        <div class="row history-row" data-testid="history-row" key={row.id}>
+          <button
+            class="history-open"
+            data-testid="history-open"
+            onClick={() => void openHistoryEditor(row.id)}
+          >
+            <span class="row-title" data-testid="history-title">
+              {row.title || UNTITLED}
+            </span>
+            <span class="muted">{hostOf(row.url)}</span>
+            <span class="muted" data-testid="history-length">
+              {formatDuration(row.seconds)}
+            </span>
+          </button>
+          <button
+            class={row.pinned ? 'pin on' : 'pin'}
+            data-testid="history-pin"
+            title={row.pinned ? 'Kept until you unpin it' : 'Keep this recording'}
+            onClick={() => void pinHistory(row.id, !row.pinned).then(props.onChanged)}
+          >
+            {row.pinned ? 'Pinned' : 'Pin'}
+          </button>
+          <button
+            class="quiet"
+            data-testid="history-delete"
+            onClick={() => {
+              // Marked deleted at once, so the row is out of every list before the user has let
+              // go of the button; the files go with the sweeper, and the toast below is the
+              // window in which that can be called off.
+              setDeleted(row)
+              void deleteHistory(row.id).then(props.onChanged)
+            }}
+          >
+            Delete
+          </button>
+        </div>
+      ))}
+
+      {deleted && (
+        <div class="toast" data-testid="undo" role="status">
+          <span>Deleted “{deleted.title || UNTITLED}”</span>
+          <button
+            onClick={() => {
+              void undoDelete(deleted.id).then(props.onChanged)
+              setDeleted(null)
+            }}
+          >
+            Undo
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function Footer(props: {
+  url: string
+  recorded: boolean
+  paused: boolean
+  inUse: { bytes: number; full: boolean }
+  onChanged: () => void
+}) {
+  const host = hostOf(props.url)
+
+  return (
+    <div class="footer">
+      <label class="switch">
+        <input
+          type="checkbox"
+          data-testid="site-toggle"
+          checked={props.recorded}
+          onChange={(event) =>
+            void setSiteRecorded(props.url, (event.target as HTMLInputElement).checked).then(
+              props.onChanged,
+            )
+          }
+        />
+        <span>
+          Record <b data-testid="site-name">{host || 'this site'}</b>
+        </span>
+      </label>
+
+      <button
+        class="quiet"
+        data-testid="pause-tab"
+        onClick={() => void pauseThisTab(!props.paused).then(props.onChanged)}
+      >
+        {props.paused ? 'Resume on this page' : 'Pause on this page'}
+      </button>
+
+      <div class="muted in-use" data-testid="in-use">
+        {/* A full disk is a state and not an error: the browser is within its rights to refuse
+            (§7.4), the sweeper has already lowered the ceiling to fit, and what the user needs to
+            know is that nothing new is going down until room is made. */}
+        {props.inUse.full
+          ? `Disk full — ${formatBytes(props.inUse.bytes)} kept`
+          : `${formatBytes(props.inUse.bytes)} on disk`}
+      </div>
+
+      <button class="quiet" data-testid="open-settings" onClick={() => chrome.runtime.openOptionsPage()}>
+        Settings
+      </button>
+    </div>
+  )
+}
+
 function Popup() {
   // null — the tab has not answered yet. An answer with no sessions in it differs from that: on
   // that the popup already knows there was nothing to record, and says so in words.
@@ -145,14 +282,67 @@ function Popup() {
   const [failure, setFailure] = useState<SaveResult | null>(null)
   const [editing, setEditing] = useState(false)
   const [editFailed, setEditFailed] = useState<NonNullable<EditResult['reason']> | null>(null)
+  /** What is on disk. Not a session of this tab and not asked of it: the index answers. */
+  const [rows, setRows] = useState<HistoryRow[]>([])
+  const [inUse, setInUse] = useState({ bytes: 0, full: false })
+  /** Where the tab stands, and whether the settings record it. */
+  const [url, setUrl] = useState('')
+  // Recording until the settings say otherwise, which is what §7.4 sets them to and what they
+  // answer for every site the user has not forbidden. The read that settles it is one turn away.
+  const [recorded, setRecorded] = useState(true)
+  /**
+   * Bumped by everything that changes what is shown: a pin, a deletion, an undo, the switch of a
+   * site, the pause of a page. Nothing is guessed at from what was asked for — the popup reads
+   * again, and draws what the index and the frame answered.
+   */
+  const [revision, setRevision] = useState(0)
+  const changed = () => setRevision((turn) => turn + 1)
 
   useEffect(() => {
-    listSessions().then(setAnswer)
-  }, [])
+    // Four reads, side by side rather than one after another: they answer independently, and the
+    // popup is obliged to open instantly. Nothing here computes and nothing walks the disk.
+    void listSessions().then(setAnswer)
+    void historyRows().then(setRows)
+    void storageInUse().then(setInUse)
+    void pageUrl().then(async (where) => {
+      setUrl(where)
+      setRecorded(await siteRecorded(where))
+    })
+  }, [revision])
 
+  // The tab has not answered yet, and until it has there is nothing to say about the page. What
+  // is on disk would be true already — it comes off the index — but a popup that drew its second
+  // half first would jump under the hand that opened it.
   if (answer === null) return <div class="pad muted">Loading…</div>
 
   const sessions = answer.sessions
+
+  /**
+   * What is on disk, and the switches for the page above it. The same two whether or not this
+   * page is recording: the history is the point of this stage and does not depend on the tab.
+   *
+   * A session of this tab is left out of the history by its merge key: one video listed in both
+   * halves would be one recording pretending to be two, and the two rows would lead to different
+   * places — the registry of the frame, and the pieces on disk.
+   */
+  const below = (
+    <>
+      <History
+        rows={rows}
+        hide={new Set(sessions.map((session) => session.key))}
+        onChanged={changed}
+      />
+      <Footer
+        url={url}
+        recorded={recorded}
+        // What the frame answered, and never what it was asked: the pause lives in the frame.
+        paused={answer.paused === true}
+        inUse={inUse}
+        onChanged={changed}
+      />
+    </>
+  )
+
   if (!sessions.length) {
     // Three different silences, and the difference is the whole point: a page with nothing worth
     // recording on it, a page whose player never reached the extension at all, and a page that
@@ -165,7 +355,17 @@ function Popup() {
         : answer.unreadableFile
           ? UNREADABLE
           : NOTHING
-    return <div class="pad muted">{nothing}</div>
+    return (
+      <div>
+        <header class="top">
+          <b>tailcut</b>
+        </header>
+        <div class="pad muted" data-testid="nothing">
+          {nothing}
+        </div>
+        {below}
+      </div>
+    )
   }
 
   // The list comes newest first: at the top is what is being watched right now, and that is what
@@ -309,6 +509,8 @@ function Popup() {
           ))}
         </div>
       )}
+
+      {below}
     </div>
   )
 }

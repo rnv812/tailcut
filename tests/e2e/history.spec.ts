@@ -6,7 +6,13 @@ import {
   piecePath,
   sessionDir,
 } from '../../src/shared/history-files'
-import { launchWithExtension, openExtensionPage, serveLocal, watchOn } from './helpers'
+import {
+  launchWithExtension,
+  openExtensionPage,
+  openPopupOn,
+  serveLocal,
+  watchOn,
+} from './helpers'
 
 /** The session every write here goes into. One directory, thrown away with the profile. */
 const SESSION = 'probe'
@@ -429,6 +435,49 @@ test('a session whose key changes on the fly stays one row', async () => {
     // is what the assertion above would then be counting.
     expect(sessions[0]!.seconds, 'the material written after the move went elsewhere').toBeGreaterThan(8)
     expect(sessions[0]!.tracks.length, 'the switch after the move opened no track here').toBe(2)
+  } finally {
+    await context.close()
+  }
+})
+
+/**
+ * The whole of §9.2 that this stage adds, in a browser: a recording of a tab that is gone, listed
+ * in a popup opened over a page that never played anything, pinned, deleted, put back — and the
+ * quick switch beside it.
+ *
+ * Every one of those crosses a boundary no unit set has: the index is IndexedDB written by a
+ * bridge frame and read by the popup, and the pause travels the extension message, the content
+ * script, the port and back.
+ */
+test('the popup lists what an earlier tab recorded, pins it and deletes it', async () => {
+  test.setTimeout(90_000)
+
+  const { context, extensionId } = await launchWithExtension()
+
+  try {
+    const page = await context.newPage()
+    await watchOn(page, 'player.html', 'https://one.test/watch', 12)
+    await page.close()
+
+    // A page with nothing on it: the history is what this popup has to show.
+    const blank = await context.newPage()
+    await serveLocal(blank, 'empty.html', 'https://two.test/empty')
+    const popup = await openPopupOn(context, blank, extensionId)
+
+    await expect(popup.getByTestId('history-row')).toHaveCount(1)
+    await popup.getByTestId('history-pin').click()
+    await expect(popup.getByTestId('history-pin')).toHaveText('Pinned')
+
+    await popup.getByTestId('history-delete').click()
+    await expect(popup.getByTestId('history-row')).toHaveCount(0)
+    await popup.getByTestId('undo').getByRole('button').click()
+    await expect(popup.getByTestId('history-row')).toHaveCount(1)
+
+    // The quick switch, in a real browser and through the real channel: the button changes its
+    // label only if the frame answered. A handler that returned without writing into the port
+    // leaves this line as it was, and nothing else in the run would ever notice.
+    await popup.getByTestId('pause-tab').click()
+    await expect(popup.getByTestId('pause-tab')).toHaveText('Resume on this page')
   } finally {
     await context.close()
   }
