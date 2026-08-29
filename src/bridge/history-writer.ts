@@ -260,11 +260,21 @@ export class HistoryWriter {
     // Both keys were gathering: one batch out of the two, in the order the material arrived. This
     // is the one case in which an init travels twice — each side claimed the init of its own
     // tracks before the merge, and the claims are not comparable across keys. It costs a few
-    // hundred bytes, and `HistoryTrack.init` says what is done about it: the row keeps the first
-    // place an init landed in and ignores every later one.
+    // hundred bytes, and nothing here answers it: the index does, in `recordPiece`, by keeping
+    // the first place an init landed in and ignoring every later one. Which is a rule of the
+    // index and tested as one — `what a landed piece leaves in the index` in
+    // tests/e2e/history-db.spec.ts, against the database it really runs on.
     standing.items.push(...pending.items)
     standing.bytes += pending.bytes
-    standing.sample = pending.sample
+    // Signed with the event that saw the page last, and not simply with the one that moved. The
+    // two keys were gathering side by side and nothing orders them: the session that survives a
+    // merge is as often the one the freshest material went to — which is exactly the case the
+    // registry's set describes under `says so on a merge, when the session it moves to is already
+    // there`. `sample` is what `openSession` dates a new row by, so taking the wrong one dates
+    // the session by material older than itself.
+    if (pending.sample.page.lastSeenAt > standing.sample.page.lastSeenAt) {
+      standing.sample = pending.sample
+    }
     // The facts of a track travel with its init: what the merged batch carries an init for, the
     // merged batch must be able to describe. Whichever side claimed a representation first keeps
     // it — the two describe the same track, so there is nothing to choose between them.

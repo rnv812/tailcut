@@ -28,7 +28,13 @@ interface Written {
  */
 function fakeIo(overrides: Partial<HistoryIo> = {}) {
   const written: Written[] = []
-  const rows: Array<{ id: string; piece: HistoryPiece; tracks: HistoryTrack[] }> = []
+  const rows: Array<{
+    id: string
+    piece: HistoryPiece
+    tracks: HistoryTrack[]
+    /** The event the row was signed with: `Pending.sample`, as the writer chose it. */
+    event: ChunkStored
+  }> = []
   const renamed: Array<[string, string]> = []
   let clock = 1_700_000_000_000
   const sweeps: number[] = []
@@ -42,7 +48,7 @@ function fakeIo(overrides: Partial<HistoryIo> = {}) {
     },
     open: async (event) => (overrides.open ? await overrides.open(event) : 'sess-1'),
     record: async (id, piece, tracks, event) => {
-      rows.push({ id, piece, tracks })
+      rows.push({ id, piece, tracks, event })
       await overrides.record?.(id, piece, tracks, event)
     },
     rename: async (id, event) => {
@@ -221,9 +227,11 @@ describe('HistoryWriter', () => {
     await settle()
 
     expect(written.map((one) => one.bytes)).toEqual([16 + HISTORY_BATCH_BYTES, HISTORY_BATCH_BYTES])
-    // And the index hears of the init once. `HistoryTrack.init` holds one place and one only, so a
-    // second row placing the same init in another file would make which of the two the index keeps
-    // a matter of the order they landed in.
+    // And the writer offers the init to the index once, which is the half of that promise it can
+    // keep: it never sends the same init down twice inside one key. The other half — what the
+    // index does when a merge of two keys offers it a second place after all — belongs to
+    // `recordPiece` and is tested there (`what a landed piece leaves in the index` in
+    // tests/e2e/history-db.spec.ts).
     expect(rows.flatMap((row) => row.tracks)).toEqual([
       { ...facts(VIDEO), init: { file: rows[0]!.piece.file, at: 0, length: 16 } },
     ])
@@ -440,6 +448,75 @@ describe('HistoryWriter.rekey', () => {
       16 + HISTORY_BATCH_BYTES,
       HISTORY_BATCH_BYTES,
     ])
+  })
+
+  /** Most of a batch and not quite one: two of these are over the limit, one of them is not. */
+  const NEARLY = HISTORY_BATCH_BYTES - 1_000
+
+  it('gathers both halves into one batch when two keys that were both filling one become one', async () => {
+    const { io, written, rows } = fakeIo()
+    const writer = new HistoryWriter(io)
+
+    // Neither key has written a byte, which is the ordinary way a merge happens: two sources of
+    // one frame meet in `absorb` (SessionStore.bind) in the first second of playback, before any
+    // batch has reached the disk. Each side is nearly a batch, so neither goes down on its own.
+    writer.take(of(VIDEO, 0, NEARLY))
+    writer.take({ ...of(AUDIO, 0, NEARLY), key: NEXT })
+    await settle()
+    expect(written).toHaveLength(0)
+
+    writer.rekey(moved)
+    await settle()
+
+    // One file with both halves in it, and it went down on the spot: the merged batch counts what
+    // both sides had gathered, so it is over the limit. Kept apart, this material would have sat
+    // in memory until the tail timer fired on it.
+    expect(written.map((one) => one.bytes)).toEqual([24 + NEARLY + 16 + NEARLY])
+    expect(rows[0]!.piece.parts).toHaveLength(2)
+
+    // And every track the merged batch carries an init for is described in the row, by its own
+    // init. The facts of a track are put where its init is attached, and they have to travel with
+    // it across the merge: what the surviving batch carries an init for, it must be able to
+    // describe. Left behind, the sound of this session would be missing from the index while its
+    // init sat in the file — or, read off `sample` instead, written down as a second picture.
+    const file = rows[0]!.piece.file
+    expect(rows[0]!.tracks).toEqual([
+      { ...facts(AUDIO), init: { file, at: 0, length: 24 } },
+      { ...facts(VIDEO), init: { file, at: 24 + NEARLY, length: 16 } },
+    ])
+  })
+
+  it('signs the merged batch with the fresher of the two events, whichever side it came from', async () => {
+    const seenAt = (one: ChunkStored, lastSeenAt: number): ChunkStored => ({
+      ...one,
+      page: { ...one.page, lastSeenAt },
+    })
+
+    // Two keys gathering side by side, and no order between them: the writer sees them as two
+    // batches and nothing says which was filled last. `sample` is what the row of the session is
+    // signed with — `openSession` dates a new row by it and `recordPiece` moves `lastSeenAt` to
+    // it — so the merged batch has to carry the event that saw the page last.
+    //
+    // The session being folded in is not always the fresher one, and the registry's own set says
+    // so: in `says so on a merge, when the session it moves to is already there`
+    // (tests/core/session-store.test.ts) the material that arrived last went to the session that
+    // survives, and the one that moves has been standing still since before it.
+    for (const [older, fresher] of [
+      [KEY, NEXT],
+      [NEXT, KEY],
+    ] as const) {
+      const { io, rows } = fakeIo()
+      const writer = new HistoryWriter(io)
+
+      writer.take(seenAt({ ...of(VIDEO, 0, 1_000), key: older }, 5))
+      writer.take(seenAt({ ...of(AUDIO, 0, 1_000), key: fresher }, 11))
+      writer.rekey(moved)
+      writer.flushAll()
+      await settle()
+
+      expect(rows).toHaveLength(1)
+      expect(rows[0]!.event.page.lastSeenAt).toBe(11)
+    }
   })
 })
 

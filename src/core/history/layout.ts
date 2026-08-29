@@ -33,7 +33,9 @@ export interface HistoryTrack {
    * where each side had already claimed the init of its own tracks. Whoever fills this in keeps the
    * first place an init landed in and ignores every later one — otherwise which of the two the
    * index names would be decided by the order they landed in. The spare copy costs a few hundred
-   * bytes inside a piece that is material anyway, and nothing ever reads it.
+   * bytes inside a piece that is material anyway, and nothing ever reads it. `recordPiece` is what
+   * fills this in and what keeps that rule; `what a landed piece leaves in the index` in
+   * tests/e2e/history-db.spec.ts is where it is held to it.
    */
   init: PlacedIn
 }

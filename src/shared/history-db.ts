@@ -284,8 +284,8 @@ export async function readTotals(): Promise<TotalsRow> {
 /**
  * How much of what is occupied stays when the browser has refused to take more.
  *
- * A ninth, not a fixed number of megabytes: a refusal says nothing about how much room is
- * missing, and taking a tenth of what we hold both frees something at every size and cannot
+ * A share of what we hold and not a fixed number of megabytes: a refusal says nothing about how
+ * much room is missing, and taking a tenth of it both frees something at every size and cannot
  * empty the history in one go. Refused again, it takes a tenth of the remainder.
  */
 export const QUOTA_RELIEF = 0.9
@@ -395,7 +395,9 @@ export async function listSessions(limit = 50): Promise<HistorySessionRow[]> {
       if (!cursor || rows.length >= limit) return resolve()
       const row = cursor.value as HistorySessionRow
       // A session with nothing in it yet is not a row of the history: it was opened by the first
-      // batch and its first piece has not landed.
+      // batch and its first piece has not landed — or that piece never will, because the write
+      // was refused. Listed, the popup would show a recording of nothing, and every count of the
+      // sessions on disk would be off by whatever is being gathered right now.
       if (!row.deletedAt && row.bytes > 0) rows.push(row)
       cursor.continue()
     }

@@ -1408,9 +1408,15 @@ export class SessionStore {
     })
   }
 
-  /** The key of this session has changed; whoever writes the history has to hear it once. */
+  /**
+   * The key of this session has changed; whoever writes the history has to hear it once.
+   *
+   * Every caller has already settled that the two keys differ — `followTo` gives up when the key
+   * it computed is already taken, and both branches of `bind` are past the early return for a
+   * source that stayed where it was. A guard here would be a line no test could reach, and the
+   * writer answers a move to the key it already stands under by itself (`HistoryWriter.rekey`).
+   */
   private rekeyed(from: string, session: StoredSession): void {
-    if (from === session.key) return
     this.onRekey?.({
       from,
       to: session.key,
