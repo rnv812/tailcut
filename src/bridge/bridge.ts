@@ -47,7 +47,15 @@ const history = new HistoryWriter({
   open: (event) =>
     openSession(event.key, event.page).catch(() => null),
   record: (id, piece, tracks, event) =>
-    recordPiece(id, piece, tracks, event).catch(() => undefined),
+    recordPiece(id, piece, tracks, {
+      ...event,
+      // The largest player seen by the time the piece landed, and not only by the time its chunks
+      // were cut: a page that hands over its whole video in the first second appends everything
+      // before the watcher has measured anything at all. The stamp on the event is what is left
+      // when the session is no longer in this frame — a key that has moved since the batch was
+      // gathered (see SessionStore.widthOf).
+      widthPx: Math.max(event.widthPx, store.widthOf(event.key)),
+    }).catch(() => undefined),
   rename: (id, event) =>
     renameSession(id, event.to, event.page)
       .then(() => undefined)
@@ -491,6 +499,18 @@ window.addEventListener('message', (event: MessageEvent) => {
   if (data?.type === 'tc:encrypted') {
     store.refuseEncrypted()
     tellRefusal()
+    return
+  }
+
+  // The size of the player a stream is being watched in, measured by the same poll of the same
+  // isolated world that speaks the verdicts. A value signal of §7.3 and nothing else: no file, no
+  // list and no save depends on it, which is why a forged one could do no harm beyond flattering
+  // a recording of the page's own.
+  //
+  // Kept whatever the verdict says afterwards. A rejection is a freeze and not an erasure (§5.5),
+  // and the size the player had while it was playing stays true.
+  if (data?.type === 'tc:player') {
+    store.sawPlayer(String(data.sourceId), Number(data.widthPx) || 0)
     return
   }
 

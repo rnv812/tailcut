@@ -97,6 +97,14 @@ const rejected: [string, unknown][] = [
     'a triage verdict: the content script passes that',
     { type: 'tc:verdict', sourceId: 's', verdict: 'reject' },
   ],
+  // The size of the player, measured by the same poll of the same isolated world. It travels the
+  // same road as the verdict and for the same reason is none of the page's business: the number
+  // is a signal of value (§7.3), and a page that could state it would be flattering a recording
+  // of its own at the expense of everybody else's.
+  [
+    'the size of a player: the content script measures that',
+    { type: 'tc:player', sourceId: 's', widthPx: 1280 },
+  ],
   // The whole of the other side of the protocol: nothing the bridge sends is addressed to the
   // bridge. The content script passes on what it recognised here as its own, and the handshake
   // and the summaries arrive in that same window of the page — recognise them and the bridge's

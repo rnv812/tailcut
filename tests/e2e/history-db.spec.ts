@@ -86,6 +86,7 @@ test('a session is opened once under its key, and a deleted one comes back to li
 
         await recordPiece(first, input.piece, [input.track], {
           page: { ...input.page, lastSeenAt: 3_000 },
+          widthPx: 0,
         })
         const listed = await listSessions()
 
@@ -133,13 +134,13 @@ test('what a landed piece leaves in the index: bytes summed, seconds joined, one
         }: typeof import('../../src/shared/history-db') = await import(address)
 
         const id = await openSession('one', { ...input.page, createdAt: 1_000, lastSeenAt: 2_000 })
-        const signed = { page: { ...input.page, lastSeenAt: 3_000 } }
+        const signed = { page: { ...input.page, lastSeenAt: 3_000 }, widthPx: 0 }
 
-        await recordPiece(id, input.first, [input.picture], signed)
+        await recordPiece(id, input.first, [input.picture], { ...signed, widthPx: 1_280 })
         // The same stretch, written a second time by the frame of a second tab, and its init with
         // it: neither side's claim on an init is comparable with the other's, so the same track
         // arrives placed in another file (see `HistoryTrack.init`).
-        await recordPiece(id, input.second, [input.pictureAgain], signed)
+        await recordPiece(id, input.second, [input.pictureAgain], { ...signed, widthPx: 640 })
         await recordPiece(id, input.third, [input.sound], signed)
 
         const row = await sessionById(id)
@@ -183,6 +184,10 @@ test('what a landed piece leaves in the index: bytes summed, seconds joined, one
     ])
     expect(got.row!.seconds).toBeCloseTo(4)
     expect(got.row!.sound, 'a session with an audio track was written down as silent').toBe(true)
+    // The largest player the video was ever watched in and not the one of the piece that landed
+    // last: the second tab watched it in a window half the size, and that says nothing about
+    // what the first one was worth (§7.3).
+    expect(got.row!.widthPx).toBe(1_280)
 
     expect(got.pieces.map((one) => one.file).sort()).toEqual([
       'aaaaaaaa-000000.tcm',
@@ -269,9 +274,10 @@ test('the marks a user leaves on a session, and the order the rows come back in'
         const oldest = await openSession('two', { ...input.page, createdAt: 1_000, lastSeenAt: 1_000 })
         const middle = await openSession('three', { ...input.page, createdAt: 1_000, lastSeenAt: 2_000 })
 
-        await recordPiece(newest, input.a, [], { page: { ...input.page, lastSeenAt: 3_000 } })
-        await recordPiece(oldest, input.b, [], { page: { ...input.page, lastSeenAt: 1_000 } })
-        await recordPiece(middle, input.c, [], { page: { ...input.page, lastSeenAt: 2_000 } })
+        const at = (lastSeenAt: number) => ({ page: { ...input.page, lastSeenAt }, widthPx: 0 })
+        await recordPiece(newest, input.a, [], at(3_000))
+        await recordPiece(oldest, input.b, [], at(1_000))
+        await recordPiece(middle, input.c, [], at(2_000))
 
         const all = (await listSessions()).map((row) => row.id)
         const first = (await listSessions(1)).map((row) => row.id)
@@ -325,7 +331,7 @@ test('pieces and whole sessions go out with the volume they took', async () => {
         }: typeof import('../../src/shared/history-db') = await import(address)
 
         const id = await openSession('one', { ...input.page, createdAt: 1_000, lastSeenAt: 2_000 })
-        const signed = { page: { ...input.page, lastSeenAt: 3_000 } }
+        const signed = { page: { ...input.page, lastSeenAt: 3_000 }, widthPx: 0 }
         await recordPiece(id, input.first, [input.picture], signed)
         await recordPiece(id, input.second, [], signed)
         await recordPiece(id, input.third, [], signed)
@@ -399,7 +405,7 @@ test('a refusal to take more lowers the ceiling, and a fresh start forgets it', 
         }: typeof import('../../src/shared/history-db') = await import(address)
 
         const id = await openSession('one', { ...input.page, createdAt: 1_000, lastSeenAt: 2_000 })
-        const signed = { page: { ...input.page, lastSeenAt: 3_000 } }
+        const signed = { page: { ...input.page, lastSeenAt: 3_000 }, widthPx: 0 }
         await recordPiece(id, input.first, [], signed)
 
         await markStorageFull(input.at)

@@ -46,6 +46,8 @@ const UNNAMED_POLLS = 2
  * which is a verdict of its own (see startWatching).
  */
 const told = new Map<string, TriageVerdict>()
+/** The largest player each stream has already been reported in; see Measured. */
+const toldWidth = new Map<string, number>()
 /**
  * What has already been said about each ordinary file: see plainSourceOf.
  *
@@ -144,15 +146,41 @@ function soundSignature(source: SoundSource): string {
   return `${source.playing ? 1 : 0}|${plainSignature(source)}`
 }
 
+/** What the isolated world says to the bridge about one stream: whether to keep it. */
+export type Tell = (sourceId: string, verdict: TriageVerdict) => void
+
+/**
+ * A player of this stream has been measured, and it is the largest one seen so far.
+ *
+ * A road of its own, and it was first written as a third argument of the verdict. That does not
+ * work, and the stand says why: a verdict is only spoken when it changes, the first thing said
+ * about an ordinary player is its promotion six seconds in, and a page that hands over everything
+ * it has in the first second has by then written its whole session to disk under a width of
+ * nothing. Measured — the row of tests/e2e/history.spec.ts came out at 0.
+ *
+ * Not a message per poll either, which is what riding the verdict was avoiding: only a width
+ * larger than the one already reported is news, and a player has one largest size. A video opened
+ * full screen and put back into the corner says it twice, and that is the whole of it.
+ */
+export type Measured = (sourceId: string, widthPx: number) => void
+
 /** What one element has to say about the file it is playing. */
 interface Speaker {
   source: PlainSource
   verdict: TriageVerdict
   playedSeconds: number
+  /** Width of this element on the screen, CSS pixels: see Measured. */
+  widthPx: number
 }
 
 /** How much a verdict is worth when two elements playing one file disagree. */
 const STANDING: Record<TriageVerdict, number> = { reject: 0, hold: 1, promote: 2 }
+
+/**
+ * What decides which element speaks for a file. The width is deliberately not part of it: a
+ * thumbnail nobody started must not take the floor from the player being watched for being wide.
+ */
+type Standing = Pick<Speaker, 'verdict' | 'playedSeconds'>
 
 /**
  * Whether this element should speak for the file instead of the one that holds the floor.
@@ -168,7 +196,7 @@ const STANDING: Record<TriageVerdict, number> = { reject: 0, hold: 1, promote: 2
  * material and either something on the page earned it or nothing did — an element that cannot be
  * measured says nothing about one that can.
  */
-function outranks(challenger: Omit<Speaker, 'source'>, holder: Omit<Speaker, 'source'>): boolean {
+function outranks(challenger: Standing, holder: Standing): boolean {
   const gap = STANDING[challenger.verdict] - STANDING[holder.verdict]
   return gap !== 0 ? gap > 0 : challenger.playedSeconds > holder.playedSeconds
 }
@@ -295,7 +323,7 @@ function reachRoots(root: ParentNode, found: ShadowRoot[]): void {
 }
 
 export function startWatching(
-  onVerdict: (sourceId: string, verdict: TriageVerdict) => void,
+  onVerdict: Tell,
   /** Said once, when this page holds a stream no verdict can ever be spoken about. */
   onUnreachable: () => void = () => {},
   /**
@@ -335,6 +363,15 @@ export function startWatching(
    * the registry's business.
    */
   onSound: (source: SoundSource) => void = () => {},
+  /**
+   * A player of one of the streams has been measured, and it is the largest one so far.
+   *
+   * §7.3 counts a big player as a sign that a recording is worth keeping, and triage is the only
+   * thing on the page that measures one — it weighs the width and throws the number away. This
+   * carries it out. Last of the callbacks and defaulted, so that a caller with no use for the
+   * signal goes on looking exactly as it did.
+   */
+  onPlayer: Measured = () => {},
 ): void {
   /** Whether the page has already been declared unrecordable. */
   let saidUnreachable = false
@@ -426,6 +463,13 @@ export function startWatching(
     onVerdict(sourceId, verdict)
   }
 
+  /** The element playing this stream, as it was measured this poll. See Measured. */
+  const measure = (sourceId: string, widthPx: number) => {
+    if (!(widthPx > (toldWidth.get(sourceId) ?? 0))) return
+    toldWidth.set(sourceId, widthPx)
+    onPlayer(sourceId, widthPx)
+  }
+
   const tick = () => {
     discover()
     const now = performance.now()
@@ -491,6 +535,7 @@ export function startWatching(
       const sourceId = sourceIdOf(element)
       if (sourceId) {
         claimed.add(sourceId)
+        measure(sourceId, signals.widthPx)
         tell(sourceId, triage(signals, BALANCED))
         continue
       }
@@ -512,7 +557,15 @@ export function startWatching(
       const verdict = triage(signals, BALANCED)
       const standing = speaking.get(plain.sourceId)
       if (!standing || outranks({ verdict, playedSeconds: state.playedSeconds }, standing)) {
-        speaking.set(plain.sourceId, { source: plain, verdict, playedSeconds: state.playedSeconds })
+        speaking.set(plain.sourceId, {
+          source: plain,
+          verdict,
+          playedSeconds: state.playedSeconds,
+          // The width of the element that speaks for the file, and not of the widest copy of it
+          // on the page: the two are one account of one file, and half an account of each would
+          // describe an element nobody watched.
+          widthPx: signals.widthPx,
+        })
       }
     }
 
@@ -526,6 +579,7 @@ export function startWatching(
         onPlain(best.source)
       }
 
+      measure(sourceId, best.widthPx)
       tell(sourceId, best.verdict)
     }
 
@@ -540,6 +594,9 @@ export function startWatching(
     // unconfirmed rejection waits out of sight and comes back whole the moment the verdict turns
     // — see Probation in the session store.
     for (const sourceId of announced) {
+      // Nothing was measured and nothing is claimed, so nothing is said about the size of a
+      // player: a width invented here would be a signal of value read off an element the watcher
+      // cannot even see.
       if (!claimed.has(sourceId)) tell(sourceId, 'reject')
     }
 

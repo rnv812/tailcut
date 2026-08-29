@@ -93,6 +93,7 @@ const of = (track: ChunkStored['track'], start: number, bytes: number): ChunkSto
   page: { url: 'https://site.example/watch', title: 'Clip', createdAt: 1, lastSeenAt: 2 },
   track,
   chunk: { start, end: start + 2, bytes: new Uint8Array(bytes).fill(1) },
+  widthPx: 0,
 })
 
 const event = (start: number, bytes: number): ChunkStored => of(VIDEO, start, bytes)

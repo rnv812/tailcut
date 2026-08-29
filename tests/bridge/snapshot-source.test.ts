@@ -28,6 +28,7 @@ function session(): Session {
     createdAt: 100,
     lastSeenAt: 200,
     refusedTracks: true,
+    widthPx: 0,
     tracks: [
       {
         bufferId: 'sb-1',

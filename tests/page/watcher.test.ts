@@ -168,12 +168,21 @@ function tick(times = 1): void {
 
 type Reported = { sourceId: string; verdict: TriageVerdict }
 
+/** A player of a stream, measured: what the watcher says about the size of an element. */
+type Player = { sourceId: string; widthPx: number }
+
 /** Поднимает наблюдателя на чистом модуле и отдаёт его вместе с журналом вердиктов. */
 async function startWatcher() {
   installDom()
   vi.resetModules()
 
   const seen: Reported[] = []
+  /**
+   * Every player the watcher has measured, in the order the measurements went out. A road of its
+   * own and not part of `seen`: the width is a signal of value (§7.3) and not a verdict, and it
+   * has to travel when the verdict does not.
+   */
+  const players: Player[] = []
   /** How many times the watcher has said that this page holds a stream it cannot reach. */
   const unreachable = { times: 0 }
   /** How many times it has said that this page plays media that is encrypted. */
@@ -204,9 +213,10 @@ async function startWatcher() {
       sounds.push(source)
       order.push(`sound ${source.sourceId}`)
     },
+    (sourceId, widthPx) => players.push({ sourceId, widthPx }),
   )
 
-  return { ...watcher, seen, unreachable, encrypted, plain, sounds, order }
+  return { ...watcher, seen, players, unreachable, encrypted, plain, sounds, order }
 }
 
 /**
@@ -1102,5 +1112,83 @@ describe('the watcher and a page that plays its sound apart from its picture', (
     // earned: the page did play its sound apart, and a torn-down element does not unmake that.
     expect(watcher.sounds).toHaveLength(1)
     expect(watcher.seen).toEqual([{ sourceId: CLIP_ID, verdict: 'promote' }])
+  })
+})
+
+describe('the watcher and the size of the player', () => {
+  it('reports the player of a stream before any verdict about it is spoken', async () => {
+    const watcher = await startWatcher()
+    place(watcher, fakeVideo({ box: box(1024, 576) }), 's-player')
+
+    tick()
+
+    // The first poll, half a second in, and long before the promotion at six. That is the whole
+    // point of the separate road: a site that hands over its material at once has written the
+    // session to disk by then, and a width that arrived with the promotion would arrive after
+    // the last piece it could have been written on.
+    expect(watcher.players).toEqual([{ sourceId: 's-player', widthPx: 1024 }])
+    expect(watcher.seen, 'the grace period is still six seconds').toEqual([])
+  })
+
+  it('says it once and then only when the player grows', async () => {
+    const watcher = await startWatcher()
+    const video = place(watcher, fakeVideo({ box: box(640, 360) }), 's-player')
+
+    tick(4)
+    expect(watcher.players).toEqual([{ sourceId: 's-player', widthPx: 640 }])
+
+    // The user opens the video full screen and puts it back into the corner of the page. It was
+    // watched full screen, and the corner says nothing about what it was worth (§7.3) — so the
+    // growth is news and the shrinking is not.
+    video.box = box(1920, 1080)
+    tick(2)
+    video.box = box(320, 180)
+    tick(2)
+
+    expect(watcher.players).toEqual([
+      { sourceId: 's-player', widthPx: 640 },
+      { sourceId: 's-player', widthPx: 1920 },
+    ])
+  })
+
+  it('measures the player of a stream it is refusing as readily as one it keeps', async () => {
+    const watcher = await startWatcher()
+    place(watcher, bannerVideo(), 's-banner')
+
+    tick()
+
+    // A rejection is a freeze and not an erasure (§5.5): the session goes on existing, and how
+    // big the player was is a fact about it whichever way the verdict went.
+    expect(watcher.players).toEqual([{ sourceId: 's-banner', widthPx: 160 }])
+    expect(watcher.seen).toEqual([{ sourceId: 's-banner', verdict: 'reject' }])
+  })
+
+  it('claims no size for a stream whose element it never found', async () => {
+    const watcher = await startWatcher()
+    attachClosedShadow()
+    watcher.registerSource('s-hidden', 'blob:hidden')
+
+    tick(40)
+
+    // Nothing was measured, and a made-up number here would be a signal of value read off an
+    // element the watcher cannot even see.
+    expect(watcher.players).toEqual([])
+    expect(watcher.seen).toEqual([{ sourceId: 's-hidden', verdict: 'reject' }])
+  })
+
+  it('gives the size of the element that speaks for an ordinary file', async () => {
+    const watcher = await startWatcher()
+    // One file, two elements: a thumbnail of it above, and the player the reader started. The
+    // verdict is taken from the element that is playing (see outranks), and so is the size — or
+    // the file would be described by a copy nobody watched.
+    stand(plainVideo({ paused: true, buffered: ranges(), box: box(160, 90) }))
+    stand(plainVideo({ buffered: ranges([0, 9.48]), box: box(1024, 576) }))
+
+    tick(13)
+
+    // Once, and with the size of the player: the thumbnail stands first on the page and would be
+    // measured first, but it never takes the floor — an element triage refuses cannot speak for a
+    // file an element beside it is playing.
+    expect(watcher.players).toEqual([{ sourceId: CLIP_ID, widthPx: 1024 }])
   })
 })

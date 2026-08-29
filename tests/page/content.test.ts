@@ -703,6 +703,13 @@ describe('the triage verdict', () => {
         message: { type: 'tc:source', sourceId: 's1', objectUrl: 'blob:banner' },
         transfer: undefined,
       },
+      {
+        // The size of the player, on a road of its own and ahead of the verdict: §7.3 counts a
+        // big player as a sign a recording is worth keeping, and the content script passes the
+        // number through exactly as the watcher measured it.
+        message: { type: 'tc:player', sourceId: 's1', widthPx: 160 },
+        transfer: undefined,
+      },
       { message: { type: 'tc:verdict', sourceId: 's1', verdict: 'reject' }, transfer: undefined },
     ])
   })
@@ -765,6 +772,11 @@ describe('the triage verdict', () => {
       },
       { message: { type: 'tc:verdict', sourceId: 's1', verdict: 'reject' }, transfer: undefined },
     ])
+    // And nothing at all is said about the size of a player: no element of the page was measured
+    // for this stream, and a number here would be read off the neighbour that was.
+    expect(
+      dom.forwarded().map((post) => (post.message as { type: string }).type),
+    ).not.toContain('tc:player')
   })
 
   it('tells the bridge when an element reports that its material is encrypted', async () => {
@@ -790,8 +802,8 @@ describe('the triage verdict', () => {
     await dom.tick()
     expect(
       dom.forwarded().map((post) => (post.message as { type: string }).type),
-      'setup: an ordinary player has nothing said about it but its own address',
-    ).toEqual(['tc:source'])
+      'setup: an ordinary player has nothing said about it but its address and its size',
+    ).toEqual(['tc:source', 'tc:player'])
 
     // The browser has found protection headers in what this element is being fed. It is the
     // stream speaking, not the page: probing for key systems fires nothing, and a page that
@@ -829,7 +841,8 @@ describe('the triage verdict', () => {
 
     // Nothing of the material travels — there is none to travel, the browser fetched the file
     // itself — so what crosses into the bridge is the address, the length and the stretch the
-    // element holds. Nothing else on the first poll: a hold is what the bridge already assumes.
+    // element holds, and the size of the player it is being watched in. No verdict on the first
+    // poll: a hold is what the bridge already assumes.
     expect(dom.forwarded().map((post) => post.message)).toEqual([
       {
         type: 'tc:plain',
@@ -838,6 +851,7 @@ describe('the triage verdict', () => {
         durationSeconds: 9.48,
         buffered: [[0, 3.2]],
       },
+      { type: 'tc:player', sourceId: `plain:${url}`, widthPx: 640 },
     ])
 
     for (let poll = 0; poll < 13; poll++) await dom.tick()
@@ -854,6 +868,7 @@ describe('the triage verdict', () => {
         durationSeconds: 9.48,
         buffered: [[0, 3.2]],
       },
+      { type: 'tc:player', sourceId: `plain:${url}`, widthPx: 640 },
       { type: 'tc:verdict', sourceId: `plain:${url}`, verdict: 'promote' },
     ])
   })
@@ -1006,6 +1021,13 @@ describe('a player whose MediaSource lives in a worker', () => {
       type: 'tc:verdict',
       sourceId: 'w1s1',
       verdict: 'promote',
+    })
+    // The player of a stream out of a worker is measured like any other: the element is on the
+    // page, whatever realm its MediaSource lives in.
+    expect(dom.forwarded().map((post) => post.message)).toContainEqual({
+      type: 'tc:player',
+      sourceId: 'w1s1',
+      widthPx: 640,
     })
   })
 

@@ -87,6 +87,14 @@ export interface Session {
    */
   refusedTracks: boolean
   /**
+   * Largest player this session was ever watched in, in CSS pixels; 0 — never measured.
+   *
+   * A value signal of §7.3 and nothing else: nothing about a file depends on it. The largest and
+   * not the latest, because a video that was watched full-screen and then put back into a corner
+   * was watched full-screen — the corner says nothing about what it was worth.
+   */
+  widthPx: number
+  /**
    * The material stayed in the file it came from, and this is where to read it.
    *
    * The other kind of session, and the only field that tells the two apart. A capture out of MSE
@@ -817,6 +825,8 @@ export interface ChunkStored {
     initBytes: Uint8Array
   }
   chunk: Chunk
+  /** Largest player this session has been seen in so far; see Session.widthPx. */
+  widthPx: number
 }
 
 /**
@@ -940,6 +950,8 @@ export class SessionStore {
   private declaredDurations = new Map<string, number>()
   /** Encrypted media was seen on this page: see refuseEncrypted. Once set, it is never cleared. */
   private encryptedSeen = false
+  /** sourceId → the largest player it has been measured in; see sawPlayer(). */
+  private playerWidths = new Map<string, number>()
   /** sourceId → the ordinary file that source is playing; see plain(). */
   private plainSources = new Map<string, PlainState>()
   /** sourceId → a soundtrack an `<audio>` of the page is playing; see sound(). */
@@ -1405,6 +1417,7 @@ export class SessionStore {
         initBytes: header.initBytes,
       },
       chunk,
+      widthPx: session.widthPx,
     })
   }
 
@@ -1760,6 +1773,38 @@ export class SessionStore {
     this.probation.set(sourceId, probationOf(session))
   }
 
+  /**
+   * The largest player the session under this merge key has been watched in; 0 — none, or no such
+   * session in this frame any more.
+   *
+   * Read where a piece of history lands, because that is later than anywhere else: the width of
+   * a player is measured half a second into the page at the earliest, and a site that hands over
+   * its whole video in the first second has by then cut every chunk it will ever cut. Stamping
+   * the number on the chunk alone would leave such a session on disk with a width of nothing.
+   */
+  widthOf(key: string): number {
+    return this.sessions.get(key)?.widthPx ?? 0
+  }
+
+  /**
+   * The watcher measured the element playing this source. See Session.widthPx.
+   *
+   * Remembered on the source as well as put on the session, because it regularly arrives before
+   * there is a session to put it on: the watcher measures the player half a second after the page
+   * loads, and on a page that opens its MediaSource a moment later the first init has not arrived
+   * yet. Only growth is reported (see Measured in the watcher), so a measurement dropped here
+   * would never be repeated.
+   */
+  sawPlayer(sourceId: string, widthPx: number): void {
+    if (!(widthPx > 0)) return
+    if (widthPx <= (this.playerWidths.get(sourceId) ?? 0)) return
+    this.playerWidths.set(sourceId, widthPx)
+
+    const source = this.sources.get(sourceId)
+    const session = source && this.sessions.get(source.key)
+    if (session && widthPx > session.widthPx) session.widthPx = widthPx
+  }
+
   /** Probation served: a rejection of this source no longer takes its session away. */
   promotePending(sourceId: string): void {
     // The watcher goes on measuring the elements it can reach, and one of them may well deserve
@@ -2001,6 +2046,11 @@ export class SessionStore {
   private join(session: StoredSession, sourceId: string): void {
     session.sources.add(sourceId)
     if (this.promoted.has(sourceId)) session.confirmed = true
+    // What was measured of this player before the session existed is a measurement of this very
+    // video: see sawPlayer. The one place a source starts feeding a session, whichever of the
+    // four roads of bind() brought it here.
+    const measured = this.playerWidths.get(sourceId) ?? 0
+    if (measured > session.widthPx) session.widthPx = measured
   }
 
   /**
@@ -2025,6 +2075,7 @@ export class SessionStore {
       createdAt: context.now,
       lastSeenAt: context.now,
       refusedTracks: false,
+      widthPx: 0,
       sources: new Set(),
       confirmed: false,
     }
@@ -2086,6 +2137,11 @@ function absorb(target: StoredSession, absorbed: StoredSession): void {
   // A track refused on either visit is a track missing from the file either way.
   target.refusedTracks = target.refusedTracks || absorbed.refusedTracks
   for (const sourceId of absorbed.sources) target.sources.add(sourceId)
+
+  // The size of the player is deliberately not in this list. It belongs to the source that was
+  // measured rather than to the session, and it lands on whatever session that source starts
+  // feeding, at the moment it starts (see join) — which on this road has already happened. A line
+  // here would be a second way to the same number, and no test could tell whether it was taken.
 }
 
 /**

@@ -299,6 +299,10 @@ test('what a tab recorded is in the index after that tab is gone', async () => {
     expect(listed.sessions[0]!.seconds).toBeLessThan(8)
     expect(listed.sessions[0]!.bytes).toBeGreaterThan(0)
     expect(listed.sessions[0]!.tracks.length).toBeGreaterThan(0)
+    // The size of the player, measured by triage on the page and carried down the whole road —
+    // watcher, content script, bridge, registry, batch, row. §7.3 counts it as a sign that a
+    // recording is worth keeping, and the fixture states it: <video width="640">.
+    expect(listed.sessions[0]!.widthPx).toBe(640)
     expect(listed.totals.bytes).toBe(listed.sessions[0]!.bytes)
 
     // The same video in a second tab is the same session (§6.1): one row, one directory, and the

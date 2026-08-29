@@ -209,7 +209,7 @@ export async function recordPiece(
   sessionId: string,
   piece: HistoryPiece,
   placed: readonly HistoryTrack[],
-  event: { page: { url: string; title: string; lastSeenAt: number } },
+  event: { page: { url: string; title: string; lastSeenAt: number }; widthPx: number },
 ): Promise<void> {
   const db = await openHistoryDb()
   const tx = transaction(db, [SESSIONS, PIECES, TOTALS], 'readwrite')
@@ -246,6 +246,10 @@ export async function recordPiece(
     title: session.title || event.page.title,
     lastSeenAt: Math.max(session.lastSeenAt, event.page.lastSeenAt),
     bytes: session.bytes + piece.bytes,
+    // The largest player the video was ever watched in, across every tab and every day the
+    // session was fed — the frame knows only its own, and a row that took the latest would
+    // shrink back to a corner the moment somebody watched it in one (§7.3).
+    widthPx: Math.max(session.widthPx, event.widthPx),
     covered,
     seconds: secondsOf(covered),
     sound: session.sound || tracks.some((track) => track.kinds.includes('audio')),

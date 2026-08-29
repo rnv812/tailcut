@@ -305,6 +305,17 @@ startWatching(
     const iframe = await ensureBridge()
     iframe.contentWindow?.postMessage({ type: 'tc:sound', ...source }, '*')
   },
+  // The size of the player one of these streams is being watched in. §7.3 counts a big player as
+  // a sign that a recording is worth keeping, and triage is the only thing on the page that ever
+  // measures one. Said on its own and not on the verdict, which is spoken only when it changes:
+  // by the time the first verdict about an ordinary player is spoken — six seconds in — a page
+  // that handed over its material at once has already written the whole session to disk.
+  //
+  // Not a message per poll: only a width larger than the one already reported is said at all.
+  async (sourceId, widthPx) => {
+    const iframe = await ensureBridge()
+    iframe.contentWindow?.postMessage({ type: 'tc:player', sourceId, widthPx }, '*')
+  },
 )
 
 // Which stream an element is playing, when the stream comes out of a worker and has no address to

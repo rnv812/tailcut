@@ -2540,3 +2540,133 @@ describe('a session whose key changes', () => {
     expect(moves[0]!.to).toBe(store.list()[0]!.key)
   })
 })
+
+describe('the size of the player a session was watched in', () => {
+  it('keeps the largest it was ever told about, not the latest', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+
+    store.sawPlayer('s1', 640)
+    store.sawPlayer('s1', 1920)
+    store.sawPlayer('s1', 320)
+
+    // The user opened the video full screen and put it back into the corner of the page. It was
+    // watched full screen, and the corner says nothing about what it was worth (§7.3).
+    expect(store.list()[0]!.widthPx).toBe(1920)
+  })
+
+  it('keeps the largest across the sources that feed it, not the last one measured', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.sawPlayer('s1', 1920)
+
+    // A second media source of the same page joins the session a moment later — which is the
+    // ordinary shape of a player, and of a page showing one video in two places. It brings its
+    // own element and its own measurement, and neither the arrival nor the measurement may take
+    // away what the session was already watched in.
+    store.append({ ...page, sourceId: 's2', bufferId: 'b2', bytes: init })
+    expect(store.list(), 'setup: two sources of one page feed one session').toHaveLength(1)
+    expect(store.list()[0]!.widthPx, 'a source that joined took the size away').toBe(1920)
+
+    store.sawPlayer('s2', 640)
+    expect(store.list()[0]!.widthPx).toBe(1920)
+  })
+
+  it('ignores a measurement that measured nothing', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.sawPlayer('s1', 800)
+
+    store.sawPlayer('s1', 0)
+    store.sawPlayer('s1', Number.NaN)
+    store.sawPlayer('s1', -1)
+    // A stream this registry has heard nothing of yet. Remembered against the day it does (see
+    // sawPlayer) and put on no session meanwhile — least of all on the one standing here.
+    store.sawPlayer('s-unknown', 1920)
+
+    expect(store.list()[0]!.widthPx).toBe(800)
+    expect(store.list()).toHaveLength(1)
+  })
+
+  it('takes a measurement made before the session existed', () => {
+    const seen: ChunkStored[] = []
+    const store = new SessionStore({ onChunk: (event) => seen.push(event) })
+
+    // The watcher measures the player half a second after the page loads, and a page that opens
+    // its MediaSource a moment later has no session here yet. Only a growth is ever reported
+    // (see Measured in the watcher), so a measurement dropped here would never come again — and
+    // on a site that hands over its material at once, every piece would go down under a width of
+    // nothing.
+    store.sawPlayer('s1', 1280)
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: videoSegs[0]! })
+
+    expect(store.list()[0]!.widthPx).toBe(1280)
+    expect(seen.map((event) => event.widthPx)).toEqual([1280])
+  })
+
+  it('reports it with every chunk, so the index can keep the largest across sessions', () => {
+    const seen: ChunkStored[] = []
+    const store = new SessionStore({ onChunk: (event) => seen.push(event) })
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: videoSegs[0]! })
+
+    store.sawPlayer('s1', 1440)
+    store.append({ ...page, bytes: videoSegs[1]! })
+
+    // The row on disk outlives the frame, so the width has to travel to it on the road the
+    // material travels; there is no other. The first chunk was cut before anything had been
+    // measured, and says so.
+    expect(seen.map((event) => event.widthPx)).toEqual([0, 1440])
+  })
+
+  it('answers for the session standing under a merge key, and for nothing else', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.sawPlayer('s1', 1600)
+
+    // What the history reads when a piece of it lands, which is later than any chunk of that
+    // piece was cut — see widthOf. A key nothing stands under is not an error and not a guess.
+    expect(store.widthOf(store.list()[0]!.key)).toBe(1600)
+    expect(store.widthOf('https://site.example/watch?v=abc|avc1|inf')).toBe(0)
+  })
+
+  it('is still the size it was when the material comes back from probation', () => {
+    const seen: ChunkStored[] = []
+    const store = new SessionStore({ onChunk: (event) => seen.push(event) })
+    store.append({ ...page, bytes: init })
+    store.sawPlayer('s1', 1920)
+    store.dropPending('s1')
+    store.append({ ...page, bytes: videoSegs[0]! })
+
+    store.promotePending('s1')
+
+    // A doubt is not an erasure (§5.4): the session that comes back is the session that went
+    // away, and it was watched in the player it was watched in. The session object itself does
+    // not survive the doubt — what does is the measurement, kept on the source and put back on
+    // whatever session that source starts feeding (see join). Without it the width would reset to
+    // nothing on every rejection a page recovers from: a paused video, a hidden tab.
+    expect(store.list()[0]!.widthPx).toBe(1920)
+    expect(seen.map((event) => event.widthPx)).toEqual([1920])
+  })
+
+  it('survives a merge as the larger of the two', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: videoSegs[0]! })
+    store.append({ ...page, sourceId: 's2', bufferId: 'b2', bytes: init })
+    store.setDuration('s2', 6.845)
+    store.sawPlayer('s1', 1920)
+    store.sawPlayer('s2', 640)
+    expect(store.list()).toHaveLength(2)
+
+    // Two sessions of one page become one (§6.1, absorb). The one that is poured in is the one
+    // that was watched full screen, and the measurement comes with the source that moves rather
+    // than with the session — or the surviving row would look like the smaller of the two windows
+    // this video was really watched in.
+    store.setDuration('s1', 6.845)
+
+    expect(store.list()).toHaveLength(1)
+    expect(store.list()[0]!.widthPx).toBe(1920)
+  })
+})
