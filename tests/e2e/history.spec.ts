@@ -1,5 +1,11 @@
 import { test, expect } from '@playwright/test'
-import { newWriterId, pieceName, piecePath, sessionDir } from '../../src/shared/history-files'
+import {
+  HISTORY_BATCH_BYTES,
+  newWriterId,
+  pieceName,
+  piecePath,
+  sessionDir,
+} from '../../src/shared/history-files'
 import { launchWithExtension, openExtensionPage } from './helpers'
 
 /** The session every write here goes into. One directory, thrown away with the profile. */
@@ -50,7 +56,11 @@ test('a piece is written sealed, read back whole, and leaves no lock behind', as
   try {
     const page = await openExtensionPage(context, extensionId, 'popup/popup.html')
 
-    const result = await page.evaluate(async (probe) => {
+    // What goes into the page: the paths from the builders, and the size of a batch from the
+    // module the writer takes it from.
+    const input = { probe: probe(), batchBytes: HISTORY_BATCH_BYTES }
+
+    const result = await page.evaluate(async ({ probe, batchBytes }) => {
       const worker = new Worker(chrome.runtime.getURL('bridge/history-worker.js'))
       const answer = (request: unknown, transfer: Transferable[]) =>
         new Promise<Record<string, unknown>>((resolve) => {
@@ -58,8 +68,9 @@ test('a piece is written sealed, read back whole, and leaves no lock behind', as
           worker.postMessage(request, transfer)
         })
 
-      // Eight mebibytes: the batch this extension actually writes.
-      const bytes = new Uint8Array(8 * 1024 * 1024)
+      // One batch, the size the extension really writes: `HISTORY_BATCH_BYTES` and not a literal
+      // under a comment saying so, which would go on saying it after the writer chose otherwise.
+      const bytes = new Uint8Array(batchBytes)
       for (let at = 0; at < bytes.length; at += 4093) bytes[at] = (at & 0xff) || 1
       const sent = bytes.slice()
 
@@ -98,12 +109,12 @@ test('a piece is written sealed, read back whole, and leaves no lock behind', as
 
       worker.terminate()
       return { first, secondWritten, size: file.size, same, removed }
-    }, probe())
+    }, input)
 
     expect(result.failure, 'the file could not be removed after the write').toBeUndefined()
-    expect(result.first).toMatchObject({ type: 'written', id: 1, bytes: 8 * 1024 * 1024 })
+    expect(result.first).toMatchObject({ type: 'written', id: 1, bytes: HISTORY_BATCH_BYTES })
     expect(result.secondWritten).toMatchObject({ type: 'written', id: 2, bytes: 4 })
-    expect(result.size).toBe(8 * 1024 * 1024)
+    expect(result.size).toBe(HISTORY_BATCH_BYTES)
     expect(result.same, 'the bytes came back changed').toBe(true)
     expect(result.removed).toBe(true)
   } finally {

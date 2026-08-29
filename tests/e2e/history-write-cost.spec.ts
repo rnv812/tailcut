@@ -1,18 +1,35 @@
 import { test, expect } from '@playwright/test'
-import { newWriterId, pieceName, piecePath } from '../../src/shared/history-files'
+import {
+  HISTORY_BATCH_BYTES,
+  newWriterId,
+  pieceName,
+  piecePath,
+} from '../../src/shared/history-files'
 import { launchWithExtension, openExtensionPage } from './helpers'
 
 /** How many batches of the real size go down. The warm-up before them is not one of them. */
 const WRITES = 5
 
 /**
- * What one batch of 8 MiB may cost before it has stopped being one write.
+ * What one batch may cost before it has stopped being one write.
  *
  * Nearly four times the worst honest sample seen on an idle machine (21.9 ms) and a fifth of the
  * cheapest the segmented write ever produced (389.7). Both halves of that were measured rather than
  * reasoned about; the numbers are in the comment on the test.
  */
 const BOUND_MS = 80
+
+/**
+ * The size every number here was measured at.
+ *
+ * What gets written is `HISTORY_BATCH_BYTES`, and the test asserts that the two are the same
+ * before it times anything. They are one number today, and the assertion is there for the day they
+ * are not: `BOUND_MS` is a bound on eight mebibytes and on no other amount — at a quarter of the
+ * size it would stop separating the segmented write from the honest one, at four times it would
+ * fail an honest write — so a batch cut at another number has to be re-measured rather than
+ * silently priced against numbers taken elsewhere.
+ */
+const MEASURED_AT_BYTES = 8 * 1024 * 1024
 
 /**
  * The price of a sealed write, measured where a measurement can still fail.
@@ -45,6 +62,11 @@ test('a batch of eight mebibytes goes down as one write', async () => {
   const { context, extensionId } = await launchWithExtension()
 
   try {
+    expect(
+      HISTORY_BATCH_BYTES,
+      'the batch is no longer the size BOUND_MS and the numbers around it were measured at',
+    ).toBe(MEASURED_AT_BYTES)
+
     const page = await openExtensionPage(context, extensionId, 'popup/popup.html')
 
     // The paths come from the builders, like every other path the extension writes: see the note
@@ -54,7 +76,12 @@ test('a batch of eight mebibytes goes down as one write', async () => {
       piecePath('cost', pieceName(writer, seq)),
     )
 
-    const samples = await page.evaluate(async (paths) => {
+    // What goes into the page: the paths, and the size of a batch taken from the module the
+    // writer takes it from rather than from a literal beside a comment claiming it is the one the
+    // extension writes. If the batch is ever cut at another number, this times that number.
+    const input = { paths, batchBytes: HISTORY_BATCH_BYTES }
+
+    const samples = await page.evaluate(async ({ paths, batchBytes }) => {
       const worker = new Worker(chrome.runtime.getURL('bridge/history-worker.js'))
       const answer = (request: unknown, transfer: Transferable[]) =>
         new Promise<Record<string, unknown>>((resolve) => {
@@ -62,10 +89,10 @@ test('a batch of eight mebibytes goes down as one write', async () => {
           worker.postMessage(request, transfer)
         })
 
-      // Eight mebibytes: the batch this extension actually writes. Filled sparsely — the write is
-      // what is being timed, and filling every byte of it costs more than the write.
+      // One batch, the size the extension really writes. Filled sparsely — the write is what is
+      // being timed, and filling every byte of it costs more than the write.
       const batch = () => {
-        const bytes = new Uint8Array(8 * 1024 * 1024)
+        const bytes = new Uint8Array(batchBytes)
         for (let at = 0; at < bytes.length; at += 4093) bytes[at] = (at & 0xff) || 1
         return bytes
       }
@@ -83,18 +110,19 @@ test('a batch of eight mebibytes goes down as one write', async () => {
         )
         measured.push(performance.now() - at)
         // A refusal that went unread would be timed as a very fast write.
-        if (written.type !== 'written' || written.bytes !== 8 * 1024 * 1024) {
+        if (written.type !== 'written' || written.bytes !== batchBytes) {
           throw new Error(`the write did not land: ${JSON.stringify(written)}`)
         }
       }
 
       worker.terminate()
       return measured
-    }, paths)
+    }, input)
 
     const cheapest = Math.min(...samples)
+    const mib = HISTORY_BATCH_BYTES / 1024 / 1024
     console.log(
-      `  8 MiB sealed: ${samples.map((ms) => ms.toFixed(1)).join('  ')} ms` +
+      `  ${mib} MiB sealed: ${samples.map((ms) => ms.toFixed(1)).join('  ')} ms` +
         ` — cheapest ${cheapest.toFixed(1)}, bound ${BOUND_MS}`,
     )
 
