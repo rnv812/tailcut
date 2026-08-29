@@ -24,6 +24,7 @@ export const ENTRIES = [
   { entryPoints: { 'shared/history-db': 'src/shared/history-db.ts' }, format: 'esm' },
   { entryPoints: { 'shared/settings-store': 'src/shared/settings-store.ts' }, format: 'esm' },
   { entryPoints: { 'popup/popup': 'src/popup/popup.tsx' }, format: 'esm' },
+  { entryPoints: { 'options/options': 'src/options/options.tsx' }, format: 'esm' },
   { entryPoints: { 'editor/main': 'src/editor/main.tsx' }, format: 'esm' },
   { entryPoints: { 'editor/waveform-worker': 'src/editor/source/waveform-worker.ts' }, format: 'iife' },
 ]
@@ -56,6 +57,7 @@ export async function build({ dev = false, watch = false } = {}) {
   await cp('manifest.json', 'dist/manifest.json')
   await cp('src/bridge/bridge.html', 'dist/bridge/bridge.html')
   await cp('src/popup/popup.html', 'dist/popup/popup.html')
+  await cp('src/options/options.html', 'dist/options/options.html')
   await cp('src/editor/editor.html', 'dist/editor/editor.html')
 
   if (watch) {

@@ -150,17 +150,9 @@ export async function openEditor(snapshotId: string): Promise<void> {
   await chrome.tabs.create({ url: chrome.runtime.getURL(editorUrl(snapshotId)) })
 }
 
-export function formatDuration(seconds: number): string {
-  const total = Math.round(seconds)
-  const m = Math.floor(total / 60)
-  const s = total % 60
-  return `${m}:${String(s).padStart(2, '0')}`
-}
-
-export function formatBytes(bytes: number): string {
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
-}
+// One place for the numbers people read: the popup and the settings page show the same ones, and
+// two copies of "how big is a megabyte" is how they come to disagree.
+export { formatBytes, formatDuration } from '../shared/format'
 
 /** The page address in a form fit for the line under the title; an unreadable one — empty. */
 export function hostOf(url: string): string {

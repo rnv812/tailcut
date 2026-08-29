@@ -8,6 +8,7 @@
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "sw/service-worker.js", "type": "module" },
   "action": { "default_popup": "popup/popup.html", "default_title": "tailcut" },
+  "options_ui": { "page": "options/options.html", "open_in_tab": true },
   "content_scripts": [
     {
       "matches": ["<all_urls>"],

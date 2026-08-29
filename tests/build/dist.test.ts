@@ -164,6 +164,7 @@ describe('сборка', () => {
       m.action.default_popup,
       ...m.content_scripts.flatMap((c: { js: string[] }) => c.js),
       ...m.web_accessible_resources.flatMap((w: { resources: string[] }) => w.resources),
+      m.options_ui.page,
     ]
 
     expect(referenced.length).toBeGreaterThan(5)
@@ -229,6 +230,27 @@ describe('сборка', () => {
     const worker = await optionsFor('editor/waveform-worker')
     expect(worker.format).toBe('iife')
     expect(existsSync('dist/editor/waveform-worker.js')).toBe(true)
+  })
+
+  it('ships the settings page, its script, and the declaration Chrome opens it by', async () => {
+    // Nothing of ours links to this page: it is reached through options_ui and through the
+    // browser's own menu on the extension. A missing declaration is therefore not a broken link
+    // — it is a settings page that does not exist as far as the browser is concerned.
+    const declared = manifest().options_ui
+    expect(declared?.page, 'the manifest declares no settings page').toBe('options/options.html')
+    expect(declared.open_in_tab, 'the settings of §9.4 want a tab, not a popup-sized box').toBe(
+      true,
+    )
+
+    expect(existsSync(`dist/${declared.page}`), `dist/${declared.page} is missing`).toBe(true)
+    expect(existsSync('dist/options/options.js')).toBe(true)
+
+    // Preact is a static import in the bundle: a classic script would not load this file.
+    const built = await optionsFor('options/options')
+    expect(built.format).toBe('esm')
+    expect(readFileSync(`dist/${declared.page}`, 'utf8')).toMatch(
+      /<script\s+type="module"\s+src="options\.js"/,
+    )
   })
 
   it('в собранных скриптах не осталось импортов голых спецификаторов', () => {

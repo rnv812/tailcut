@@ -642,7 +642,9 @@ describe('formatDuration', () => {
     [100, '1:40'],
     [150, '2:30'],
     [600, '10:00'],
-    [3661, '61:01'],
+    // Past an hour the clock grows a field rather than counting on in minutes; the whole table
+    // of lengths lives in tests/shared/format.test.ts, this is the road through the re-export.
+    [3661, '1:01:01'],
   ])('%s seconds → %s', async (seconds, expected) => {
     installChrome()
     const { formatDuration } = await importApi()
@@ -664,7 +666,7 @@ describe('formatBytes', () => {
     [1_020_000, '996 KB'],
     [1_048_576, '1.0 MB'],
     [1_543_210, '1.5 MB'],
-    [1_073_741_824, '1024.0 MB'],
+    [1_073_741_824, '1.00 GB'],
   ])('%s bytes → %s', async (bytes, expected) => {
     installChrome()
     const { formatBytes } = await importApi()
