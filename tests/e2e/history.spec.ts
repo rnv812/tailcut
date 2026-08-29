@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect, type Frame, type Page } from '@playwright/test'
 import {
   HISTORY_BATCH_BYTES,
   newWriterId,
@@ -6,7 +6,7 @@ import {
   piecePath,
   sessionDir,
 } from '../../src/shared/history-files'
-import { launchWithExtension, openExtensionPage } from './helpers'
+import { launchWithExtension, openExtensionPage, serveLocal } from './helpers'
 
 /** The session every write here goes into. One directory, thrown away with the profile. */
 const SESSION = 'probe'
@@ -187,6 +187,88 @@ test('a request that cannot be written is refused rather than dropped', async ()
     ).toMatch(/\S/)
     expect(result.written, 'one impossible request cost the frame every batch after it')
       .toMatchObject({ type: 'written', id: 8, bytes: 1 })
+  } finally {
+    await context.close()
+  }
+})
+
+/**
+ * The bridge stands as a cross-origin frame inside somebody else's page, and Chrome partitions
+ * third-party storage by the top-level site. Everything this stage is built on assumes that an
+ * extension frame is not third-party to itself: one index, written by whichever frame is
+ * recording, read by the popup, the sweeper and the editor alike.
+ *
+ * If this ever fails, the fallback is a message to the service worker per batch, and it belongs
+ * in the plan rather than in a hurry.
+ *
+ * A database of its own and not `tailcut-history`, for two reasons that pull the same way. The
+ * question is about the browser and not about our schema, so the probe carries the smallest store
+ * that can answer it and creates that store itself — opened without an upgrade, a fresh profile
+ * gives back a database with nothing in it and every transaction fails with NotFoundError. And
+ * the pages here are recording: a store-less `tailcut-history` left at version 1 is exactly what
+ * `openHistoryDb` then opens without an upgrade, so the probe would break the writing it stands
+ * beside.
+ */
+test('the index a bridge frame writes is the index every other context reads', async () => {
+  const { context, extensionId } = await launchWithExtension()
+
+  try {
+    const first = await context.newPage()
+    await serveLocal(first, 'player.html', 'https://one.test/watch')
+
+    const bridgeOf = async (page: Page) => {
+      await page.waitForFunction(() =>
+        [...document.querySelectorAll('iframe')].some((frame) => frame.dataset.tailcut === 'bridge'),
+      )
+      const frame = page.frames().find((one) => one.url().startsWith('chrome-extension://'))
+      if (!frame) throw new Error('the bridge frame is not there')
+      return frame
+    }
+
+    const write = async (frame: Frame, value: string) =>
+      frame.evaluate(async (mark) => {
+        const db: IDBDatabase = await new Promise((resolve, reject) => {
+          const request = indexedDB.open('tailcut-partition-probe', 1)
+          request.onupgradeneeded = () => request.result.createObjectStore('sessions', { keyPath: 'id' })
+          request.onerror = () => reject(request.error)
+          request.onsuccess = () => resolve(request.result)
+        })
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction('sessions', 'readwrite')
+          tx.objectStore('sessions').put({ id: 'probe', key: mark, url: '', title: mark })
+          tx.oncomplete = resolve
+          tx.onerror = () => reject(tx.error)
+        })
+        db.close()
+      }, value)
+
+    const read = (target: Frame | Page) =>
+      target.evaluate(async () => {
+        const db: IDBDatabase = await new Promise((resolve, reject) => {
+          const request = indexedDB.open('tailcut-partition-probe', 1)
+          request.onupgradeneeded = () => request.result.createObjectStore('sessions', { keyPath: 'id' })
+          request.onerror = () => reject(request.error)
+          request.onsuccess = () => resolve(request.result)
+        })
+        const row = await new Promise<{ title?: string } | undefined>((resolve, reject) => {
+          const request = db.transaction('sessions').objectStore('sessions').get('probe')
+          request.onerror = () => reject(request.error)
+          request.onsuccess = () => resolve(request.result)
+        })
+        db.close()
+        return row?.title
+      })
+
+    await write(await bridgeOf(first), 'written by one.test')
+
+    // A frame of another site: partitioning, if it applied, would give this one a store of its own.
+    const second = await context.newPage()
+    await serveLocal(second, 'player.html', 'https://two.test/watch')
+    expect(await read(await bridgeOf(second))).toBe('written by one.test')
+
+    // And a page of the extension itself, which is what the popup and the sweeper are.
+    const own = await openExtensionPage(context, extensionId, 'popup/popup.html')
+    expect(await read(own)).toBe('written by one.test')
   } finally {
     await context.close()
   }

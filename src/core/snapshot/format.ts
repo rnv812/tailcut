@@ -10,11 +10,19 @@ export const SNAPSHOT_VERSION = 1
 export const FOOTER_BYTES = 32
 
 /**
- * Where the bytes of a track live. Stage 2 puts them all inside the snapshot; stage 3 adds
- * `{ kind: 'file', path }` for material already written out as a session, and the shape of the
- * index does not change with it — a Located simply names a different store.
+ * Where the bytes a `Located` addresses actually live.
+ *
+ * The stores are one address space laid end to end in the order they are listed: the first store
+ * begins at zero, the next where the first ends. A snapshot written as a file has one inline
+ * store — itself — and offsets that are offsets in that file. A session read out of the history
+ * has one store per piece on disk, and the same `Located` means the same thing: so many bytes
+ * from the start of the whole, and the reader works out which file that falls in.
+ *
+ * That is why the index has stores at all rather than a path on every range: a range is written
+ * by the layout of one batch, which knows nothing of the batches before it, and a path per range
+ * would be the same string repeated a thousand times.
  */
-export type Store = { kind: 'inline' }
+export type Store = { kind: 'inline' } | { kind: 'file'; path: string; bytes: number }
 
 /** One piece of the map, laid out in the file. */
 export interface SnapshotChunkEntry {
