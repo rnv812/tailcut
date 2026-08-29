@@ -238,6 +238,36 @@ function announceRecording(): void {
 setInterval(announceRecording, ANNOUNCE_INTERVAL_MS)
 
 /**
+ * How often the buffer length and the memory ceiling are enforced.
+ *
+ * The same two seconds as the tail of a batch, and for a related reason: this is the granularity
+ * at which the frame acts on anything at all. Enforcing on every append would be arithmetic over
+ * every map on a path that runs dozens of times a minute; enforcing once a minute would let a
+ * shortened buffer look broken for a minute after the user shortened it.
+ */
+const EVICT_INTERVAL_MS = 2_000
+
+/**
+ * Largest amount of material one document keeps in memory, across every session of its frame.
+ *
+ * The buffer length bounds each session; this bounds their number. At the default of three
+ * minutes and an ordinary 1080p bitrate one session is about 135 MB, so this is room for three of
+ * them and a little — a page that opens sessions without end (a feed, an autoplaying playlist)
+ * stops here instead of taking the tab down with it.
+ *
+ * It is not a setting. §9.4 has no field for it, and asking a user to tune a number they cannot
+ * see would be worse than choosing one: what they can see and do tune is the buffer length, which
+ * is the other half of the same arithmetic. It is per document, because a registry lives in a
+ * frame and a frame can see neither its neighbours nor other tabs (§7.2).
+ */
+const MEMORY_CEILING_BYTES = 512 * 1024 * 1024
+
+setInterval(() => {
+  store.trimToBuffer(settings.get().recording.bufferSeconds)
+  store.dropOverCeiling(MEMORY_CEILING_BYTES, Date.now())
+}, EVICT_INTERVAL_MS)
+
+/**
  * The same word on the arrival of something, at most once per period.
  *
  * The clock above would carry it within ten seconds anyway; this is for the ten seconds. A

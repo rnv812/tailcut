@@ -169,3 +169,32 @@ test('recording to disk switched off leaves the index empty and the page recordi
     await context.close()
   }
 })
+
+test('shortening the buffer trims a recording that is already running', async () => {
+  test.setTimeout(120_000)
+
+  const { context, extensionId } = await launchWithExtension()
+
+  try {
+    // minute.html again, and for the same reason: this is about material that keeps arriving.
+    const page = await context.newPage()
+    await watchMinute(page, PAGE_URL)
+    await page.waitForTimeout(20_000)
+
+    expect(await recorded(context, extensionId, page)).toBeGreaterThan(15)
+
+    await setSettings(context, extensionId, {
+      recording: { mode: 'all', bufferSeconds: 15, allow: [], deny: [] },
+    })
+    // The trim runs on the frame's own tick, every two seconds.
+    await page.waitForTimeout(5_000)
+
+    const held = await recorded(context, extensionId, page)
+    // A buffer long, measured from the newest material of the session — which is ahead of the
+    // play head, because a player downloads ahead of itself.
+    expect(held).toBeLessThanOrEqual(17)
+    expect(held).toBeGreaterThan(8)
+  } finally {
+    await context.close()
+  }
+})

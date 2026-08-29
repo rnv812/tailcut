@@ -58,6 +58,16 @@ function installChrome(
     reply?: unknown
     /** What each frame of the tab answers, by frame number; the reply above is the main frame's. */
     frames?: Record<number, unknown>
+    /**
+     * The address chrome.tabs.get gives for the tab; `null` — a tab that answers without one.
+     *
+     * Chrome hands back a url only where the extension may read it: `<all_urls>` covers http and
+     * https and nothing else, so a chrome:// page or the extension gallery arrives with the field
+     * missing altogether.
+     */
+    url?: string | null
+    /** What is stored under the settings key; nothing — the defaults of §7.4. */
+    settings?: unknown
   } = {},
 ) {
   const alarms: Alarm[] = []
@@ -75,6 +85,7 @@ function installChrome(
   const tabs = options.tabs ?? [{ id: 7 }]
   const reply: unknown = 'reply' in options ? options.reply : { sessions: [summary(6)] }
   const frames: Record<number, unknown> = options.frames ?? { [TOP]: reply }
+  const address = options.url === undefined ? 'https://site.example/watch' : options.url
   let failure: Error | null = null
   let badgeFailure: Error | null = null
 
@@ -103,7 +114,14 @@ function installChrome(
         badgeText.push(arg)
       },
     },
+    storage: {
+      local: {
+        get: async (key: string) =>
+          options.settings === undefined ? {} : { [key]: options.settings },
+      },
+    },
     tabs: {
+      get: async (id: number) => ({ id, ...(address === null ? {} : { url: address }) }),
       query: async (info: QueryInfo = {}) => [
         ...(info.currentWindow ? [] : [OTHER_WINDOW_TAB]),
         ...(info.active ? [] : [BACKGROUND_TAB]),
@@ -512,6 +530,56 @@ describe('recounting the badge', () => {
 
     await chrome.fire()
 
+    expect(chrome.badgeText).toEqual([{ tabId: 7, text: '' }])
+  })
+
+  it('says the recording is off on a host the user denied', async () => {
+    const chrome = installChrome({ settings: { recording: { deny: ['site.example'] } } })
+    await importWorker()
+
+    await chrome.fire()
+
+    // §9.1 asks for this, and it is not decoration: over a denied host an empty badge and a badge
+    // over a page with no video on it look exactly the same, and the first of them is a decision
+    // the user made and can unmake.
+    expect(chrome.badgeText).toEqual([{ tabId: 7, text: 'off' }])
+  })
+
+  it('says it is off with the mode set to Off, over a tab that is holding something', async () => {
+    const chrome = installChrome({ settings: { recording: { mode: 'off' } } })
+    await importWorker()
+
+    await chrome.fire()
+
+    // The frame answers six seconds — a page loaded before the switch was thrown still holds what
+    // it gathered, because switching recording off is not an erasure (§7.2). What the badge says
+    // is about the switch, and the popup is where the six seconds are still offered.
+    expect(chrome.badgeText).toEqual([{ tabId: 7, text: 'off' }])
+  })
+
+  it('badges the length on a host the allow list names', async () => {
+    const chrome = installChrome({
+      settings: { recording: { mode: 'allowlist', allow: ['site.example'] } },
+    })
+    await importWorker()
+
+    await chrome.fire()
+
+    // The address of the tab and not a constant: under `Only on these sites` these very settings
+    // answer `off` for every host but this one.
+    expect(chrome.badgeText).toEqual([{ tabId: 7, text: '6s' }])
+  })
+
+  it('leaves the badge empty on a tab whose address it cannot read', async () => {
+    const chrome = installChrome({ url: null, reply: { sessions: [] } })
+    await importWorker()
+
+    await chrome.fire()
+
+    // chrome://, the extension gallery, a tab older than the installation: Chrome gives no url
+    // for them at all, and `siteAllows` refuses an address it cannot read. `off` here would say
+    // the user had switched something off, and what is the matter is that there is nothing here
+    // to switch off.
     expect(chrome.badgeText).toEqual([{ tabId: 7, text: '' }])
   })
 

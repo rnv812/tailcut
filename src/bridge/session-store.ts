@@ -9,6 +9,7 @@ import {
 } from '../core/container'
 import { SegmentStream } from '../core/stream'
 import { PtsMap } from '../core/timeline/map'
+import { victimsFor } from '../core/history/value'
 import { durationToken, normalizeUrl, sessionKey } from '../core/session-key'
 import {
   cutPlain,
@@ -1624,29 +1625,87 @@ export class SessionStore {
     }
   }
 
-  evictAll(windowSeconds: number, currentTime: number): void {
+  /**
+   * Trims every session to the buffer length (§7.3).
+   *
+   * The position each session is measured from is the newest end of its own material, unless a
+   * caller states one. Three reasons, and none of them is an approximation. The playhead is known
+   * to the watcher and not here, and carrying it over would be a number per element twice a
+   * second. A jump backwards past the window is a re-request (§6.3) — the player downloads the
+   * stretch again and the segments land back on the map — so the case this would protect against
+   * heals itself. And a session that nothing arrives in stays exactly a buffer long instead of
+   * melting away three minutes after the page was paused, which is what a wall clock would do to
+   * it.
+   */
+  trimToBuffer(windowSeconds: number, at?: number): void {
     for (const session of this.sessions.values()) {
-      for (const track of session.tracks) track.map.evict(windowSeconds, currentTime)
-    }
+      let newest = at ?? 0
+      if (at === undefined) {
+        for (const track of session.tracks) newest = Math.max(newest, track.map.span()?.end ?? 0)
+        for (const span of session.plain?.buffered ?? []) newest = Math.max(newest, span.end)
+      }
 
-    // The same rule over the other kind of material: what lies further back than the buffer
-    // reaches is no longer on offer. There is nothing to free by it — a plain session holds an
-    // index and not the material — so what it does is keep the promise the same on both kinds:
-    // the popup offers as far back as the setting says and no further, whichever way the video
-    // arrived. A captured map drops whole segments because a segment is what it holds; here the
-    // unit is a sample, so the stretch is cut at the line rather than at the segment before it.
-    for (const state of this.plainSources.values()) {
-      const floor = currentTime - windowSeconds
-      if (floor > state.floor) state.floor = floor
-      state.buffered = clampSpans(state.buffered, state.floor)
+      for (const track of session.tracks) track.map.evict(windowSeconds, newest)
 
-      // Written onto the session rather than left to syncPlain, because eviction reaches a frozen
-      // session too. A rejection stops a recording growing (§5.5); it does not exempt what has
-      // already been gathered from the buffer length, and the captured maps next door are evicted
-      // frozen or not.
-      const session = this.sessions.get(state.key)
-      if (session?.plain) session.plain.buffered = state.buffered
+      // The same rule over the other kind of material: what lies further back than the buffer
+      // reaches is no longer on offer. There is nothing to free by it — a plain session holds an
+      // index and not the material — so what it does is keep the promise the same on both kinds:
+      // the popup offers as far back as the setting says and no further, whichever way the video
+      // arrived. A captured map drops whole segments because a segment is what it holds; here the
+      // unit is a sample, so the stretch is cut at the line rather than at the segment before it.
+      //
+      // Written onto the session as well as onto the source, because eviction reaches a frozen
+      // session too: a rejection stops a recording growing (§5.5), and it does not exempt what
+      // was already gathered from the buffer length. Reached through the session rather than by
+      // walking the sources, because the position is the session's own end — a file feeding no
+      // session has no end of its own to be measured from, and a rejection the session has not
+      // outgrown takes it out of the registry altogether (see syncPlain).
+      const floor = newest - windowSeconds
+      const state = [...this.plainSources.values()].find((one) => one.key === session.key)
+      if (state) {
+        if (floor > state.floor) state.floor = floor
+        state.buffered = clampSpans(state.buffered, state.floor)
+        if (session.plain) session.plain.buffered = state.buffered
+      }
     }
+  }
+
+  /** Weight of everything this frame is holding in memory, across every session. */
+  heldBytes(): number {
+    let bytes = 0
+    for (const session of this.sessions.values()) {
+      for (const track of session.tracks) bytes += track.map.totalBytes()
+    }
+    return bytes
+  }
+
+  /**
+   * Drops whole sessions, cheapest first, until what is held fits under the ceiling (§7.2).
+   *
+   * Whole sessions and not the oldest runs of each: the runs are already trimmed to the buffer
+   * length, and taking more off every session would break the promise of the setting evenly
+   * across all of them instead of keeping it for the ones worth keeping.
+   *
+   * Nothing here knows about pins, and that is not an oversight: a pin is about the history on
+   * disk, which this ceiling has nothing to do with. What is pinned is on the disk and outlives
+   * the frame either way.
+   */
+  dropOverCeiling(ceilingBytes: number, now: number): void {
+    const over = this.heldBytes() - ceilingBytes
+    if (over <= 0) return
+
+    const held = [...this.sessions.values()].map((session) => ({
+      id: session.key,
+      pinned: false,
+      usedAt: 0,
+      lastSeenAt: session.lastSeenAt,
+      seconds: session.tracks[0]?.map.duration() ?? 0,
+      sound: session.tracks.some((track) => track.kinds.includes('audio')),
+      widthPx: session.widthPx,
+      bytes: session.tracks.reduce((total, track) => total + track.map.totalBytes(), 0),
+    }))
+
+    for (const victim of victimsFor(held, now, over)) this.sessions.delete(victim.id)
   }
 
   /**

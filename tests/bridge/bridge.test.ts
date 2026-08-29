@@ -2256,6 +2256,32 @@ describe('the recording switch of §9.4', () => {
     expect(after[0]!.duration).toBe(before.duration)
   })
 
+  it('keeps recording into memory when the history to disk is switched off', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+    const before = win.list()[0]!
+
+    await win.settings((current) => ({
+      ...current,
+      history: { ...current.history, toDisk: false },
+    }))
+
+    win.append(seg2Bytes)
+
+    // `Save recordings to disk` is about the disk and about nothing else. What the frame is
+    // holding stays where it is, what arrives after the switch is still taken in, and the hook is
+    // not told to stop copying — the buffer of §7.2 is the popup's to offer whether or not any of
+    // it outlives the tab. What does go is the batch the writer had gathered and not yet written,
+    // which is the one thing that would otherwise become a file created after the user said no
+    // (see HistoryWriter.setEnabled).
+    const after = win.list()
+    expect(after).toHaveLength(1)
+    expect(after[0]!.bytes).toBeGreaterThan(before.bytes)
+    expect(win.switches(), 'the hook was told to stop copying').toEqual([true])
+  })
+
   it('answers again when the page walks to a forbidden address without a navigation', async () => {
     const win = await loadBridge(REFERRER, denying('other.example'))
     win.context()

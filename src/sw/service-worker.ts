@@ -8,6 +8,8 @@ import {
 } from '../shared/history-db'
 import { clearStorage } from '../shared/history-opfs'
 import { isExtensionToWorker, isTabToExtension } from '../shared/protocol'
+import { siteAllows } from '../shared/settings'
+import { readSettings } from '../shared/settings-store'
 import {
   ORPHAN_GRACE_MS,
   SWEEP_ALARM,
@@ -95,24 +97,38 @@ function remember(tabId: number, sessions: readonly FramedSession[]): void {
 }
 
 /**
- * Asks the tab what it has gathered and gives back the freshest session's length as a caption.
+ * The badge of one tab: how many seconds are on offer, or that nothing is being recorded here.
  *
- * Not every frame of it, as the popup asks: those the tab has named, and the main one. The badge
- * is the only sign that anything is being recorded at all, and on a page carrying an embedded
- * player the recording lives in the frame of the embed — that frame says so, and it is asked.
+ * §9.1 asks for both, and the second is not decoration: with the mode set to `Off`, or this host
+ * on the deny list, an empty badge and a badge over a page with no video on it look exactly the
+ * same — and the first of them is a decision the user made and can unmake, while the second is
+ * a page with nothing on it.
+ *
+ * The length is asked of the frames the tab has named and of the main one, and not of every frame
+ * as the popup asks: on a page carrying an embedded player the recording lives in the frame of
+ * the embed — that frame says so, and it is asked.
  */
 async function badgeTextFor(tabId: number): Promise<string> {
   try {
+    const [settings, tab] = await Promise.all([readSettings(), chrome.tabs.get(tabId)])
+    // An address only where there is one. A chrome:// page, the extension gallery, a tab opened
+    // before this extension was installed: `<all_urls>` does not cover them and Chrome hands back
+    // a tab with no url at all. `off` there would say the user had switched something off, and
+    // what is actually the matter is that there is nothing here to switch off — which is what an
+    // empty badge says, and what such a tab gets from the count below anyway.
+    if (tab.url && !siteAllows(settings, tab.url)) return 'off'
+
     const answer = await listTabSessions(tabId, framesToAsk(tabId))
     remember(tabId, answer.sessions)
     return formatBadge(answer.sessions[0]?.duration ?? 0)
   } catch {
-    // Every step below has a catch of its own, so nothing reaches this today — and that is a
-    // property of the code down there rather than a promise this one can make. Here is the last
-    // place a failure can be answered: a service worker has nobody to hand a rejection to, and an
-    // unhandled one goes into the extension's error list and wakes the worker to put it there.
-    // Nothing is known about the tab after a failure, and an empty badge is what nothing looks
-    // like.
+    // Reached from two places now, where before there was none: `chrome.tabs.get` refuses over a
+    // tab that closed while the poll was running, and everything under `listTabSessions` catches
+    // its own failures. `readSettings` is not one of them — it answers the defaults rather than
+    // throwing. This is the last place a failure can be answered: a service worker has nobody to
+    // hand a rejection to, and an unhandled one goes into the extension's error list and wakes
+    // the worker to put it there. Nothing is known about the tab after a failure, and an empty
+    // badge is what nothing looks like.
     return ''
   }
 }

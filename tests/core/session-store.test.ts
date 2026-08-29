@@ -10,6 +10,7 @@ import {
   type SessionRekeyed,
 } from '../../src/bridge/session-store'
 import { sessionKey } from '../../src/core/session-key'
+import { WIDTH_CAP_PX } from '../../src/core/history/value'
 import { parseInit } from '../../src/core/iso/init'
 import { parseFragment } from '../../src/core/iso/fragment'
 import type { MuxTrack } from '../../src/core/mux'
@@ -1141,7 +1142,7 @@ describe('SessionStore: session lifetime', () => {
     expect(only(store.list()[0]!).initBytes).toEqual(init)
   })
 
-  it('trims the maps of every session in evictAll, not only of the first', () => {
+  it('trims the maps of every session in trimToBuffer, not only of the first', () => {
     const store = new SessionStore()
     const second = { ...page, sourceId: 's2', url: 'https://site.example/watch?v=b' }
 
@@ -1153,7 +1154,7 @@ describe('SessionStore: session lifetime', () => {
 
     // A window of one second around the fourth: the first fragment (0–2) is out, the second
     // (2–4) is not.
-    store.evictAll(1, 4)
+    store.trimToBuffer(1, 4)
 
     expect(store.list().map((s) => only(s).map.span())).toEqual([
       { start: 2, end: 4 },
@@ -1161,7 +1162,7 @@ describe('SessionStore: session lifetime', () => {
     ])
   })
 
-  it('trims every track of a session in evictAll, not only the first', () => {
+  it('trims every track of a session in trimToBuffer, not only the first', () => {
     const store = new SessionStore()
     store.append({ ...page, bytes: init })
     store.append({ ...page, bufferId: 'b2', bytes: audioInit })
@@ -1170,7 +1171,7 @@ describe('SessionStore: session lifetime', () => {
 
     // The recording window is a property of the session and not of one of its tracks: trim the
     // video alone and the sound of the discarded part would stay in memory for good.
-    store.evictAll(1, 4)
+    store.trimToBuffer(1, 4)
 
     expect(store.list()[0]!.tracks.map((t) => t.map.span())).toEqual([null, null])
   })
@@ -2766,5 +2767,137 @@ describe('SessionStore: intake switched off and on', () => {
 
     expect(chunksOf(store)).toEqual(chunksOf(control))
     expect(chunksOf(store), 'setup: the whole segment makes exactly one chunk').toHaveLength(1)
+  })
+})
+
+describe('trimming and the memory ceiling', () => {
+  /** A session of `segments` two-second pieces, from zero: a long watch without a long fixture. */
+  const watch = (store: SessionStore, where: { sourceId: string; url: string }, segments: number) => {
+    const at = { ...page, ...where }
+    store.append({ ...at, bytes: sdInit })
+    for (let i = 0; i < segments; i++) {
+      store.append({ ...at, bytes: moof(1, i * 2_000, 1, 2_000) })
+    }
+    return store.list().find((session) => session.url === where.url)!
+  }
+
+  const held = (store: SessionStore, session: Session) =>
+    store.get(session.key)!.tracks[0]!.map.duration()
+
+  it('keeps the buffer length around the newest material of each session', () => {
+    const store = new SessionStore()
+    const a = watch(store, { sourceId: 's1', url: 'https://a.example/x' }, 60) // 0…120 s
+    const b = watch(store, { sourceId: 's2', url: 'https://b.example/y' }, 10) // 0…20 s
+
+    store.trimToBuffer(60)
+
+    // Each session is measured from its own end: one of them has two minutes of material and one
+    // has twenty seconds, and neither has been watched by the same clock.
+    expect(held(store, a)).toBeCloseTo(60, 1)
+    expect(held(store, b)).toBeCloseTo(20, 1)
+  })
+
+  it('does not melt a session away while nothing arrives in it', () => {
+    const store = new SessionStore()
+    const session = watch(store, { sourceId: 's1', url: 'https://a.example/x' }, 60)
+
+    store.trimToBuffer(60)
+    const after = held(store, session)
+    store.trimToBuffer(60)
+    store.trimToBuffer(60)
+
+    // Measured from the wall clock this would be empty by the first trim, never mind the third;
+    // measured from its own newest material it stays exactly a buffer long, which is what the
+    // setting promises. Both numbers are named: a trim that erodes and a trim off a wall clock
+    // are two different failures, and comparing the third trim to the first alone would leave the
+    // second of them green with nothing left at all.
+    expect(after, 'the first trim did not leave a buffer').toBeCloseTo(60, 1)
+    expect(held(store, session)).toBeCloseTo(after, 5)
+  })
+
+  it('takes an explicit position when the caller has one', () => {
+    const store = new SessionStore()
+    const session = watch(store, { sourceId: 's1', url: 'https://a.example/x' }, 60)
+
+    store.trimToBuffer(10, 30)
+
+    // The position the caller gave and not the newest end of the session: measured from its own
+    // material a ten-second window over 0…120 would begin at 110, and the number below is what
+    // tells the two apart.
+    expect(store.get(session.key)!.tracks[0]!.map.span()).toEqual({ start: 20, end: 120 })
+  })
+
+  it('drops whole sessions, cheapest first, until the frame is under the ceiling', () => {
+    const store = new SessionStore()
+    // The cheap one stands last in the alphabet and the valuable one first, so that the order
+    // below is the order of §7.3 and not the tie-break underneath it: evictionOrder falls back to
+    // the key when two sessions are worth the same, and the keys begin with these addresses.
+    const meagre = watch(store, { sourceId: 's1', url: 'https://z.example/x' }, 4)
+    const watched = watch(store, { sourceId: 's2', url: 'https://a.example/y' }, 60)
+
+    const bytes = store.heldBytes()
+    expect(bytes).toBeGreaterThan(0)
+
+    // A byte over: enough to make the cheapest go and not enough to touch the next one.
+    store.dropOverCeiling(bytes - 1, page.now)
+
+    expect(store.get(meagre.key)).toBeUndefined()
+    expect(store.get(watched.key)).toBeDefined()
+  })
+
+  it('does nothing at all while there is room', () => {
+    const store = new SessionStore()
+    const session = watch(store, { sourceId: 's1', url: 'https://a.example/x' }, 10)
+
+    store.dropOverCeiling(store.heldBytes() + 1, page.now)
+
+    expect(store.get(session.key)).toBeDefined()
+  })
+
+  it('goes on recording into a session the ceiling took, from the next segment on', () => {
+    const store = new SessionStore()
+    const at = { ...page, sourceId: 's1', url: 'https://a.example/x' }
+    const session = watch(store, at, 4)
+
+    store.dropOverCeiling(0, page.now)
+    expect(store.get(session.key), 'setup: the ceiling took nothing').toBeUndefined()
+
+    store.append({ ...at, bytes: moof(1, 8_000, 1, 2_000) })
+
+    // The ceiling frees memory; it does not switch the page off. The session opens again on the
+    // next segment, under the same key and off the header its source is still holding — what was
+    // dropped is gone, and what arrives after it is kept like anything else.
+    expect(store.get(session.key)!.tracks[0]!.map.duration()).toBeCloseTo(2, 5)
+  })
+
+  it('lets the silent session go before the one that has sound', () => {
+    const store = new SessionStore()
+    // Alphabet against value again, for the reason the check above states.
+    const silent = watch(store, { sourceId: 's1', url: 'https://z.example/x' }, 10)
+    const heard = watch(store, { sourceId: 's2', url: 'https://a.example/y' }, 10)
+    // A second buffer of that session, carrying the soundtrack: the one thing that tells the two
+    // of them apart. Sound is the difference between a video and a decoration (§7.3).
+    const sound = { ...page, sourceId: 's2', url: 'https://a.example/y', bufferId: 'b2' }
+    store.append({ ...sound, bytes: audioInit })
+    store.append({ ...sound, bytes: audioSegs[0]! })
+
+    store.dropOverCeiling(store.heldBytes() - 1, page.now)
+
+    expect(store.get(silent.key)).toBeUndefined()
+    expect(store.get(heard.key)).toBeDefined()
+  })
+
+  it('lets the session watched in a corner go before the one watched in a big player', () => {
+    const store = new SessionStore()
+    const corner = watch(store, { sourceId: 's1', url: 'https://z.example/x' }, 10)
+    const big = watch(store, { sourceId: 's2', url: 'https://a.example/y' }, 10)
+    // The width the watcher measured, carried in by tc:player (Task 5). Everything else about
+    // these two is the same, so this is the whole of what decides.
+    store.sawPlayer('s2', WIDTH_CAP_PX)
+
+    store.dropOverCeiling(store.heldBytes() - 1, page.now)
+
+    expect(store.get(corner.key)).toBeUndefined()
+    expect(store.get(big.key)).toBeDefined()
   })
 })

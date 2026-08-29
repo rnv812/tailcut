@@ -462,7 +462,7 @@ describe('what an ordinary file promises, and what it delivers', () => {
 
     // Two seconds of buffer around a play head at the end of the file: the same rule the captured
     // maps are evicted by, over the other kind of material.
-    page.store.evictAll(2, LENGTH)
+    page.store.trimToBuffer(2, LENGTH)
     const kept = summarize(page.store.list()[0]!).duration
 
     expect(kept).toBeLessThan(whole_)
