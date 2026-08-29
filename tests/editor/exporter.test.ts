@@ -410,6 +410,51 @@ describe('downloadIo', () => {
     }
   })
 
+  it('leaves the browser to put the file where it always puts it', async () => {
+    // The default of §9.4, and the one a queue of six clips needs: six dialogues for one press of
+    // Export is not a setting anybody leaves on. `uniquify` is what keeps the sixth from writing
+    // over the first when two clips of one page come out under one name.
+    const asked = stubDownloads(11) as unknown as Array<Record<string, unknown>>
+    await downloadIo({} as SnapshotReader).save(new Uint8Array([1]), 'Cats.mp4')
+
+    expect(asked[0]!.saveAs).toBe(false)
+    expect(asked[0]!.conflictAction).toBe('uniquify')
+  })
+
+  it('asks where every clip goes when the settings say to', async () => {
+    const asked = stubDownloads(11) as unknown as Array<Record<string, unknown>>
+    await downloadIo({} as SnapshotReader, { askWhere: true }).save(new Uint8Array([1]), 'Cats.mp4')
+
+    expect(asked[0]!.saveAs).toBe(true)
+  })
+
+  it('says a clip was written, so that a recording cut from counts as used', async () => {
+    // §7.3 puts a session the user cut from second only to what is pinned, and the editor is the
+    // only place that knows a clip came out of one. Told after the browser took the file and not
+    // before: a refused download is not a session anybody got anything out of.
+    stubDownloads(11)
+    const saved: number[] = []
+    await downloadIo({} as SnapshotReader, { onSaved: () => saved.push(1) }).save(
+      new Uint8Array([1]),
+      'Cats.mp4',
+    )
+
+    expect(saved).toHaveLength(1)
+  })
+
+  it('says nothing of a clip the browser refused', async () => {
+    stubDownloads(undefined)
+    const saved: number[] = []
+
+    await expect(
+      downloadIo({} as SnapshotReader, { onSaved: () => saved.push(1) }).save(
+        new Uint8Array([1]),
+        'Cats.mp4',
+      ),
+    ).rejects.toThrow(/refused to save/)
+    expect(saved).toEqual([])
+  })
+
   it('fails the job when the browser refuses the download', async () => {
     // Chrome answers an id of undefined and says why in lastError. A promise that resolved here
     // would leave the row reading "Saved" over a file that was never written.

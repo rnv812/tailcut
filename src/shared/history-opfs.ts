@@ -117,3 +117,39 @@ export async function clearStorage(): Promise<void> {
     await root.removeEntry(name, { recursive: true }).catch(() => undefined)
   }
 }
+
+/**
+ * Reads a range out of a file of the storage, by path.
+ *
+ * The `File` is kept per path, and that is sound for one reason worth stating: a piece is written
+ * once and never revised (see sync-write.ts), so a Blob over it stays valid for as long as the
+ * file is there. It is the growing file this design does not have that would break it — a Blob
+ * over a file being written dies at the first write, answering NotReadableError on the next
+ * slice, and that is why the history grows by files rather than inside them.
+ *
+ * One re-open on failure all the same: the sweeper can take a file between two reads, and
+ * fetching the handle again is cheaper than failing an export over it.
+ */
+const opened = new Map<string, File>()
+
+export async function readRangeIn(path: string, at: number, length: number): Promise<Uint8Array> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      let file = opened.get(path)
+      if (!file) {
+        const parts = path.split('/')
+        const name = parts.pop()!
+        const dir = await directory(parts)
+        if (!dir) throw new Error(`no such directory: ${parts.join('/')}`)
+        file = await (await dir.getFileHandle(name)).getFile()
+        opened.set(path, file)
+      }
+      return new Uint8Array(await file.slice(at, at + length).arrayBuffer())
+    } catch (cause) {
+      opened.delete(path)
+      if (attempt) throw cause
+    }
+  }
+
+  throw new Error('unreachable')
+}

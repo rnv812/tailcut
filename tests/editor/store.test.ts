@@ -101,6 +101,23 @@ describe('deriveMaterial', () => {
     expect(ctx.keyframes.length).toBe(2)
   })
 
+  it('carries the name template and the host of the page into the context', () => {
+    // §9.4: the setting is read once when the tab opens and reaches the model this way and no
+    // other. The host comes with it because it has nowhere else to come from — `{host}` is one
+    // of the five fields the settings page offers, the recording knows the address it was
+    // watched at, and the reducer that names a clip knows nothing but the context.
+    const { ctx } = deriveMaterial(index, preview, '{host} {title} {in}')
+
+    expect(ctx.nameTemplate).toBe('{host} {title} {in}')
+    expect(ctx.host).toBe('site.example')
+  })
+
+  it('leaves the template out when the tab was opened without one', () => {
+    // Which is what `clipName` reads as "the name stage 2 built": title and timecode. An empty
+    // string here instead of nothing would be a template that resolves to an empty name.
+    expect(deriveMaterial(index, preview).ctx.nameTemplate).toBeUndefined()
+  })
+
   it('takes the runs and the zones from the picture, which is the lane the cut follows', () => {
     // Both come from the whole recording (§ EditContext) and both are read off one lane, so a
     // derivation that reached for the audio lane — or for whichever lane came first — would put

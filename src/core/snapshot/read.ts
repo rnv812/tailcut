@@ -46,6 +46,18 @@ export class SnapshotReader {
     }
   }
 
+  /**
+   * A reader over an index that is already in hand.
+   *
+   * The history has no snapshot file: its index is built out of the rows (see
+   * src/core/history/index.ts) and its material lies in the pieces on disk, so there is no footer
+   * to parse and no checksum to check — there is nothing that could have been half-written, the
+   * rows and the pieces having been reconciled at start-up.
+   */
+  static over(read: ReadRange, index: SnapshotIndex): SnapshotReader {
+    return new SnapshotReader(read, index)
+  }
+
   bytesOf(loc: Located): Promise<Uint8Array> {
     return this.read(loc.at, loc.length)
   }

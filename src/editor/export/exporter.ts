@@ -95,12 +95,28 @@ export function requestsFor(source: ClipSource, clips: readonly Clip[]): ExportR
   }))
 }
 
+/** What the settings and the recording have to say about where a clip goes. */
+export interface SaveOptions {
+  /** §9.4: put the browser's own Save dialogue up for every clip. */
+  askWhere?: boolean
+  /**
+   * Called once the browser has taken a file, and not before.
+   *
+   * A recording that was cut from is a recording the user chose (§7.3), and the editor is the
+   * only place that knows a clip came out of one. A refusal is not a choice, so this is not
+   * called on the path that rejects.
+   */
+  onSaved?: () => void
+}
+
 /** The snapshot for reading and Chrome for writing: the only two places the editor touches. */
-export function downloadIo(reader: SnapshotReader): ExportIo {
+export function downloadIo(reader: SnapshotReader, options: SaveOptions = {}): ExportIo {
+  const askWhere = options.askWhere ?? false
+
   return {
     read: (at) => reader.bytesOf(at),
 
-    save: (file, fileName) =>
+    save: (file, name) =>
       new Promise((resolve, reject) => {
         // A Blob takes a view over a plain ArrayBuffer; the writer allocates its own, and it is
         // never shared.
@@ -108,15 +124,29 @@ export function downloadIo(reader: SnapshotReader): ExportIo {
           new Blob([file as Uint8Array<ArrayBuffer>], { type: 'video/mp4' }),
         )
 
-        chrome.downloads.download({ url, filename: fileName }, (id) => {
-          const failed = id === undefined
-          // The failure has to be read, or Chrome writes about it to the console itself.
-          if (failed) void chrome.runtime.lastError
+        chrome.downloads.download(
+          {
+            url,
+            filename: name,
+            conflictAction: 'uniquify',
+            // §9.4: ask where each clip goes. Off by default — a queue of six clips would be six
+            // dialogues — and worth having for the person who files as they cut.
+            saveAs: askWhere,
+          },
+          (id) => {
+            const failed = id === undefined
+            // The failure has to be read, or Chrome writes about it to the console itself.
+            if (failed) void chrome.runtime.lastError
 
-          setTimeout(() => URL.revokeObjectURL(url), failed ? 0 : REVOKE_DELAY_MS)
-          if (failed) reject(new Error('The browser refused to save the file.'))
-          else resolve()
-        })
+            setTimeout(() => URL.revokeObjectURL(url), failed ? 0 : REVOKE_DELAY_MS)
+            if (failed) {
+              reject(new Error('The browser refused to save the file.'))
+              return
+            }
+            options.onSaved?.()
+            resolve()
+          },
+        )
       }),
   }
 }

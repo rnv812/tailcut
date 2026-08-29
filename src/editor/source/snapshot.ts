@@ -1,7 +1,9 @@
 import { isSnapshotId } from '../../shared/protocol'
+import { historyIndexOf } from '../../core/history/index'
+import { piecesOf, sessionById, setUsed } from '../../shared/history-db'
 import { materialOf, type Material } from '../../core/snapshot/material'
 import { SnapshotReader } from '../../core/snapshot/read'
-import { openSnapshotFile } from './opfs'
+import { openHistoryStores, openSnapshotFile } from './opfs'
 
 /**
  * Why the editor has nothing to show. Four distinct answers, because they ask four different
@@ -15,7 +17,14 @@ export type LoadedSnapshot =
   | { ok: false; reason: SnapshotFailure }
 
 export async function loadSnapshot(search: string): Promise<LoadedSnapshot> {
-  const id = new URLSearchParams(search).get('s') ?? ''
+  const params = new URLSearchParams(search)
+
+  // Two doors, and the address says which. `h` is a recording of the history, read out of the
+  // index and the pieces on disk; `s` is a snapshot file written by the freeze of a page.
+  const history = params.get('h')
+  if (history) return loadHistory(history)
+
+  const id = params.get('s') ?? ''
   // The identifier goes straight into a file name, so only the shape the extension itself mints
   // is accepted: a typed address is not a way into the rest of the storage.
   if (!isSnapshotId(id)) return { ok: false, reason: 'no-id' }
@@ -30,6 +39,35 @@ export async function loadSnapshot(search: string): Promise<LoadedSnapshot> {
 
   const material = materialOf(reader.index)
   if (!material.video && !material.audio) return { ok: false, reason: 'empty' }
+
+  return { ok: true, reader, material }
+}
+
+async function loadHistory(id: string): Promise<LoadedSnapshot> {
+  // The identifier travels through the address bar and from there into a path, so only the shape
+  // the extension itself mints is accepted.
+  if (!isSnapshotId(id)) return { ok: false, reason: 'no-id' }
+
+  const session = await sessionById(id).catch(() => undefined)
+  // Swept out under an address the user had open, or an index that would not open at all.
+  if (!session || session.deletedAt) return { ok: false, reason: 'missing' }
+
+  const pieces = await piecesOf(id).catch(() => [])
+  const composed = historyIndexOf(session, pieces, {
+    capturedAt: Date.now(),
+    producer: `tailcut ${chrome.runtime.getManifest().version}`,
+  })
+  if (!composed.index.tracks.length) return { ok: false, reason: 'empty' }
+
+  const reader = SnapshotReader.over(openHistoryStores(composed.stores), composed.index)
+  const material = materialOf(reader.index)
+  if (!material.video && !material.audio) return { ok: false, reason: 'empty' }
+
+  // Opening the editor over a recording is the user saying "this one" out loud, and §7.3 puts
+  // such a session second only to what is pinned. It is also what keeps the sweeper from taking
+  // the material out from under an editing session — not a lock, and said as such in the closing
+  // section of the plan.
+  void setUsed(id, Date.now()).catch(() => undefined)
 
   return { ok: true, reader, material }
 }

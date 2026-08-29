@@ -1,3 +1,5 @@
+import { readRangeIn } from '../../shared/history-opfs'
+import { composeStores, type StoreFile } from '../../core/snapshot/stores'
 import { SNAPSHOT_DIR, snapshotFileName } from '../../shared/protocol'
 import type { ReadRange } from '../../core/snapshot/read'
 
@@ -34,4 +36,15 @@ export async function openSnapshotFile(id: string): Promise<OpenFile | null> {
   } catch {
     return null
   }
+}
+
+/**
+ * Opens the pieces of a history session as one run of bytes.
+ *
+ * No snapshot file is written for this: the index was built out of the rows, and the material
+ * stays exactly where the recording left it. What the editor gets is the same `ReadRange` a
+ * snapshot gives it, over an address space made of files (src/core/snapshot/stores.ts).
+ */
+export function openHistoryStores(stores: readonly StoreFile[]): ReadRange {
+  return composeStores(stores, (path, at, length) => readRangeIn(path, at, length))
 }

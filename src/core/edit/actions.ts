@@ -83,7 +83,14 @@ function startClip(project: Project, edge: 'in' | 'out', ctx: EditContext): Proj
 
   const draft: Clip = {
     id: `c${project.doc.nextId}`,
-    name: clipName({ title: ctx.title, at: start, taken: project.doc.clips.map((clip) => clip.name) }),
+    name: clipName({
+      title: ctx.title,
+      at: start,
+      to: end,
+      host: ctx.host,
+      template: ctx.nameTemplate,
+      taken: project.doc.clips.map((clip) => clip.name),
+    }),
     in: start,
     out: end,
     representation: zoneAt(ctx, start)?.representation ?? '',
@@ -114,7 +121,14 @@ function splitClip(project: Project, ctx: EditContext): Project {
     {
       ...clip,
       id: `c${project.doc.nextId}`,
-      name: clipName({ title: ctx.title, at, taken: project.doc.clips.map((candidate) => candidate.name) }),
+      name: clipName({
+        title: ctx.title,
+        at,
+        to: clip.out,
+        host: ctx.host,
+        template: ctx.nameTemplate,
+        taken: project.doc.clips.map((candidate) => candidate.name),
+      }),
       in: at,
     },
     ctx,

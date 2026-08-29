@@ -268,6 +268,31 @@ export async function clickEdit(
   return { editor, snapshotId: snapshotId! }
 }
 
+/**
+ * One clip out of whatever the editor has open, and the file it landed in.
+ *
+ * The shortest path from material to a saved file: a mark in, a mark out a couple of seconds
+ * later, Export. Written once because three sets walk it — the editor over the history, the
+ * journey through a restart, and the sweep — and three copies of it would part company on the
+ * first renamed button.
+ */
+export async function exportFirstClip(editor: Page): Promise<string> {
+  await editor.waitForFunction(() => (document.querySelector('video')?.readyState ?? 0) >= 2)
+
+  await typeInto(editor, 'playhead-field', '00:00:00:12')
+  await editor.keyboard.press('i')
+  await expect(editor.getByTestId('clip')).toHaveCount(1)
+  await expect(editor.getByTestId('export')).toBeEnabled()
+
+  await typeInto(editor, 'out-c1', '00:00:02:12')
+  await expect(editor.getByTestId('out-c1')).toHaveValue('00:00:02:12')
+
+  const [saved] = await collectDownloads(editor, 1, () => editor.getByTestId('export').click())
+  await expect(editor.getByTestId('job-state').first()).toHaveText('Saved')
+
+  return saved!.file
+}
+
 export interface Probed {
   format: { duration: string }
   streams: Array<{

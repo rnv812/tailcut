@@ -26,6 +26,15 @@ export interface EditorMaterial {
   snapGaps: Span[]
 }
 
+/** The site a recording was watched on, as a template writes it. An address that is not one: ''. */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host
+  } catch {
+    return ''
+  }
+}
+
 /**
  * The derived layer: what is worked out from the snapshot once, on opening, and never edited.
  *
@@ -33,7 +42,11 @@ export interface EditorMaterial {
  * into every step of the history, and a hundred steps of undo would hold a hundred copies of a
  * grid of tens of thousands of numbers.
  */
-export function deriveMaterial(index: SnapshotIndex, preview: Preview | null): EditorMaterial {
+export function deriveMaterial(
+  index: SnapshotIndex,
+  preview: Preview | null,
+  nameTemplate?: string,
+): EditorMaterial {
   const lanes = lanesOf(index.tracks)
   const picture = laneOf(lanes, 'video')
   const rows = preview ? preview.frames.frames() : []
@@ -53,6 +66,8 @@ export function deriveMaterial(index: SnapshotIndex, preview: Preview | null): E
     zones: picture?.zones ?? [],
     duration: materialSpan(lanes)?.end ?? 0,
     title: index.page.title,
+    nameTemplate,
+    host: hostOf(index.page.url),
   }
 
   return { ctx, lanes, gaps: cuttingLane(lanes)?.gaps ?? [], snapGaps: allGaps(lanes) }

@@ -1,8 +1,24 @@
 import type { Material } from '../core/snapshot/material'
 import type { SnapshotReader } from '../core/snapshot/read'
+import type { SaveOptions } from './export/exporter'
 import type { Preview } from './source/preview'
 import type { SnapshotFailure } from './source/snapshot'
 import { Workbench } from './workbench'
+
+/**
+ * What §9.4 has to say to an open editor, read once when the tab opened.
+ *
+ * It travels with the ready state rather than beside it because it is read before the workbench
+ * is shown at all: the template is part of the context every clip is named against, and a context
+ * that changed under a session would take the clips with it.
+ */
+export interface EditorOptions extends SaveOptions {
+  /** The template a new clip is named by; absent — the name stage 2 built. */
+  nameTemplate?: string
+}
+
+/** §9.4 with nothing to say: every field of it is optional, so absent and empty are one state. */
+const NO_OPTIONS: EditorOptions = {}
 
 export type EditorState =
   | { status: 'opening' }
@@ -13,6 +29,7 @@ export type EditorState =
       material: Material
       /** 'building' while the preview is being assembled; null when the snapshot has no picture. */
       preview: Preview | 'building' | null
+      options?: EditorOptions
     }
 
 /**
@@ -44,5 +61,12 @@ export function Shell({ state }: { state: EditorState }) {
     )
   }
 
-  return <Workbench reader={state.reader} material={state.material} preview={state.preview} />
+  return (
+    <Workbench
+      reader={state.reader}
+      material={state.material}
+      preview={state.preview}
+      options={state.options ?? NO_OPTIONS}
+    />
+  )
 }

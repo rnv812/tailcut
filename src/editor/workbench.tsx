@@ -14,6 +14,7 @@ import { HelpSheet } from './help'
 import { downloadIo, openClipSource, planOf, requestsFor } from './export/exporter'
 import { Clips } from './inspector/clips'
 import { ExportQueue } from './inspector/queue'
+import type { EditorOptions } from './shell'
 import { Player } from './player/player'
 import { deriveMaterial } from './source/media'
 import type { Preview } from './source/preview'
@@ -28,6 +29,8 @@ export interface WorkbenchProps {
   material: Material
   /** 'building' while the preview is being assembled; null when there is no picture. */
   preview: Preview | 'building' | null
+  /** §9.4 as the tab read it when it opened: how a clip is named and where it goes. */
+  options: EditorOptions
 }
 
 const duration = (seconds: number): string => {
@@ -70,9 +73,12 @@ function TrackLine({ track }: { track: MaterialTrack }) {
  * held here beside the store is the transport — running or not, and how fast — which lives
  * exactly as long as the finger and is deliberately outside the undo history.
  */
-export function Workbench({ reader, material, preview }: WorkbenchProps) {
+export function Workbench({ reader, material, preview, options }: WorkbenchProps) {
   const built = preview === 'building' ? null : preview
-  const derived = useMemo(() => deriveMaterial(reader.index, built), [reader, built])
+  const derived = useMemo(
+    () => deriveMaterial(reader.index, built, options.nameTemplate),
+    [reader, built, options.nameTemplate],
+  )
   // A new context is a new store: the frame grid every clip is measured against has changed, and
   // clips measured against the old one would mean something else against the new.
   const store = useMemo(
@@ -93,7 +99,7 @@ export function Workbench({ reader, material, preview }: WorkbenchProps) {
   // browser cannot be taken back, so Ctrl+Z has no business touching this.
   const [queue, setQueue] = useState<Queue>(EMPTY_QUEUE)
   const [source, setSource] = useState<ClipSource | null>(null)
-  const runner = useMemo(() => createRunner(downloadIo(reader)), [reader])
+  const runner = useMemo(() => createRunner(downloadIo(reader, options)), [reader, options])
 
   useEffect(() => runner.subscribe(setQueue), [runner])
 

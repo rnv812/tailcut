@@ -39,6 +39,18 @@ export interface EditContext {
   duration: number
   /** Title of the page: clips are named after it. */
   title: string
+  /**
+   * The user's file-name template (§9.4), read once when the tab opened; absent — the name stage
+   * 2 built out of the title and the timecode.
+   *
+   * It sits here rather than being read where a clip is named because naming happens in the
+   * reducer, which is pure and knows nothing but this context. Absent and empty are two different
+   * things: absent is a tab opened before the settings came back, empty is a field the user
+   * cleared, and `clipName` answers the second with the title alone.
+   */
+  nameTemplate?: string
+  /** Host of the page the recording came from: the `{host}` a template may ask for. */
+  host?: string
 }
 
 /** The context of an editor with nothing open yet. Total functions need a total starting point. */

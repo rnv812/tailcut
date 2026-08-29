@@ -7,9 +7,11 @@ import {
   sessionDir,
 } from '../../src/shared/history-files'
 import {
+  exportFirstClip,
   launchWithExtension,
   openExtensionPage,
   openPopupOn,
+  probeFile,
   serveLocal,
   watchOn,
 } from './helpers'
@@ -478,6 +480,70 @@ test('the popup lists what an earlier tab recorded, pins it and deletes it', asy
     // leaves this line as it was, and nothing else in the run would ever notice.
     await popup.getByTestId('pause-tab').click()
     await expect(popup.getByTestId('pause-tab')).toHaveText('Resume on this page')
+  } finally {
+    await context.close()
+  }
+})
+
+/**
+ * The whole point of keeping anything on disk: a recording of a tab that is gone opens in the
+ * editor and comes out as a file, and not one byte of it is copied on the way.
+ *
+ * Everything below the popup is new ground for a browser. The index is built out of rows in
+ * IndexedDB rather than read out of a snapshot's footer, the material is read out of the pieces
+ * the recording left in OPFS, and the frame table, the preview and the export all stand on that
+ * as if it were one file.
+ *
+ * What it does not prove is the seam: this fixture hands its material over in one burst, so one
+ * batch holds all of it and the session is a single piece — measured, and the reason the read
+ * that spans two files is checked where it can be arranged, in tests/core/stores.test.ts and in
+ * tests/editor/history-source.test.ts. Cutting the address space here down to its first file
+ * leaves this test green, and that is a true statement about this fixture rather than about
+ * `composeStores`. What only a browser can say is the rest: that OPFS gives the bytes back by
+ * path, that an index built out of rows carries a decoder through a frame table, and that what
+ * ffprobe opens at the end is video.
+ */
+test('a recording of the history opens in the editor and comes out as a file', async () => {
+  test.setTimeout(120_000)
+
+  const { context, extensionId } = await launchWithExtension()
+
+  try {
+    const page = await context.newPage()
+    await watchOn(page, 'player.html', 'https://one.test/watch', 20)
+    await page.close()
+
+    const blank = await context.newPage()
+    await serveLocal(blank, 'empty.html', 'https://two.test/empty')
+    const popup = await openPopupOn(context, blank, extensionId)
+
+    const [editor] = await Promise.all([
+      context.waitForEvent('page'),
+      popup.getByTestId('history-open').click(),
+    ])
+    await editor.waitForLoadState()
+
+    // The material is read straight out of the pieces: no snapshot file was written for this.
+    const snapshots = await editor.evaluate(async () => {
+      const root = await navigator.storage.getDirectory()
+      const names: string[] = []
+      try {
+        const dir = await root.getDirectoryHandle('snapshots')
+        for await (const [name] of dir.entries()) names.push(name)
+      } catch {
+        // No snapshots directory at all is the same answer as an empty one.
+      }
+      return names
+    })
+    expect(snapshots).toEqual([])
+
+    // The editor stood up over the pieces: the frame counter is the first thing it can only show
+    // once it has read a frame table out of the material.
+    await expect(editor.getByTestId('frame-count')).toBeVisible()
+    const file = await exportFirstClip(editor)
+    const probed = probeFile(file)
+    expect(probed.streams[0]!.codec_name).toBe('h264')
+    expect(Number(probed.format.duration)).toBeGreaterThan(1)
   } finally {
     await context.close()
   }

@@ -134,6 +134,41 @@ describe('marking', () => {
   })
 })
 
+describe('the name a clip is born with', () => {
+  /** The settings of a user who files as they cut: the site, the page, and both edges. */
+  const templated = { ...ctx, nameTemplate: '{host} {title} {in}-{out}', host: 'site.example' }
+  const named = (project: Project): string => project.doc.clips.at(-1)!.name
+
+  it('follows the template the settings gave', () => {
+    const project = reduce(newProject(1200, templated), { type: 'setIn' }, templated)
+
+    // In at nought, out at the end of the run it was begun in: the template sees both edges.
+    expect(named(project)).toBe('site.example A page about cats 00.00-00.04')
+  })
+
+  it('is the name of stage 2 when there is no template', () => {
+    // The default is a template too ('{title} {in}'), so this is the tab that was opened before
+    // the settings came back — not a user who cleared the field.
+    expect(named(reduce(newProject(1200, ctx), { type: 'setIn' }, ctx))).toBe(
+      'A page about cats 00.00',
+    )
+  })
+
+  it('follows it for the half a split makes as well', () => {
+    // The other place a clip is born. A template honoured in one and not the other would name
+    // two halves of one clip by two different rules.
+    const one = reduce(
+      reduce(newProject(1200, templated), { type: 'setIn' }, templated),
+      { type: 'seek', time: 2 },
+      templated,
+    )
+    const cut = reduce(one, { type: 'splitClip' }, templated)
+
+    expect(cut.doc.clips).toHaveLength(2)
+    expect(named(cut)).toBe('site.example A page about cats 00.02-00.04')
+  })
+})
+
 describe('clips', () => {
   const one = run([at(1), { type: 'setIn' }, at(3), { type: 'setOut' }])
 
