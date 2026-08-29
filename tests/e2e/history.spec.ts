@@ -1,5 +1,32 @@
 import { test, expect } from '@playwright/test'
+import { newWriterId, pieceName, piecePath, sessionDir } from '../../src/shared/history-files'
 import { launchWithExtension, openExtensionPage } from './helpers'
+
+/** The session every write here goes into. One directory, thrown away with the profile. */
+const SESSION = 'probe'
+
+/**
+ * Where the pieces go, built the way the extension builds them rather than spelled out here.
+ *
+ * This is the only thing that ties `src/shared/history-files.ts` to a disk. The unit set beside
+ * it compares strings to strings: it says that a sequence number is padded and that two writers
+ * of one session get different names, and it would say all of that just as happily about a name
+ * OPFS refuses to open. Literal paths on both sides of this test would have been worse than
+ * nothing — they would agree with each other while agreeing with no line of the module.
+ *
+ * So the writer is handed `piecePath` and the reader walks down the chain `sessionDir` names.
+ * `HISTORY_DIR` reaches both sides through those two and is spelled out on neither, which is the
+ * point: there is no longer a literal 'history' in this file to agree with itself.
+ */
+const probe = () => {
+  const writer = newWriterId()
+  const names = [0, 1, 2].map((seq) => pieceName(writer, seq))
+  return {
+    dirs: sessionDir(SESSION).split('/'),
+    names,
+    paths: names.map((name) => piecePath(SESSION, name)),
+  }
+}
 
 /**
  * The shape of the write, proved in a browser because there is nowhere else to prove it: OPFS and
@@ -10,10 +37,12 @@ import { launchWithExtension, openExtensionPage } from './helpers'
  * The handle is gone by the time the answer arrives, which `removeEntry` is the only honest test
  * of: while a synchronous handle is open, removal of that file fails with
  * NoModificationAllowedError, and a sweeper that could not remove anything of a live session
- * would be a silent no-op rather than a failure. And the cost stays where it was measured: 8 MiB
- * in about ten milliseconds, on a worker that is already up — the start of it and the first touch
- * of OPFS in a fresh profile cost more than the write itself and are no part of it, which is why
- * a byte goes down before anything is timed.
+ * would be a silent no-op rather than a failure. And the names are the module's own, so that the
+ * directory `HISTORY_DIR` names is the directory the writer made and the name `pieceName` gives
+ * out is a name OPFS will take.
+ *
+ * What a write costs is measured elsewhere — `tests/e2e/history-write-cost.spec.ts`, which runs
+ * alone because a measurement taken beside three other browsers cannot fail.
  */
 test('a piece is written sealed, read back whole, and leaves no lock behind', async () => {
   const { context, extensionId } = await launchWithExtension()
@@ -21,7 +50,7 @@ test('a piece is written sealed, read back whole, and leaves no lock behind', as
   try {
     const page = await openExtensionPage(context, extensionId, 'popup/popup.html')
 
-    const result = await page.evaluate(async () => {
+    const result = await page.evaluate(async (probe) => {
       const worker = new Worker(chrome.runtime.getURL('bridge/history-worker.js'))
       const answer = (request: unknown, transfer: Transferable[]) =>
         new Promise<Record<string, unknown>>((resolve) => {
@@ -30,57 +59,28 @@ test('a piece is written sealed, read back whole, and leaves no lock behind', as
         })
 
       // Eight mebibytes: the batch this extension actually writes.
-      const batch = () => {
-        const bytes = new Uint8Array(8 * 1024 * 1024)
-        for (let at = 0; at < bytes.length; at += 4093) bytes[at] = (at & 0xff) || 1
-        return bytes
-      }
-
-      // A byte first, and it is not idle: it starts the worker, makes the directory and touches
-      // OPFS for the first time in this profile. None of the three is the cost of a write, and
-      // all three land in the first measurement if they are not taken out of it — a first write
-      // costs 30–47 ms alone against the 10 of the ones after it, and 58–91 ms while the rest of
-      // the set runs beside it, where it was once seen at 880.
-      const warm = new Uint8Array([1])
-      await answer(
-        { type: 'write', id: 0, path: 'history/probe/warm.tcm', bytes: warm.buffer },
-        [warm.buffer],
-      )
-
-      const bytes = batch()
+      const bytes = new Uint8Array(8 * 1024 * 1024)
+      for (let at = 0; at < bytes.length; at += 4093) bytes[at] = (at & 0xff) || 1
       const sent = bytes.slice()
 
-      const started = performance.now()
       const first = await answer(
-        { type: 'write', id: 1, path: 'history/probe/aaaa-000000.tcm', bytes: bytes.buffer },
+        { type: 'write', id: 1, path: probe.paths[0], bytes: bytes.buffer },
         [bytes.buffer],
       )
-      let writeMs = performance.now() - started
-
-      // Two more of the same size, and the cheapest of the three is what the bound below is put
-      // on. A run of the whole set puts four browsers on this machine, and a stall in any one
-      // measurement says nothing about the shape of the write.
-      for (let n = 1; n <= 2; n++) {
-        const again = batch()
-        const at = performance.now()
-        await answer(
-          { type: 'write', id: 10 + n, path: `history/probe/again-00000${n}.tcm`, bytes: again.buffer },
-          [again.buffer],
-        )
-        writeMs = Math.min(writeMs, performance.now() - at)
-      }
 
       // A second piece beside the first: the writer comes back to the directory and not to the
       // file, and the directory has to be there already.
       const second = new Uint8Array([1, 2, 3, 4])
       const secondWritten = await answer(
-        { type: 'write', id: 2, path: 'history/probe/aaaa-000001.tcm', bytes: second.buffer },
+        { type: 'write', id: 2, path: probe.paths[1], bytes: second.buffer },
         [second.buffer],
       )
 
-      const root = await navigator.storage.getDirectory()
-      const dir = await (await root.getDirectoryHandle('history')).getDirectoryHandle('probe')
-      const file = await (await dir.getFileHandle('aaaa-000000.tcm')).getFile()
+      // Down the chain `sessionDir` names, with nothing created on the way: the directories are
+      // there only if the path the writer was given led to the same place.
+      let dir = await navigator.storage.getDirectory()
+      for (const part of probe.dirs) dir = await dir.getDirectoryHandle(part)
+      const file = await (await dir.getFileHandle(probe.names[0]!)).getFile()
       const back = new Uint8Array(await file.arrayBuffer())
 
       let same = back.byteLength === sent.byteLength
@@ -90,16 +90,15 @@ test('a piece is written sealed, read back whole, and leaves no lock behind', as
       // succeeds is the proof that the worker closed it.
       let removed = false
       try {
-        await dir.removeEntry('aaaa-000000.tcm')
+        await dir.removeEntry(probe.names[0]!)
         removed = true
       } catch (cause) {
-        removed = false
         return { failure: String(cause) }
       }
 
       worker.terminate()
-      return { first, secondWritten, size: file.size, same, removed, writeMs }
-    })
+      return { first, secondWritten, size: file.size, same, removed }
+    }, probe())
 
     expect(result.failure, 'the file could not be removed after the write').toBeUndefined()
     expect(result.first).toMatchObject({ type: 'written', id: 1, bytes: 8 * 1024 * 1024 })
@@ -107,19 +106,71 @@ test('a piece is written sealed, read back whole, and leaves no lock behind', as
     expect(result.size).toBe(8 * 1024 * 1024)
     expect(result.same, 'the bytes came back changed').toBe(true)
     expect(result.removed).toBe(true)
-    // Measured on a warm worker: 9.9–12.7 ms for this size on a free machine, 17–37 with the
-    // whole working set running beside it. The bound is ten times the worst of those, and it is
-    // not a performance assertion: it is the tripwire on a write that has stopped being one
-    // write — a handle reopened per segment, a copy of the file per batch, a read back to check.
-    //
-    // What it does not catch is a fall back to createWritable, and saying so is the point of
-    // measuring: on a file this size and freshly made, createWritable costs 16–19 ms, which is
-    // inside any bound this test could keep. Its price is paid on the second visit to a file
-    // rather than the first — reopening with keepExistingData copies what is already there into
-    // the swap, measured at 3.9, 6.3 and 9.6 ms to add the same megabyte to a file of one, two
-    // and three — and a sealed piece is never visited twice. That the pieces stay sealed is what
-    // the assertions above hold: one write per file, and no handle left behind after it.
-    expect(result.writeMs).toBeLessThan(400)
+  } finally {
+    await context.close()
+  }
+})
+
+/**
+ * Every request is answered, the impossible one included.
+ *
+ * The writer that Task 3 puts in front of this worker sends one batch at a time and waits for the
+ * answer by number, so a request that produces no answer at all does not cost one batch: it costs
+ * every batch of every session for the life of the frame, silently, on a page that goes on
+ * playing. There is no consumer yet to notice, which is exactly why it is pinned now.
+ *
+ * The hole was before the write rather than inside it. `writeSealed` catches what it can and
+ * answers, but the request is turned into a `Uint8Array` first, and the `close()` in its `finally`
+ * — the call that lets go of the lock — is outside the `try` that answers, so a throw from either
+ * left the promise rejected and the listener with nothing to post. Both now land in one catch
+ * around the whole of the work, and this is the half of it that can be provoked from outside: a
+ * length of −1 throws where the buffer is taken.
+ *
+ * The valid write afterwards is the other half of the claim. A worker that answered the refusal
+ * and then stopped taking messages would cost the frame just as much as one that never answered.
+ */
+test('a request that cannot be written is refused rather than dropped', async () => {
+  const { context, extensionId } = await launchWithExtension()
+
+  try {
+    const page = await openExtensionPage(context, extensionId, 'popup/popup.html')
+
+    const result = await page.evaluate(async (probe) => {
+      const worker = new Worker(chrome.runtime.getURL('bridge/history-worker.js'))
+
+      // Five seconds rather than the thirty of the test: silence is the defect under test, and it
+      // deserves to be reported as silence and not as a timeout with no story in it.
+      const next = (): Promise<unknown> =>
+        Promise.race([
+          new Promise<unknown>((resolve) => {
+            worker.onmessage = (event: MessageEvent) => resolve(event.data)
+          }),
+          new Promise<unknown>((resolve) => setTimeout(() => resolve('nothing came back'), 5_000)),
+        ])
+
+      const refusal = next()
+      worker.postMessage({ type: 'write', id: 7, path: probe.paths[2], bytes: -1 })
+      const refused = await refusal
+
+      const after = new Uint8Array([9])
+      const surviving = next()
+      worker.postMessage({ type: 'write', id: 8, path: probe.paths[1], bytes: after.buffer }, [
+        after.buffer,
+      ])
+      const written = await surviving
+
+      worker.terminate()
+      return { refused, written }
+    }, probe())
+
+    expect(result.refused, 'the worker took a request it could not carry out and said nothing')
+      .toMatchObject({ type: 'failed', id: 7, quota: false })
+    expect(
+      String((result.refused as { error?: unknown }).error),
+      'the refusal says nothing about what went wrong',
+    ).toMatch(/\S/)
+    expect(result.written, 'one impossible request cost the frame every batch after it')
+      .toMatchObject({ type: 'written', id: 8, bytes: 1 })
   } finally {
     await context.close()
   }

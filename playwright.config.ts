@@ -37,7 +37,7 @@ const SWEEP_ONLY = [
 ]
 
 /**
- * The measurement, and why it runs by itself.
+ * The measurements, and why they run by themselves.
  *
  * `overhead.spec.ts` prices `appendBuffer` with and without the extension and states the
  * difference in copies of a segment. Both halves of that fraction are wall-clock measurements of
@@ -48,10 +48,19 @@ const SWEEP_ONLY = [
  * copies from 1.82. The test still passed. It had stopped being able to fail: a regression of a
  * whole copy would have fitted inside the room the inflated denominator gave it.
  *
- * So it gets a project of its own with one worker, and `dependencies` puts it after everything
+ * `history-write-cost.spec.ts` is here for the same reason and had the same failure to show for
+ * it. It times one write of 8 MiB, which costs 8.9–21.9 ms with the machine to itself. Under four
+ * workers the very same write ran 16.6–37: the neighbours doubled the number and stretched its
+ * tail, and the bound had to be widened until it cleared their worst rather than the write's. It
+ * was set at 400 and named three regressions it could not see — the segmented write it was meant
+ * to catch straddled that line at 369–420 and went green in four runs out of six. Alone, eighty
+ * milliseconds is nearly four times the worst honest sample and a fifth of the cheapest
+ * segmented one.
+ *
+ * So each gets a project of its own with one worker, and `dependencies` puts them after everything
  * else rather than beside it.
  */
-const MEASURED = '**/overhead.spec.ts'
+const MEASURED = ['**/overhead.spec.ts', '**/history-write-cost.spec.ts']
 
 /**
  * Four browsers at a time on eight cores.
@@ -84,7 +93,7 @@ export default defineConfig({
     // start until one of them came free at 54 s. Declared first, that chain starts at zero and
     // the working set fills in around it: the whole run fell from 222 s to 170 s for it.
     { name: 'sweep', testMatch: SWEEP_ONLY },
-    { name: 'working', testIgnore: [...SWEEP_ONLY, MEASURED] },
+    { name: 'working', testIgnore: [...SWEEP_ONLY, ...MEASURED] },
     // Last, and alone: see MEASURED. A failure anywhere else skips it, which is the price of
     // ordering it this way and is paid on a run that is red already.
     { name: 'measured', testMatch: MEASURED, workers: 1, dependencies: ['working', 'sweep'] },
