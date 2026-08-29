@@ -71,7 +71,10 @@ test('a full disk lowers the ceiling, and the sweeper frees room by value', asyn
     // And the index still agrees with itself: the running total is the sum of the rows.
     expect(after.totals).toBe(after.rowBytes)
     expect(after.totals).toBeLessThan(before.bytes)
-    // The state the interface shows for it: said out loud, not retried in silence (§11).
+    // The mark the interface is to say "disk full" by (§11): the refusal is written down where it
+    // outlives the worker, instead of a retry every thirty seconds that nobody can see. Read out
+    // of the index because that is where it lives — the settings page and the popup will show it
+    // from there (Tasks 10 and 11).
     expect(after.full).toBe(true)
   } finally {
     await context.close()

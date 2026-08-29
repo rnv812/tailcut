@@ -2276,9 +2276,15 @@ describe('the recording switch of §9.4', () => {
     // it outlives the tab. What does go is the batch the writer had gathered and not yet written,
     // which is the one thing that would otherwise become a file created after the user said no
     // (see HistoryWriter.setEnabled).
+    //
+    // Both numbers are named, and the sum is written out rather than compared: seg2 alone weighs
+    // more than the init and seg1 together, so "heavier than before" is also what a registry
+    // wiped on the switch and refilled by the next segment would say. What tells the two apart is
+    // that the material before the switch is still in the total.
     const after = win.list()
     expect(after).toHaveLength(1)
-    expect(after[0]!.bytes).toBeGreaterThan(before.bytes)
+    expect(after[0]!.bytes).toBe(before.bytes + seg2Bytes.byteLength)
+    expect(after[0]!.duration).toBe(before.duration + 2)
     expect(win.switches(), 'the hook was told to stop copying').toEqual([true])
   })
 
@@ -2322,5 +2328,46 @@ describe('the recording switch of §9.4', () => {
     expect(win.said().filter((message) => variantOf(message) === 'tc:record')).toEqual([
       { type: 'tc:record', on: true },
     ])
+  })
+})
+
+describe('the frame keeps the buffer length and the memory ceiling on its own clock', () => {
+  it('trims to the length the settings say and drops what is over the ceiling, every tick', async () => {
+    vi.useFakeTimers()
+    const win = await loadBridge()
+    // The registry the frame built is an instance of this very class: `loadBridge` resets the
+    // module registry and imports the bridge, so an import made after it lands in the same one.
+    // Watched from the prototype, because the store itself belongs to the bridge and to nobody
+    // else — what is checked here is that the tick asks for both halves of §7.2 and with what.
+    const { SessionStore } = await import('../../src/bridge/session-store')
+    const trims = vi.spyOn(SessionStore.prototype, 'trimToBuffer')
+    const drops = vi.spyOn(SessionStore.prototype, 'dropOverCeiling')
+
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+    await win.settings((current) => ({
+      ...current,
+      recording: { ...current.recording, bufferSeconds: 30 },
+    }))
+
+    // One period of the frame's eviction clock (EVICT_INTERVAL_MS in the bridge).
+    vi.advanceTimersByTime(2_000)
+
+    // The buffer length as it stands now, and no position: the newest end of each session is the
+    // position, and the frame has no playhead to offer (see trimToBuffer).
+    expect(trims.mock.calls, 'the buffer length is not enforced anywhere else').toEqual([[30]])
+
+    // And the other half of the same tick. Nothing takes the ceiling for it, and nothing else in
+    // the frame is watching how much it holds — without this call a page opening session after
+    // session grows until the tab dies.
+    expect(drops).toHaveBeenCalledTimes(1)
+    const [ceiling, now] = drops.mock.calls[0]!
+    expect(now, 'the value of a session is ranked by the wall clock').toBe(Date.now())
+    // Room for several sessions of a default buffer, and not a number that would empty the frame
+    // every two seconds: the two lines under it are what that would look like from the outside.
+    expect(ceiling).toBeGreaterThan(128 * 1024 * 1024)
+    expect(win.list()).toHaveLength(1)
+    expect(win.list()[0]!.duration).toBe(2)
   })
 })

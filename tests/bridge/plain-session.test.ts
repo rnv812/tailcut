@@ -476,4 +476,25 @@ describe('what an ordinary file promises, and what it delivers', () => {
     await page.store.settled()
     expect(summarize(page.store.list()[0]!).duration).toBeCloseTo(kept, 5)
   })
+
+  it('measures the buffer from the end of its own material when no position is given', async () => {
+    const page = registry()
+
+    page.says()
+    page.store.promotePending(SOURCE)
+    await page.store.settled()
+    const whole_ = summarize(page.store.list()[0]!).duration
+
+    // How the frame's own tick asks for it: a buffer length and nothing else (see bridge.ts). A
+    // plain session has no captured map to take a position from, so its end has to come out of
+    // what the element says it holds — without that the position is zero, the floor is below
+    // every sample there is, and this kind of session is never trimmed at all while the other
+    // kind is. The promise of the setting is the same on both: as far back as it says, no
+    // further, whichever way the video arrived.
+    page.store.trimToBuffer(2)
+
+    const kept = summarize(page.store.list()[0]!).duration
+    expect(kept, 'the whole file was still on offer past the buffer').toBeLessThan(whole_)
+    expect(kept).toBeCloseTo(2, 0)
+  })
 })

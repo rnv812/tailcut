@@ -211,9 +211,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (isExtensionToWorker(message)) {
     if (message.type === 'tc:sweep') {
       // A refusal by the browser comes first and separately: it lowers the effective ceiling to
-      // below what is occupied, so that the sweep below has something to take, and it puts the
-      // interface into the state §11 promises for this — "disk full" said out loud rather than a
-      // retry every thirty seconds that nobody can see.
+      // below what is occupied, so that the sweep below has something to take, and it writes the
+      // refusal into the index — the one place that outlives this worker. That mark is what the
+      // settings page and the popup will say "disk full" by (§11, Tasks 10 and 11); until they
+      // read it, a refusal is recorded rather than shown, which is still not the silent retry
+      // every thirty seconds.
       void (message.full ? markStorageFull(Date.now()) : Promise.resolve())
         .then(() => sweep(liveIo()))
         .catch(() => undefined)
