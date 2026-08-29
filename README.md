@@ -40,7 +40,7 @@ npm test             # unit tests (Vitest)
 npm run e2e:fast     # the working set: run it after every change
 npm run e2e          # the whole sweep: run it once, when a task is finished
 npm run typecheck
-npm run plan:check   # every plan's code blocks still match the repository
+npm run plan:check   # every plan's blocks, code and prose, still match the repository
 ```
 
 Load `dist/` through `chrome://extensions` with developer mode on.
