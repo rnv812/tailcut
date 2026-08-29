@@ -392,8 +392,19 @@ export async function renameSession(
   return true
 }
 
-/** Sessions newest first, the deleted ones left out. */
-export async function listSessions(limit = 50): Promise<HistorySessionRow[]> {
+/**
+ * Sessions newest first, the deleted ones and the empty ones left out.
+ *
+ * `includeHidden` gives back every row there is, and exactly one caller passes it: the sweeper,
+ * which is the only thing in the program that has to see what nobody else may. A deleted row is
+ * what tells it which files to take once the undo of §9.2 has expired, and an empty one is a
+ * session whose first piece never landed — the repair reconciles those against the disk. Every
+ * other reader wants the history as the user sees it, which is what the default is.
+ */
+export async function listSessions(
+  limit = 50,
+  includeHidden = false,
+): Promise<HistorySessionRow[]> {
   const db = await openHistoryDb()
   const tx = transaction(db, [SESSIONS], 'readonly')
   const rows: HistorySessionRow[] = []
@@ -409,7 +420,7 @@ export async function listSessions(limit = 50): Promise<HistorySessionRow[]> {
       // batch and its first piece has not landed — or that piece never will, because the write
       // was refused. Listed, the popup would show a recording of nothing, and every count of the
       // sessions on disk would be off by whatever is being gathered right now.
-      if (!row.deletedAt && row.bytes > 0) rows.push(row)
+      if (includeHidden || (!row.deletedAt && row.bytes > 0)) rows.push(row)
       cursor.continue()
     }
   })

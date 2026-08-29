@@ -93,12 +93,19 @@ test('a session is opened once under its key, and a deleted one comes back to li
         await setDeleted(first, 5_000)
         const afterDelete = await listSessions()
 
+        // What the sweeper sees and nothing else does. Both kinds of row the default hides are
+        // exactly the two it works from: a session whose first piece never landed, which the
+        // repair reconciles against the disk, and a deleted one, whose files it takes once the
+        // undo of §9.2 has expired. Hidden from it, neither would ever leave the disk.
+        const empty = await openSession('two', { ...input.page, createdAt: 8_000, lastSeenAt: 8_000 })
+        const hidden = await listSessions(Number.MAX_SAFE_INTEGER, true)
+
         // Watched again before the sweeper came round. The row is still on disk, and it is this
         // session's row: opening a second one would leave the material of one video in two.
         const back = await openSession('one', { ...input.page, createdAt: 1_000, lastSeenAt: 7_000 })
         const revived = await sessionById(first)
 
-        return { first, again, beforeAnythingLanded, listed, afterDelete, back, revived }
+        return { first, again, beforeAnythingLanded, listed, afterDelete, empty, hidden, back, revived }
       },
       { page: PAGE, piece: piece('aaaaaaaa-000000.tcm', 0, 2, 1_016), track: track(VIDEO, 'aaaaaaaa-000000.tcm') },
     )
@@ -115,6 +122,10 @@ test('a session is opened once under its key, and a deleted one comes back to li
     expect(got.listed[0]!.title).toBe(PAGE.title)
 
     expect(got.afterDelete, 'a deleted session was listed').toEqual([])
+    expect(
+      got.hidden.map((row) => row.id).sort(),
+      'the sweeper is shown the same list as the popup: nothing it could take',
+    ).toEqual([got.empty, got.first].sort())
     expect(got.back).toBe(got.first)
     expect(got.revived!.deletedAt, 'watching it again left it deleted').toBe(0)
   })
