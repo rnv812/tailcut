@@ -166,6 +166,51 @@ describe('clipName', () => {
     expect(clipName({ title: '   ', at: 0, taken: [] })).toBe('Clip 00.00')
   })
 
+  it('follows the template when there is one', () => {
+    expect(
+      clipName({
+        title: 'Cats',
+        at: 83,
+        to: 90,
+        host: 'site.example',
+        taken: [],
+        template: '{host} {title} {in}-{out}',
+      }),
+    ).toBe('site.example Cats 01.23-01.30')
+  })
+
+  it('has an out and a host for the template even when the caller gave neither', () => {
+    const name = clipName({ title: 'Cats', at: 83, taken: [], template: '{title} {in}-{out} {host}' })
+
+    expect(name).toBe('Cats 01.23-01.23')
+  })
+
+  it('numbers a repeat of a templated name the same way', () => {
+    expect(clipName({ title: 'Cats', at: 83, taken: ['Cats'], template: '{title}' })).toBe('Cats (2)')
+  })
+
+  it('falls back to the name of stage 2 when the template says nothing', () => {
+    // A field the user cleared, or typed three spaces into, gives a name made of the title —
+    // not an empty one, and not a file called "tailcut".
+    expect(clipName({ title: 'Cats', at: 83, taken: [], template: '   ' })).toBe('Cats')
+  })
+
+  it('shortens a title inside a template exactly as it does without one', () => {
+    // The very name the test above expects without a template: a template chooses the shape of a
+    // name, not how much of a page title a file name may carry.
+    const title = 'Cats of the internet and their extraordinary adventures'
+
+    expect(clipName({ title, at: 0, taken: [], template: '{title} {in}' })).toBe(
+      'Cats of the internet and their 00.00',
+    )
+  })
+
+  it('dates a clip by the day and not by the month', () => {
+    expect(clipName({ title: 'Cats', at: 0, taken: [], template: '{date}' })).toMatch(
+      /^\d{4}-\d{2}-\d{2}$/,
+    )
+  })
+
   it('stamps hours only when there are hours', () => {
     expect(stamp(0)).toBe('00.00')
     expect(stamp(3723)).toBe('01.02.03')

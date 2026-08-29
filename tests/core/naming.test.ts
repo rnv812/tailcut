@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import {
   MAX_NAME_BYTES,
+  applyTemplate,
   fileNameOf,
   sanitizeFileName,
   uniqueNames,
+  type NameFields,
 } from '../../src/core/export/naming'
 import type { Clip } from '../../src/core/edit/clip'
 
@@ -101,5 +103,50 @@ describe('uniqueNames', () => {
   it('leaves names that differ alone', () => {
     const names = ['one.mp4', 'two.mp4']
     expect(uniqueNames(names)).toEqual(names)
+  })
+})
+
+describe('applyTemplate', () => {
+  const fields: NameFields = {
+    title: 'Cats',
+    in: '01.23',
+    out: '01.30',
+    date: '2026-08-29',
+    host: 'site.example',
+  }
+
+  it('puts every field it knows into the name', () => {
+    expect(applyTemplate('{title} {in}-{out} {date} {host}', fields)).toBe(
+      'Cats 01.23-01.30 2026-08-29 site.example',
+    )
+  })
+
+  it('leaves a field it does not know exactly as it was typed', () => {
+    // The user meant those characters. Deleting a word out of the middle of a file name is worse
+    // than a name with {oops} in it, which explains itself the moment it is read.
+    expect(applyTemplate('{title} {oops}', fields)).toBe('Cats {oops}')
+  })
+
+  it('substitutes and nothing more: a template is not a language', () => {
+    // Every feature beyond {field} is another way for a sentence someone typed to become an
+    // error message, so a brace around a brace is a brace, and a pipe is four characters.
+    expect(applyTemplate('{{title}}', fields)).toBe('{Cats}')
+    expect(applyTemplate('{title|upper}', fields)).toBe('{title|upper}')
+  })
+
+  it('gives nothing back for a template that holds nothing', () => {
+    // The emptiness is the answer: it is what tells the caller to fall back on a name of its own.
+    expect(applyTemplate('', fields)).toBe('')
+    expect(applyTemplate('   ', fields)).toBe('')
+  })
+
+  it('closes the gap a field that came out empty would leave', () => {
+    // A page with no host is not a page whose name begins with two spaces.
+    expect(applyTemplate('{title} {host} {in}', { ...fields, host: '' })).toBe('Cats 01.23')
+  })
+
+  it('makes no path out of a slash: the name still goes through the cleaning', () => {
+    // The template is typed by hand, and a slash in it is a directory to Chrome.
+    expect(sanitizeFileName(applyTemplate('{host}/{title}', fields))).toBe('site.example Cats')
   })
 })

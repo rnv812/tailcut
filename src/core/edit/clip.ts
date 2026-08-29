@@ -1,3 +1,4 @@
+import { applyTemplate } from '../export/naming'
 import { boundaryIndexAt, quantize, shiftBy } from '../timeline/grid'
 import type { Zone } from '../timeline/lanes'
 import type { EditContext } from './context'
@@ -145,8 +146,26 @@ function shortTitle(title: string): string {
 }
 
 /** The name a new clip is born with: the page it came from and when it starts. */
-export function clipName(input: { title: string; at: number; taken: Iterable<string> }): string {
-  const base = `${shortTitle(input.title)} ${stamp(input.at)}`
+export function clipName(input: {
+  title: string
+  at: number
+  taken: Iterable<string>
+  /** The user's template (§9.4); absent — the name stage 2 built, title and timecode. */
+  template?: string
+  /** The end of the clip and where it was watched: fields a template may ask for. */
+  to?: number
+  host?: string
+}): string {
+  const base = input.template
+    ? applyTemplate(input.template, {
+        title: shortTitle(input.title),
+        in: stamp(input.at),
+        out: stamp(input.to ?? input.at),
+        date: new Date().toISOString().slice(0, 10),
+        host: input.host ?? '',
+      }) || shortTitle(input.title)
+    : `${shortTitle(input.title)} ${stamp(input.at)}`
+
   const taken = new Set(input.taken)
   if (!taken.has(base)) return base
 

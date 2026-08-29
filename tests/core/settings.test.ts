@@ -1,0 +1,191 @@
+import { describe, it, expect } from 'vitest'
+import { BALANCED, LOOSE, STRICT } from '../../src/core/triage'
+import {
+  DEFAULTS,
+  LIMITS,
+  merge,
+  presetOf,
+  presetNamed,
+  siteAllows,
+  type Settings,
+} from '../../src/shared/settings'
+
+describe('DEFAULTS', () => {
+  it('is §7.4, word for word', () => {
+    expect(DEFAULTS.recording.bufferSeconds).toBe(180)
+    expect(DEFAULTS.recording.mode).toBe('all')
+    expect(DEFAULTS.history.toDisk).toBe(true)
+    expect(DEFAULTS.history.keepDays).toBe(7)
+    expect(DEFAULTS.history.ceilingBytes).toBe(4 * 1024 ** 3)
+    expect(DEFAULTS.detection).toEqual(BALANCED)
+    expect(DEFAULTS.export.format).toBe('mp4')
+    expect(DEFAULTS.export.codec).toBe('hevc')
+    expect(DEFAULTS.export.rewriteHead).toBe(false)
+  })
+
+  it('is not shared with what it is merged into', () => {
+    const merged = merge({})
+    merged.recording.deny.push('example.com')
+    expect(DEFAULTS.recording.deny).toEqual([])
+  })
+})
+
+describe('merge', () => {
+  it('gives the defaults for anything that is not there', () => {
+    expect(merge(undefined)).toEqual(DEFAULTS)
+    expect(merge(null)).toEqual(DEFAULTS)
+    expect(merge('settings')).toEqual(DEFAULTS)
+    expect(merge({ recording: { bufferSeconds: 60 } }).recording.mode).toBe('all')
+  })
+
+  it('keeps what was stored', () => {
+    const stored = merge({ recording: { bufferSeconds: 60, deny: ['a.example'] } })
+    expect(stored.recording.bufferSeconds).toBe(60)
+    expect(stored.recording.deny).toEqual(['a.example'])
+  })
+
+  it('throws away what it does not know: a build of tomorrow wrote it, or a page did', () => {
+    const merged = merge({ recording: { bufferSeconds: 60, colour: 'red' }, nonsense: 1 })
+    expect(merged).toEqual({ ...DEFAULTS, recording: { ...DEFAULTS.recording, bufferSeconds: 60 } })
+  })
+
+  it('refuses a value of the wrong kind rather than carrying it into the program', () => {
+    const merged = merge({
+      recording: { mode: 'sometimes', bufferSeconds: 'lots', allow: 'a.example', deny: [1, 'b.example'] },
+      history: { toDisk: 'yes', keepDays: null },
+      export: { rewriteHead: 'no' },
+    })
+    expect(merged.recording.mode).toBe(DEFAULTS.recording.mode)
+    expect(merged.recording.bufferSeconds).toBe(DEFAULTS.recording.bufferSeconds)
+    expect(merged.recording.allow).toEqual([])
+    // A list is cleaned rather than dropped: one bad entry is not a reason to lose the list.
+    expect(merged.recording.deny).toEqual(['b.example'])
+    expect(merged.history.toDisk).toBe(true)
+    expect(merged.history.keepDays).toBe(7)
+    // Read for its kind and not for its truthiness: every non-empty string is truthy, so a
+    // stored 'no' would come back out of storage as a yes.
+    expect(merged.export.rewriteHead).toBe(false)
+  })
+
+  it('refuses a number that is not a number, and one that has no size', () => {
+    // clamp is three comparisons, and NaN loses all three: Math.min(Math.max(NaN, min), max) is
+    // NaN, and a buffer of NaN seconds is a buffer that trims nothing at all.
+    const merged = merge({
+      recording: { bufferSeconds: Number.NaN },
+      history: { keepDays: Number.POSITIVE_INFINITY },
+    })
+    expect(merged.recording.bufferSeconds).toBe(DEFAULTS.recording.bufferSeconds)
+    expect(merged.history.keepDays).toBe(DEFAULTS.history.keepDays)
+  })
+
+  it('leaves the defaults alone: every one of them is inside the limits that guard it', () => {
+    // A default outside its own limit is a setting that changes as it is stored and read back:
+    // merge({}) hands out 7 days, and merge of that very 7 clamps it to something else. The
+    // settings page writes the whole shape back on every change, so the drift is one save away.
+    expect(merge(DEFAULTS)).toEqual(DEFAULTS)
+  })
+
+  it('clamps a number into its limits instead of trusting it', () => {
+    const low = merge({ recording: { bufferSeconds: 1 }, history: { keepDays: 0, ceilingBytes: 1 } })
+    expect(low.recording.bufferSeconds).toBe(LIMITS.bufferSeconds.min)
+    expect(low.history.keepDays).toBe(LIMITS.keepDays.min)
+    expect(low.history.ceilingBytes).toBe(LIMITS.ceilingBytes.min)
+
+    const high = merge({ recording: { bufferSeconds: 999_999 } })
+    expect(high.recording.bufferSeconds).toBe(LIMITS.bufferSeconds.max)
+  })
+
+  it('keeps a name template that says something and refuses one that says nothing', () => {
+    // The one string a user types into these settings, and the one field a wrong kind reaches the
+    // file system through: an empty template names every clip after the page and nothing else.
+    expect(merge({ export: { nameTemplate: '{host} {title}' } }).export.nameTemplate).toBe(
+      '{host} {title}',
+    )
+    expect(merge({ export: { nameTemplate: '   ' } }).export.nameTemplate).toBe(
+      DEFAULTS.export.nameTemplate,
+    )
+    expect(merge({ export: { nameTemplate: 7 } }).export.nameTemplate).toBe(
+      DEFAULTS.export.nameTemplate,
+    )
+  })
+
+  it('lowercases and trims a host, drops what is not one, and keeps it once', () => {
+    const merged = merge({
+      recording: {
+        deny: [
+          '  Example.COM ',
+          '',
+          'https://x.example/y',
+          'ok.example',
+          'not a host',
+          'example.com',
+        ],
+      },
+    })
+    expect(merged.recording.deny).toEqual(['example.com', 'x.example', 'ok.example'])
+  })
+})
+
+describe('presetOf', () => {
+  it('names the three of §7.4 and calls anything else custom', () => {
+    expect(presetOf(BALANCED)).toBe('balanced')
+    expect(presetOf(LOOSE)).toBe('loose')
+    expect(presetOf(STRICT)).toBe('strict')
+    expect(presetOf({ ...BALANCED, minWidthPx: 321 })).toBe('custom')
+  })
+
+  it('gives back the three by name, and the balanced one for anything else', () => {
+    expect(presetNamed('strict')).toEqual(STRICT)
+    expect(presetNamed('custom')).toEqual(BALANCED)
+    // A copy of it: what asks for a preset is a settings page whose sliders then write into the
+    // answer, and STRICT is a module constant every other reader shares.
+    expect(presetNamed('strict')).not.toBe(STRICT)
+  })
+})
+
+describe('siteAllows', () => {
+  const with_ = (over: Partial<Settings['recording']>): Settings => ({
+    ...DEFAULTS,
+    recording: { ...DEFAULTS.recording, ...over },
+  })
+
+  it('records everything in the ordinary mode', () => {
+    expect(siteAllows(with_({}), 'https://site.example/watch')).toBe(true)
+  })
+
+  it('records nothing at all when the mode is off', () => {
+    // Against a list that would otherwise match: `off` is a refusal of its own, and not the
+    // emptiness of an allowlist wearing another name.
+    const off = with_({ mode: 'off', allow: ['site.example'] })
+    expect(siteAllows(off, 'https://site.example/watch')).toBe(false)
+  })
+
+  it('records only what is listed when the mode is a list', () => {
+    const only = with_({ mode: 'allowlist', allow: ['site.example'] })
+    expect(siteAllows(only, 'https://site.example/watch')).toBe(true)
+    expect(siteAllows(only, 'https://other.example/watch')).toBe(false)
+  })
+
+  it('lets a host stand for its subdomains, and not for a host that merely ends the same way', () => {
+    const only = with_({ mode: 'allowlist', allow: ['site.example'] })
+    expect(siteAllows(only, 'https://www.site.example/watch')).toBe(true)
+    expect(siteAllows(only, 'https://notsite.example/watch')).toBe(false)
+  })
+
+  it('lets deny win over allow, in every mode', () => {
+    expect(siteAllows(with_({ deny: ['site.example'] }), 'https://site.example/x')).toBe(false)
+    expect(
+      siteAllows(
+        with_({ mode: 'allowlist', allow: ['site.example'], deny: ['ads.site.example'] }),
+        'https://ads.site.example/x',
+      ),
+    ).toBe(false)
+  })
+
+  it('records nothing at an address it cannot read', () => {
+    // A frame at about:blank, a data: document, an empty referrer: nothing to weigh a list
+    // against, and a recording nobody can turn off from the settings page is worse than none.
+    expect(siteAllows(with_({}), '')).toBe(false)
+    expect(siteAllows(with_({}), 'about:blank')).toBe(false)
+  })
+})

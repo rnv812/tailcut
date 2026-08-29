@@ -134,3 +134,27 @@ export function uniqueNames(names: readonly string[]): string[] {
     }
   })
 }
+
+/** What a name template may put into a name. Anything else in braces is left as it stands. */
+export const NAME_FIELDS = ['title', 'in', 'out', 'date', 'host'] as const
+
+export type NameFields = Record<(typeof NAME_FIELDS)[number], string>
+
+/**
+ * A clip name out of the user's template.
+ *
+ * Substitution and nothing more: no expressions, no conditionals, no defaults. A template is a
+ * setting a user types by hand, and every feature beyond `{field}` is a way for a typed sentence
+ * to become an error message. An unknown field is left in the name exactly as it was written —
+ * the user meant those characters, and silently deleting a word out of the middle of a file name
+ * is worse than a name with `{oops}` in it, which explains itself.
+ *
+ * The result still goes through sanitizeFileName: the template may hold a slash, and the fields
+ * hold a page title.
+ */
+export function applyTemplate(template: string, fields: NameFields): string {
+  const filled = template.replace(/\{([a-z]+)\}/g, (whole, name: string) =>
+    (NAME_FIELDS as readonly string[]).includes(name) ? fields[name as keyof NameFields] : whole,
+  )
+  return filled.replace(/\s+/g, ' ').trim()
+}
