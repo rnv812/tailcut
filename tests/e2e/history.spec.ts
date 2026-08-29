@@ -35,8 +35,8 @@ const probe = () => {
 }
 
 /**
- * The shape of the write, proved in a browser because there is nowhere else to prove it: OPFS and
- * the synchronous handle exist in Chrome and in no test runner.
+ * What a sealed write leaves behind, proved in a browser because there is nowhere else to prove
+ * it: OPFS and the synchronous handle exist in Chrome and in no test runner.
  *
  * Three things are asserted and each of them is a decision of the design rather than a detail.
  * The bytes come back exactly as they went in — a sealed piece is written once and never revised.
@@ -47,8 +47,13 @@ const probe = () => {
  * directory `HISTORY_DIR` names is the directory the writer made and the name `pieceName` gives
  * out is a name OPFS will take.
  *
- * What a write costs is measured elsewhere — `tests/e2e/history-write-cost.spec.ts`, which runs
- * alone because a measurement taken beside three other browsers cannot fail.
+ * A fourth thing about the write is not asserted here and cannot be: that it was one write. The
+ * alternative was built and run — the handle taken per 64 KiB segment, 128 opens of the file
+ * instead of one — and every assertion below stayed green on it, because a segmented write leaves
+ * behind exactly the same file with the same bytes and the same released lock. Only a clock tells
+ * them apart, and that clock is `tests/e2e/history-write-cost.spec.ts` (400.7–498.0 ms segmented
+ * against a bound of 80). It runs in the `measured` project, which `npm run e2e:fast` leaves out,
+ * so a change to `writeSealed` that keeps the bytes right is answered by nothing until it is run.
  */
 test('a piece is written sealed, read back whole, and leaves no lock behind', async () => {
   const { context, extensionId } = await launchWithExtension()

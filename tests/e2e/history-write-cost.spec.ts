@@ -48,8 +48,16 @@ const MEASURED_AT_BYTES = 8 * 1024 * 1024
  * price of that one is paid on the second visit to a file, where reopening with `keepExistingData`
  * copies what is already there into the swap, and a sealed piece is never visited twice. Both sit
  * inside the spread of an honest write, and no bound this test could hold would separate them from
- * it. What holds the shape of the write is therefore not a clock but `tests/e2e/history.spec.ts`:
- * one write per file, the bytes back unchanged, and no handle left behind after it.
+ * it.
+ *
+ * What `tests/e2e/history.spec.ts` holds is the rest of the write and not this part of it, and the
+ * line between the two was drawn by breaking the code rather than by reading it. Under the
+ * segmented handle above, that set stays green in every assertion it makes — the bytes come back
+ * unchanged, the file is the size it was handed, the lock is gone by the time the answer arrives,
+ * and a segmented write keeps all three. The one thing that goes red is the bound below. So the
+ * shape of the write — one open, one write, one flush per file — is held by this measurement and
+ * by nothing else, and this measurement is in the `measured` project, which `npm run e2e:fast`
+ * does not run: whoever touches `writeSealed` has to run it by hand.
  *
  * The cheapest of five is what the assertion stands on, and that is not a way around a bad sample.
  * The regression above multiplies every write by thirty or more, so the cheapest of them witnesses
