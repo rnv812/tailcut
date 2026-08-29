@@ -200,6 +200,16 @@ describe('сборка', () => {
     expect(existsSync('dist/bridge/snapshot-worker.js')).toBe(true)
   })
 
+  it('builds the history worker as a classic script', async () => {
+    // The recording frame starts it the same way the bridge starts the snapshot worker: with
+    // new Worker(url) and no { type: 'module' }. And it is the only writer the history has —
+    // without an entry point of its own the file never reaches dist, the worker fails to load,
+    // and the frame keeps every batch in memory with nothing to say about it.
+    const worker = await optionsFor('bridge/history-worker')
+    expect(worker.format).toBe('iife')
+    expect(existsSync('dist/bridge/history-worker.js')).toBe(true)
+  })
+
   it('builds the waveform worker as a classic script', async () => {
     const worker = await optionsFor('editor/waveform-worker')
     expect(worker.format).toBe('iife')
