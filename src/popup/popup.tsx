@@ -5,6 +5,7 @@ import {
   editSession,
   formatBytes,
   formatDuration,
+  formatWhen,
   historyRows,
   hostOf,
   listSessions,
@@ -15,7 +16,7 @@ import {
   pinHistory,
   saveAll,
   setSiteRecorded,
-  siteRecorded,
+  siteSwitch,
   storageInUse,
   undoDelete,
   type EditResult,
@@ -24,6 +25,7 @@ import {
   type SaveFailure,
   type SaveResult,
   type SessionList,
+  type SiteSwitch,
 } from './api'
 
 /** How a session is signed when the page never told its title. */
@@ -173,9 +175,19 @@ function History(props: { rows: HistoryRow[]; hide: Set<string>; onChanged: () =
             <span class="row-title" data-testid="history-title">
               {row.title || UNTITLED}
             </span>
-            <span class="muted">{hostOf(row.url)}</span>
+            {/* Where it came from and what it costs. The weight belongs beside the address rather
+                than under the length: the two questions a row answers are "what is this" and
+                "what is it taking up", and the second is the one a full disk is made of. */}
+            <span class="muted" data-testid="history-host">
+              {hostOf(row.url)} · {formatBytes(row.bytes)}
+            </span>
             <span class="muted" data-testid="history-length">
               {formatDuration(row.seconds)}
+            </span>
+            {/* When it was last watched (§9.2). Without it a history of a feed is a column of
+                lengths that look alike, and nothing in it says which recording is today's. */}
+            <span class="muted" data-testid="history-when">
+              {formatWhen(row.lastSeenAt)}
             </span>
           </button>
           <button
@@ -219,9 +231,20 @@ function History(props: { rows: HistoryRow[]; hide: Set<string>; onChanged: () =
   )
 }
 
+/**
+ * Why the switch for the site is shut.
+ *
+ * `Off` records nothing anywhere (§9.4), so there is nothing here to switch — and a switch left
+ * live over it writes a list nothing reads and comes back unticked, which is a control answering
+ * a press by doing nothing and saying nothing. Unticked and quiet it would also be saying "not
+ * this site", which is a different statement and a false one. So it is shut, with the reason and
+ * the way out of it: the mode lives on the settings page, one button along this same line.
+ */
+const RECORDING_OFF = 'Recording is off in Settings — no site is recorded.'
+
 function Footer(props: {
   url: string
-  recorded: boolean
+  site: SiteSwitch
   paused: boolean
   inUse: { bytes: number; full: boolean }
   onChanged: () => void
@@ -234,7 +257,8 @@ function Footer(props: {
         <input
           type="checkbox"
           data-testid="site-toggle"
-          checked={props.recorded}
+          checked={props.site.recorded}
+          disabled={props.site.off}
           onChange={(event) =>
             void setSiteRecorded(props.url, (event.target as HTMLInputElement).checked).then(
               props.onChanged,
@@ -266,6 +290,12 @@ function Footer(props: {
       <button class="quiet" data-testid="open-settings" onClick={() => chrome.runtime.openOptionsPage()}>
         Settings
       </button>
+
+      {props.site.off && (
+        <div class="muted why" data-testid="site-off">
+          {RECORDING_OFF}
+        </div>
+      )}
     </div>
   )
 }
@@ -285,11 +315,11 @@ function Popup() {
   /** What is on disk. Not a session of this tab and not asked of it: the index answers. */
   const [rows, setRows] = useState<HistoryRow[]>([])
   const [inUse, setInUse] = useState({ bytes: 0, full: false })
-  /** Where the tab stands, and whether the settings record it. */
+  /** Where the tab stands, and what the settings make of it. */
   const [url, setUrl] = useState('')
   // Recording until the settings say otherwise, which is what §7.4 sets them to and what they
   // answer for every site the user has not forbidden. The read that settles it is one turn away.
-  const [recorded, setRecorded] = useState(true)
+  const [site, setSite] = useState<SiteSwitch>({ recorded: true, off: false })
   /**
    * Bumped by everything that changes what is shown: a pin, a deletion, an undo, the switch of a
    * site, the pause of a page. Nothing is guessed at from what was asked for — the popup reads
@@ -306,7 +336,7 @@ function Popup() {
     void storageInUse().then(setInUse)
     void pageUrl().then(async (where) => {
       setUrl(where)
-      setRecorded(await siteRecorded(where))
+      setSite(await siteSwitch(where))
     })
   }, [revision])
 
@@ -334,7 +364,7 @@ function Popup() {
       />
       <Footer
         url={url}
-        recorded={recorded}
+        site={site}
         // What the frame answered, and never what it was asked: the pause lives in the frame.
         paused={answer.paused === true}
         inUse={inUse}

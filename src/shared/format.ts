@@ -37,3 +37,43 @@ export function formatBytes(bytes: number): string {
   if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`
   return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`
 }
+
+/** The months, short, in the language of this program: a date is a string and not a locale here. */
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+/** A day and a night in milliseconds: the border where the count of hours stops being readable. */
+const DAY_MS = 86_400_000
+
+/**
+ * When something happened, as a person says it: "just now", "45 min ago", "3 h ago", "Yesterday",
+ * "3 days ago", "22 Aug", "31 Dec 2025".
+ *
+ * §9.2 asks for the recent sessions with their time, and the reason is the list itself: three rows
+ * of a feed are three lengths that look alike, and the moment is what tells this afternoon's
+ * recording from last month's. Elapsed time up to a week, because that is the question near the
+ * present — "was this today?" — and a calendar date beyond it, because past a week nobody counts
+ * in days.
+ *
+ * The clock is a parameter with a default rather than a call inside: a row is drawn against the
+ * moment it is drawn at, and a caller that has one already must not get a second reading.
+ */
+export function formatWhen(at: number, now = Date.now()): string {
+  // A row with no moment written in it: nothing at all, rather than a day in 1970.
+  if (!Number.isFinite(at) || at <= 0) return ''
+
+  // A clock that moved backwards under a row already written — the machine woke up and corrected
+  // itself, the row came off a profile carried over. It happened, and not in the future.
+  const ago = Math.max(0, now - at)
+  if (ago < 60_000) return 'just now'
+  if (ago < 3_600_000) return `${Math.floor(ago / 60_000)} min ago`
+  if (ago < DAY_MS) return `${Math.floor(ago / 3_600_000)} h ago`
+
+  const days = Math.floor(ago / DAY_MS)
+  if (days === 1) return 'Yesterday'
+  if (days < 7) return `${days} days ago`
+
+  const day = new Date(at)
+  const date = `${day.getDate()} ${MONTHS[day.getMonth()]}`
+  // The year only where it differs: "31 Dec" of a year ago reads as the December still to come.
+  return day.getFullYear() === new Date(now).getFullYear() ? date : `${date} ${day.getFullYear()}`
+}

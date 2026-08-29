@@ -25,6 +25,16 @@ const pinned: Array<[string, boolean]> = []
 const deleted: string[] = []
 const undone: string[] = []
 
+/**
+ * The deletion marks the index holds, by identifier: the moment a row was deleted, or nothing.
+ *
+ * Kept here and honoured by the listing below, because that is what the real index does — a
+ * marked row is off every list it has (src/shared/history-db.ts). A fake that went on answering a
+ * deleted row would let the popup put it back the moment the toast left, and the set would call
+ * that working.
+ */
+const marks = new Map<string, number>()
+
 let stored: Settings = DEFAULTS
 const written: Settings[] = []
 
@@ -41,7 +51,7 @@ const asStored = (row: HistoryRow) => ({
   ...row,
   createdAt: row.lastSeenAt,
   usedAt: 0,
-  deletedAt: 0,
+  deletedAt: marks.get(row.id) ?? 0,
   covered: [{ start: 0, end: row.seconds }],
   widthPx: 640,
   sound: true,
@@ -49,7 +59,13 @@ const asStored = (row: HistoryRow) => ({
 })
 
 vi.mock('../../src/shared/history-db', () => ({
-  listSessions: async (limit: number) => rows.slice(0, limit).map(asStored),
+  // Sifted the way the index sifts: a row marked deleted is not in the list any more, whoever
+  // asks and however soon after the mark.
+  listSessions: async (limit: number) =>
+    rows
+      .filter((row) => !marks.get(row.id))
+      .slice(0, limit)
+      .map(asStored),
   readTotals: async () => ({
     id: 'totals',
     bytes: inUse.bytes,
@@ -63,6 +79,7 @@ vi.mock('../../src/shared/history-db', () => ({
   // One call for both, and the argument is what tells them apart: a deletion is a moment and an
   // undo is that moment taken back.
   setDeleted: async (id: string, at: number) => {
+    marks.set(id, at)
     ;(at ? deleted : undone).push(id)
   },
 }))
@@ -273,12 +290,19 @@ beforeEach(() => {
   pinned.length = 0
   deleted.length = 0
   undone.length = 0
+  marks.clear()
   written.length = 0
   stored = DEFAULTS
   sent.length = 0
 })
 
-afterEach(() => {
+afterEach(async () => {
+  // The timers of a test are run out before its clock is taken away. Preact defers the effects of
+  // a render to a timer and schedules that flush only when its queue goes from empty to one — so a
+  // fake clock thrown away with one still pending leaves a component in the queue of the whole
+  // module, which no `vi.resetModules()` clears, and every popup mounted after it would sit in
+  // "Loading…" for ever with nobody able to say why.
+  if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(100)
   vi.unstubAllGlobals()
   vi.useRealTimers()
 })
@@ -921,6 +945,18 @@ describe('the history and the switches under it', () => {
     expect(deleted).toEqual(['h1'])
   })
 
+  it('says when a recording was last watched, and how much of the disk it holds', async () => {
+    rows = [{ ...row, lastSeenAt: Date.now() - 26 * 3_600_000 }]
+    await draw()
+
+    // §9.2 lists the recent sessions with their time. Three rows all reading "4:00" are three
+    // rows the user cannot tell apart, and the moment is what tells yesterday's recording from
+    // last month's; the weight beside the address is the other half of the same question — what
+    // is on disk, and what taking a row back would give.
+    expect(textAt('history-when')).toBe('Yesterday')
+    expect(textAt('history-host')).toBe('old.example · 85.8 MB')
+  })
+
   it('takes the undo away when the time to change one’s mind is up', async () => {
     // The window in which a deletion can be called off is the toast, and it is not for ever: the
     // sweeper takes the files half a minute later, and an undo left on screen past that would be
@@ -937,5 +973,44 @@ describe('the history and the switches under it', () => {
     await settle()
 
     expect(at('undo')).toBeNull()
+  })
+
+  it('keeps a deleted row gone once the undo has left, rather than putting it back', async () => {
+    // The row is hidden while the toast is up and out of the index for good the moment it was
+    // deleted — those are two different mechanisms, and the toast leaving must not undo the
+    // second one. The index here marks and sifts exactly as the real one does, so the row is
+    // already out of what a re-reading answers.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    rows = [row]
+    await draw()
+
+    document.querySelector<HTMLButtonElement>('[data-testid="history-delete"]')!.click()
+    await settle()
+
+    await vi.advanceTimersByTimeAsync(6_000)
+    await settle()
+
+    expect(allAt('history-row')).toHaveLength(0)
+    expect(at('history'), 'a heading was left standing over an empty history').toBeNull()
+  })
+
+  it('offers no switch for the site while nothing is recorded anywhere', async () => {
+    stored = merge({ recording: { ...DEFAULTS.recording, mode: 'off' } })
+    await draw()
+
+    // `Off` is not "this site is not recorded": neither list decides anything while it holds, so
+    // a live switch here writes a host onto a list nothing reads and comes back unticked — a
+    // control that answers a press by doing nothing and saying nothing about why.
+    const toggle = at('site-toggle') as HTMLInputElement
+    expect(toggle.disabled, 'a switch that decides nothing was offered as a live one').toBe(true)
+    expect(toggle.checked).toBe(false)
+    expect(textAt('site-off')).toBe('Recording is off in Settings — no site is recorded.')
+  })
+
+  it('leaves the switch live, and unexplained, wherever the settings do decide something', async () => {
+    await draw()
+
+    expect((at('site-toggle') as HTMLInputElement).disabled).toBe(false)
+    expect(at('site-off'), 'a reason was given for a switch that works').toBeNull()
   })
 })

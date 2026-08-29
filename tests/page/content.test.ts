@@ -32,11 +32,13 @@ function fakeElement(tagName: string) {
   return {
     tagName,
     posted,
+    // Nullable, because a frame really does lose it: one taken out of the document under us, and
+    // one the browser has not finished putting in, both answer null here.
     contentWindow: {
       postMessage: (message: unknown, _targetOrigin: string, transfer?: unknown) => {
         posted.push({ message, transfer })
       },
-    },
+    } as { postMessage: (message: unknown, targetOrigin: string, transfer?: unknown) => void } | null,
     dataset: {} as Record<string, string>,
     style: { cssText: '' },
     attributes,
@@ -100,7 +102,15 @@ function fakeVideo(overrides: Record<string, unknown> = {}) {
   }
 }
 
-function installDom(options: { title?: string; url?: string; contentType?: string } = {}) {
+function installDom(
+  options: {
+    title?: string
+    url?: string
+    contentType?: string
+    /** A document that will not make an element at all: the bridge can never be built in it. */
+    noFrames?: boolean
+  } = {},
+) {
   const created: FakeElement[] = []
   const appended: FakeElement[] = []
   const messageListeners: Array<(event: MessageEvent) => void> = []
@@ -150,6 +160,10 @@ function installDom(options: { title?: string; url?: string; contentType?: strin
       ;(documentListeners[type] ??= []).push(listener)
     },
     createElement: (tagName: string) => {
+      // A document being torn down under the script — a page navigating away, an extension
+      // reloaded — throws here. It is the one way the promise of the bridge is ever rejected,
+      // and everything waiting on it has to answer on that.
+      if (options.noFrames) throw new Error('this document makes no elements')
       const element = fakeElement(tagName)
       created.push(element)
       return element
@@ -272,6 +286,13 @@ function installDom(options: { title?: string; url?: string; contentType?: strin
         listener(message, { id: EXTENSION_ORIGIN }, (reply) => answers.push(reply)),
       )
       return { answers, kept }
+    },
+    /**
+     * The bridge loses its window: a frame taken out of the document under us, or one the browser
+     * has not finished putting in. The frame is still there and still answers as an element.
+     */
+    takeBridgeWindow: (): void => {
+      for (const element of created) element.contentWindow = null
     },
     /** The ports the content script handed the bridge along with the extension requests. */
     portsToBridge: (): MessagePort[] =>
@@ -963,6 +984,41 @@ describe('requests from the popup and the service worker', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
 
     expect(dom.forwarded().map((post) => post.message)).toEqual([{ type: 'tc:list' }])
+  })
+
+  it('answers a request it has no frame to put it in, rather than holding the channel open', async () => {
+    const dom = await withBridge()
+    dom.takeBridgeWindow()
+
+    const { answers, kept } = dom.askTab({ type: 'tc:list' })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    // The listener has already told Chrome that an answer is coming, so returning without one is
+    // not a quick "no": the asker waits for as long as the channel lives, and in the popup that
+    // is a button whose label never changes. Answered with the nothing that a frame with no
+    // content script in it answers — which the callers already read as "could not be reached".
+    expect(kept).toEqual([true])
+    expect(dom.forwarded(), 'a request went into a frame with no window in it').toEqual([])
+    expect(answers, 'the relay left the asker waiting on a frame it could not reach').toEqual([
+      undefined,
+    ])
+  })
+
+  it('answers a request when the bridge could not be built at all', async () => {
+    const dom = installDom({ noFrames: true })
+    const { ensureBridge } = await importContent()
+    // The rejection is one promise and it is remembered: read here, because a rejection nobody
+    // reads is an error in the console of somebody's page — and because the relay's own refusal
+    // is the thing under test, not the runner's opinion of an unhandled one.
+    await expect(ensureBridge(), 'setup: the bridge was built after all').rejects.toBeDefined()
+
+    const { answers, kept } = dom.askTab({ type: 'tc:list' })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(kept).toEqual([true])
+    expect(answers, 'the relay swallowed the refusal of the bridge it never got').toEqual([
+      undefined,
+    ])
   })
 
   it('neither forwards a foreign extension message nor holds the channel for it', async () => {

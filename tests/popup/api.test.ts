@@ -862,12 +862,37 @@ describe('the history the popup shows', () => {
 describe('the switches under the history', () => {
   it('reads whether this site is recorded out of the settings as they stand', async () => {
     installChrome()
-    const { siteRecorded } = await importApi()
+    const { siteSwitch } = await importApi()
 
-    expect(await siteRecorded(PAGE_URL)).toBe(true)
+    expect(await siteSwitch(PAGE_URL)).toEqual({ recorded: true, off: false })
 
     stored = merge({ recording: { ...DEFAULTS.recording, deny: ['site.example'] } })
-    expect(await siteRecorded(PAGE_URL)).toBe(false)
+    expect(await siteSwitch(PAGE_URL)).toEqual({ recorded: false, off: false })
+  })
+
+  it('says the switch decides nothing where the settings record nothing anywhere', async () => {
+    stored = merge({ recording: { ...DEFAULTS.recording, mode: 'off' } })
+    installChrome()
+    const { siteSwitch } = await importApi()
+
+    // `Off` is not "this site is not recorded": it is every site, and neither list decides
+    // anything while it holds. Unticked, the two read the same in the popup — so the answer
+    // carries the mode as well, out of the one read that answered the other half.
+    expect(await siteSwitch(PAGE_URL)).toEqual({ recorded: false, off: true })
+  })
+
+  it('writes nothing at all while recording is off altogether', async () => {
+    stored = merge({ recording: { ...DEFAULTS.recording, mode: 'off' } })
+    installChrome()
+    const { setSiteRecorded } = await importApi()
+
+    await setSiteRecorded(PAGE_URL, true)
+    await setSiteRecorded(PAGE_URL, false)
+
+    // A host put on a list nothing reads is a setting the user never made, and the settings page
+    // shows it to them afterwards. The popup keeps the switch shut in this mode; this is the same
+    // refusal one layer down, where it holds whoever asks.
+    expect(written).toEqual([])
   })
 
   it('forbids the site in the deny list while every site is recorded', async () => {

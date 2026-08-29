@@ -252,9 +252,29 @@ export async function openHistoryEditor(id: string): Promise<void> {
   await chrome.tabs.create({ url: chrome.runtime.getURL(historyUrl(id)) })
 }
 
-/** Is this site recorded at all, by the settings as they stand? */
-export async function siteRecorded(url: string): Promise<boolean> {
-  return siteAllows(await readSettings(), url)
+/** What the switch under the history stands at, and whether it decides anything at all. */
+export interface SiteSwitch {
+  /** Is this site recorded, by the settings as they stand? */
+  recorded: boolean
+  /**
+   * Do the settings record nothing anywhere?
+   *
+   * `Off` is not "this site is not recorded", and unticked the two look the same: neither list
+   * decides anything while it holds, so the switch is shown shut with the reason beside it rather
+   * than as a live control that writes a list nothing reads.
+   */
+  off: boolean
+}
+
+/**
+ * The state of the switch under the history, out of one read of the settings.
+ *
+ * One read and not two, because it is one answer: a second read could come back from between two
+ * writes and describe a switch half in one mode and half in another.
+ */
+export async function siteSwitch(url: string): Promise<SiteSwitch> {
+  const settings = await readSettings()
+  return { recorded: siteAllows(settings, url), off: settings.recording.mode === 'off' }
 }
 
 /**
@@ -262,11 +282,14 @@ export async function siteRecorded(url: string): Promise<boolean> {
  *
  * Writes the deny list in `All sites` mode and the allow list in `Allowlist` mode, which is the
  * only reading of "record here" that means the same thing in both. In `Off` mode there is nothing
- * to switch — the toggle is disabled and says why.
+ * to switch — the popup shows the switch shut and says why, and this is the same refusal one
+ * layer down: a host put on a list nothing reads is a setting the user never made, and the
+ * settings page shows it to them afterwards.
  */
 export async function setSiteRecorded(url: string, on: boolean): Promise<void> {
   const host = hostOf(url)
   if (!host) return
+  if ((await readSettings()).recording.mode === 'off') return
 
   await writeSettings((current) => {
     const recording = { ...current.recording }
@@ -298,7 +321,7 @@ export async function pauseThisTab(on: boolean): Promise<void> {
 
 // One place for the numbers people read: the popup and the settings page show the same ones, and
 // two copies of "how big is a megabyte" is how they come to disagree.
-export { formatBytes, formatDuration } from '../shared/format'
+export { formatBytes, formatDuration, formatWhen } from '../shared/format'
 
 /** The page address in a form fit for the line under the title; an unreadable one — empty. */
 export function hostOf(url: string): string {

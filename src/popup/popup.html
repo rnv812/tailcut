@@ -45,13 +45,18 @@
   .history-row:hover { background: #1e2126; }
   .history-open { flex: 1; min-width: 0; display: grid; gap: 0 10px; padding: 4px 0;
                   grid-template-columns: minmax(0, 1fr) auto;
-                  grid-template-areas: "title length" "host length";
+                  grid-template-areas: "title length" "host when";
                   border: 0; background: none; color: inherit; font: inherit;
                   text-align: left; cursor: pointer; }
   .history-open > :nth-child(1) { grid-area: title; }
   .history-open > :nth-child(2) { grid-area: host; overflow: hidden;
                                   text-overflow: ellipsis; white-space: nowrap; }
-  .history-open > :nth-child(3) { grid-area: length; align-self: center; }
+  .history-open > :nth-child(3) { grid-area: length; }
+  /* The right-hand column carries the length over the moment, both against the same edge: what
+     varies between rows is the title, and the two numbers stay where the eye left them. */
+  .history-open > :nth-child(3), .history-open > :nth-child(4) { text-align: right;
+                                                                 white-space: nowrap; }
+  .history-open > :nth-child(4) { grid-area: when; }
   /* Pin and Delete: quiet enough not to compete with "Save all" above, and a pinned row says so
      in colour — it is the one state of a recording the user set by hand. */
   .pin, .quiet { padding: 3px 8px; border: 1px solid #3a3f47; border-radius: 6px;
@@ -78,7 +83,12 @@
   .switch input { margin: 0; accent-color: #4c8dff; }
   .switch span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .switch b { font-weight: 500; }
+  /* A shut switch is shut, and looks it: the label goes with the box it belongs to. */
+  .switch:has(input:disabled) { color: #6f757c; cursor: default; }
   .footer .quiet { justify-self: end; }
+  /* Why that switch decides nothing, across the whole width and under both its rows: it is a
+     sentence and not a label, and it points at the button standing beside it. */
+  .footer .why { grid-column: 1 / -1; }
 </style>
 <body></body>
 <script type="module" src="popup.js"></script>
