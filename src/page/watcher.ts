@@ -1,4 +1,5 @@
-import { triage, BALANCED, type TriageVerdict, type VideoSignals } from '../core/triage'
+import { triage, type TriageVerdict, type VideoSignals } from '../core/triage'
+import { liveSettings } from '../shared/settings-store'
 import type { PlainSource, SoundSource } from '../shared/protocol'
 
 /** Как часто пересматриваются сигналы каждого <video>. */
@@ -373,6 +374,26 @@ export function startWatching(
    */
   onPlayer: Measured = () => {},
 ): void {
+  /**
+   * The detection settings, live (§9.4).
+   *
+   * The watcher runs in the isolated world, which has chrome.storage of its own, so it holds its
+   * copy directly instead of hearing it from the bridge: one less message, and one less thing to
+   * get wrong about who is allowed to say it.
+   *
+   * Built here rather than beside the module's other constants: a copy made while the module is
+   * loading is made in every context that imports it, and one of them is a test in happy-dom with
+   * no extension around it. `watchSettings` answers a missing `chrome` with the defaults, so this
+   * is belt and braces — but the belt costs one line and the failure it prevents is a whole file
+   * that cannot be imported.
+   *
+   * A preset changed while a video is playing applies to the next poll, and that is deliberate:
+   * the user who tightens the filter over a page full of banners expects those banners to stop
+   * being recorded now, and the one who loosens it expects the player they are watching to be
+   * picked up without a reload. What has already been promoted is not demoted by it — see §5.5.
+   */
+  const detection = liveSettings()
+
   /** Whether the page has already been declared unrecordable. */
   let saidUnreachable = false
   /** Whether the page has already been declared protected: the refusal never turns. */
@@ -536,7 +557,7 @@ export function startWatching(
       if (sourceId) {
         claimed.add(sourceId)
         measure(sourceId, signals.widthPx)
-        tell(sourceId, triage(signals, BALANCED))
+        tell(sourceId, triage(signals, detection.get().detection))
         continue
       }
 
@@ -554,7 +575,7 @@ export function startWatching(
       claimed.add(plain.sourceId)
       announced.add(plain.sourceId)
 
-      const verdict = triage(signals, BALANCED)
+      const verdict = triage(signals, detection.get().detection)
       const standing = speaking.get(plain.sourceId)
       if (!standing || outranks({ verdict, playedSeconds: state.playedSeconds }, standing)) {
         speaking.set(plain.sourceId, {

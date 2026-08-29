@@ -177,6 +177,22 @@ describe('an ordinary file in the registry', () => {
     expect(page.opens).toBe(2)
   })
 
+  it('is not recorded at all on a page the settings forbid', async () => {
+    // The hook does not stand on this road: nothing of an ordinary file passes through the MAIN
+    // world, so the switch of §9.4 reaches a plain source only at the registry's own door.
+    // Without that door a denied host playing a <video src="…mp4"> would go on being recorded,
+    // fetched from the extension origin and offered for saving.
+    const page = registry()
+    page.store.pauseIntake(true)
+
+    page.says()
+    page.store.promotePending(SOURCE)
+    await page.store.settled()
+
+    expect(page.asked, 'a forbidden page had its file fetched').toEqual([])
+    expect(page.store.list()).toEqual([])
+  })
+
   it('is keyed by the address of the file, so two of them on one page are two sessions', async () => {
     // The same three components as any other session (§6.1) — an address, the codecs, the length
     // — with the address being the address of the material. For a stream out of MediaSource there

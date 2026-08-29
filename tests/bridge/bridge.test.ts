@@ -7,6 +7,8 @@ import { movieTracksOf } from '../../src/core/export/source'
 import { isSnapshotId, snapshotPath } from '../../src/shared/protocol'
 import { decodeFooter, decodeIndex, FOOTER_BYTES } from '../../src/core/snapshot/format'
 import type { BridgeToPage, EditResult, SessionList, SessionSummary } from '../../src/shared/protocol'
+import { SETTINGS_KEY, type Settings } from '../../src/shared/settings'
+import { writeSettings } from '../../src/shared/settings-store'
 
 /** An ordinary complete file, the shape a page delivers when it uses no MediaSource at all. */
 const plainBytes = new Uint8Array(readFileSync('tests/fixtures/plain/whole.mp4'))
@@ -156,13 +158,23 @@ function isSummary(value: unknown): value is SessionSummary {
 /** The variant of the BridgeToPage union a value fits; null — it fits none of them. */
 function variantOf(
   value: unknown,
-): 'tc:ready' | 'tc:refused' | 'tc:recording' | 'session list' | null {
+): 'tc:ready' | 'tc:refused' | 'tc:recording' | 'tc:record' | 'session list' | null {
   if (typeof value !== 'object' || value === null) return null
   const fields = value as Record<string, unknown>
 
   if (fields.type === 'tc:ready' && Object.keys(fields).length === 1) return 'tc:ready'
   if (fields.type === 'tc:refused' && Object.keys(fields).length === 1) return 'tc:refused'
   if (fields.type === 'tc:recording' && Object.keys(fields).length === 1) return 'tc:recording'
+  // The one bit of the settings the hook is given, and the one message of this side that turns.
+  // Its shape is checked as strictly as the others': anything more than the bit would be the
+  // page reading a list of what its user watches.
+  if (
+    fields.type === 'tc:record' &&
+    typeof fields.on === 'boolean' &&
+    Object.keys(fields).length === 2
+  ) {
+    return 'tc:record'
+  }
 
   const known = ['sessions', 'unreachable', 'unreadableFile']
   const fits =
@@ -193,10 +205,25 @@ function targetOriginOf(to: unknown): unknown {
  * bridge stands up in a nested frame too, where window.parent (the window of that very frame)
  * and window.top (the top page) are different windows.
  */
-function installWindow(referrer = REFERRER) {
+function installWindow(referrer = REFERRER, stored?: unknown) {
   const listeners: MessageListener[] = []
   const parent = receiver()
   const top = receiver()
+
+  /**
+   * chrome.storage.local, which is where the settings live and the only thing in the extension
+   * that keeps any.
+   *
+   * The frame holds a live copy of them and acts on every change without a reload (§9.4), so the
+   * set has to be able to move a setting under a page that is already recording — which is the
+   * whole shape of the feature and cannot be asked of a constant.
+   */
+  const storage: Record<string, unknown> = stored === undefined ? {} : { [SETTINGS_KEY]: stored }
+  type StorageListener = (
+    changes: Record<string, { newValue?: unknown; oldValue?: unknown }>,
+    area: string,
+  ) => void
+  const storageListeners: StorageListener[] = []
 
   vi.stubGlobal('window', {
     addEventListener(type: string, listener: MessageListener) {
@@ -287,6 +314,26 @@ function installWindow(referrer = REFERRER) {
       },
       getURL: (path: string) => `chrome-extension://tailcut/${path}`,
       getManifest: () => ({ version: '0.1.0' }),
+      sendMessage: async () => undefined,
+    },
+    storage: {
+      local: {
+        get: async (key: string) => (key in storage ? { [key]: storage[key] } : {}),
+        set: async (patch: Record<string, unknown>) => {
+          const changes: Record<string, { newValue?: unknown; oldValue?: unknown }> = {}
+          for (const [key, value] of Object.entries(patch)) {
+            changes[key] = { newValue: value, oldValue: storage[key] }
+            storage[key] = value
+          }
+          for (const listener of [...storageListeners]) listener(changes, 'local')
+        },
+      },
+      onChanged: {
+        addListener: (listener: StorageListener) => storageListeners.push(listener),
+        removeListener: (listener: StorageListener) => {
+          storageListeners.splice(storageListeners.indexOf(listener), 1)
+        },
+      },
     },
     downloads: {
       download(options: Download, done: (id?: number) => void) {
@@ -340,6 +387,30 @@ function installWindow(referrer = REFERRER) {
     /** Tells the bridge which page it stands on. */
     context(url = PAGE_URL, title = PAGE_TITLE): void {
       deliver({ type: 'tc:context', url, title })
+    },
+    /**
+     * Changes a setting the way the settings page does: through storage, from another document.
+     *
+     * The frame hears it over chrome.storage.onChanged and acts on it where it stands — no
+     * reload, no navigation, and no message of the protocol involved. That is the promise of
+     * §9.4 and it is what this drives.
+     */
+    async settings(edit: (current: Settings) => Settings): Promise<void> {
+      await writeSettings(edit)
+      // The live copy is updated inside the write; the frame's own work behind it — the switch to
+      // the hook, the registry — is synchronous, and this is for anything the read chained on.
+      for (let turn = 0; turn < 4; turn++) await Promise.resolve()
+    },
+    /** Everything the bridge posted to the window that inserted it, in order. */
+    said(): unknown[] {
+      return parent.posts.map((post) => post.message)
+    },
+    /** The switches the bridge told the hook about, oldest first. */
+    switches(): boolean[] {
+      return parent.posts
+        .map((post) => post.message as { type?: unknown; on?: unknown })
+        .filter((message) => message?.type === 'tc:record')
+        .map((message) => message.on === true)
     },
     /**
      * Asks the bridge to build a file — the way the popup does through the content script.
@@ -439,11 +510,19 @@ function installHost(file: Uint8Array = plainBytes) {
   }
 }
 
-/** The bridge sets its listener and says hello right when the module loads. */
-async function loadBridge(referrer?: string) {
-  const win = installWindow(referrer)
+/**
+ * The bridge sets its listener and says hello right when the module loads.
+ *
+ * `stored` is what chrome.storage.local already holds under the settings key when the frame comes
+ * up — a user who set something in an earlier session, which is every user after the first. The
+ * frame reads it a turn or two after loading, so the turns are given here rather than left to
+ * every caller to remember.
+ */
+async function loadBridge(referrer?: string, stored?: unknown) {
+  const win = installWindow(referrer, stored)
   vi.resetModules()
   await import('../../src/bridge/bridge')
+  for (let turn = 0; turn < 4; turn++) await Promise.resolve()
   return win
 }
 
@@ -634,12 +713,26 @@ describe('the bridge puts segments into the session registry', () => {
 
     // The bridge takes tc:context from anyone on the page: any script can address it, not only
     // our content script. Nobody checked the fields, so anything at all could travel into the
-    // summary of the session — the very thing the popup signs it with — right down to an object
-    // that would render in the list as "[object Object]".
+    // summary of the session — the very thing the popup signs it with — and a URL object beside
+    // a number is exactly what a script that means no harm would send.
+    win.deliver({ type: 'tc:context', url: new URL(PAGE_URL), title: 42 })
+    win.append(initBytes)
+
+    expect(win.list()).toMatchObject([{ url: PAGE_URL, title: '42' }])
+  })
+
+  it('records nothing at all under an address that is not one', async () => {
+    const win = await loadBridge()
+
+    // Coerced, this address reads "[object Object]", which no list of domains can be weighed
+    // against — and the same is true of about:blank and of a data: document. A recording the
+    // settings page cannot turn off is worse than no recording (see siteAllows), so there is
+    // none, and the hook is told to stop copying for good measure.
     win.deliver({ type: 'tc:context', url: { href: PAGE_URL }, title: 42 })
     win.append(initBytes)
 
-    expect(win.list()).toMatchObject([{ url: '[object Object]', title: '42' }])
+    expect(win.list()).toEqual([])
+    expect(win.switches()).toEqual([false])
   })
 
   it('does not merge segments of different sources into one session', async () => {
@@ -964,8 +1057,12 @@ describe('the bridge refuses a page that plays encrypted media', () => {
 
     encrypted(win)
 
-    expect(win.parent.posts.map((post) => post.message)).toEqual([
+    expect(win.said()).toEqual([
       { type: 'tc:ready' },
+      // The address arrived, so the frame worked out whether this page is recorded at all and
+      // said so. It stands before the refusal because the refusal came of what the page sent
+      // afterwards.
+      { type: 'tc:record', on: true },
       { type: 'tc:refused' },
     ])
   })
@@ -976,8 +1073,9 @@ describe('the bridge refuses a page that plays encrypted media', () => {
 
     win.append(cencInitBytes, 's1')
 
-    expect(win.parent.posts.map((post) => post.message)).toEqual([
+    expect(win.said()).toEqual([
       { type: 'tc:ready' },
+      { type: 'tc:record', on: true },
       { type: 'tc:refused' },
     ])
   })
@@ -1008,8 +1106,9 @@ describe('the bridge refuses a page that plays encrypted media', () => {
 
     // The word that this frame is recording goes out beside the handshake and belongs there: the
     // page is being recorded, which is the opposite of refused.
-    expect(win.parent.posts.map((post) => post.message)).toEqual([
+    expect(win.said()).toEqual([
       { type: 'tc:ready' },
+      { type: 'tc:record', on: true },
       { type: 'tc:recording' },
     ])
   })
@@ -1061,15 +1160,16 @@ describe('BridgeToPage describes everything the bridge sends', () => {
     // The bridge sends through two channels: to the parent window and into the port of the
     // request. Both ends are gathered here because one type is declared for both: a message sent
     // past the union is unknown to the receiver and to the next reader of the protocol alike.
-    const sent: unknown[] = [...win.parent.posts.map((post) => post.message), ...reply.received]
+    const sent: unknown[] = [...win.said(), ...reply.received]
     expect(sent.map(variantOf), 'the bridge sent a message not described in BridgeToPage').toEqual([
       'tc:ready',
+      'tc:record',
       'tc:recording',
       'session list',
     ])
   })
 
-  it('takes both variants from the union, not from the ideas of the set about it', async () => {
+  it('takes every variant from the union, not from the ideas of the set about it', async () => {
     const win = await loadBridge()
     win.context()
     win.append(initBytes)
@@ -1080,14 +1180,16 @@ describe('BridgeToPage describes everything the bridge sends', () => {
     const handshake: BridgeToPage = { type: 'tc:ready' }
     const refusal: BridgeToPage = { type: 'tc:refused' }
     const recording: BridgeToPage = { type: 'tc:recording' }
+    const record: BridgeToPage = { type: 'tc:record', on: false }
     const list: BridgeToPage = win.answer()
 
     expect([
       variantOf(handshake),
       variantOf(refusal),
       variantOf(recording),
+      variantOf(record),
       variantOf(list),
-    ]).toEqual(['tc:ready', 'tc:refused', 'tc:recording', 'session list'])
+    ]).toEqual(['tc:ready', 'tc:refused', 'tc:recording', 'tc:record', 'session list'])
   })
 })
 
@@ -2051,5 +2153,148 @@ describe('the word that this frame is recording', () => {
     // it a file watched to the end is recorded, offered in the popup, and never counted.
     expect(notices(win)).toEqual([{ type: 'tc:recording' }])
     expect(win.list()).toHaveLength(1)
+  })
+})
+
+describe('the recording switch of §9.4', () => {
+  /** The settings as the settings page would store them: one key, the whole of them under it. */
+  const denying = (...hosts: string[]) => ({
+    recording: { mode: 'all', bufferSeconds: 180, allow: [], deny: hosts },
+  })
+
+  it('works out whether this page is recorded when the address arrives, and says so', async () => {
+    const win = await loadBridge()
+
+    expect(win.switches(), 'setup: nothing is decided before the address is known').toEqual([])
+
+    win.context()
+
+    // The hook copies until it is told otherwise, so this is the frame answering for the page it
+    // turned out to be standing on.
+    expect(win.switches()).toEqual([true])
+  })
+
+  it('says nothing before the address has arrived, whatever the settings say', async () => {
+    // A page with a strict referrer policy: the frame stands on the extension origin and knows
+    // nothing at all about where it is until tc:context.
+    const win = await loadBridge('', denying('site.example'))
+
+    // "Not known yet" and "cannot be read" are two different states. siteAllows refuses an
+    // address it cannot read — rightly, for about:blank — and answering that refusal before the
+    // handshake has landed would switch the frame off on every page that strips its referrer.
+    expect(win.switches()).toEqual([])
+  })
+
+  it('keeps the material that arrived before the address did', async () => {
+    const win = await loadBridge('')
+
+    // The order of a real page: the hook copies from document_start, and the init segment of a
+    // track goes past in the first second — once, never repeated. The content script's context
+    // arrives when it arrives.
+    win.append(initBytes)
+    win.append(seg1Bytes)
+    win.context()
+
+    // Switched off on `settings.ready` instead, the frame would have paused intake over an empty
+    // address, and letting the readers go on the way back in would have taken this init with it:
+    // the session would be unreadable for good over a message ordering.
+    expect(win.list()).toHaveLength(1)
+    expect(win.list()[0]!.bytes).toBeGreaterThan(0)
+  })
+
+  it('records nothing on a page the settings forbid, and says so once', async () => {
+    const win = await loadBridge(REFERRER, denying('site.example'))
+
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+
+    expect(win.switches()).toEqual([false])
+    expect(win.list(), 'a forbidden page was recorded all the same').toEqual([])
+  })
+
+  it('turns the recording back on inside the page when the user allows the site again', async () => {
+    const win = await loadBridge(REFERRER, denying('site.example'))
+    win.context()
+    win.append(initBytes)
+    expect(win.list(), 'setup: the page was recorded while it was forbidden').toEqual([])
+
+    await win.settings((current) => ({
+      ...current,
+      recording: { ...current.recording, deny: [] },
+    }))
+
+    win.append(initBytes)
+    win.append(seg1Bytes)
+
+    // No reload and no navigation: the settings page is a tab of its own, and a user who changes
+    // a setting while a video is playing is changing it about that video.
+    expect(win.switches()).toEqual([false, true])
+    expect(win.list()).toHaveLength(1)
+  })
+
+  it('stops the recording inside the page when the user forbids the site', async () => {
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+    const before = win.list()[0]!
+
+    await win.settings((current) => ({
+      ...current,
+      recording: { ...current.recording, deny: ['site.example'] },
+    }))
+
+    win.append(seg2Bytes)
+
+    // What was recorded stays exactly where it was (§7.2): a switch is not an erasure, and the
+    // user who turns recording off over a video they have been watching still has that video.
+    const after = win.list()
+    expect(win.switches()).toEqual([true, false])
+    expect(after).toHaveLength(1)
+    expect(after[0]!.bytes).toBe(before.bytes)
+    expect(after[0]!.duration).toBe(before.duration)
+  })
+
+  it('answers again when the page walks to a forbidden address without a navigation', async () => {
+    const win = await loadBridge(REFERRER, denying('other.example'))
+    win.context()
+    expect(win.switches(), 'setup: this address is allowed').toEqual([true])
+
+    // A single-page application loading the next video: no navigation, no reload, and the hook
+    // has no idea where it now stands.
+    win.context('https://other.example/watch', 'Elsewhere')
+
+    expect(win.switches()).toEqual([true, false])
+  })
+
+  it('says it once while the answer does not change', async () => {
+    const win = await loadBridge()
+
+    win.context()
+    win.context(`${PAGE_URL}&t=42`, 'The same clip, rewound')
+    await win.settings((current) => ({
+      ...current,
+      history: { ...current.history, keepDays: 30 },
+    }))
+
+    // A word per context poll would be a message twice a second into the page's own window, and
+    // a word per unrelated setting would put one there every time a slider moves.
+    expect(win.switches()).toEqual([true])
+  })
+
+  it('carries the bit and never the settings', async () => {
+    const win = await loadBridge(REFERRER, {
+      recording: { mode: 'allowlist', bufferSeconds: 180, allow: ['site.example'], deny: [] },
+    })
+
+    win.context()
+
+    // The MAIN world is the page's own realm: everything that reaches it, the page can read. The
+    // list of domains a user allowed or forbade is a list of what they watch, and the hook needs
+    // none of it — it needs "copy or do not".
+    expect(win.said().filter((message) => variantOf(message) === 'tc:record')).toEqual([
+      { type: 'tc:record', on: true },
+    ])
   })
 })

@@ -195,6 +195,13 @@ export async function saveAll(player: Page, popup: Page): Promise<string> {
   return file!
 }
 
+/** What formatDuration wrote, back as a number of seconds: `m:ss` and `h:mm:ss` alike. */
+export function parseClock(text: string | null): number {
+  const parts = (text ?? '').trim().split(':').map(Number)
+  if (!parts.length || parts.some((part) => !Number.isFinite(part))) return NaN
+  return parts.reduce((total, part) => total * 60 + part, 0)
+}
+
 /** Long enough for triage to let a player past its probation (six seconds), plus the poll. */
 const PROBATION_MS = 7_000
 

@@ -9,6 +9,8 @@ import {
   type SessionList,
   type SessionSummary,
 } from '../shared/protocol'
+import { siteAllows } from '../shared/settings'
+import { liveSettings } from '../shared/settings-store'
 import { HistoryWriter, historyWorker } from './history-writer'
 import { openPlainFile, openSoundFile } from './loader'
 import {
@@ -27,15 +29,6 @@ import {
 } from '../shared/history-db'
 import { writeSnapshot } from './snapshot-writer'
 import { writeSaveFile } from './write'
-
-/**
- * Whether material goes to the disk at all.
- *
- * A constant until Task 7, where it becomes `history.toDisk` of the settings (§7.2) and goes,
- * this line with it. It is the default of §7.4 written down in one place, so that turning the
- * whole stage off while it is being built is one edit and not a hunt.
- */
-const HISTORY_TO_DISK = true
 
 const writeHistoryPiece = historyWorker()
 
@@ -69,7 +62,6 @@ const history = new HistoryWriter({
   },
   now: () => Date.now(),
 })
-history.setEnabled(HISTORY_TO_DISK)
 
 /**
  * The registry of this frame, with the one thing it cannot do for itself handed to it: reading a
@@ -95,6 +87,74 @@ const store = new SessionStore({
   // addressed by it. Without this the disk would keep the halves apart.
   onRekey: (event) => history.rekey(event),
 })
+
+/**
+ * The settings, live, in the frame that records.
+ *
+ * Everything they change here is applied on the spot: the recording switch reaches the hook, the
+ * history writer is turned on or off, and the buffer length is what the next trim will use
+ * (Task 9). Nothing waits for a reload — the settings page is a tab of its own, and a user who
+ * changes a setting while a video is playing is changing it about that video.
+ *
+ * `onChange` is called for the first read too, so the stored settings of a returning user are
+ * acted on exactly like a change they make now. Until that read lands the copy answers the
+ * defaults of §7.4, which is also what the writer is built with.
+ */
+const settings = liveSettings((next) => {
+  history.setEnabled(next.history.toDisk)
+  applyRecordingMode()
+})
+
+/**
+ * Whether the address of the page is known at all.
+ *
+ * Until the first `tc:context` it is not: the bridge stands on the extension origin and sees
+ * neither the address nor the title of the page it was inserted into, and `document.referrer` is
+ * empty on any site with a strict referrer policy. "Not known yet" and "cannot be read" are two
+ * different states and must not be confused — `siteAllows` refuses an address it cannot read, and
+ * that refusal is right for `about:blank` and wrong for a page whose handshake is still in
+ * flight.
+ */
+let contextKnown = false
+
+/** Whether this page is recorded at all, by the mode and the two lists (§9.4). */
+function recordingHere(): boolean {
+  return siteAllows(settings.get(), pageContext.url)
+}
+
+/**
+ * The registry stops taking material in, and the hook stops copying it.
+ *
+ * Silent until the address has arrived, and that is the whole of what it is guarding. Applied on
+ * `settings.ready` instead — which is what a first version of this did — the frame would switch
+ * itself off on every page that strips its referrer, because `siteAllows(settings, '')` is
+ * `false`; then `tc:context` would arrive a moment later, switch it back on, and `pauseIntake`
+ * would let the half-read stream readers go. Everything that arrived in that window would be
+ * lost, and among it the init segments, which a site hands out in the first second of playback
+ * and never repeats — so the session would be unreadable for good over a message ordering.
+ */
+function applyRecordingMode(): void {
+  if (!contextKnown) return
+  const on = recordingHere()
+  store.pauseIntake(!on)
+  tellRecordingSwitch()
+}
+
+let switchTold: boolean | undefined
+
+/**
+ * Tells the hook whether to copy. Said on every change, and again whenever the page moves: a
+ * single-page application walks from an allowed address to a forbidden one without a navigation,
+ * and the hook has no idea where it stands.
+ */
+function tellRecordingSwitch(): void {
+  const on = recordingHere()
+  if (switchTold === on) return
+  switchTold = on
+
+  const message: BridgeToPage = { type: 'tc:record', on }
+  window.parent.postMessage(message, '*')
+}
 
 /**
  * How long a blob lives after a download starts. Chrome does not read it instantly, and an
@@ -439,6 +499,10 @@ window.addEventListener('message', (event: MessageEvent) => {
     // navigation. Left to the moment of opening alone, the popup would say "Untitled" for a
     // video that has a name, and the saved file would be named after nothing.
     store.pageIsAt(pageContext.url, pageContext.title)
+    contextKnown = true
+    // The address decides whether anything is recorded here, so the answer is worked out when the
+    // address arrives and again whenever it changes — never before it, and never on a timer.
+    applyRecordingMode()
     return
   }
 

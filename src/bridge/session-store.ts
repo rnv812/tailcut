@@ -950,6 +950,8 @@ export class SessionStore {
   private declaredDurations = new Map<string, number>()
   /** Encrypted media was seen on this page: see refuseEncrypted. Once set, it is never cleared. */
   private encryptedSeen = false
+  /** Nothing is taken in at all: the recording mode of §9.4. See pauseIntake(). */
+  private paused = false
   /** sourceId → the largest player it has been measured in; see sawPlayer(). */
   private playerWidths = new Map<string, number>()
   /** sourceId → the ordinary file that source is playing; see plain(). */
@@ -1019,6 +1021,8 @@ export class SessionStore {
    * src/core/stream.ts — so the segments are recovered first, and only whole ones are read.
    */
   append(input: AppendInput): void {
+    if (this.paused) return
+
     // Nothing of a protected page is read at all — not even to keep a reader in its place. This
     // is the one refusal that never turns (see refuseEncrypted), so there is no later verdict for
     // a reader to be ready for, and parsing on would only be a way of holding on to the material.
@@ -1070,7 +1074,10 @@ export class SessionStore {
    * than twice a second.
    */
   plain(input: PlainInput): void {
-    if (this.encryptedSeen) return
+    // The one road the hook does not stand on: nothing of an ordinary file passes through the
+    // MAIN world, so the recording switch reaches it only here. Without this line a denied host
+    // playing a plain <video src> would go on being recorded and offered for saving.
+    if (this.paused || this.encryptedSeen) return
 
     let state = this.plainSources.get(input.sourceId)
     if (!state) {
@@ -1112,7 +1119,7 @@ export class SessionStore {
    * reason, as an ordinary file.
    */
   sound(input: SoundInput): void {
-    if (this.encryptedSeen) return
+    if (this.paused || this.encryptedSeen) return
 
     let state = this.soundSources.get(input.sourceId)
     if (!state) {
@@ -1663,6 +1670,28 @@ export class SessionStore {
    * that was in the clear throughout. Asking is not playing, and a page that asks and then plays
    * in the clear is recorded like any other.
    */
+  /**
+   * Whether material is taken in at all: the recording mode of §9.4 as the registry sees it.
+   *
+   * Belt and braces beside the hook, which is where the switch actually saves anything — but the
+   * hook of a page loaded before the extension was updated, or a worker wrapped in a realm of its
+   * own, can still be sending. And the hook is not on every road: an ordinary file never passes
+   * through it at all, so the two doors of §5.6 are shut here as well. What the registry already
+   * holds is not touched: switching recording off is not an erasure, and §7.2 promises exactly
+   * that.
+   */
+  pauseIntake(paused: boolean): void {
+    if (this.paused === paused) return
+    this.paused = paused
+
+    // Coming back, the readers are let go rather than resumed. MSE hands a SourceBuffer a byte
+    // stream and not a list of segments, so a reader that kept the half of a segment it had would
+    // splice it onto bytes from minutes later and read the join as a header. A fresh reader finds
+    // the next header and starts there, and the material in between is a gap — which is what it
+    // is, and what §6.3 keeps honestly.
+    if (!paused) this.streams.clear()
+  }
+
   refuseEncrypted(): void {
     this.encryptedSeen = true
 

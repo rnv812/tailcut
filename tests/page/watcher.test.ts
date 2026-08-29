@@ -1,6 +1,8 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import type { TriageVerdict } from '../../src/core/triage'
 import type { PlainSource, SoundSource } from '../../src/shared/protocol'
+import { SETTINGS_KEY, type Settings } from '../../src/shared/settings'
+import { writeSettings } from '../../src/shared/settings-store'
 
 /** Шаг опроса наблюдателя: столько модельного времени проходит за один tick(). */
 const POLL_MS = 500
@@ -171,9 +173,54 @@ type Reported = { sourceId: string; verdict: TriageVerdict }
 /** A player of a stream, measured: what the watcher says about the size of an element. */
 type Player = { sourceId: string; widthPx: number }
 
-/** Поднимает наблюдателя на чистом модуле и отдаёт его вместе с журналом вердиктов. */
-async function startWatcher() {
+/**
+ * chrome.storage.local, and nothing else of the extension.
+ *
+ * Installed only for the tests that are about the settings. Everywhere else the realm has no
+ * `chrome` in it at all — which is the shape this file has always run in and the shape the
+ * watcher has to survive: it lives in the isolated world of an ordinary page, and a live copy of
+ * the settings built as the module loads would take the whole file down at import here.
+ */
+function installSettings(stored: unknown): void {
+  const storage: Record<string, unknown> = { [SETTINGS_KEY]: stored }
+  type StorageListener = (
+    changes: Record<string, { newValue?: unknown; oldValue?: unknown }>,
+    area: string,
+  ) => void
+  const listeners: StorageListener[] = []
+
+  vi.stubGlobal('chrome', {
+    storage: {
+      local: {
+        get: async (key: string) => (key in storage ? { [key]: storage[key] } : {}),
+        set: async (patch: Record<string, unknown>) => {
+          const changes: Record<string, { newValue?: unknown; oldValue?: unknown }> = {}
+          for (const [key, value] of Object.entries(patch)) {
+            changes[key] = { newValue: value, oldValue: storage[key] }
+            storage[key] = value
+          }
+          for (const listener of [...listeners]) listener(changes, 'local')
+        },
+      },
+      onChanged: {
+        addListener: (listener: StorageListener) => listeners.push(listener),
+        removeListener: (listener: StorageListener) => {
+          listeners.splice(listeners.indexOf(listener), 1)
+        },
+      },
+    },
+  })
+}
+
+/**
+ * Поднимает наблюдателя на чистом модуле и отдаёт его вместе с журналом вердиктов.
+ *
+ * `stored` — то, что уже лежит в chrome.storage под ключом настроек. Не передан вовсе — в реалме
+ * нет и самого `chrome`.
+ */
+async function startWatcher(...stored: [unknown?]) {
   installDom()
+  if (stored.length) installSettings(stored[0])
   vi.resetModules()
 
   const seen: Reported[] = []
@@ -216,7 +263,26 @@ async function startWatcher() {
     (sourceId, widthPx) => players.push({ sourceId, widthPx }),
   )
 
-  return { ...watcher, seen, players, unreachable, encrypted, plain, sounds, order }
+  // The live copy answers the defaults until the first read of storage comes back, a turn or two
+  // after start-up. Given here so that a test about a stored setting is about that setting and
+  // not about which of the two landed first.
+  for (let turn = 0; turn < 4; turn++) await Promise.resolve()
+
+  return {
+    ...watcher,
+    seen,
+    players,
+    unreachable,
+    encrypted,
+    plain,
+    sounds,
+    order,
+    /** Moves a setting the way the settings page does, from another document. */
+    async setSettings(edit: (current: Settings) => Settings): Promise<void> {
+      await writeSettings(edit)
+      for (let turn = 0; turn < 4; turn++) await Promise.resolve()
+    },
+  }
 }
 
 /**
@@ -1190,5 +1256,84 @@ describe('the watcher and the size of the player', () => {
     // measured first, but it never takes the floor — an element triage refuses cannot speak for a
     // file an element beside it is playing.
     expect(watcher.players).toEqual([{ sourceId: CLIP_ID, widthPx: 1024 }])
+  })
+})
+
+describe('the watcher judges by the settings of §9.4', () => {
+  it('watches a page with no extension around it at all', async () => {
+    // The isolated world of an ordinary page has chrome.storage; this realm has nothing. A live
+    // copy of the settings built beside the module's constants is built in every context that
+    // imports the file, and a throw there is not a failing assertion but a file that cannot be
+    // imported — so the copy is made where the watching starts, and it answers the defaults when
+    // there is no storage to read.
+    expect((globalThis as { chrome?: unknown }).chrome, 'setup: this realm has no chrome').toBe(
+      undefined,
+    )
+
+    const watcher = await startWatcher()
+    place(watcher, fakeVideo(), 's-player')
+    tick(13)
+
+    expect(watcher.seen).toEqual([{ sourceId: 's-player', verdict: 'promote' }])
+  })
+
+  it('refuses a player the tightened filter no longer counts as one', async () => {
+    // The same element the balanced preset promotes, under a filter that asks for a wider one.
+    // 640 pixels of player against a floor of a thousand: it is not that the element changed.
+    const watcher = await startWatcher({
+      detection: { gracePeriodSeconds: 6, minWidthPx: 1000, recordMuted: false },
+    })
+    place(watcher, fakeVideo(), 's-player')
+    tick(13)
+
+    expect(watcher.seen).toEqual([{ sourceId: 's-player', verdict: 'reject' }])
+  })
+
+  it('promotes what the loosened filter lets through', async () => {
+    // A small player with controls on it, playing with sound: the balanced preset refuses it for
+    // its width alone, and a user who loosened the filter meant exactly this.
+    const watcher = await startWatcher({
+      detection: { gracePeriodSeconds: 0, minWidthPx: 200, recordMuted: true },
+    })
+    place(watcher, fakeVideo({ box: box(240, 135) }), 's-small')
+    tick(2)
+
+    expect(watcher.seen.at(-1)).toEqual({ sourceId: 's-small', verdict: 'promote' })
+  })
+
+  it('takes a preset moved while a video is playing at the very next poll', async () => {
+    const watcher = await startWatcher({})
+    place(watcher, fakeVideo(), 's-player')
+    tick(13)
+    expect(watcher.seen, 'setup: the default preset promotes this player').toEqual([
+      { sourceId: 's-player', verdict: 'promote' },
+    ])
+
+    // The user tightens the filter over a page full of banners and expects those banners to stop
+    // being recorded now — not after a reload. What has already been promoted is not demoted by
+    // it: the verdict travels, and §5.5 is kept by the registry, which protects a confirmed
+    // session from a later rejection.
+    await watcher.setSettings((current) => ({
+      ...current,
+      detection: { ...current.detection, minWidthPx: 1000 },
+    }))
+    tick()
+
+    expect(watcher.seen.at(-1)).toEqual({ sourceId: 's-player', verdict: 'reject' })
+  })
+
+  it('judges an ordinary file by the same settings as a stream', async () => {
+    // The other road a verdict travels: a <video src="…mp4"> with no MediaSource anywhere. Both
+    // calls to triage are inside one poll, and a filter that reached one of them and not the
+    // other would record what the user forbade on every page outside the video platforms.
+    const watcher = await startWatcher({
+      detection: { gracePeriodSeconds: 6, minWidthPx: 1000, recordMuted: false },
+    })
+    videos.push(fakeVideo({ src: '', currentSrc: 'https://cdn.example/clip.mp4', duration: 12 }))
+    tick(13)
+
+    expect(watcher.seen).toEqual([
+      { sourceId: 'plain:https://cdn.example/clip.mp4', verdict: 'reject' },
+    ])
   })
 })

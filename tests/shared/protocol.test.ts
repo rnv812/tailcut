@@ -41,10 +41,15 @@ const accepted: [string, PageToBridge][] = [
   ['tc:plain', plain],
 ]
 
-/** Both variants of the other side of the protocol: the bridge sends these, it does not take them. */
+/** Every variant of the other side of the protocol: the bridge sends these, it does not take them. */
 const bridgeToPage: [string, BridgeToPage][] = [
   ['the handshake', { type: 'tc:ready' }],
   ['the word that this frame is recording', { type: 'tc:recording' }],
+  // The one bit of the settings the hook is given. It is the one message of this side that turns,
+  // and the page must not be able to say it: recognised here, a site could switch its own
+  // recording off — or, worse, back on over a switch the user had turned.
+  ['the recording switch turned off', { type: 'tc:record', on: false }],
+  ['the recording switch turned back on', { type: 'tc:record', on: true }],
   [
     'an answer with sessions in it',
     {

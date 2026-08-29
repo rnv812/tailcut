@@ -2670,3 +2670,82 @@ describe('the size of the player a session was watched in', () => {
     expect(store.list()[0]!.widthPx).toBe(1920)
   })
 })
+
+describe('SessionStore: intake switched off and on', () => {
+  /** Everything the map of the one track holds, in a form a failing assertion can print. */
+  const chunksOf = (store: SessionStore) =>
+    store.list().flatMap((session) => only(session).map.runs().flatMap((run) => run.chunks.map(shapeOf)))
+
+  it('takes nothing in while intake is paused', () => {
+    const store = new SessionStore()
+    store.pauseIntake(true)
+
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: seg1 })
+
+    // Belt and braces beside the hook, which is where the switch actually saves the copy. A page
+    // loaded before the extension was updated, or a player wrapped in a realm of its own, can
+    // still be sending — and a setting that says "off" has to mean off wherever the bytes come
+    // from.
+    expect(store.list()).toHaveLength(0)
+  })
+
+  it('keeps what it already held: switching recording off is not an erasure', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: seg1 })
+    const before = chunksOf(store)
+    expect(before, 'setup: nothing was recorded to begin with').toHaveLength(1)
+
+    store.pauseIntake(true)
+    store.append({ ...page, bytes: seg2 })
+
+    // §7.2 promises exactly this: the switch is about writing, never about erasing. The user who
+    // turns recording off over a video they have been watching still has that video to save.
+    expect(store.list()).toHaveLength(1)
+    expect(chunksOf(store)).toEqual(before)
+  })
+
+  it('lets a half-read reader go rather than splicing across the silence', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    // The page was in the middle of handing over a segment when the switch was thrown. MSE gives
+    // a SourceBuffer a byte stream, so this is an ordinary shape and not a contrived one.
+    store.append({ ...page, bytes: seg1.subarray(0, 100) })
+
+    store.pauseIntake(true)
+    store.pauseIntake(false)
+
+    store.append({ ...page, bytes: seg2 })
+
+    // Kept, the half would be spliced onto bytes from minutes later and the join read as a
+    // header: a chunk carrying the timing of the first segment and the material of the second.
+    // A fresh reader finds the next header and starts there, and the silence is a gap — which is
+    // what it is, and what §6.3 keeps honestly.
+    const control = new SessionStore()
+    control.append({ ...page, bytes: init })
+    control.append({ ...page, bytes: seg2 })
+
+    expect(chunksOf(store)).toEqual(chunksOf(control))
+  })
+
+  it('holds the readers where they are when the switch did not move', () => {
+    const store = new SessionStore()
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: seg1.subarray(0, 100) })
+
+    // Recording was on and stays on. Said again — and the settings are said again on every change
+    // of any of them — this must cost the stream nothing: letting the readers go here would put
+    // a hole in the recording of every page open when the user moves an unrelated slider.
+    store.pauseIntake(false)
+
+    store.append({ ...page, bytes: seg1.subarray(100) })
+
+    const control = new SessionStore()
+    control.append({ ...page, bytes: init })
+    control.append({ ...page, bytes: seg1 })
+
+    expect(chunksOf(store)).toEqual(chunksOf(control))
+    expect(chunksOf(store), 'setup: the whole segment makes exactly one chunk').toHaveLength(1)
+  })
+})

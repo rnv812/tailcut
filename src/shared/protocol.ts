@@ -355,14 +355,47 @@ export interface FrameRecording {
 }
 
 /**
- * Everything the bridge sends outwards and nothing besides. There are two channels and the union
- * describes both: the handshake, the refusal and the word that this frame is recording go to the
- * window that inserted the bridge, and the answer to a list request only into the MessageChannel
- * port that came with it. A message not described here is an undeclared part of the protocol: the
- * receiver does not know of it, and the next reader of the code learns of it from the bridge
- * implementation rather than from the type.
+ * Whether the hook in the MAIN world should copy anything at all.
+ *
+ * The recording mode of §9.4 (`All sites` / `Allowlist` / `Off`) and the two lists beside it,
+ * decided by the bridge and carried across as the one bit the hook can act on. Off, the hook
+ * stops copying: that is the whole of what turning recording off buys, and it cannot be bought
+ * anywhere further downstream — a registry that dropped what it was given would still be paying
+ * for a copy of every append.
+ *
+ * One bit and not the settings. The MAIN world is the page's own realm: everything that reaches
+ * it, the page can read. Which domains a user has forbidden is a list of what they watch, and it
+ * has no business there.
+ *
+ * It travels from the bridge rather than from the content script, although the content script is
+ * the one holding chrome.storage. The bridge stands on the extension origin, which a page cannot
+ * imitate, and the hook already refuses everything that does not (see PageRefused). Sent from the
+ * content script it would be indistinguishable from a message the page sent itself — and a site
+ * could switch its own recording off with one postMessage.
+ *
+ * Unlike the refusal, this one turns: it is said again whenever the settings change, and again
+ * to a hook that has just started. What was recorded before it was switched off stays exactly
+ * where it was (§7.2); nothing is erased by a switch.
  */
-export type BridgeToPage = { type: 'tc:ready' } | PageRefused | FrameRecording | SessionList
+export interface RecordingSwitch {
+  type: 'tc:record'
+  on: boolean
+}
+
+/**
+ * Everything the bridge sends outwards and nothing besides. There are two channels and the union
+ * describes both: the handshake, the refusal, the recording switch and the word that this frame
+ * is recording go to the window that inserted the bridge, and the answer to a list request only
+ * into the MessageChannel port that came with it. A message not described here is an undeclared
+ * part of the protocol: the receiver does not know of it, and the next reader of the code learns
+ * of it from the bridge implementation rather than from the type.
+ */
+export type BridgeToPage =
+  | { type: 'tc:ready' }
+  | PageRefused
+  | FrameRecording
+  | RecordingSwitch
+  | SessionList
 
 /**
  * How the main world tells a message of the bridge from a message of the page.

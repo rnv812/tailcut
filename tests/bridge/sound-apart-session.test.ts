@@ -145,6 +145,31 @@ describe('a page that plays its sound apart from its picture', () => {
     expect(summarize(session!).pairedSound).toBe(true)
   })
 
+  it('lays no soundtrack under a session while recording is switched off', async () => {
+    // A picture recorded while the site was allowed, and the sound arriving after the user
+    // forbade it: an `<audio>` starts on this page a minute later, or the poll first notices it
+    // then. Taken in, the recording would grow a whole soundtrack while recording was off —
+    // material added by a switch that is meant only to stop taking material.
+    const page = await paired()
+    expect(page.store.list()[0]?.plain?.sound?.url, 'setup: the pairing never happened').toBe(TRACK)
+
+    const after = registry()
+    after.plays()
+    after.shows()
+    after.store.promotePending(SOURCE)
+    await after.store.settled()
+    after.shows()
+    await after.store.settled()
+    // Everything the allowed page did, and then the site is forbidden and the track re-announced.
+    after.store.pauseIntake(true)
+    after.plays({ url: OTHER_TRACK })
+    await after.store.settled()
+
+    expect(after.store.list()[0]?.plain?.sound?.url, 'a forbidden page picked up a new track').toBe(
+      TRACK,
+    )
+  })
+
   it('promises the length of the picture and not of the track', async () => {
     const page = await paired()
     const summary = summarize(page.store.list()[0]!)

@@ -706,3 +706,155 @@ describe('отказ страницы', () => {
     expect(page.of('tc:append')).toHaveLength(1)
   })
 })
+
+describe('the recording switch', () => {
+  /**
+   * The one bit of §9.4 the hook is given: copy, or do not. It comes from the bridge, over the
+   * same channel and under the same origin check as the refusal — and unlike the refusal it
+   * turns, because a user may change their mind about a site without reloading it.
+   */
+  const OFF = { type: 'tc:record', on: false }
+  const ON = { type: 'tc:record', on: true }
+
+  it('stops copying while recording is switched off', async () => {
+    const page = installPage()
+    await importHook()
+    const { sourceBuffer } = openSource(page)
+
+    sourceBuffer.appendBuffer(segment(512))
+    await flush()
+    expect(page.of('tc:append'), 'setup: the hook copies before the switch is touched').toHaveLength(1)
+
+    page.deliver(OFF)
+
+    sourceBuffer.appendBuffer(segment(512))
+    sourceBuffer.appendBuffer(segment(512))
+    await flush()
+
+    // The whole of what turning recording off buys is bought here. Anywhere further downstream
+    // the copy of every append has already been made and paid for.
+    expect(page.of('tc:append'), 'the hook went on copying with recording off').toHaveLength(1)
+  })
+
+  it('copies again when the switch turns back on', async () => {
+    const page = installPage()
+    await importHook()
+    const { sourceBuffer } = openSource(page)
+
+    page.deliver(OFF)
+    sourceBuffer.appendBuffer(segment(512))
+    await flush()
+    expect(page.of('tc:append'), 'setup: nothing travels while the switch is off').toHaveLength(0)
+
+    // This is what the refusal never does. What comes back is the middle of somebody's byte
+    // stream, and finding a place in it again is the registry's business (pauseIntake), not the
+    // hook's: a hook that tried to resume at a boundary would have to parse.
+    page.deliver(ON)
+    sourceBuffer.appendBuffer(segment(512))
+    await flush()
+
+    expect(page.of('tc:append'), 'the switch turned on and the hook stayed silent').toHaveLength(1)
+  })
+
+  it('holds everything else back too while it stands', async () => {
+    const page = installPage()
+    await importHook()
+
+    page.deliver(OFF)
+
+    const { mediaSource } = openSource(page)
+    mediaSource.duration = 42
+
+    // Not only the segments: an announcement of a source nothing will ever be copied from is
+    // traffic bought for nothing, and the bridge has no use for it.
+    expect(page.posted, 'the hook kept talking with recording off').toEqual([])
+  })
+
+  it('is the extension’s to work and not the page’s', async () => {
+    const page = installPage()
+    await importHook()
+    const { sourceBuffer } = openSource(page)
+
+    // A page may post whatever it likes into its own window. Taken as the bridge speaking, this
+    // would hand every site a switch for its own recording — and the far worse one: a site that
+    // could say `on` would turn a switch the user had turned off.
+    page.deliver(OFF, 'https://site.example')
+
+    sourceBuffer.appendBuffer(segment(512))
+    await flush()
+
+    expect(page.of('tc:append')).toHaveLength(1)
+  })
+
+  it('does not lift a refusal: protected media stays refused whatever the settings say', async () => {
+    const page = installPage()
+    await importHook()
+    const { sourceBuffer } = openSource(page)
+
+    page.deliver({ type: 'tc:refused' })
+    page.deliver(ON)
+
+    sourceBuffer.appendBuffer(segment(512))
+    await flush()
+
+    // The two are different words about different things: §5.4 refuses this page's material for
+    // good, and the recording mode is the user's preference about sites. The looser of the two
+    // must not overrule the other, or a page playing DRM would be recorded by having the setting
+    // changed.
+    expect(page.of('tc:append'), 'a switch turned on undid the refusal of a protected page').toHaveLength(
+      0,
+    )
+  })
+})
+
+/**
+ * A buffer that says who read it: the page's own view, with a count of the times its bytes were
+ * reached for. The browser reaches for them once, to append them; the hook reaches for them a
+ * second time, to make the copy it sends to the bridge.
+ *
+ * It is a real ArrayBufferView — ArrayBuffer.isView says so — so both the wrapper and the fake
+ * SourceBuffer treat it exactly as they treat what a player appends.
+ */
+class CountedView extends Uint8Array {
+  reads = 0
+  override get buffer(): ArrayBuffer {
+    this.reads++
+    return super.buffer as ArrayBuffer
+  }
+}
+
+describe('what a switched-off recording costs the page', () => {
+  /** How many times the page's own bytes were reached for over one appendBuffer. */
+  async function readsOverOneAppend(deliver?: unknown): Promise<number> {
+    const page = installPage()
+    await importHook()
+    const { sourceBuffer } = openSource(page)
+    if (deliver) page.deliver(deliver)
+
+    const view = new CountedView(pattern(512))
+    sourceBuffer.appendBuffer(view)
+    await flush()
+    return view.reads
+  }
+
+  it('costs the page no copy of the segment at all', async () => {
+    // The measured cost of copying and throwing away: 29.7 MB on dash.js ClearKey in forty
+    // seconds, 34.7 MB on Widevine. A switch that only dropped the copy at the far end would
+    // leave every byte of that on the page's bill, and there would be nothing to switch off.
+    //
+    // Silence downstream is not the same fact and is checked next door: this is about the
+    // synchronous path of somebody's player, where the copy is made.
+    const recording = await readsOverOneAppend()
+    const off = await readsOverOneAppend({ type: 'tc:record', on: false })
+
+    expect(recording, 'setup: the hook is meant to copy what it is given').toBeGreaterThan(1)
+    // Once, by the browser appending it, and by nobody else.
+    expect(off, 'the hook copied the segment of a page it was told not to record').toBe(1)
+  })
+
+  it('costs it none on a refused page either', async () => {
+    // The same guard, for the refusal that stands beside the switch. Both stop before the copy
+    // and for the same reason; a change that moved one and not the other would be found here.
+    expect(await readsOverOneAppend({ type: 'tc:refused' })).toBe(1)
+  })
+})

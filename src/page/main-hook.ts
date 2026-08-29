@@ -30,19 +30,33 @@ const nextId = (prefix: string): string => `${prefix}${++counter}`
  */
 let refused = false
 
+/**
+ * Recording is switched off for this page: the mode of §9.4, or a list that does not have this
+ * site on it. Nothing is copied while it stands.
+ *
+ * Unlike `refused`, this one turns — the user may switch recording back on without reloading the
+ * page — and what comes back after it is the middle of somebody's byte stream. That is handled on
+ * the other side: the registry lets its half-read readers go when intake resumes, and they find
+ * their place at the next header (see SessionStore.pauseIntake). Here there is nothing to do
+ * about it: a hook that tried to resume at a boundary would have to parse, and it must not.
+ */
+let paused = false
+
 window.addEventListener('message', (event: MessageEvent) => {
   // Only the bridge may say this. Its frame stands on the extension origin, and a document of the
   // site cannot carry that scheme however it posts — while a page may put anything at all into
   // its own window, and a refusal it could imitate would be a switch for turning recording off.
   if (!event.origin.startsWith(EXTENSION_ORIGIN_PREFIX)) return
-  if ((event.data as { type?: unknown } | null)?.type === 'tc:refused') refused = true
+  const message = event.data as { type?: unknown; on?: unknown } | null
+  if (message?.type === 'tc:refused') refused = true
+  if (message?.type === 'tc:record') paused = message.on === false
 })
 
 function send(message: PageToBridge, transfer: Transferable[] = []): void {
   // The last stop for everything, the appends a wrapped worker forwards included: those are
   // copied in a realm of their own, out of reach of the guard below, and the page is refused all
   // the same.
-  if (refused) return
+  if (refused || paused) return
   window.postMessage(message, '*', transfer)
 }
 
@@ -154,8 +168,9 @@ SourceBuffer.prototype.appendBuffer = function (data: BufferSource): void {
   //
   // `refused` рядом — это отказ страницы (см. выше): копию делать незачем, её на той стороне
   // выбросят. Проверка стоит булева чтения при уже сделанном поиске в WeakMap, а экономит
-  // копию сегмента на каждый вызов.
-  if (tracked && !refused) {
+  // копию сегмента на каждый вызов. `paused` — то же самое по настройке §9.4: выключенная
+  // запись обязана не стоить странице копии сегмента, иначе выключать было бы нечего.
+  if (tracked && !refused && !paused) {
     const bytes = copyOf(data)
     // Отправляем в микрозадаче: синхронный путь плеера остаётся пустым.
     queueMicrotask(() => {
