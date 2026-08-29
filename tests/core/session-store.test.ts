@@ -7,6 +7,7 @@ import {
   summarize,
   type ChunkStored,
   type Session,
+  type SessionRekeyed,
 } from '../../src/bridge/session-store'
 import { sessionKey } from '../../src/core/session-key'
 import { parseInit } from '../../src/core/iso/init'
@@ -2445,5 +2446,97 @@ describe('the history hook', () => {
       [0, 2],
       [2, 4],
     ])
+  })
+})
+
+describe('a session whose key changes', () => {
+  it('says so when the player states the length, with the key it now stands under', () => {
+    const moves: SessionRekeyed[] = []
+    const store = new SessionStore({ onRekey: (event) => moves.push(event) })
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: videoSegs[0]! })
+    const live = store.list()[0]!.key
+
+    store.setDuration('s1', 6.845)
+
+    expect(moves).toHaveLength(1)
+    expect(moves[0]!.from).toBe(live)
+    expect(moves[0]!.to).toBe(store.list()[0]!.key)
+    expect(moves[0]!.to).not.toBe(live)
+    expect(moves[0]!.page.url).toBe(page.url)
+  })
+
+  it('says so when the page it was feeding moves to another address', () => {
+    const moves: SessionRekeyed[] = []
+    const store = new SessionStore({ onRekey: (event) => moves.push(event) })
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: videoSegs[0]! })
+    const before = store.list()[0]!.key
+
+    // The soft navigation of §6.1: the page caught up with itself, and the recording it was
+    // feeding belongs to the address it moved to (followTo). The first of the three places a key
+    // changes, and the disk has to move with it there as much as anywhere else.
+    store.pageIsAt('https://site.example/watch?v=next', 'The next one')
+
+    expect(moves).toHaveLength(1)
+    expect(moves[0]!.from).toBe(before)
+    expect(moves[0]!.to).toBe(store.list()[0]!.key)
+    // What the row on disk is renamed to say: a session that followed the page stands at the
+    // page's new address, under the page's new name.
+    expect(moves[0]!.page).toEqual({
+      url: 'https://site.example/watch?v=next',
+      title: 'The next one',
+    })
+  })
+
+  it('says nothing while the old session lives on with other sources feeding it', () => {
+    const moves: SessionRekeyed[] = []
+    const store = new SessionStore({ onRekey: (event) => moves.push(event) })
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: videoSegs[0]! })
+    store.append({ ...page, sourceId: 's2', bufferId: 'b2', bytes: init })
+
+    // The second source leaves for a session of its own; the first is still feeding this one, so
+    // its material stays where it is and nothing on the disk has moved.
+    store.setDuration('s2', 6.845)
+
+    expect(store.list()).toHaveLength(2)
+    expect(moves).toEqual([])
+  })
+
+  it('says nothing when a source joins a session that was already standing there', () => {
+    const moves: SessionRekeyed[] = []
+    const store = new SessionStore({ onRekey: (event) => moves.push(event) })
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: videoSegs[0]! })
+    store.append({ ...page, sourceId: 's2', bufferId: 'b2', bytes: init })
+    store.append({ ...page, sourceId: 's3', bufferId: 'b3', bytes: init })
+
+    // The third source leaves and opens the session at the key its stated length gives it; the
+    // second follows it into a session that is standing there already, while the first goes on
+    // feeding the old one. The other half of the carryTracks branch, and the same answer: the old
+    // session keeps its key and its material, so nothing on the disk has moved.
+    store.setDuration('s3', 6.845)
+    store.setDuration('s2', 6.845)
+
+    expect(store.list()).toHaveLength(2)
+    expect(moves).toEqual([])
+  })
+
+  it('says so on a merge, when the session it moves to is already there', () => {
+    const moves: SessionRekeyed[] = []
+    const store = new SessionStore({ onRekey: (event) => moves.push(event) })
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: videoSegs[0]! })
+    store.append({ ...page, sourceId: 's2', bufferId: 'b2', bytes: init })
+    store.setDuration('s2', 6.845)
+    store.append({ ...page, sourceId: 's2', bufferId: 'b2', bytes: videoSegs[1]! })
+    expect(store.list()).toHaveLength(2)
+
+    store.setDuration('s1', 6.845)
+
+    expect(store.list()).toHaveLength(1)
+    expect(moves).toHaveLength(1)
+    expect(moves[0]!.to).toBe(store.list()[0]!.key)
   })
 })

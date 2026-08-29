@@ -201,28 +201,39 @@ const PROBATION_MS = 7_000
 type PageState = { allAppended?: boolean }
 
 /**
- * Opens a test page with a player and lets it gather material. The looping is what carries the
- * played counter past the probation: the fixture holds exactly six seconds.
+ * Opens a test page with a player on a tab that is already there, and lets it gather material for
+ * as long as it is asked to. The looping is what carries the played counter past the probation:
+ * the fixture holds exactly six seconds.
  */
+export async function watchOn(
+  page: Page,
+  htmlFile: string,
+  url: string,
+  seconds: number,
+): Promise<void> {
+  await serveLocal(page, htmlFile, url)
+
+  await page.waitForFunction(
+    () => (window as unknown as PageState).allAppended === true,
+    undefined,
+    { timeout: 15_000 },
+  )
+  await page.evaluate(() => {
+    const video = document.querySelector('video')!
+    video.loop = true
+    return video.play()
+  })
+  await page.waitForTimeout(seconds * 1_000)
+}
+
+/** The same, on a browser of its own: what the tests of the earlier stages ask for. */
 export async function recordPlayer(
   htmlFile = 'player.html',
   url = 'https://tailcut.test/player',
 ): Promise<{ context: BrowserContext; player: Page; extensionId: string }> {
   const { context, extensionId } = await launchWithExtension()
   const player = await context.newPage()
-  await serveLocal(player, htmlFile, url)
-
-  await player.waitForFunction(
-    () => (window as unknown as PageState).allAppended === true,
-    undefined,
-    { timeout: 15_000 },
-  )
-  await player.evaluate(() => {
-    const video = document.querySelector('video')!
-    video.loop = true
-    return video.play()
-  })
-  await player.waitForTimeout(PROBATION_MS)
+  await watchOn(player, htmlFile, url, PROBATION_MS / 1_000)
 
   return { context, player, extensionId }
 }

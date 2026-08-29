@@ -6,7 +6,7 @@ import {
   piecePath,
   sessionDir,
 } from '../../src/shared/history-files'
-import { launchWithExtension, openExtensionPage, serveLocal } from './helpers'
+import { launchWithExtension, openExtensionPage, serveLocal, watchOn } from './helpers'
 
 /** The session every write here goes into. One directory, thrown away with the profile. */
 const SESSION = 'probe'
@@ -269,6 +269,96 @@ test('the index a bridge frame writes is the index every other context reads', a
     // And a page of the extension itself, which is what the popup and the sweeper are.
     const own = await openExtensionPage(context, extensionId, 'popup/popup.html')
     expect(await read(own)).toBe('written by one.test')
+  } finally {
+    await context.close()
+  }
+})
+
+test('what a tab recorded is in the index after that tab is gone', async () => {
+  const { context, extensionId } = await launchWithExtension()
+
+  try {
+    const page = await context.newPage()
+    await watchOn(page, 'player.html', 'https://one.test/watch', 12)
+    const title = await page.title()
+    await page.close()
+
+    const reader = await openExtensionPage(context, extensionId, 'popup/popup.html')
+    const listed = await reader.evaluate(async () => {
+      const address = '/shared/history-db.js'
+      const { listSessions, readTotals }: typeof import('../../src/shared/history-db') =
+        await import(address)
+      return { sessions: await listSessions(), totals: await readTotals() }
+    })
+
+    expect(listed.sessions).toHaveLength(1)
+    expect(listed.sessions[0]!.title).toBe(title)
+    // Six seconds of material and no more, however long the page looped it: a second viewing of
+    // one stretch is the same stretch (§6.3), and the length of a session says so.
+    expect(listed.sessions[0]!.seconds).toBeGreaterThan(4)
+    expect(listed.sessions[0]!.seconds).toBeLessThan(8)
+    expect(listed.sessions[0]!.bytes).toBeGreaterThan(0)
+    expect(listed.sessions[0]!.tracks.length).toBeGreaterThan(0)
+    expect(listed.totals.bytes).toBe(listed.sessions[0]!.bytes)
+
+    // The same video in a second tab is the same session (§6.1): one row, one directory, and the
+    // material of both tabs in it.
+    const again = await context.newPage()
+    await watchOn(again, 'player.html', 'https://one.test/watch', 12)
+    await again.close()
+
+    const after = await reader.evaluate(async () => {
+      const address = '/shared/history-db.js'
+      const { listSessions }: typeof import('../../src/shared/history-db') =
+        await import(address)
+      return listSessions()
+    })
+    expect(after).toHaveLength(1)
+    expect(after[0]!.id).toBe(listed.sessions[0]!.id)
+    // And the material of the second tab is in it. Its frame has a map of its own, so it wrote
+    // its own copy of the stretch and the row grew by it — which is also what tells a merge apart
+    // from a second row the unique key simply refused.
+    expect(after[0]!.bytes).toBeGreaterThan(listed.sessions[0]!.bytes)
+    // And it is still one recording long: the two tabs wrote the same stretch twice, and the
+    // length of a session is what it covers and not what was written into it.
+    expect(after[0]!.seconds).toBeLessThan(8)
+  } finally {
+    await context.close()
+  }
+})
+
+/**
+ * The key of this session changes while it is being recorded: the page states the length of the
+ * video a moment after the first segments have gone down (§6.1, and it is what a player does).
+ * One video, one row — the halves must not end up apart.
+ */
+test('a session whose key changes on the fly stays one row', async () => {
+  const { context, extensionId } = await launchWithExtension()
+
+  try {
+    const page = await context.newPage()
+    await watchOn(page, 'player.html', 'https://one.test/watch', 6)
+
+    // Long after the first batches: this is the state the writer has to survive, not the one
+    // where nothing has landed yet.
+    await page.evaluate(() => {
+      const source = (window as unknown as { tcPlayerSource?: MediaSource }).tcPlayerSource
+      if (source) source.duration = 6.845
+    })
+    await page.waitForTimeout(6_000)
+    await page.close()
+
+    const reader = await openExtensionPage(context, extensionId, 'popup/popup.html')
+    const sessions = await reader.evaluate(async () => {
+      const address = '/shared/history-db.js'
+      const { listSessions }: typeof import('../../src/shared/history-db') =
+        await import(address)
+      return listSessions()
+    })
+
+    expect(sessions, 'the halves of one video ended up in two rows').toHaveLength(1)
+    // Under the key the length gave it, not the one that said `live`: the row followed.
+    expect(sessions[0]!.key).toMatch(/\|7$/)
   } finally {
     await context.close()
   }

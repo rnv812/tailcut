@@ -1,8 +1,8 @@
-import { layoutBatch, type BatchItem, type HistoryPiece, type PlacedInit } from '../core/history/layout'
+import { layoutBatch, type BatchItem, type HistoryPiece, type HistoryTrack } from '../core/history/layout'
 import { concatBytes } from '../core/iso/writer'
 import { HISTORY_BATCH_BYTES, newWriterId, pieceName, piecePath } from '../shared/history-files'
 import type { FromHistoryWorker, ToHistoryWorker } from './history-worker'
-import type { ChunkStored } from './session-store'
+import type { ChunkStored, SessionRekeyed } from './session-store'
 
 /**
  * How long a batch waits for more material before going down as it is.
@@ -47,8 +47,18 @@ export interface HistoryIo {
   write(path: string, bytes: ArrayBuffer): Promise<FromHistoryWorker>
   /** Identity of this session on disk; null — the index would not open one, so nothing is written. */
   open(event: ChunkStored): Promise<string | null>
-  /** The row goes in after the file has landed, never before it (see the storage convention). */
-  record(id: string, piece: HistoryPiece, inits: PlacedInit[], event: ChunkStored): Promise<void>
+  /**
+   * The row goes in after the file has landed, never before it (see the storage convention).
+   *
+   * `tracks` are the tracks whose init segment this piece carries, each described by the event
+   * that brought it. Described one by one and not by the batch, because a batch regularly carries
+   * the init of two — MSE gives the picture and the sound a SourceBuffer apiece and a site opens
+   * both in the first second — and the facts of a track cannot be read off whichever chunk
+   * happened to close the batch.
+   */
+  record(id: string, piece: HistoryPiece, tracks: HistoryTrack[], event: ChunkStored): Promise<void>
+  /** The session on disk is known by another merge key from now on; the row moves, the files do not. */
+  rename(id: string, event: SessionRekeyed): Promise<void>
   /** Storage is full and somebody has to make room. */
   sweep(): void
   now(): number
@@ -61,8 +71,15 @@ interface Pending {
   bytes: number
   /** The freshest event of the batch: what the session row is signed with. */
   sample: ChunkStored
-  /** Representations whose init is inside this batch already. */
-  attached: Set<string>
+  /**
+   * Representations whose init is inside this batch already, and what each of those tracks is.
+   *
+   * The facts and not merely the names, because the row of a track is written from them: the
+   * buffer it arrived in, its kinds and the header its init declared. They are put here where the
+   * init is attached, so that a track is described by the event that carried its init and not by
+   * the freshest event of the batch, which is as likely to be the other track's.
+   */
+  attached: Map<string, Omit<HistoryTrack, 'init'>>
   timer: Timer | undefined
 }
 
@@ -128,7 +145,7 @@ export class HistoryWriter {
       items: [],
       bytes: 0,
       sample: event,
-      attached: new Set<string>(),
+      attached: new Map<string, Omit<HistoryTrack, 'init'>>(),
       timer: undefined,
     }
     pending.sample = event
@@ -143,7 +160,12 @@ export class HistoryWriter {
     // or the material is unreadable for good.
     if (!this.carried.get(event.key)?.has(representation) && !pending.attached.has(representation)) {
       item.init = event.track.initBytes
-      pending.attached.add(representation)
+      pending.attached.set(representation, {
+        representation,
+        bufferId: event.track.bufferId,
+        kinds: event.track.kinds,
+        info: event.track.info,
+      })
       pending.bytes += event.track.initBytes.byteLength
     }
 
@@ -158,6 +180,98 @@ export class HistoryWriter {
     if (!pending.timer) {
       pending.timer = setTimeout(() => this.flush(event.key), HISTORY_TAIL_MS)
     }
+  }
+
+  /**
+   * The session this writer knows under one key is known under another from now on.
+   *
+   * Three cases, told apart by one question: is there a row on the disk under either key already?
+   *
+   * Nothing written yet — the ordinary case, because the length a player states arrives in the
+   * first second — and everything simply moves: the batch being gathered carries the init
+   * segments of its tracks with it, because nothing of them has landed.
+   *
+   * A row under the old key and none under the new one: the row moves with the key. The identity
+   * is the same, the directory is the same, and what has already landed stays landed — which is
+   * the whole point, because otherwise the second half of one video would open a row of its own
+   * and the popup would show one recording as two.
+   *
+   * A row under both, which is a merge (SessionStore.absorb): the batch being gathered goes down
+   * under the old key, where the init segments that explain it are, and the two rows stay two.
+   * Folding them would mean moving files between directories; it is named as a limitation rather
+   * than half-done here.
+   */
+  rekey(event: SessionRekeyed): void {
+    const { from, to } = event
+    if (from === to) return
+
+    // "Has an identity, or has asked for one." `opened` alone is not the question: a batch queued
+    // a moment ago may be inside `io.open` this very second, and answering "nothing was ever
+    // written under this key" would leave the identity behind under a key nothing writes to any
+    // more — and the next batch under the new key would open a second row for one video, which is
+    // the splitting this method exists to prevent.
+    const owns = this.opened.has(from) || this.claimed.has(from)
+    const carries = owns && !this.opened.has(to) && !this.claimed.has(to)
+
+    if (owns && !carries) {
+      // A merge whose survivor has a row of its own: what was gathered under the old key goes
+      // down into the old row, beside the init segments that explain it, and the bookkeeping of
+      // that key is left standing — the batch just queued finds its identity there instead of
+      // asking the index for it a second time.
+      this.flush(from)
+      return
+    }
+
+    const pending = this.pending.get(from)
+    const inits = this.carried.get(from)
+    this.pending.delete(from)
+    this.carried.delete(from)
+
+    if (carries) {
+      if (inits) this.carried.set(to, inits)
+      // Onto the queue the batches are on, so that no piece is ever written under a key the index
+      // has not been told about yet — and the identity is read there rather than here, because
+      // the batch that asked for it may still be waiting for the answer. This runs after it.
+      this.queue = this.queue
+        .then(async () => {
+          const id = this.opened.get(from)
+          this.opened.delete(from)
+          this.claimed.delete(from)
+          if (id === undefined) return
+
+          this.opened.set(to, id)
+          this.claimed.add(to)
+          await this.io.rename(id, event)
+        })
+        .catch(() => undefined)
+    }
+
+    if (!pending) return
+    if (pending.timer) clearTimeout(pending.timer)
+    pending.timer = undefined
+
+    const standing = this.pending.get(to)
+    if (!standing) {
+      this.pending.set(to, pending)
+      pending.timer = setTimeout(() => this.flush(to), HISTORY_TAIL_MS)
+      return
+    }
+
+    // Both keys were gathering: one batch out of the two, in the order the material arrived. This
+    // is the one case in which an init travels twice — each side claimed the init of its own
+    // tracks before the merge, and the claims are not comparable across keys. It costs a few
+    // hundred bytes, and `HistoryTrack.init` says what is done about it: the row keeps the first
+    // place an init landed in and ignores every later one.
+    standing.items.push(...pending.items)
+    standing.bytes += pending.bytes
+    standing.sample = pending.sample
+    // The facts of a track travel with its init: what the merged batch carries an init for, the
+    // merged batch must be able to describe. Whichever side claimed a representation first keeps
+    // it — the two describe the same track, so there is nothing to choose between them.
+    for (const [representation, facts] of pending.attached) {
+      if (!standing.attached.has(representation)) standing.attached.set(representation, facts)
+    }
+    if (standing.bytes >= HISTORY_BATCH_BYTES) this.flush(to)
   }
 
   /** Everything gathered, down now. For a caller that knows the page is going away. */
@@ -185,6 +299,14 @@ export class HistoryWriter {
     // session, and the next "Save all" would write a file of zeroes.
     const bytes = concatBytes(layout.parts)
     const sample = pending.sample
+
+    // What the index is told about the tracks of this piece: the place each init landed in,
+    // beside the facts of the track it explains. `attached` is filled where the init is attached,
+    // so an init with nothing beside it here would be an item this writer never took.
+    const tracks = layout.inits.flatMap((init) => {
+      const facts = pending.attached.get(init.representation)
+      return facts ? [{ ...facts, init: { file, at: init.at, length: init.length } }] : []
+    })
 
     // Both of these are said here, synchronously, and not inside the continuation below, because
     // the next batch is cut in a turn the continuation has not run in yet.
@@ -218,7 +340,7 @@ export class HistoryWriter {
           }
 
           // The row after the file, never before it: a row is a promise that the bytes are there.
-          await this.io.record(id, layout.piece, layout.inits, sample)
+          await this.io.record(id, layout.piece, tracks, sample)
           landed = true
         } finally {
           // The claim is given back by the batch that did not keep it, whichever way it failed —

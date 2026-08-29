@@ -819,6 +819,25 @@ export interface ChunkStored {
   chunk: Chunk
 }
 
+/**
+ * A session is known under a new merge key from now on (§6.1).
+ *
+ * Said in three places and meaning two different things, which is why it carries both keys and
+ * lets the writer decide. Two of them are renames: `followTo` moves the freshest session to the
+ * address a soft navigation went to, and `bind` re-keys a session once the player states the
+ * length — until then the key says `live`. The third is a merge: `bind` finds a session already
+ * standing at the new key and pours this one into it (`absorb`).
+ *
+ * Nothing of the material is reported again by any of them. The history hears about a chunk when
+ * a map takes it, and everything a merge moves was taken when it arrived.
+ */
+export interface SessionRekeyed {
+  from: string
+  to: string
+  /** Where the session stands now: what the row on disk is renamed to say. */
+  page: { url: string; title: string }
+}
+
 export interface StoreOptions {
   openPlain?: PlainOpener
   openSound?: SoundOpener
@@ -839,6 +858,11 @@ export interface StoreOptions {
    * nothing and behaves exactly as the registry did before this stage.
    */
   onChunk?: (event: ChunkStored) => void
+  /**
+   * The key of a session has changed. What is on disk is addressed by that key, so whatever
+   * writes the history has to move with it — see HistoryWriter.rekey.
+   */
+  onRekey?: (event: SessionRekeyed) => void
 }
 
 /** Everything the registry keeps about one ordinary file the page is playing. */
@@ -926,12 +950,14 @@ export class SessionStore {
   private readonly openSound?: SoundOpener
   private readonly onFileRead?: () => void
   private readonly onChunk?: (event: ChunkStored) => void
+  private readonly onRekey?: (event: SessionRekeyed) => void
 
   constructor(options: StoreOptions = {}) {
     this.openPlain = options.openPlain
     this.openSound = options.openSound
     this.onFileRead = options.onFileRead
     this.onChunk = options.onChunk
+    this.onRekey = options.onRekey
   }
 
   /**
@@ -1382,6 +1408,16 @@ export class SessionStore {
     })
   }
 
+  /** The key of this session has changed; whoever writes the history has to hear it once. */
+  private rekeyed(from: string, session: StoredSession): void {
+    if (from === session.key) return
+    this.onRekey?.({
+      from,
+      to: session.key,
+      page: { url: session.url, title: session.title },
+    })
+  }
+
   /**
    * A segment of a source whose rejection is under review: set aside instead of collected, and
    * out of sight until triage settles which kind of rejection it was.
@@ -1543,11 +1579,13 @@ export class SessionStore {
     })
     if (this.sessions.has(key)) return
 
-    this.sessions.delete(freshest.key)
+    const previousKey = freshest.key
+    this.sessions.delete(previousKey)
     freshest.key = key
     freshest.url = url
     freshest.title = title
     this.sessions.set(key, freshest)
+    this.rekeyed(previousKey, freshest)
 
     // The sources move with it, or the next init at the new address would read as a move to
     // another video and clear the headers of a stream that never stopped (see sourceFor).
@@ -1919,10 +1957,12 @@ export class SessionStore {
 
     if (!target) {
       if (previous && alone) {
-        this.sessions.delete(previous.key)
+        const previousKey = previous.key
+        this.sessions.delete(previousKey)
         previous.key = key
         this.join(previous, sourceId)
         this.sessions.set(key, previous)
+        this.rekeyed(previousKey, previous)
         return previous
       }
 
@@ -1937,6 +1977,10 @@ export class SessionStore {
     if (previous && alone) {
       absorb(target, previous)
       this.sessions.delete(previous.key)
+      // A merge and not a rename, and said as one: what the absorbed session collected is already
+      // on the maps of this one and is not reported again. What the writer does about two keys
+      // that have become one is its own business (HistoryWriter.rekey).
+      this.rekeyed(previous.key, target)
     } else if (previous) {
       this.carryTracks(target, source)
     }

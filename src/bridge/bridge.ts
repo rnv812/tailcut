@@ -19,6 +19,12 @@ import {
   summarize,
   type Session,
 } from './session-store'
+import {
+  openSession,
+  recordPiece,
+  recordSnapshot,
+  renameSession,
+} from '../shared/history-db'
 import { writeSnapshot } from './snapshot-writer'
 import { writeSaveFile } from './write'
 
@@ -33,20 +39,26 @@ const HISTORY_TO_DISK = true
 
 const writeHistoryPiece = historyWorker()
 
-/** Identity of a session on disk. Task 4 replaces this with a lookup by merge key in the index. */
-const diskIds = new Map<string, string>()
-
 const history = new HistoryWriter({
   write: (path, bytes) => writeHistoryPiece(path, bytes),
-  open: async (event) => {
-    const known = diskIds.get(event.key)
-    if (known) return known
-    const id = crypto.randomUUID()
-    diskIds.set(event.key, id)
-    return id
+  // By merge key, so that a second tab playing the same video fills in the session the first one
+  // opened rather than starting one of its own beside it (§6.1). A refusal — private browsing, a
+  // store the browser would not open — is answered with null, and nothing is written at all.
+  open: (event) =>
+    openSession(event.key, event.page).catch(() => null),
+  record: (id, piece, tracks, event) =>
+    recordPiece(id, piece, tracks, event).catch(() => undefined),
+  rename: (id, event) =>
+    renameSession(id, event.to, event.page)
+      .then(() => undefined)
+      .catch(() => undefined),
+  sweep: () => {
+    // Storage is full — full below our own ceiling, which is the browser's right (§7.4 is a
+    // ceiling we keep, not a quota we are given). The service worker lowers the effective ceiling
+    // to below what is occupied and sweeps; without `full` there would be nothing over the
+    // ceiling to take, and this would be a nudge that frees nothing, every thirty seconds.
+    void chrome.runtime.sendMessage({ type: 'tc:sweep', full: true }).catch(() => undefined)
   },
-  record: async () => undefined,
-  sweep: () => undefined,
   now: () => Date.now(),
 })
 history.setEnabled(HISTORY_TO_DISK)
@@ -71,6 +83,9 @@ const store = new SessionStore({
   // Everything that lands on a map goes to the disk as well, in batches (§7.1). The registry says
   // it happened; what to do about it is entirely the writer's business.
   onChunk: (event) => history.take(event),
+  // The key of a session changes while it is being recorded (§6.1), and what is on disk is
+  // addressed by it. Without this the disk would keep the halves apart.
+  onRekey: (event) => history.rekey(event),
 })
 
 /**
@@ -340,7 +355,19 @@ async function freezeCaptured(session: Session, meta: SnapshotMeta): Promise<Edi
   if (!plan.index.tracks.some((track) => track.chunks.length)) return { ok: false, reason: 'empty' }
 
   const written = await writeSnapshot(plan, snapshotPath(meta.id))
-  return written ? { ok: true, snapshotId: meta.id } : { ok: false, reason: 'storage' }
+  if (!written) return { ok: false, reason: 'storage' }
+
+  // A snapshot is a temporary of one editing and it is swept by age like everything else, so it
+  // has to be in the index that the sweeper and the volume indicator read. Written after the file
+  // and never before it, exactly as a piece of the history is.
+  await recordSnapshot({
+    id: meta.id,
+    capturedAt: meta.capturedAt,
+    bytes: plan.bytes,
+    title: session.title,
+  }).catch(() => undefined)
+
+  return { ok: true, snapshotId: meta.id }
 }
 
 /**
@@ -377,8 +404,20 @@ async function freezeFile(session: Session, meta: SnapshotMeta): Promise<EditRes
   const source = fileSnapshotSourceOf(session, file, cut.duration)
   if (!source) return { ok: false, reason: 'unread' }
 
-  const written = await writeSnapshot(planSnapshot(source, meta), snapshotPath(meta.id))
-  return written ? { ok: true, snapshotId: meta.id } : { ok: false, reason: 'storage' }
+  const plan = planSnapshot(source, meta)
+  const written = await writeSnapshot(plan, snapshotPath(meta.id))
+  if (!written) return { ok: false, reason: 'storage' }
+
+  // The same as for material this frame was holding: the file first, the row after it, and the
+  // sweeper counts this one in the occupied volume like any other.
+  await recordSnapshot({
+    id: meta.id,
+    capturedAt: meta.capturedAt,
+    bytes: plan.bytes,
+    title: session.title,
+  }).catch(() => undefined)
+
+  return { ok: true, snapshotId: meta.id }
 }
 
 window.addEventListener('message', (event: MessageEvent) => {

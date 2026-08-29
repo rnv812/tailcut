@@ -20,6 +20,7 @@ export const ENTRIES = [
   { entryPoints: { 'bridge/bridge': 'src/bridge/bridge.ts' }, format: 'esm' },
   { entryPoints: { 'bridge/snapshot-worker': 'src/bridge/snapshot-worker.ts' }, format: 'iife' },
   { entryPoints: { 'bridge/history-worker': 'src/bridge/history-worker.ts' }, format: 'iife' },
+  { entryPoints: { 'shared/history-db': 'src/shared/history-db.ts' }, format: 'esm' },
   { entryPoints: { 'popup/popup': 'src/popup/popup.tsx' }, format: 'esm' },
   { entryPoints: { 'editor/main': 'src/editor/main.tsx' }, format: 'esm' },
   { entryPoints: { 'editor/waveform-worker': 'src/editor/source/waveform-worker.ts' }, format: 'iife' },

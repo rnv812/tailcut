@@ -8,7 +8,7 @@ import {
   type HistoryIo,
 } from '../../src/bridge/history-writer'
 import { HISTORY_BATCH_BYTES } from '../../src/shared/history-files'
-import type { HistoryPiece, PlacedInit } from '../../src/core/history/layout'
+import type { HistoryPiece, HistoryTrack } from '../../src/core/history/layout'
 import type { FromHistoryWorker, ToHistoryWorker } from '../../src/bridge/history-worker'
 import type { ChunkStored } from '../../src/bridge/session-store'
 
@@ -28,7 +28,8 @@ interface Written {
  */
 function fakeIo(overrides: Partial<HistoryIo> = {}) {
   const written: Written[] = []
-  const rows: Array<{ id: string; piece: HistoryPiece; inits: PlacedInit[] }> = []
+  const rows: Array<{ id: string; piece: HistoryPiece; tracks: HistoryTrack[] }> = []
+  const renamed: Array<[string, string]> = []
   let clock = 1_700_000_000_000
   const sweeps: number[] = []
 
@@ -40,9 +41,12 @@ function fakeIo(overrides: Partial<HistoryIo> = {}) {
       )
     },
     open: async (event) => (overrides.open ? await overrides.open(event) : 'sess-1'),
-    record: async (id, piece, inits, event) => {
-      rows.push({ id, piece, inits })
-      await overrides.record?.(id, piece, inits, event)
+    record: async (id, piece, tracks, event) => {
+      rows.push({ id, piece, tracks })
+      await overrides.record?.(id, piece, tracks, event)
+    },
+    rename: async (id, event) => {
+      renamed.push([id, event.to])
     },
     sweep: () => {
       sweeps.push(clock)
@@ -51,24 +55,44 @@ function fakeIo(overrides: Partial<HistoryIo> = {}) {
     now: () => (overrides.now ? overrides.now() : clock),
   }
 
-  return { io, written, rows, sweeps, tick: (ms: number) => (clock += ms) }
+  return { io, written, rows, renamed, sweeps, tick: (ms: number) => (clock += ms) }
 }
 
 /** The merge key of the session everything in this set is about (§6.1). */
 const KEY = 'https://site.example/watch|avc1|live'
 
-const event = (start: number, bytes: number): ChunkStored => ({
+/** The picture of that session: the track everything here is written about. */
+const VIDEO: ChunkStored['track'] = {
+  representation: 'video:avc1:1920x1080',
+  bufferId: 'sb-1',
+  kinds: ['video'],
+  info: { tracks: [{ trackId: 1, kind: 'video', timescale: 90_000, codec: 'avc1', width: 1920, height: 1080 }] },
+  initBytes: new Uint8Array(16).fill(9),
+}
+
+/**
+ * Its sound, in a buffer of its own — which is how MSE delivers sound, and the only reason the
+ * facts of a track cannot be read off the chunk that happened to close the batch.
+ */
+const AUDIO: ChunkStored['track'] = {
+  representation: 'audio:mp4a:0x0',
+  bufferId: 'sb-2',
+  kinds: ['audio'],
+  info: { tracks: [{ trackId: 2, kind: 'audio', timescale: 48_000, codec: 'mp4a', width: 0, height: 0 }] },
+  initBytes: new Uint8Array(24).fill(7),
+}
+
+const of = (track: ChunkStored['track'], start: number, bytes: number): ChunkStored => ({
   key: KEY,
   page: { url: 'https://site.example/watch', title: 'Clip', createdAt: 1, lastSeenAt: 2 },
-  track: {
-    representation: 'video:avc1:1920x1080',
-    bufferId: 'sb-1',
-    kinds: ['video'],
-    info: { tracks: [] },
-    initBytes: new Uint8Array(16).fill(9),
-  },
+  track,
   chunk: { start, end: start + 2, bytes: new Uint8Array(bytes).fill(1) },
 })
+
+const event = (start: number, bytes: number): ChunkStored => of(VIDEO, start, bytes)
+
+/** A track as the index remembers it, minus the place its init landed in. */
+const facts = ({ initBytes: _bytes, ...track }: ChunkStored['track']) => track
 
 /** Lets the writer's queue of promises drain: everything it does is chained onto one. */
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
@@ -127,7 +151,31 @@ describe('HistoryWriter', () => {
 
     expect(order).toEqual(['file', 'row'])
     expect(rows[0]!.piece.parts).toHaveLength(1)
-    expect(rows[0]!.inits).toEqual([{ representation: 'video:avc1:1920x1080', at: 0, length: 16 }])
+    expect(rows[0]!.tracks).toEqual([
+      { ...facts(VIDEO), init: { file: rows[0]!.piece.file, at: 0, length: 16 } },
+    ])
+  })
+
+  it('describes every track of a batch by its own init, not by the chunk that closed it', async () => {
+    const { io, rows } = fakeIo()
+    const writer = new HistoryWriter(io)
+
+    // Picture and sound of one video, inside one tail. That is the ordinary first batch of any
+    // session — MSE gives a track a SourceBuffer apiece and a site opens both in the first second
+    // — and it is the only place where one piece carries the init of more than one track.
+    writer.take(of(VIDEO, 0, 1_000))
+    writer.take(of(AUDIO, 0, HISTORY_BATCH_BYTES))
+    await settle()
+
+    // The row of a track says what that track is: its buffer, its kinds, the header its init
+    // declared. Read off the batch instead — off `sample`, the freshest event in it — and the
+    // picture of this session would be written down as sound, with the sound's timescale, and
+    // the editor would read every video segment on the wrong clock.
+    const file = rows[0]!.piece.file
+    expect(rows[0]!.tracks).toEqual([
+      { ...facts(VIDEO), init: { file, at: 0, length: 16 } },
+      { ...facts(AUDIO), init: { file, at: 1_016, length: 24 } },
+    ])
   })
 
   it('sends the init of a track once, and again if the batch carrying it was lost', async () => {
@@ -176,8 +224,8 @@ describe('HistoryWriter', () => {
     // And the index hears of the init once. `HistoryTrack.init` holds one place and one only, so a
     // second row placing the same init in another file would make which of the two the index keeps
     // a matter of the order they landed in.
-    expect(rows.flatMap((row) => row.inits)).toEqual([
-      { representation: 'video:avc1:1920x1080', at: 0, length: 16 },
+    expect(rows.flatMap((row) => row.tracks)).toEqual([
+      { ...facts(VIDEO), init: { file: rows[0]!.piece.file, at: 0, length: 16 } },
     ])
   })
 
@@ -297,6 +345,101 @@ describe('HistoryWriter', () => {
 
     expect(written).toHaveLength(0)
     expect(rows).toHaveLength(0)
+  })
+})
+
+describe('HistoryWriter.rekey', () => {
+  // What the key becomes when the player states the length: the same address, `live` replaced by
+  // the number (§6.1, and durationToken rounds it to whole seconds).
+  const NEXT = 'https://site.example/watch|avc1|7'
+  const moved = { from: KEY, to: NEXT, page: { url: 'https://site.example/watch', title: 'Clip' } }
+
+  it('moves the row of a session to the key it is now known by', async () => {
+    const { io, written, rows, renamed } = fakeIo()
+    const writer = new HistoryWriter(io)
+
+    writer.take(event(0, HISTORY_BATCH_BYTES))
+    await settle()
+    writer.rekey(moved)
+    await settle()
+
+    expect(renamed).toEqual([['sess-1', NEXT]])
+
+    // What arrives under the new key goes into the same row and the same directory, and the init
+    // of a track that is already on disk does not travel again.
+    writer.take({ ...event(2, HISTORY_BATCH_BYTES), key: NEXT })
+    await settle()
+    expect(rows.map((row) => row.id)).toEqual(['sess-1', 'sess-1'])
+    expect(written.map((one) => one.bytes)).toEqual([
+      16 + HISTORY_BATCH_BYTES,
+      HISTORY_BATCH_BYTES,
+    ])
+  })
+
+  it('carries what it was gathering over, init and all, when nothing has landed yet', async () => {
+    const { io, written, rows } = fakeIo()
+    const writer = new HistoryWriter(io)
+
+    writer.take(event(0, 1_000))
+    writer.rekey(moved)
+    writer.take({ ...event(2, HISTORY_BATCH_BYTES), key: NEXT })
+    await settle()
+
+    // One row, one file, both chunks in it, and the init in front of them: nothing had reached
+    // the disk when the key changed, so there was nothing to leave behind.
+    expect(rows).toHaveLength(1)
+    expect(written[0]!.bytes).toBe(16 + 1_000 + HISTORY_BATCH_BYTES)
+    expect(rows[0]!.piece.parts).toHaveLength(2)
+  })
+
+  it('leaves a merged session where it is, with what it holds', async () => {
+    const ids: Record<string, string> = { [KEY]: 'sess-1', [NEXT]: 'sess-2' }
+    const { io, written, rows, renamed } = fakeIo({ open: async (one) => ids[one.key] ?? 'sess-1' })
+    const writer = new HistoryWriter(io)
+
+    // Both keys have a row of their own: two sessions of one frame about to become one.
+    writer.take(event(0, HISTORY_BATCH_BYTES))
+    writer.take({ ...event(0, HISTORY_BATCH_BYTES), key: NEXT })
+    await settle()
+
+    writer.take(event(4, 1_000))
+    writer.rekey(moved)
+    await settle()
+
+    // Nothing renamed — the survivor has a row — and the half-gathered batch went down under the
+    // key it was gathered on, where the init that explains it is.
+    expect(renamed).toEqual([])
+    expect(rows.map((row) => row.id)).toEqual(['sess-1', 'sess-2', 'sess-1'])
+    expect(written.at(-1)!.bytes).toBe(1_000)
+  })
+
+  it('waits for an identity a batch is still asking for, instead of deciding nothing was written', async () => {
+    const { io, written, rows, renamed } = fakeIo()
+    const writer = new HistoryWriter(io)
+
+    // The batch is full, so it goes down on the spot — and the key changes while the index is
+    // still being asked who this session is. No `settle` between the two lines, and that is the
+    // whole test: the merge key of §6.1 changes when the player states the length, which is the
+    // first second of playback, which is exactly when the first batch is in flight.
+    writer.take(event(0, HISTORY_BATCH_BYTES))
+    writer.rekey(moved)
+    writer.take({ ...event(2, HISTORY_BATCH_BYTES), key: NEXT })
+    await settle()
+
+    // One session, renamed, and both batches in it. Read `opened` synchronously here and this is
+    // two rows for one video: the identity stays behind under the old key and the second batch
+    // opens another.
+    expect(renamed).toEqual([['sess-1', NEXT]])
+    expect(rows.map((row) => row.id)).toEqual(['sess-1', 'sess-1'])
+    // And the init does not travel a second time. The claim on it is made where the batch is cut
+    // rather than after it lands (see `carried`), so it was already standing when the key moved,
+    // and it moved with it: the same identity, the same directory, one init on disk. The claim
+    // is the very same set, so a first batch that failed to land would give it back under the new
+    // key and the next batch would bring the init along.
+    expect(written.map((one) => one.bytes)).toEqual([
+      16 + HISTORY_BATCH_BYTES,
+      HISTORY_BATCH_BYTES,
+    ])
   })
 })
 

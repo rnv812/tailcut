@@ -40,6 +40,10 @@
   const video = document.getElementById('v')
   const mediaSource = new MediaSource()
   video.src = URL.createObjectURL(mediaSource)
+  // The very MediaSource that is playing: a test that states a duration has to state it on this
+  // one, or the hook never hears of it. Named apart from `tcSource`, which is the probe array the
+  // hook sets tell themselves what the hook saw — a page that overwrote it broke four of them.
+  window.tcPlayerSource = mediaSource
 
   window.appended = 0
 
