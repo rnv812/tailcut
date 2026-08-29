@@ -9,6 +9,7 @@ import {
   type SessionList,
   type SessionSummary,
 } from '../shared/protocol'
+import { HistoryWriter, historyWorker } from './history-writer'
 import { openPlainFile, openSoundFile } from './loader'
 import {
   SessionStore,
@@ -20,6 +21,35 @@ import {
 } from './session-store'
 import { writeSnapshot } from './snapshot-writer'
 import { writeSaveFile } from './write'
+
+/**
+ * Whether material goes to the disk at all.
+ *
+ * A constant until Task 7, where it becomes `history.toDisk` of the settings (§7.2) and goes,
+ * this line with it. It is the default of §7.4 written down in one place, so that turning the
+ * whole stage off while it is being built is one edit and not a hunt.
+ */
+const HISTORY_TO_DISK = true
+
+const writeHistoryPiece = historyWorker()
+
+/** Identity of a session on disk. Task 4 replaces this with a lookup by merge key in the index. */
+const diskIds = new Map<string, string>()
+
+const history = new HistoryWriter({
+  write: (path, bytes) => writeHistoryPiece(path, bytes),
+  open: async (event) => {
+    const known = diskIds.get(event.key)
+    if (known) return known
+    const id = crypto.randomUUID()
+    diskIds.set(event.key, id)
+    return id
+  },
+  record: async () => undefined,
+  sweep: () => undefined,
+  now: () => Date.now(),
+})
+history.setEnabled(HISTORY_TO_DISK)
 
 /**
  * The registry of this frame, with the one thing it cannot do for itself handed to it: reading a
@@ -38,6 +68,9 @@ const store = new SessionStore({
   // watched to the end and fully downloaded would otherwise be recorded and never counted on the
   // badge — see tellRecording.
   onFileRead: () => tellRecording(),
+  // Everything that lands on a map goes to the disk as well, in batches (§7.1). The registry says
+  // it happened; what to do about it is entirely the writer's business.
+  onChunk: (event) => history.take(event),
 })
 
 /**

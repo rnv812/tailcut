@@ -40,27 +40,27 @@ const SWEEP_ONLY = [
  * The measurements, and why they run by themselves.
  *
  * `overhead.spec.ts` prices `appendBuffer` with and without the extension and states the
- * difference in copies of a segment. Both halves of that fraction are wall-clock measurements of
- * this machine, and a neighbour running a browser on the other cores inflates them — but not by
- * the same amount, which is what makes it a problem and not merely noise. Run under three
- * workers, every one of its three clean rounds priced a copy above 20 µs and the lowest came out
- * at 21.7 against 15.0 alone; the overhead above it rose by less, and the verdict fell to 1.34
- * copies from 1.82. The test still passed. It had stopped being able to fail: a regression of a
- * whole copy would have fitted inside the room the inflated denominator gave it.
+ * difference in copies of a segment. `history-write-cost.spec.ts` times one sealed write of a
+ * whole batch and names the shape it would lose. `history-cost.spec.ts` watches a page in real
+ * time while the extension writes a hundred and thirty megabytes of its material to disk and
+ * counts what the page lost by it.
  *
- * `history-write-cost.spec.ts` is here for the same reason and had the same failure to show for
- * it. It times one write of 8 MiB, which costs 8.9–21.9 ms with the machine to itself. Under four
- * workers the very same write ran 16.6–37: the neighbours doubled the number and stretched its
- * tail, and the bound had to be widened until it cleared their worst rather than the write's. It
- * was set at 400 and named three regressions it could not see — the segmented write it was meant
- * to catch straddled that line at 369–420 and went green in four runs out of six. Alone, eighty
- * milliseconds is nearly four times the worst honest sample and a fifth of the cheapest
- * segmented one.
+ * All three are wall-clock measurements of this machine, and a neighbour running a browser on the
+ * other cores inflates them — unevenly, which is what makes it a problem and not merely noise.
+ * Measured on the two that were here first: the verdict of `overhead.spec.ts` fell from 1.82
+ * copies to 1.34 under three workers, and a regression of a whole copy would have fitted inside
+ * the room that gave it; the write of `history-write-cost.spec.ts` went from 8.9–21.9 ms to
+ * 16.6–37 under four, and its bound had to be widened until it cleared the neighbours' worst
+ * rather than the write's — at which point it named three regressions and caught none of them.
  *
- * So each gets a project of its own with one worker, and `dependencies` puts them after everything
+ * So they get a project of their own with one worker, and `dependencies` puts it after everything
  * else rather than beside it.
  */
-const MEASURED = ['**/overhead.spec.ts', '**/history-write-cost.spec.ts']
+const MEASURED = [
+  '**/overhead.spec.ts',
+  '**/history-write-cost.spec.ts',
+  '**/history-cost.spec.ts',
+]
 
 /**
  * Four browsers at a time on eight cores.

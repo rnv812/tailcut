@@ -212,6 +212,31 @@ describe('HistoryWriter', () => {
     }
   })
 
+  it('sends everything it has gathered when it is told the page is going, and only once', async () => {
+    vi.useFakeTimers()
+    try {
+      const { io, written } = fakeIo()
+      const writer = new HistoryWriter(io)
+
+      writer.take(event(0, 1_000))
+      expect(vi.getTimerCount()).toBe(1)
+
+      writer.flushAll()
+      // The tail timer went with the batch, and it went now rather than two seconds from now: a
+      // frame lives for hours and this runs on every batch, so a timer abandoned by each of them
+      // is a timer per batch outstanding for the life of the page.
+      expect(vi.getTimerCount()).toBe(0)
+
+      await vi.advanceTimersByTimeAsync(0)
+      expect(written.map((one) => one.bytes)).toEqual([16 + 1_000])
+
+      await vi.advanceTimersByTimeAsync(HISTORY_TAIL_MS * 2)
+      expect(written).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('says nothing to the index when it refuses to open the session', async () => {
     const { io, written, rows } = fakeIo({ open: async () => null })
     const writer = new HistoryWriter(io)

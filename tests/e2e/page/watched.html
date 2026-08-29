@@ -1,0 +1,202 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>watched player</title>
+<video id="v" muted playsinline width="640" style="background: #000"></video>
+<script>
+  const INIT = '/fixtures/h264/init-stream0.m4s'
+  const SEGMENTS = [
+    '/fixtures/h264/chunk-stream0-00001.m4s',
+    '/fixtures/h264/chunk-stream0-00002.m4s',
+    '/fixtures/h264/chunk-stream0-00003.m4s',
+  ]
+
+  /** Медийные часы фикстуры: timescale из mdhd её init-сегмента. */
+  const TIMESCALE = 12288
+  /** Три сегмента по две секунды — столько медийного времени в одном проходе. */
+  const PASS_SECONDS = 6
+  const PASS_TICKS = PASS_SECONDS * TIMESCALE
+
+  /** Сколько играем на самом деле: измерение о том, что видит зритель, значит в реальном времени. */
+  const WATCH_SECONDS = 25
+  /** Порция, которую страница отдаёт за раз, и как часто: 10 МиБ каждые две секунды — 5 МиБ/с. */
+  const BURST_BYTES = 10 * 1024 * 1024
+  const BURST_MS = 2000
+  /**
+   * Сколько медийного времени остаётся в буфере.
+   *
+   * Далёкий материал из буфера убирается: MSE держит около полутораста мегабайт на дорожку и,
+   * дойдя до предела, отказывает — а под измерением должна стоять запись на диск, а не предел
+   * чужого буфера. Расширению это ничего не отнимает: оно слушает appendBuffer, а не содержимое
+   * буфера, и байты забрало в момент вызова.
+   */
+  const KEEP_SECONDS = 60
+
+  window.watched = false
+  window.failure = null
+  window.report = null
+
+  const video = document.getElementById('v')
+  const mediaSource = new MediaSource()
+  video.src = URL.createObjectURL(mediaSource)
+
+  /**
+   * Считаем только пока идёт просмотр.
+   *
+   * Настройка стенда — загрузка страницы, четыре запроса за фикстурой, заведение декодера — это
+   * работа, которой у зрителя нет, и длинная задача в ней не про запись на диск. Окно измерения
+   * открывается на первом кадре, а не на первой строке скрипта.
+   */
+  let measuring = false
+
+  // Длинные задачи главного потока страницы. Ровно та величина, которой измеряется «страница
+  // подтормаживает»: 50 мс — три кадра при 60 Гц.
+  const longTasks = []
+  try {
+    new PerformanceObserver((list) => {
+      if (!measuring) return
+      for (const entry of list.getEntries()) longTasks.push(entry.duration)
+    }).observe({ entryTypes: ['longtask'] })
+  } catch {
+    // Браузер без longtask: остальные две величины отвечают на тот же вопрос.
+  }
+
+  // Зазоры между кадрами анимации. Пропуск кадра — это зазор в два периода и больше.
+  const gaps = []
+  let previous = 0
+  const tick = (now) => {
+    if (measuring && previous) gaps.push(now - previous)
+    previous = now
+    requestAnimationFrame(tick)
+  }
+  requestAnimationFrame(tick)
+
+  const appends = []
+
+  /**
+   * Где в сегменте лежит 64-битный baseMediaDecodeTime.
+   *
+   * Box'ы обходятся, а не ищутся по образцу: четыре байта `tfdt` встречаются и в mdat, и
+   * попадание в чужие байты испортило бы кадры молча. Версия проверяется по той же причине —
+   * перегенерированная фикстура с 32-битным tfdt должна сказать об этом вслух.
+   */
+  function tfdtAt(bytes) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+
+    const walk = (from, to) => {
+      let at = from
+      while (at + 8 <= to) {
+        const size = view.getUint32(at)
+        const type = String.fromCharCode(bytes[at + 4], bytes[at + 5], bytes[at + 6], bytes[at + 7])
+        // Размер 0 («до конца файла») и 1 (64-битный) в этой фикстуре не встречаются, и
+        // догадываться о них стенду незачем.
+        if (size < 8 || at + size > to) return -1
+        if (type === 'tfdt') return view.getUint8(at + 8) === 1 ? at + 12 : -1
+        if (type === 'moof' || type === 'traf') {
+          const inside = walk(at + 8, at + size)
+          if (inside >= 0) return inside
+        }
+        at += size
+      }
+      return -1
+    }
+
+    return walk(0, bytes.byteLength)
+  }
+
+  /** Тот же сегмент на другом месте медийных часов: копия с переставленным tfdt. */
+  const shifted = (segment, at, ticks) => {
+    const bytes = segment.slice()
+    const view = new DataView(bytes.buffer)
+    view.setBigUint64(at, view.getBigUint64(at) + BigInt(ticks))
+    return bytes
+  }
+
+  mediaSource.addEventListener('sourceopen', async () => {
+    try {
+      const sb = mediaSource.addSourceBuffer('video/mp4; codecs="avc1.4d401e"')
+      const fetchBytes = async (url) => new Uint8Array(await (await fetch(url)).arrayBuffer())
+      const initBytes = await fetchBytes(INIT)
+      const segments = await Promise.all(SEGMENTS.map(fetchBytes))
+      const offsets = segments.map(tfdtAt)
+      if (offsets.some((at) => at < 0)) throw new Error('no 64-bit tfdt in a fixture segment')
+
+      /**
+       * Одна операция буфера, до её конца или до отказа.
+       *
+       * Оба слушателя снимаются вместе одним `AbortController`, и это не аккуратность ради
+       * аккуратности: `{ once: true }` снимает слушателя, когда тот сработал, а слушатель отказа
+       * не срабатывает никогда — за прогон их накопилось бы около тысячи восьмисот на одном
+       * SourceBuffer. Страница под измерением не должна делать работы, которой у зрителя нет.
+       */
+      const operation = (start, failure) =>
+        new Promise((resolve, reject) => {
+          const done = new AbortController()
+          const finish = (answer) => {
+            done.abort()
+            answer()
+          }
+          sb.addEventListener('updateend', () => finish(resolve), { signal: done.signal })
+          sb.addEventListener('error', () => finish(() => reject(new Error(failure))), {
+            signal: done.signal,
+          })
+          start()
+        })
+
+      const append = (buffer) =>
+        operation(() => {
+          const started = performance.now()
+          sb.appendBuffer(buffer)
+          appends.push(performance.now() - started)
+        }, 'appendBuffer failed')
+
+      const forget = (from) => operation(() => sb.remove(from, Infinity), 'remove failed')
+
+      let pushedBytes = 0
+      let passes = 0
+
+      /** Один проход фикстуры на своём месте медийных часов, сегмент за сегментом. */
+      const pushPass = async () => {
+        const ticks = passes++ * PASS_TICKS
+        for (let i = 0; i < segments.length; i++) {
+          const bytes = shifted(segments[i], offsets[i], ticks)
+          await append(bytes)
+          pushedBytes += bytes.byteLength
+        }
+      }
+
+      await append(initBytes)
+      await pushPass()
+      await video.play()
+
+      measuring = true
+      const startedAt = performance.now()
+      while ((performance.now() - startedAt) / 1000 < WATCH_SECONDS) {
+        const until = pushedBytes + BURST_BYTES
+        const slotEnds = performance.now() + BURST_MS
+
+        while (pushedBytes < until) await pushPass()
+        if (passes * PASS_SECONDS > KEEP_SECONDS) await forget(KEEP_SECONDS)
+
+        const left = slotEnds - performance.now()
+        if (left > 0) await new Promise((resolve) => setTimeout(resolve, left))
+      }
+
+      const quality = video.getVideoPlaybackQuality()
+      const sorted = [...appends].sort((a, b) => a - b)
+      window.report = {
+        droppedFrames: quality.droppedVideoFrames,
+        totalFrames: quality.totalVideoFrames,
+        longTasks: longTasks.length,
+        longestTaskMs: longTasks.reduce((worst, one) => Math.max(worst, one), 0),
+        maxGapMs: gaps.reduce((worst, one) => Math.max(worst, one), 0),
+        appends: appends.length,
+        appendP50Ms: sorted[Math.floor(sorted.length / 2)] ?? 0,
+        pushedBytes,
+        playedSeconds: video.currentTime,
+      }
+      window.watched = true
+    } catch (error) {
+      window.failure = String(error)
+    }
+  })
+</script>
