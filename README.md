@@ -2,8 +2,6 @@
   <img src="assets/tailcut/promo/readme-banner-1280x440.png" alt="tailcut product overview" width="100%">
 </p>
 
-<p align="center"><sub>The banner illustrates the common clear-media MSE path. Protected and incompatible material is intentionally refused; see <a href="#current-limits">Current limits</a>.</sub></p>
-
 <p align="center">
   <a href="https://github.com/rnv812/tailcut/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/rnv812/tailcut/actions/workflows/ci.yml/badge.svg"></a>
   <a href="#current-limits"><img alt="Pre-release status" src="https://img.shields.io/badge/status-pre--release-B7F03F?style=flat-square&labelColor=17181F"></a>
