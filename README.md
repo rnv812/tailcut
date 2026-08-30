@@ -4,7 +4,14 @@ Clip already-buffered video from any site and save it as MP4.
 
 ## Status
 
-Stage 3 of 5 — history and settings. What a tab records is written to disk in
+Stage 4 of 5 — the re-encoding path is in progress. A crop, Animated WebP,
+`Optimize`, or the rewrite-head setting sends a clip through WebCodecs; the codec
+is chosen for that clip's geometry, the sound is copied unchanged, and copy jobs
+run beside one encoding job in separate queue lanes. The editor reports the
+measured pace after a completed encode, and the export settings are live. The
+sandbox end-to-end checks and the Windows hardware checklist are still open.
+
+What a tab records is written to disk in
 batches of eight megabytes, in sealed pieces the writer never comes back to, and
 survives the tab, the browser and an update: the popup lists what was watched,
 pins what should stay, deletes with an undo, and opens any of it in the editor
@@ -14,8 +21,8 @@ change to any of them reaches a recording that is already running, without a
 reload.
 
 Under all of it is what the first two stages built: the extension intercepts MSE
-segments, keeps a sliding window indexed by media time, and cuts clips out of it
-in an editor that never re-encodes a frame.
+segments, keeps a sliding window indexed by media time, and cuts clips out of it.
+The default `Original` path still edits the container without re-encoding a frame.
 
 An ordinary `<video src>` is recorded as well, and it is the commoner case off
 the video platforms: eighteen of twenty-one live pages that delivered any video
@@ -37,7 +44,7 @@ underneath rather than from the video. Where the pairing cannot be made — the 
 or two of them playing with nothing to say which belongs to the picture — the clip is silent and
 the popup says that instead. Only as much of the track as the picture is long is ever fetched.
 
-Re-encoding and extra sources land in later stages. See
+Extra sources land in the last stage. See
 `docs/superpowers/specs/2026-08-22-tailcut-design.md`.
 
 ## Development
