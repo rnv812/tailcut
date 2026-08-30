@@ -195,10 +195,15 @@ export function Workbench({ reader, material, preview, options, sourceTabId }: W
   }, [reader, selectedMaterial, selectedPicture, initialPicture, preview])
 
   const shown = opened.trackId === selectedPicture ? opened.preview : 'building'
+  const previewPhase =
+    shown === 'building' || shown === 'failed' || shown === null ? (shown ?? 'none') : 'ready'
 
   return (
     <OpenWorkbench
-      key={selectedPicture}
+      // A built preview changes the frame grid and therefore creates a new store below. Remount
+      // the store owner with it: keeping the old hook session until the first wheel event lets
+      // that event reveal the new store's 1200 px bootstrap view inside a wider timeline.
+      key={`${selectedPicture}:${previewPhase}`}
       reader={reader}
       material={selectedMaterial}
       preview={shown}

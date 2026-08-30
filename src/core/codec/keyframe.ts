@@ -26,6 +26,15 @@ export function keyframeClassifier(sampleEntry: Uint8Array): KeyframeClassifier 
     return (bytes) => lengthPrefixedKey(bytes, lengthBytes, (head) => (head & 0x1f) === 5)
   }
 
+  if ((format === 'hvc1' || format === 'hev1') && record && record.byteLength >= 22) {
+    const lengthBytes = (record[21]! & 0x03) + 1
+    return (bytes) =>
+      lengthPrefixedKey(bytes, lengthBytes, (head) => {
+        const nalType = (head >> 1) & 0x3f
+        return nalType >= 16 && nalType <= 23
+      })
+  }
+
   if (format === 'av01') {
     let reducedHeader = record ? reducedStillPictureHeader(record.subarray(4)) : null
     return (bytes) => {
@@ -35,7 +44,28 @@ export function keyframeClassifier(sampleEntry: Uint8Array): KeyframeClassifier 
     }
   }
 
+  if (format === 'vp09') return vp9Keyframe
+
   return null
+}
+
+/** VP9 uncompressed header, whose fixed fields lead every coded frame. */
+function vp9Keyframe(bytes: Uint8Array): boolean | null {
+  const bits = new Av1Bits(bytes)
+  if (bits.read(2) !== 2) return null
+
+  const profileLow = bits.read(1)
+  const profileHigh = bits.read(1)
+  if (profileLow < 0 || profileHigh < 0) return null
+  const profile = profileLow | (profileHigh << 1)
+  if (profile === 3 && bits.read(1) !== 0) return null
+
+  const showExisting = bits.read(1)
+  if (showExisting < 0) return null
+  if (showExisting === 1) return false
+
+  const frameType = bits.read(1)
+  return frameType < 0 ? null : frameType === 0
 }
 
 /** Walk AVC/HEVC length-prefixed NAL units and ask whether any is an intra random-access unit. */

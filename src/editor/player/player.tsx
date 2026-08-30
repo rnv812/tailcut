@@ -1,5 +1,5 @@
-import type { ComponentChildren } from 'preact'
-import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
+import type { ComponentChildren, JSX } from 'preact'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks'
 import type { FrameTable } from '../../core/timeline/frames'
 import { formatTimecode } from '../../core/timeline/timecode'
 import { frameSeeker, type FrameSeeker } from './seek'
@@ -33,9 +33,23 @@ interface IconButtonProps {
   icon: string
   disabled?: boolean
   onClick: () => void
+  onPointerDown?: JSX.PointerEventHandler<HTMLButtonElement>
+  onPointerUp?: JSX.PointerEventHandler<HTMLButtonElement>
+  onPointerCancel?: JSX.PointerEventHandler<HTMLButtonElement>
+  onLostPointerCapture?: JSX.PointerEventHandler<HTMLButtonElement>
 }
 
-function IconButton({ testId, label, icon, disabled, onClick }: IconButtonProps) {
+function IconButton({
+  testId,
+  label,
+  icon,
+  disabled,
+  onClick,
+  onPointerDown,
+  onPointerUp,
+  onPointerCancel,
+  onLostPointerCapture,
+}: IconButtonProps) {
   return (
     <button
       type="button"
@@ -44,9 +58,107 @@ function IconButton({ testId, label, icon, disabled, onClick }: IconButtonProps)
       title={label}
       disabled={disabled}
       onClick={onClick}
+      onPointerDown={onPointerDown}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
+      onLostPointerCapture={onLostPointerCapture}
     >
       <span aria-hidden="true">{icon}</span>
     </button>
+  )
+}
+
+/** A held frame button begins like a key press, then repeats at half the source frame rate. */
+function HeldStepButton({
+  testId,
+  label,
+  icon,
+  disabled,
+  repeatEveryMs,
+  onClick,
+}: IconButtonProps & { repeatEveryMs: number }) {
+  const delay = useRef<number | null>(null)
+  const repeat = useRef<number | null>(null)
+  const pointer = useRef<number | null>(null)
+  const ignoreClick = useRef(false)
+  const action = useRef(onClick)
+  action.current = onClick
+
+  const clearTimers = (): void => {
+    if (delay.current !== null) window.clearTimeout(delay.current)
+    if (repeat.current !== null) window.clearInterval(repeat.current)
+    delay.current = null
+    repeat.current = null
+  }
+
+  const stop = (keepPointerClick: boolean): void => {
+    clearTimers()
+    pointer.current = null
+    if (!keepPointerClick) ignoreClick.current = false
+  }
+
+  useLayoutEffect(
+    () => () => {
+      stop(false)
+    },
+    [],
+  )
+
+  useEffect(() => {
+    if (disabled) stop(false)
+  }, [disabled])
+
+  const begin: JSX.PointerEventHandler<HTMLButtonElement> = (event) => {
+    if (disabled || event.button !== 0 || pointer.current !== null) return
+
+    pointer.current = event.pointerId
+    ignoreClick.current = true
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId)
+    } catch {
+      // A synthetic event has no active browser pointer. Its timer semantics are still testable.
+    }
+
+    action.current()
+    delay.current = window.setTimeout(() => {
+      if (pointer.current === null) return
+      action.current()
+      repeat.current = window.setInterval(() => action.current(), repeatEveryMs)
+    }, 300)
+  }
+
+  const release: JSX.PointerEventHandler<HTMLButtonElement> = (event) => {
+    if (pointer.current !== event.pointerId) return
+    // The click dispatched after pointerup is the activation already performed on pointerdown.
+    stop(true)
+  }
+
+  const abandon: JSX.PointerEventHandler<HTMLButtonElement> = (event) => {
+    if (pointer.current !== event.pointerId) return
+    // Cancellation and an unexpected loss of capture do not produce that trailing click.
+    stop(false)
+  }
+
+  const activate = (): void => {
+    if (ignoreClick.current) {
+      ignoreClick.current = false
+      return
+    }
+    action.current()
+  }
+
+  return (
+    <IconButton
+      testId={testId}
+      label={label}
+      icon={icon}
+      disabled={disabled}
+      onClick={activate}
+      onPointerDown={begin}
+      onPointerUp={release}
+      onPointerCancel={abandon}
+      onLostPointerCapture={abandon}
+    />
   )
 }
 
@@ -153,6 +265,7 @@ export function Player({
 
   const table = preview.frames
   const fps = table.fps()
+  const frameRepeatMs = fps > 0 ? Math.max(100, Math.ceil(2_000 / fps)) : 150
   const frame = table.at(index)
   const boundary = useMemo(
     () => playbackFrames(table, playbackRange),
@@ -351,11 +464,12 @@ export function Player({
 
         <div class="transport-center">
           <div class="transport-playback">
-            <IconButton
+            <HeldStepButton
               testId="prev"
               label="Previous frame"
               icon="◀"
               disabled={index <= 0}
+              repeatEveryMs={frameRepeatMs}
               onClick={() => onStep(-1)}
             />
             <IconButton
@@ -364,11 +478,12 @@ export function Player({
               icon={playing ? '⏸' : '▶'}
               onClick={() => onPlaying(!playing)}
             />
-            <IconButton
+            <HeldStepButton
               testId="next"
               label="Next frame"
               icon="▶"
               disabled={index >= table.count() - 1}
+              repeatEveryMs={frameRepeatMs}
               onClick={() => onStep(1)}
             />
           </div>

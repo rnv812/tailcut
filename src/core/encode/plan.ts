@@ -84,7 +84,11 @@ export function planFrames(
 ): FramePlan | null {
   const plan = planClip(source, request)
   const video = plan.tracks.find((track) => track.kind === 'video')
-  if (!video || !video.samples.length) return null
+  // WebCodecs accepts no delta chunk after configure: if retention left no entry point at all,
+  // `planClip` has nothing decodable to start from and deliberately leaves the first retained
+  // sample in place. Refuse it here instead of handing that delta to a decoder as the first chunk
+  // and reporting a generic EncodingError after Export was pressed.
+  if (!video || !video.samples.length || !video.samples[0]!.sync) return null
 
   // Nothing decodes without this, so material this program cannot describe has no frame path at
   // all. Unreachable in practice — every picture codec the recorder admits is in the table — and

@@ -397,6 +397,21 @@ describe('planFrames: material with no frame path at all', () => {
     expect(decoderConfigOf(unknown)).toBeNull()
     expect(planFrames(undescribed, request, null, FRAMERATE)).toBeNull()
   })
+
+  it('refuses picture whose retained bytes contain no decoder entry point', () => {
+    const request: ClipRequest = { in: 0, out: 3, sound: true }
+    const midGroup: ClipSource = {
+      video: {
+        ...whole.video,
+        samples: whole.video.samples.map((sample) => ({ ...sample, sync: false })),
+      },
+      audio: whole.audio,
+    }
+
+    expect(midGroup.video.samples).not.toHaveLength(0)
+    expect(midGroup.video.samples.some((sample) => sample.sync)).toBe(false)
+    expect(planFrames(midGroup, request, null, FRAMERATE)).toBeNull()
+  })
 })
 
 describe('planFrames: the entry point in the scale the transport counts in', () => {

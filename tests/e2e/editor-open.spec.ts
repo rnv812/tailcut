@@ -47,6 +47,39 @@ test('Edit opens an editor tab over the material of the page', async () => {
       canvas: document.querySelector('.tc-timeline canvas')!.getBoundingClientRect().width,
     }))
     expect(Math.abs(widths.strip - widths.canvas)).toBeLessThanOrEqual(1)
+
+    const fitted = async () => editor.evaluate(() => {
+      const strip = document.querySelector<HTMLElement>('.tc-timeline')!
+      const canvas = strip.querySelector('canvas')!.getBoundingClientRect()
+      const scale = Number(strip.dataset.viewScale)
+      return {
+        stripWidth: strip.getBoundingClientRect().width,
+        canvasWidth: canvas.width,
+        materialWidth: 6 / scale,
+        start: Number(strip.dataset.viewStart),
+      }
+    })
+
+    await expect.poll(fitted).toMatchObject({
+      stripWidth: expect.any(Number),
+      canvasWidth: expect.any(Number),
+      materialWidth: expect.any(Number),
+      start: 0,
+    })
+    let view = await fitted()
+    expect(Math.abs(view.stripWidth - view.canvasWidth)).toBeLessThanOrEqual(1)
+    expect(Math.abs(view.canvasWidth - view.materialWidth)).toBeLessThanOrEqual(1)
+
+    const timeline = editor.locator('.tc-timeline canvas')
+    const box = (await timeline.boundingBox())!
+    await editor.mouse.move(box.x + box.width / 2, box.y + 20)
+    await editor.mouse.wheel(0, 1)
+    await editor.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
+
+    view = await fitted()
+    expect(Math.abs(view.stripWidth - view.canvasWidth)).toBeLessThanOrEqual(1)
+    expect(Math.abs(view.canvasWidth - view.materialWidth)).toBeLessThanOrEqual(1)
+    expect(view.start).toBe(0)
   } finally {
     await context.close()
   }

@@ -55,6 +55,10 @@ function fire(mediaTime: number): void {
   next!(performance.now(), { mediaTime })
 }
 
+function pointer(type: string, pointerId = 7): PointerEvent {
+  return new PointerEvent(type, { bubbles: true, button: 0, pointerId, isPrimary: true })
+}
+
 function mount(input: {
   index: number
   endMode: 'stop' | 'loop'
@@ -132,6 +136,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   render(null, host)
   host.innerHTML = ''
   vi.restoreAllMocks()
@@ -234,6 +239,68 @@ describe('Player playback boundary', () => {
       expect(callback, `${testId} did not reach its owner`).toHaveBeenCalledOnce()
     }
     expect(onPlaying).not.toHaveBeenCalledWith(false)
+  })
+
+  it('steps once on press, then repeats after a keyboard-like delay until release', () => {
+    vi.useFakeTimers()
+    const onStep = vi.fn()
+    mount({ index: 2, endMode: 'stop', playing: false, onStep })
+    const previous = host.querySelector<HTMLButtonElement>('[data-testid="prev"]')!
+
+    previous.dispatchEvent(pointer('pointerdown'))
+    expect(onStep.mock.calls).toEqual([[-1]])
+
+    vi.advanceTimersByTime(299)
+    expect(onStep).toHaveBeenCalledTimes(1)
+    vi.advanceTimersByTime(1)
+    expect(onStep.mock.calls).toEqual([[-1], [-1]])
+
+    // This table is one frame per second. Repeat runs at half that rate, never faster than the
+    // source picture, so the next step is two seconds after the first repeat.
+    vi.advanceTimersByTime(1_999)
+    expect(onStep).toHaveBeenCalledTimes(2)
+    vi.advanceTimersByTime(1)
+    expect(onStep).toHaveBeenCalledTimes(3)
+
+    previous.dispatchEvent(pointer('pointerup'))
+    vi.advanceTimersByTime(5_000)
+    expect(onStep).toHaveBeenCalledTimes(3)
+
+    // A browser follows pointerup with click. It belongs to the press already counted above.
+    previous.click()
+    expect(onStep).toHaveBeenCalledTimes(3)
+    // A later synthesized click is keyboard activation and stays a single ordinary step.
+    previous.click()
+    expect(onStep.mock.calls.at(-1)).toEqual([-1])
+    expect(onStep).toHaveBeenCalledTimes(4)
+  })
+
+  it('ends a held step on pointer cancellation, lost capture, and unmount', () => {
+    vi.useFakeTimers()
+    const onStep = vi.fn()
+    mount({ index: 2, endMode: 'stop', playing: false, onStep })
+    const next = host.querySelector<HTMLButtonElement>('[data-testid="next"]')!
+
+    next.dispatchEvent(pointer('pointerdown', 1))
+    expect(onStep).toHaveBeenCalledTimes(1)
+    next.dispatchEvent(pointer('pointercancel', 1))
+    vi.advanceTimersByTime(3_000)
+    expect(onStep).toHaveBeenCalledTimes(1)
+    // Cancellation produces no click, so the next keyboard activation must not be swallowed.
+    next.click()
+    expect(onStep).toHaveBeenCalledTimes(2)
+
+    next.dispatchEvent(pointer('pointerdown', 2))
+    expect(onStep).toHaveBeenCalledTimes(3)
+    next.dispatchEvent(pointer('lostpointercapture', 2))
+    vi.advanceTimersByTime(3_000)
+    expect(onStep).toHaveBeenCalledTimes(3)
+
+    next.dispatchEvent(pointer('pointerdown', 3))
+    expect(onStep).toHaveBeenCalledTimes(4)
+    render(null, host)
+    vi.advanceTimersByTime(3_000)
+    expect(onStep).toHaveBeenCalledTimes(4)
   })
 
   it('disables marker jumps only when no marker exists in that direction', () => {

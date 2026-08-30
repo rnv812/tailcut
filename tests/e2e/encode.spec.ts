@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { test, expect, type BrowserContext, type Page } from '@playwright/test'
 import { videoSampleEntry } from '../../src/core/iso/entry'
-import { boxBody, childBoxes, topLevelBoxes, type Box } from '../../src/core/iso/reader'
+import { boxBody, childBoxes, findBox, topLevelBoxes, type Box } from '../../src/core/iso/reader'
 import type { TrackKind } from '../../src/shared/types'
 import {
   clickEdit,
@@ -52,6 +52,43 @@ function av1WithDependencyOnly(file: string): Buffer {
   return Buffer.from(out)
 }
 
+/** An HLS fragment whose container leaves every sample dependency flag unknown. */
+function withoutSampleFlags(file: string): Buffer {
+  const out = new Uint8Array(readFileSync(file))
+  const view = new DataView(out.buffer, out.byteOffset, out.byteLength)
+  const tfhd = findBox(out, ['moof', 'traf', 'tfhd'])!
+  const tfhdWord = tfhd.start + tfhd.headerSize
+  const tfhdFlags = view.getUint32(tfhdWord) & 0x00ffffff
+  let field = tfhdWord + 8
+  if (tfhdFlags & 0x000001) field += 8
+  if (tfhdFlags & 0x000002) field += 4
+  if (tfhdFlags & 0x000008) field += 4
+  if (tfhdFlags & 0x000010) field += 4
+  if (tfhdFlags & 0x000020) view.setUint32(field, 0)
+
+  const trun = findBox(out, ['moof', 'traf', 'trun'])!
+  const trunWord = trun.start + trun.headerSize
+  const trunFlags = view.getUint32(trunWord) & 0x00ffffff
+  const count = view.getUint32(trunWord + 4)
+  field = trunWord + 8
+  if (trunFlags & 0x000001) field += 4
+  if (trunFlags & 0x000004) {
+    view.setUint32(field, 0)
+    field += 4
+  }
+  const beforeFlags =
+    (trunFlags & 0x000100 ? 4 : 0) + (trunFlags & 0x000200 ? 4 : 0)
+  const entry =
+    beforeFlags +
+    (trunFlags & 0x000400 ? 4 : 0) +
+    (trunFlags & 0x000800 ? 4 : 0)
+  if (trunFlags & 0x000400) {
+    for (let i = 0; i < count; i++) view.setUint32(field + i * entry + beforeFlags, 0)
+  }
+
+  return Buffer.from(out)
+}
+
 interface OpenedClip {
   context: BrowserContext
   editor: Page
@@ -96,6 +133,29 @@ async function installEncodeCounter(context: BrowserContext): Promise<void> {
       return encode.call(this, frame, options)
     }
     Object.defineProperty(window, 'tcEncodeCalls', { get: () => calls })
+  })
+}
+
+/** Count profile-0 VP9 delta frames the editor labels as decoder entry points. */
+async function installVp9KeyAudit(context: BrowserContext): Promise<void> {
+  await context.addInitScript(() => {
+    let chunks = 0
+    let falseKeys = 0
+    const decode = VideoDecoder.prototype.decode
+    VideoDecoder.prototype.decode = function (chunk) {
+      const bytes = new Uint8Array(chunk.byteLength)
+      chunk.copyTo(bytes)
+      // VP9 starts with the frame marker 10. This fixture is profile 0, where frame_type is the
+      // sixth bit. AVC length prefixes and the H.264 output do not match this marker here.
+      if ((bytes[0]! & 0xc0) === 0x80) {
+        chunks += 1
+        if (chunk.type === 'key' && (bytes[0]! & 0x04) !== 0) falseKeys += 1
+      }
+      return decode.call(this, chunk)
+    }
+    Object.defineProperty(window, 'tcVp9KeyAudit', {
+      get: () => ({ chunks, falseKeys }),
+    })
   })
 }
 
@@ -354,6 +414,53 @@ test('decodes AV1 when dependency metadata omits the non-sync bit', async () => 
 
     const saved = await exportClipWith(editor, { mode: 'optimize' })
     expect(saved.progress, 'AV1 never reached the decoder and encoder').not.toHaveLength(0)
+    expect(probeFile(saved.file).streams[0]!.codec_name).toBe('h264')
+  } finally {
+    await context.close()
+  }
+})
+
+test('decodes VP9 when HLS metadata leaves every sample dependency unknown', async () => {
+  test.setTimeout(180_000)
+  const { context, extensionId } = await launchWithExtension()
+  await installVp9KeyAudit(context)
+  const player = await context.newPage()
+
+  try {
+    await routeLocal(player, 'codecs.html', PLAYER_URL)
+    let rewrittenChunks = 0
+    await player.route('**/fixtures/vp9/chunk-stream0-*.m4s', async (route) => {
+      const name = new URL(route.request().url()).pathname.replace('/fixtures/', '')
+      rewrittenChunks += 1
+      await route.fulfill({
+        body: withoutSampleFlags(`tests/fixtures/${name}`),
+        contentType: 'video/mp4',
+      })
+    })
+
+    const feed = [{
+      mime: 'video/mp4; codecs="vp09.00.20.08"',
+      init: '/fixtures/vp9/init-stream0.m4s',
+      chunks: [1, 2].map((n) => `/fixtures/vp9/chunk-stream0-0000${n}.m4s`),
+    }]
+    await player.goto(`${PLAYER_URL}#${encodeURIComponent(JSON.stringify(feed))}`)
+    await player.waitForFunction(() => (window as unknown as { allAppended?: boolean }).allAppended)
+    expect(rewrittenChunks).toBe(2)
+    await player.evaluate(() => document.querySelector('video')!.play())
+    await player.waitForTimeout(7_000)
+
+    const { editor } = await clickEdit(context, player, extensionId)
+    await editor.waitForFunction(() => (document.querySelector('video')?.readyState ?? 0) >= 2)
+    await typeInto(editor, 'playhead-field', '00:00:01:00')
+    await editor.keyboard.press('i')
+
+    const saved = await exportClipWith(editor, { mode: 'optimize' })
+    expect(saved.progress, 'VP9 never reached the decoder and encoder').not.toHaveLength(0)
+    const audit = await editor.evaluate(() =>
+      (window as unknown as { tcVp9KeyAudit: { chunks: number; falseKeys: number } }).tcVp9KeyAudit,
+    )
+    expect(audit.chunks, 'the VP9 fixture never reached VideoDecoder').toBeGreaterThan(0)
+    expect(audit.falseKeys, 'a VP9 delta frame was mislabeled as a decoder entry point').toBe(0)
     expect(probeFile(saved.file).streams[0]!.codec_name).toBe('h264')
   } finally {
     await context.close()

@@ -228,6 +228,24 @@ const midGroup: SourceTrack = (() => {
   return { ...video, samples: video.samples.slice(5) }
 })()
 
+/**
+ * Three retained runs whose latter two begin inside a group of pictures. The samples before each
+ * sync frame survived capture, but their references lie in the missing stretch in front of the
+ * run, so neither can be the first chunk handed to a fresh decoder.
+ */
+const gapsIntoGroups: SourceTrack = (() => {
+  const video = madeTrack('video', 1000, 100, [
+    { at: 0, count: 3 },
+    { at: 1000, count: 5 },
+    { at: 2000, count: 4 },
+  ])
+  const syncTimes = new Set([0, 1200, 2100])
+  return {
+    ...video,
+    samples: video.samples.map((sample) => ({ ...sample, sync: syncTimes.has(sample.dts) })),
+  }
+})()
+
 /** The type the page opened its SourceBuffer with; a VP9 track cannot be converted without it. */
 const VP9_TYPE = 'video/webm; codecs="vp09.00.10.08"'
 
@@ -473,6 +491,26 @@ describe('planClip', () => {
     expect(video.skipTicks).toBe(0)
     expect(presentationTicks(video)).toBe(25600)
     expect(plan.duration).toBeCloseTo(25600 / 12288, 9)
+  })
+
+  it('resumes every retained run at a sync sample after a decode-time gap', () => {
+    const firstDelta = gapsIntoGroups.samples.find((sample) => sample.dts === 1000)!
+    const secondDelta = gapsIntoGroups.samples.find((sample) => sample.dts === 2000)!
+    const firstEntry = gapsIntoGroups.samples.find((sample) => sample.dts === 1200)!
+    const secondEntry = gapsIntoGroups.samples.find((sample) => sample.dts === 2100)!
+    expect([firstDelta.sync, secondDelta.sync]).toEqual([false, false])
+    expect([firstEntry.sync, secondEntry.sync]).toEqual([true, true])
+
+    const video = trackByKind(
+      planClip({ video: gapsIntoGroups }, { in: 0, out: 3, sound: false }).tracks,
+      'video',
+    )
+    const sources = video.samples.map((sample) => sample.source)
+
+    expect(sources).not.toContainEqual(firstDelta.source)
+    expect(sources).not.toContainEqual(secondDelta.source)
+    expect(sources).toContainEqual(firstEntry.source)
+    expect(sources).toContainEqual(secondEntry.source)
   })
 
   it('gives the sound a running start and hides it too', () => {

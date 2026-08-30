@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { decoderConfigOf, sampleEntryFormat } from '../../src/core/encode/decoder'
+import { keyframeClassifier } from '../../src/core/codec/keyframe'
 import { videoSampleEntry, type SampleEntry } from '../../src/core/iso/entry'
 import { boxOf, u32, u8, zeroes } from '../../src/core/iso/writer'
 import { parseInit as parseWebmInit } from '../../src/core/webm/init'
@@ -178,6 +179,36 @@ describe('decoderConfigOf: HEVC', () => {
 
     const second = decoderConfigOf(visualEntry('hvc1', boxOf('hvcC', exotic)))
     expect(second!.codec).toBe('hvc1.B4.80000000.H186.b0.00.00.00.00.01')
+  })
+})
+
+describe('keyframeClassifier: HEVC', () => {
+  it('reads each sample entry and its hvcC length size before naming an IRAP picture', () => {
+    const record = (lengthBytes: number): Uint8Array => {
+      const bytes = new Uint8Array(23)
+      bytes[0] = 1
+      bytes[21] = 0xfc | (lengthBytes - 1)
+      return bytes
+    }
+    const sample = (lengthBytes: number, nalType: number): Uint8Array =>
+      Uint8Array.from([
+        ...new Array(lengthBytes - 1).fill(0),
+        2,
+        nalType << 1,
+        1,
+      ])
+
+    for (const one of [
+      { format: 'hvc1', lengthBytes: 4, irapType: 19 },
+      { format: 'hev1', lengthBytes: 2, irapType: 21 },
+    ]) {
+      const classify = keyframeClassifier(
+        visualEntry(one.format, boxOf('hvcC', record(one.lengthBytes))),
+      )
+      expect(classify, one.format).not.toBeNull()
+      expect(classify!(sample(one.lengthBytes, one.irapType)), one.format).toBe(true)
+      expect(classify!(sample(one.lengthBytes, 1)), one.format).toBe(false)
+    }
   })
 })
 

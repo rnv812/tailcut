@@ -120,14 +120,16 @@ export function seamsOf(source: ClipSource): Seam[] {
 }
 
 export function planClip(source: ClipSource, request: ClipRequest): ExportPlan {
-  const seams = seamsOf(source)
+  const videoSource = decodableVideo(source.video)
+  const decodable = videoSource === source.video ? source : { ...source, video: videoSource }
+  const seams = seamsOf(decodable)
   const tracks: PlannedTrack[] = []
 
-  const video = planTrack(source.video, request, seams)
+  const video = planTrack(decodable.video, request, seams)
   if (video) tracks.push(video)
 
-  if (request.sound && source.audio && video) {
-    const audio = planTrack(source.audio, request, seams)
+  if (request.sound && decodable.audio && video) {
+    const audio = planTrack(decodable.audio, request, seams)
     if (audio) tracks.push(audio)
   }
 
@@ -142,6 +144,34 @@ export function planClip(source: ClipSource, request: ClipRequest): ExportPlan {
     duration: lead ? presentationTicks(lead) / lead.timescale : 0,
     bytes,
   }
+}
+
+/**
+ * Drop the undecodable head of every retained run of picture.
+ *
+ * A gap loses the decoder state along with the missing bytes. Samples after it may still be in
+ * the index before the next sync sample, but their references are not, so handing one to a fresh
+ * decoder is invalid. The skipped stretch becomes part of the hole seen by the seam planner.
+ */
+function decodableVideo(track: SourceTrack): SourceTrack {
+  if (track.kind !== 'video') return track
+
+  const samples: SourceSample[] = []
+  let previousEnd: number | null = null
+  // `firstFrame` already chooses the first usable entry for the head of a clip. This pass only
+  // repairs later runs, where `planTrack` would otherwise keep walking across the gap.
+  let waitingForSync = false
+
+  for (const sample of track.samples) {
+    if (previousEnd !== null && sample.dts > previousEnd) waitingForSync = true
+    if (!waitingForSync || sample.sync) {
+      samples.push(sample)
+      waitingForSync = false
+    }
+    previousEnd = sample.dts + sample.duration
+  }
+
+  return samples.length === track.samples.length ? track : { ...track, samples }
 }
 
 /**

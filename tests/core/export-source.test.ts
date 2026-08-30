@@ -21,6 +21,8 @@ const AUDIO_INIT = read('h264/init-stream1.m4s')
 const AUDIO = [1, 2, 3, 4].map((n) => read(`h264/chunk-stream1-0000${n}.m4s`))
 const AV1_INIT = read('av1/init-stream0.m4s')
 const AV1 = read('av1/chunk-stream0-00001.m4s')
+const VP9_INIT = read('vp9/init-stream0.m4s')
+const VP9 = [1, 2].map((n) => read(`vp9/chunk-stream0-0000${n}.m4s`))
 
 /** One buffer fed both kinds: two traks in the moov, two trafs in every segment. */
 const MUXED_INIT = read('muxed/init-stream0.m4s')
@@ -154,6 +156,7 @@ describe('sourceTrackOf', () => {
   it('takes video entry points from the bitstream when an HLS fragment leaves its flags unknown', () => {
     const blindH264 = VIDEO.map(withoutSampleFlags)
     const blindAv1 = withoutSampleFlags(AV1)
+    const blindVp9 = VP9.map(withoutSampleFlags)
 
     // The premise and the browser failure: by container metadata alone every picture now looks
     // like a key frame. WebCodecs checks the coded frame and rejects the first such lie passed as
@@ -171,11 +174,15 @@ describe('sourceTrackOf', () => {
 
     const h264 = sourceTrackOf(placed('video', VIDEO_INIT, blindH264).input)!
     const av1 = sourceTrackOf(placed('video', AV1_INIT, [blindAv1]).input)!
+    const vp9 = sourceTrackOf(placed('video', VP9_INIT, blindVp9).input)!
 
     expect(h264.samples.flatMap((sample, at) => (sample.sync ? [at] : []))).toEqual([
       0, 24, 48, 72, 96, 120,
     ])
     expect(av1.samples.flatMap((sample, at) => (sample.sync ? [at] : []))).toEqual([0])
+    expect(vp9.samples.flatMap((sample, at) => (sample.sync ? [at] : []))).toEqual([
+      0, 24, 48, 72,
+    ])
   })
 
   it('addresses the bytes of a sample where they really are', () => {
