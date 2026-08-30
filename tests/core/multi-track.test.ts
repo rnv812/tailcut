@@ -73,6 +73,31 @@ function placed() {
   return { map, segments }
 }
 
+/** Track id and base decode time of every traf, in file order. */
+function decodeTimesOf(file: Uint8Array): Array<{ trackId: number; ticks: number }> {
+  const view = new DataView(file.buffer, file.byteOffset, file.byteLength)
+  const times: Array<{ trackId: number; ticks: number }> = []
+
+  for (const moof of topLevelBoxes(file).filter((box) => box.type === 'moof')) {
+    for (const traf of childBoxes(file, moof).filter((box) => box.type === 'traf')) {
+      const children = childBoxes(file, traf)
+      const tfhd = children.find((box) => box.type === 'tfhd')
+      const tfdt = children.find((box) => box.type === 'tfdt')
+      if (!tfhd || !tfdt) continue
+
+      const trackId = view.getUint32(tfhd.start + tfhd.headerSize + 4)
+      const body = tfdt.start + tfdt.headerSize
+      const ticks =
+        view.getUint8(body) === 1
+          ? Number(view.getBigUint64(body + 4))
+          : view.getUint32(body + 4)
+      times.push({ trackId, ticks })
+    }
+  }
+
+  return times
+}
+
 describe('the fixture itself', () => {
   it('is the file ffmpeg wrote, boxes apart: init and segments decode frame for frame', () => {
     // Everything below reads a container written by hand, and a handmade container is worth
@@ -596,10 +621,8 @@ describe('a recording read out of one muxed buffer', () => {
     // sound, so the picture is the traf standing second and is exactly the one a walk that stopped
     // at the first would leave where it was: 1.86 s late against its own sound, in a file that
     // still plays.
-    const file = writeTemp(
-      'multi-mux-tail.mp4',
-      muxFragmentedMp4([{ initBytes: INIT, segments: SEGMENTS.slice(1) }]),
-    )
+    const bytes = muxFragmentedMp4([{ initBytes: INIT, segments: SEGMENTS.slice(1) }])
+    const file = writeTemp('multi-mux-tail.mp4', bytes)
     const probed = probeFile(file)
 
     expect(probed.status).toBe(0)
@@ -608,9 +631,14 @@ describe('a recording read out of one muxed buffer', () => {
     const [video, audio] = probed.probed!.streams
     expect(video!.nb_read_frames).toBe('40')
     expect(audio!.nb_read_packets).toBe('91')
-    // 60000 ticks of 30000 less the origin, then the edit list of the trak takes off its 6000.
-    expect(Number(video!.start_time)).toBeCloseTo(0.1424, 4)
-    expect(Number(audio!.start_time)).toBeCloseTo(-0.0464, 4)
+    // The leading sound lands at zero. The picture in the same moof moves by the same 1.8576 s,
+    // from 60000 ticks to 4273 of its own scale. ffprobe 4.4 reports the sound edit as -0.0464 s
+    // while 6.1 normalises it to zero, so the tfdt boxes are the version-independent evidence.
+    expect(decodeTimesOf(bytes).slice(0, 2)).toEqual([
+      { trackId: AUDIO_TRACK, ticks: 0 },
+      { trackId: VIDEO_TRACK, ticks: 4273 },
+    ])
+    expect(4273 / VIDEO_TIMESCALE).toBeCloseTo(0.1424, 4)
   })
 
   it('renumbers every traf of a fragment when the file already holds a track', () => {
