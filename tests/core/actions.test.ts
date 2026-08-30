@@ -214,6 +214,25 @@ describe('clips', () => {
     ])
   })
 
+  it('moves both clip boundaries by whole frames without changing its length', () => {
+    const moved = reduce(one, { type: 'moveClip', id: 'c1', time: 1.51 }, ctx)
+
+    expect(moved.doc.clips[0]).toMatchObject({ in: 1.52, out: 3.52 })
+    expect(moved.doc.clips[0]!.out - moved.doc.clips[0]!.in).toBeCloseTo(2, 9)
+  })
+
+  it('keeps a moved clip inside the quality zone while preserving its length', () => {
+    const againstEnd = reduce(one, { type: 'moveClip', id: 'c1', time: 9 }, ctx)
+    const againstStart = reduce(one, { type: 'moveClip', id: 'c1', time: -9 }, ctx)
+
+    expect(againstEnd.doc.clips[0]).toMatchObject({ in: 2, out: 4, representation: '480p' })
+    expect(againstStart.doc.clips[0]).toMatchObject({ in: 0, out: 2, representation: '480p' })
+  })
+
+  it('move of a clip that is gone changes nothing at all', () => {
+    expect(reduce(one, { type: 'moveClip', id: 'nope', time: 2 }, ctx)).toBe(one)
+  })
+
   it('selecting a clip that is not there selects nothing', () => {
     expect(reduce(one, { type: 'selectClip', id: 'nope' }, ctx).ui.selectedClipId).toBeNull()
   })
@@ -474,6 +493,7 @@ describe('identity', () => {
       { type: 'selectClip', id: 'c1' },
       { type: 'resize', widthPx: 1200 },
       { type: 'trim', id: 'c1', edge: 'in', time: 1 },
+      { type: 'moveClip', id: 'c1', time: 1 },
       { type: 'setSnapping', on: true },
       { type: 'removeMarker', id: 'nope' },
     ]
@@ -544,6 +564,10 @@ describe('undoModeOf', () => {
     expect(undoModeOf({ type: 'renameClip', id: 'c1', name: 'x' })).toEqual({
       kind: 'merge',
       key: 'rename:c1',
+    })
+    expect(undoModeOf({ type: 'moveClip', id: 'c1', time: 2 })).toEqual({
+      kind: 'merge',
+      key: 'move:c1',
     })
   })
 

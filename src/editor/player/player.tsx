@@ -1,5 +1,6 @@
 import type { ComponentChildren } from 'preact'
-import { useEffect, useRef, useState } from 'preact/hooks'
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
+import type { FrameTable } from '../../core/timeline/frames'
 import { formatTimecode } from '../../core/timeline/timecode'
 import { frameSeeker, type FrameSeeker } from './seek'
 import type { Preview } from '../source/preview'
@@ -10,6 +11,42 @@ type FrameCallbackVideo = HTMLVideoElement & {
     callback: (now: number, metadata: { mediaTime: number }) => void,
   ): number
   cancelVideoFrameCallback?(handle: number): void
+}
+
+export interface PlaybackRange {
+  /** First session PTS included in preview playback. */
+  in: number
+  /** First session PTS excluded from preview playback. */
+  out: number
+}
+
+export type PlaybackEndMode = 'stop' | 'loop'
+
+interface PlaybackFrames {
+  first: number
+  last: number
+}
+
+/** First frame whose session PTS is at or after the boundary. */
+function lowerBound(table: FrameTable, boundary: number): number {
+  const frames = table.frames()
+  let low = 0
+  let high = frames.length
+
+  while (low < high) {
+    const middle = (low + high) >> 1
+    if (frames[middle]!.pts < boundary) low = middle + 1
+    else high = middle
+  }
+
+  return low
+}
+
+/** Frames displayed by the half-open session range, or null when it contains no picture. */
+function playbackFrames(table: FrameTable, range: PlaybackRange): PlaybackFrames | null {
+  const first = lowerBound(table, range.in)
+  const last = lowerBound(table, range.out) - 1
+  return first <= last && first < table.count() ? { first, last } : null
 }
 
 export interface PlayerProps {
@@ -23,6 +60,12 @@ export interface PlayerProps {
   rate: number
   /** What the transport is doing, in words: '', '4×', '8× back'. */
   note: string
+  /** Half-open preview boundary in the recording's session PTS, not the preview file's clock. */
+  playbackRange: PlaybackRange
+  /** What the preview alone does after displaying the last frame before playbackRange.out. */
+  endMode: PlaybackEndMode
+  /** Change the controlled preview-only behavior at the end of playbackRange. */
+  onEndMode: (mode: PlaybackEndMode) => void
   /** Move by a number of frames. Relative, so a burst of key repeats composes instead of racing. */
   onStep: (delta: number) => void
   /** Go to a frame outright: this is what playback reports. */
@@ -37,18 +80,32 @@ export function Player({
   playing,
   rate,
   note,
+  playbackRange,
+  endMode,
+  onEndMode,
   onStep,
   onSeek,
   onPlaying,
 }: PlayerProps) {
   const element = useRef<HTMLVideoElement | null>(null)
   const seeker = useRef<FrameSeeker | null>(null)
+  const indexRef = useRef(index)
+  const onSeekRef = useRef(onSeek)
+  const onPlayingRef = useRef(onPlaying)
   const [catchingUp, setCatchingUp] = useState(false)
   const [ready, setReady] = useState(false)
+
+  indexRef.current = index
+  onSeekRef.current = onSeek
+  onPlayingRef.current = onPlaying
 
   const table = preview.frames
   const fps = table.fps()
   const frame = table.at(index)
+  const boundary = useMemo(
+    () => playbackFrames(table, playbackRange),
+    [table, playbackRange.in, playbackRange.out],
+  )
 
   useEffect(() => {
     const video = element.current
@@ -82,9 +139,27 @@ export function Player({
     const video = element.current
     if (!video) return
 
-    if (playing) void video.play().catch(() => onPlaying(false))
-    else video.pause()
-  }, [playing, onPlaying])
+    if (!playing) {
+      video.pause()
+      return
+    }
+
+    if (!boundary) {
+      video.pause()
+      onPlayingRef.current(false)
+      return
+    }
+
+    // The owner may change the active clip while the player stands elsewhere, or Play may be
+    // pressed after a previous range ended. This seek belongs to playback, so it goes straight to
+    // the element; frameSeeker deliberately ignores seeks it did not issue.
+    if (ready && (indexRef.current < boundary.first || indexRef.current > boundary.last)) {
+      video.currentTime = table.seekTimeOf(boundary.first)
+      onSeekRef.current(boundary.first)
+    }
+
+    void video.play().catch(() => onPlayingRef.current(false))
+  }, [playing, ready, table, boundary])
 
   // The forward half of the shuttle is the element's own doing: it decodes ahead and keeps the
   // sound with it up to about four times, which nothing we could write would do better.
@@ -104,15 +179,46 @@ export function Player({
     // was written by the exporter, which closed the holes in the decode timeline. Where
     // a hole could not be closed the frame in front of the seam simply lasts longer, and skipping
     // over it would run away from the sound that never stopped.
+    let entered = Boolean(
+      boundary && indexRef.current >= boundary.first && indexRef.current <= boundary.last,
+    )
+
     const follow = (mediaTime: number): void => {
-      onSeek(Math.max(0, table.indexAtOut(mediaTime)))
+      if (!boundary) {
+        stopped = true
+        video.pause()
+        onPlayingRef.current(false)
+        return
+      }
+
+      const shown = Math.max(0, table.indexAtOut(mediaTime))
+      // A callback for the old range may arrive while the seek to In is taking effect. It is not
+      // the end of this range, because this range has not begun yet.
+      if (!entered && (shown < boundary.first || shown > boundary.last)) return
+      entered = true
+
+      if (shown >= boundary.last) {
+        if (endMode === 'loop') {
+          entered = false
+          video.currentTime = table.seekTimeOf(boundary.first)
+          onSeekRef.current(boundary.first)
+        } else {
+          stopped = true
+          video.pause()
+          onSeekRef.current(boundary.last)
+          onPlayingRef.current(false)
+        }
+        return
+      }
+
+      onSeekRef.current(shown)
     }
 
     if (video.requestVideoFrameCallback) {
       const tick = (_now: number, metadata: { mediaTime: number }): void => {
         if (stopped) return
         follow(metadata.mediaTime)
-        handle = video.requestVideoFrameCallback!(tick)
+        if (!stopped) handle = video.requestVideoFrameCallback!(tick)
       }
       handle = video.requestVideoFrameCallback(tick)
 
@@ -126,7 +232,7 @@ export function Player({
     const onTime = () => follow(video.currentTime)
     video.addEventListener('timeupdate', onTime)
     return () => video.removeEventListener('timeupdate', onTime)
-  }, [playing, table, onSeek])
+  }, [playing, table, boundary, endMode])
 
   return (
     <section class="player" data-testid="player">
@@ -144,6 +250,12 @@ export function Player({
         </button>
         <button data-testid="next" disabled={index >= table.count() - 1} onClick={() => onStep(1)}>
           frame ▶
+        </button>
+        <button
+          data-testid="end-mode"
+          onClick={() => onEndMode(endMode === 'stop' ? 'loop' : 'stop')}
+        >
+          At end: {endMode === 'stop' ? 'Stop' : 'Loop'}
         </button>
       </div>
 

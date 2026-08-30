@@ -55,6 +55,7 @@ function trackFrom(
   const run = sampleRunOf({
     segments: segments.map((bytes) => ({ bytes, source: bank.add(bytes) })),
     trackId: declared.trackId,
+    kind,
     defaults: trackDefaults(init),
     loneTrack: true,
   })

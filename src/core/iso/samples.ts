@@ -1,4 +1,4 @@
-import type { Located } from '../../shared/types'
+import type { Located, TrackKind } from '../../shared/types'
 import { boxBody, childBoxes, findBox, topLevelBoxes, type Box } from './reader'
 import { trackIdOf } from './entry'
 
@@ -118,8 +118,24 @@ const TRUN_SAMPLE_SIZE = 0x000200
 const TRUN_SAMPLE_FLAGS = 0x000400
 const TRUN_SAMPLE_CTS = 0x000800
 
-/** The one bit of sample_flags this program reads: a frame no player may start from. */
+/** sample_flags fields that say a frame may not be used as a decoder entry point. */
 const SAMPLE_IS_NON_SYNC = 0x00010000
+const SAMPLE_DEPENDS_ON_MASK = 0x03000000
+const SAMPLE_DEPENDS_ON_OTHERS = 0x01000000
+
+function isSyncSample(flags: number, video: boolean): boolean {
+  return (
+    (flags & SAMPLE_IS_NON_SYNC) === 0 &&
+    (!video || (flags & SAMPLE_DEPENDS_ON_MASK) !== SAMPLE_DEPENDS_ON_OTHERS)
+  )
+}
+
+interface SampleReadOptions {
+  /** Track whose dependency field must also agree that a video sample is a decoder entry point. */
+  videoTrackId?: number
+  /** Treat the sole traf as video even when a packager changed its track id from the init. */
+  loneVideoTrack?: boolean
+}
 
 export interface SampleRef {
   /** Decode time in ticks of the track: the tfdt of the fragment plus the durations before it. */
@@ -163,13 +179,15 @@ interface FragmentHeader {
 export function samplesInSegment(
   segment: Uint8Array,
   defaults: Map<number, SampleDefaults>,
+  options: SampleReadOptions = {},
 ): TrackSamples[] {
   const moof = topLevelBoxes(segment).find((b) => b.type === 'moof')
   if (!moof) return []
 
   const tracks: TrackSamples[] = []
+  const trafs = childBoxes(segment, moof).filter((b) => b.type === 'traf')
 
-  for (const traf of childBoxes(segment, moof).filter((b) => b.type === 'traf')) {
+  for (const traf of trafs) {
     const parts = childBoxes(segment, traf)
     const tfhd = parts.find((b) => b.type === 'tfhd')
     if (!tfhd) continue
@@ -181,9 +199,12 @@ export function samplesInSegment(
 
       let dts = tfdt ? readBaseTime(segment, tfdt) : 0
       let at = header.baseDataOffset
+      const video =
+        header.trackId === options.videoTrackId ||
+        (options.loneVideoTrack === true && trafs.length === 1)
 
       for (const trun of parts.filter((b) => b.type === 'trun')) {
-        ;({ dts, at } = readRun(segment, trun, header, dts, at, samples))
+        ;({ dts, at } = readRun(segment, trun, header, dts, at, samples, video))
       }
 
       tracks.push({ trackId: header.trackId, samples })
@@ -251,6 +272,7 @@ function readRun(
   startDts: number,
   startAt: number,
   into: SampleRef[],
+  video: boolean,
 ): { dts: number; at: number } {
   const view = viewOf(segment, trun)
   const version = view.getUint8(0)
@@ -315,7 +337,7 @@ function readRun(
       duration,
       at,
       size,
-      sync: (sampleFlags & SAMPLE_IS_NON_SYNC) === 0,
+      sync: isSyncSample(sampleFlags, video),
     })
 
     dts += duration
@@ -363,6 +385,8 @@ export interface SampleRunInput {
   segments: readonly PlacedSegment[]
   /** Which ISO track of them to walk. */
   trackId: number
+  /** Whether the selected track is picture or sound. Dependency metadata gates video only. */
+  kind: TrackKind
   /** What the movie says about samples a fragment leaves unsaid; see `trackDefaults`. */
   defaults: Map<number, SampleDefaults>
   /**
@@ -404,7 +428,16 @@ export function sampleRunOf(input: SampleRunInput): SampleRun {
   const arrived: LocatedSample[] = []
 
   for (const segment of input.segments) {
-    const tracks = samplesInSegment(segment.bytes, input.defaults)
+    const tracks = samplesInSegment(
+      segment.bytes,
+      input.defaults,
+      input.kind === 'video'
+        ? {
+            videoTrackId: input.trackId,
+            ...(input.loneTrack ? { loneVideoTrack: true } : {}),
+          }
+        : undefined,
+    )
     const found =
       tracks.find((track) => track.trackId === input.trackId) ??
       (input.loneTrack && tracks.length === 1 ? tracks[0] : undefined)

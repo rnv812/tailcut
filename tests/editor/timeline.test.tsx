@@ -139,7 +139,42 @@ describe('Timeline', () => {
 
     const canvas = host.querySelector('canvas')!
     expect(canvas.width).toBe(1800)
+    // The bitmap and its CSS box name the same 900 logical pixels. A percentage here lets the
+    // parent stretch a stale 1200 px opening bitmap to whatever width the editor happens to have,
+    // blurring the ruler and making the point under the mouse a different point in the scene.
+    expect(canvas.style.width).toBe('900px')
     expect(calls.some((call) => call.op === 'setTransform' && call.args[0] === 2)).toBe(true)
+  })
+
+  it('converts a point in a scaled CSS box into the canvas logical width', () => {
+    installWidth(450)
+    const gestures: unknown[] = []
+    render(<Timeline {...props()} onGesture={(gesture) => gestures.push(gesture)} />, host)
+
+    const canvas = host.querySelector('canvas')!
+    canvas.dispatchEvent(press(100, METRICS.rulerHeight - 2))
+
+    // The scene is 900 logical pixels wide but the staged CSS box is half that width. A hundred
+    // CSS pixels is therefore x=200 in the scene, which is ten seconds at 0.05 s/px.
+    expect(gestures).toEqual([{ type: 'seek', time: 10 }])
+  })
+
+  it('moves a DOM playhead with the render instead of waiting for the canvas frame', async () => {
+    render(<Timeline {...props()} />, host)
+    await nextFrame()
+    // It has one owner. Leaving the old line in the bitmap would show two playheads between the
+    // synchronous DOM move and the next deferred scene paint.
+    expect(calls.some((call) => call.style === PALETTE.fill.playhead)).toBe(false)
+    calls.length = 0
+
+    render(<Timeline {...props()} playhead={5} />, host)
+
+    const playhead = host.querySelector<HTMLElement>('[data-testid="timeline-playhead"]')!
+    expect(playhead).not.toBeNull()
+    expect(playhead.style.left).toBe('100px')
+    // The canvas repaint is deliberately still pending. The moving line is a DOM pixel, so the
+    // user sees the new frame now and no old canvas line remains beside it for one refresh.
+    expect(calls.some((call) => call.style === PALETTE.fill.playhead)).toBe(false)
   })
 
   it('paints once per frame however many times the props change', async () => {
@@ -207,7 +242,7 @@ describe('Timeline', () => {
     expect(host.querySelector('canvas')).not.toBeNull()
   })
 
-  it('turns a wheel over the canvas into a zoom at the pointer', () => {
+  it('turns a vertical wheel over the canvas into a horizontal time pan', () => {
     const gestures: unknown[] = []
     render(<Timeline {...props()} onGesture={(gesture) => gestures.push(gesture)} />, host)
 
@@ -219,9 +254,34 @@ describe('Timeline', () => {
     Object.defineProperty(event, 'clientX', { value: ORIGIN.x + 300 })
     canvas.dispatchEvent(event)
 
-    expect(gestures).toEqual([{ type: 'zoom', atPx: 300, factor: expect.any(Number) }])
-    // Without this the page scrolls under the timeline and Ctrl+wheel zooms the whole tab.
+    expect(gestures).toEqual([{ type: 'pan', dxPx: 120 }])
+    // Without this the page scrolls under the timeline as well as moving through time.
     expect(event.defaultPrevented).toBe(true)
+  })
+
+  it('turns Alt plus a vertical wheel into a zoom at the pointer', () => {
+    const gestures: unknown[] = []
+    render(<Timeline {...props()} onGesture={(gesture) => gestures.push(gesture)} />, host)
+
+    const canvas = host.querySelector('canvas')!
+    const event = new WheelEvent('wheel', { deltaY: -120, altKey: true, cancelable: true })
+    Object.defineProperty(event, 'clientX', { value: ORIGIN.x + 300 })
+    Object.defineProperty(event, 'altKey', { value: true })
+    canvas.dispatchEvent(event)
+
+    expect(gestures).toEqual([{ type: 'zoom', atPx: 300, factor: expect.any(Number) }])
+    expect(event.defaultPrevented).toBe(true)
+  })
+
+  it('leaves a wheel event alone when it has no movement to handle', () => {
+    const gestures: unknown[] = []
+    render(<Timeline {...props()} onGesture={(gesture) => gestures.push(gesture)} />, host)
+
+    const event = new WheelEvent('wheel', { cancelable: true })
+    host.querySelector('canvas')!.dispatchEvent(event)
+
+    expect(gestures).toEqual([])
+    expect(event.defaultPrevented).toBe(false)
   })
 
   it('turns a drag across a lane into a pan', () => {

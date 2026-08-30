@@ -28,6 +28,102 @@ export interface ClipsProps {
    */
   estimate: Estimate | null
   dispatch: (action: SessionAction) => void
+  /** The right inspector edits one selection; the media panel owns the full list. */
+  selectedOnly?: boolean
+  showPosition?: boolean
+  showMarkers?: boolean
+}
+
+export interface ClipBinProps {
+  doc: Doc
+  selectedId: string | null
+  fps: number
+  onSelect: (clip: Clip) => void
+  dispatch: (action: SessionAction) => void
+}
+
+/** Fast navigation over clips and markers, separate from the selected clip's properties. */
+export function ClipBin({ doc, selectedId, fps, onSelect, dispatch }: ClipBinProps) {
+  return (
+    <section class="tc-media-bin" data-testid="clip-bin">
+      <div class="tc-panel-heading">
+        <div>
+          <h2>Clips</h2>
+          <p class="muted">Choose a clip to see and edit it everywhere.</p>
+        </div>
+        <span class="tc-count" aria-label={`${doc.clips.length} clips`}>{doc.clips.length}</span>
+      </div>
+
+      {doc.clips.length === 0 && (
+        <div class="tc-empty" data-testid="no-bin-clips">
+          <strong>No clips yet</strong>
+          <span>Move the playhead, then choose Set In and Set Out.</span>
+        </div>
+      )}
+
+      <ul class="tc-bin-list">
+        {doc.clips.map((clip, index) => (
+          <li
+            key={clip.id}
+            data-testid="clip"
+            data-id={clip.id}
+            class={clip.id === selectedId ? 'tc-bin-clip selected' : 'tc-bin-clip'}
+          >
+            <button
+              type="button"
+              data-testid={`clip-go-${clip.id}`}
+              aria-current={clip.id === selectedId ? 'true' : undefined}
+              onClick={() => onSelect(clip)}
+            >
+              <span class="tc-bin-index">{String(index + 1).padStart(2, '0')}</span>
+              <span class="tc-bin-copy">
+                <strong>{clip.name}</strong>
+                <span>
+                  {formatTimecode(clip.in, fps)} – {formatTimecode(clip.out, fps)}
+                </span>
+              </span>
+              <span class="tc-bin-duration">{formatTimecode(clip.out - clip.in, fps)}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+
+      <div class="tc-panel-heading tc-marker-heading">
+        <div>
+          <h2>Markers</h2>
+          <p class="muted">Click a marker to jump to it.</p>
+        </div>
+        <span class="tc-count" aria-label={`${doc.markers.length} markers`}>{doc.markers.length}</span>
+      </div>
+
+      {doc.markers.length === 0 && (
+        <p class="muted tc-bin-empty" data-testid="no-markers">No markers yet.</p>
+      )}
+      <ul class="tc-marker-list">
+        {doc.markers.map((marker) => (
+          <li key={marker.id} data-testid="marker" class="tc-marker">
+            <button
+              type="button"
+              class="tc-marker-go"
+              data-testid={`marker-${marker.id}`}
+              onClick={() => dispatch({ type: 'seek', time: marker.time })}
+            >
+              {marker.label} · {formatTimecode(marker.time, fps)}
+            </button>
+            <button
+              type="button"
+              class="tc-icon-button"
+              aria-label={`Remove ${marker.label}`}
+              data-testid={`drop-${marker.id}`}
+              onClick={() => dispatch({ type: 'removeMarker', id: marker.id })}
+            >
+              ×
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
 }
 
 /**
@@ -195,32 +291,57 @@ function costNote(clip: Clip, estimate: Estimate, dispatch: (action: SessionActi
 }
 
 /** The clips of the recording, the markers, and the playhead above them. */
-export function Clips({ doc, ctx, selectedId, playhead, fps, estimate, dispatch }: ClipsProps) {
+export function Clips({
+  doc,
+  ctx,
+  selectedId,
+  playhead,
+  fps,
+  estimate,
+  dispatch,
+  selectedOnly = false,
+  showPosition = true,
+  showMarkers = true,
+}: ClipsProps) {
+  // Keep every card mounted so an async estimate or a form edit is not discarded when selection
+  // changes. The focused inspector hides the others; the standalone panel used elsewhere lists all.
+  const shownClips = doc.clips
+
   return (
     <section class="tc-clips" data-testid="clips">
-      <h2>Position</h2>
-      <TimecodeField
-        id="playhead-field"
-        label="Playhead"
-        seconds={playhead}
-        fps={fps}
-        onCommit={(time) => dispatch({ type: 'seek', time })}
-      />
+      {showPosition && (
+        <>
+          <h2>Position</h2>
+          <TimecodeField
+            id="playhead-field"
+            label="Playhead"
+            seconds={playhead}
+            fps={fps}
+            onCommit={(time) => dispatch({ type: 'seek', time })}
+          />
+        </>
+      )}
 
-      <h2>Clips</h2>
+      <h2>{selectedOnly ? 'Clip settings' : 'Clips'}</h2>
       {doc.clips.length === 0 && (
         <p class="muted" data-testid="no-clips">
           No clips yet. I marks the start of one, O marks its end.
         </p>
       )}
+      {selectedOnly && doc.clips.length > 0 && selectedId === null && (
+        <p class="muted tc-select-prompt" data-testid="select-clip-prompt">
+          Select a clip in the media panel or on the timeline to edit its boundaries and export settings.
+        </p>
+      )}
 
       <ul class="tc-clip-list">
-        {doc.clips.map((clip) => (
+        {shownClips.map((clip) => (
           <li
             key={clip.id}
-            data-testid="clip"
+            data-testid={selectedOnly ? 'clip-properties' : 'clip'}
             data-id={clip.id}
             class={clip.id === selectedId ? 'tc-clip selected' : 'tc-clip'}
+            hidden={selectedOnly && clip.id !== selectedId}
             onClick={() => dispatch({ type: 'selectClip', id: clip.id })}
           >
             <NameField clip={clip} dispatch={dispatch} />
@@ -321,6 +442,8 @@ export function Clips({ doc, ctx, selectedId, playhead, fps, estimate, dispatch 
         ))}
       </ul>
 
+      {showMarkers && (
+        <>
       {/* Markers exist to be dropped in a hurry and therefore to be dropped by mistake. M puts
           one down and refuses a second on the same frame, so without this list — and without
           Shift+M beside it — a wrong marker would stay in the project for good. */}
@@ -352,6 +475,8 @@ export function Clips({ doc, ctx, selectedId, playhead, fps, estimate, dispatch 
           </li>
         ))}
       </ul>
+        </>
+      )}
     </section>
   )
 }

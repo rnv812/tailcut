@@ -15,13 +15,14 @@ import {
   METRICS,
   layoutScene,
   packRows,
+  sceneHeight,
   type ClipBand,
   type MarkerPin,
   type Metrics,
   type WaveformInput,
 } from '../../core/timeline/layout'
 import type { SnapSet, SnapTarget } from '../../core/timeline/snap'
-import { xToTime, type Viewport } from '../../core/timeline/view'
+import { timeToX, viewEnd, xToTime, type Viewport } from '../../core/timeline/view'
 import { PALETTE, paintScene } from './draw'
 
 export interface TimelineProps {
@@ -72,12 +73,20 @@ export function Timeline(props: TimelineProps) {
       lanes: current.lanes,
       clips: current.clips,
       markers: current.markers,
-      playhead: current.playhead,
+      // The playhead is the one part that changes for every presented video frame. It lives in
+      // the DOM below so it moves with the render instead of waiting behind this deferred paint.
+      playhead: Number.NEGATIVE_INFINITY,
       fps: current.fps,
       snap: hint.current,
       active: active.current,
       peaks: current.peaks,
     })
+
+    // Change the CSS and backing widths together. A percentage width lets the parent stretch a
+    // stale opening bitmap before the resize action has made its round trip through the store;
+    // besides blurring the ruler, that makes the pixels the scene was laid out in differ from the
+    // pixels the pointer reports.
+    element.style.width = `${scene.width}px`
 
     const ratio = globalThis.devicePixelRatio || 1
     const width = Math.round(scene.width * ratio)
@@ -150,9 +159,20 @@ export function Timeline(props: TimelineProps) {
     const element = canvas.current
     if (!element) return
 
+    const xAt = (event: MouseEvent): { css: number; logical: number } => {
+      const box = element.getBoundingClientRect()
+      const css = event.clientX - box.left
+      const logical = box.width > 0 ? css * latest.current.view.widthPx / box.width : css
+      return { css, logical }
+    }
+
     const pointerAt = (event: MouseEvent): { x: number; y: number; alt: boolean } => {
       const box = element.getBoundingClientRect()
-      return { x: event.clientX - box.left, y: event.clientY - box.top, alt: event.altKey }
+      return {
+        x: xAt(event).logical,
+        y: event.clientY - box.top,
+        alt: event.altKey,
+      }
     }
 
     const apply = (result: GestureResult): void => {
@@ -203,20 +223,20 @@ export function Timeline(props: TimelineProps) {
         scheduleHover(null)
         return
       }
-      const x = event.clientX - element.getBoundingClientRect().left
-      scheduleHover({ xPx: x, time: xToTime(latest.current.view, x) })
+      const x = xAt(event)
+      // The tooltip is positioned in the CSS box; media time is read in the logical scene.
+      scheduleHover({ xPx: x.css, time: xToTime(latest.current.view, x.logical) })
     }
 
     const leave = (): void => scheduleHover(null)
 
     const wheel = (event: WheelEvent): void => {
-      const box = element.getBoundingClientRect()
       const gesture = onWheel({
-        x: event.clientX - box.left,
+        x: xAt(event).logical,
         deltaX: event.deltaX,
         deltaY: event.deltaY,
         deltaMode: event.deltaMode,
-        shift: event.shiftKey,
+        alt: event.altKey,
       })
       if (!gesture) return
       event.preventDefault()
@@ -237,9 +257,32 @@ export function Timeline(props: TimelineProps) {
     }
   }, [])
 
+  const metrics = props.metrics ?? METRICS
+  const rows = packRows(props.clips)
+  const rowCount = rows.size ? Math.max(...rows.values()) + 1 : 1
+  const playheadVisible =
+    props.playhead >= props.view.start && props.playhead <= viewEnd(props.view)
+  const playheadX = Math.round(timeToX(props.view, props.playhead))
+
   return (
     <div class="tc-timeline" ref={host} style={{ position: 'relative', width: '100%' }}>
-      <canvas ref={canvas} style={{ display: 'block', width: '100%' }} />
+      <canvas ref={canvas} style={{ display: 'block' }} />
+      {playheadVisible && (
+        <span
+          data-testid="timeline-playhead"
+          aria-hidden="true"
+          style={{
+            position: 'absolute',
+            left: `${playheadX}px`,
+            top: '0',
+            width: '1px',
+            height: `${sceneHeight(metrics, props.lanes.length, rowCount)}px`,
+            background: PALETTE.fill.playhead,
+            pointerEvents: 'none',
+            zIndex: 1,
+          }}
+        />
+      )}
     </div>
   )
 }

@@ -24,35 +24,43 @@ const surface: Surface = {
 }
 
 const wheel = (overrides: Partial<Parameters<typeof onWheel>[0]> = {}) =>
-  onWheel({ x: 300, deltaX: 0, deltaY: 0, deltaMode: 0, shift: false, ...overrides })
+  onWheel({ x: 300, deltaX: 0, deltaY: 0, deltaMode: 0, alt: false, ...overrides })
 
 /** A point inside the first lane: below the ruler, above the clip rows. */
 const inLane = { x: 300, y: METRICS.rulerHeight + 10, alt: false }
 const inRuler = { x: 200, y: 6, alt: false }
 
 describe('onWheel', () => {
-  it('zooms toward the pointer', () => {
-    expect(wheel({ deltaY: -120 })).toEqual({ type: 'zoom', atPx: 300, factor: zoomFactorOf(-120) })
+  it('pans through time on a vertical wheel', () => {
+    expect(wheel({ deltaY: -120 })).toEqual({ type: 'pan', dxPx: 120 })
+    expect(wheel({ deltaY: 120 })).toEqual({ type: 'pan', dxPx: -120 })
   })
 
-  it('zooms out on a wheel the other way', () => {
-    const gesture = wheel({ deltaY: 120 })
+  it('zooms toward the pointer only while Alt is held', () => {
+    expect(wheel({ deltaY: -120, alt: true })).toEqual({
+      type: 'zoom',
+      atPx: 300,
+      factor: zoomFactorOf(-120),
+    })
 
-    expect(gesture).toMatchObject({ type: 'zoom' })
-    expect((gesture as { factor: number }).factor).toBeGreaterThan(1)
-  })
+    const out = wheel({ deltaY: 120, alt: true })
 
-  it('pans instead when shift is held', () => {
-    expect(wheel({ deltaY: -120, shift: true })).toEqual({ type: 'pan', dxPx: 120 })
+    expect(out).toMatchObject({ type: 'zoom' })
+    expect((out as { factor: number }).factor).toBeGreaterThan(1)
   })
 
   it('pans on a horizontal wheel', () => {
     // A trackpad swipe: the horizontal delta wins whenever it is the larger one.
     expect(wheel({ deltaX: 90, deltaY: 10 })).toEqual({ type: 'pan', dxPx: -90 })
+    expect(wheel({ deltaX: 90, deltaY: 10, alt: true })).toEqual({ type: 'pan', dxPx: -90 })
   })
 
   it('turns lines and pages into pixels before deciding', () => {
     expect(wheel({ deltaY: -3, deltaMode: 1 })).toEqual({
+      type: 'pan',
+      dxPx: 48,
+    })
+    expect(wheel({ deltaY: -3, deltaMode: 1, alt: true })).toEqual({
       type: 'zoom',
       atPx: 300,
       factor: zoomFactorOf(-48),
@@ -61,7 +69,7 @@ describe('onWheel', () => {
 
   it('says nothing about a wheel that did not move', () => {
     expect(wheel({})).toBeNull()
-    expect(wheel({ shift: true })).toBeNull()
+    expect(wheel({ alt: true })).toBeNull()
   })
 })
 
@@ -185,7 +193,10 @@ describe('handles', () => {
       kind: 'handle',
       edge: 'out',
     })
-    expect(onPointerDown(withHandles, { ...out, x: out.x - 12 }).drag).toBeNull()
+    expect(onPointerDown(withHandles, { ...out, x: out.x - 12 }).drag).toMatchObject({
+      kind: 'clip',
+      id: 'c1',
+    })
   })
 
   it('grabs the handle of the clip on the row that was pressed', () => {
@@ -278,14 +289,52 @@ describe('handles', () => {
     expect(nudge.hint).toBeNull()
   })
 
-  it('pressing the body of a clip selects it and starts no drag', () => {
+  it('pressing the body of a clip selects it and holds its original position', () => {
     // At 15 s, which is where the clip on the row below has its in handle: a handle belongs to
     // the row it is drawn on, or the rows would grab each other's edges through the screen.
     const body = { x: 15 / view.scale, y: rowTop(METRICS, 2, 0) + 9, alt: false }
     const down = onPointerDown(withHandles, body)
 
     expect(down.gesture).toEqual({ type: 'selectClip', id: 'c1' })
-    expect(down.drag).toBeNull()
+    expect(down.drag).toEqual({ kind: 'clip', id: 'c1', from: body.x, in: 10, moved: false })
+  })
+
+  it('moves a clip body on the frame grid without losing the grab offset', () => {
+    const body = { x: 15 / view.scale, y: rowTop(METRICS, 2, 0) + 9, alt: false }
+    const down = onPointerDown(withHandles, body)
+    const move = onPointerMove(withHandles, down.drag, { ...body, x: 18.13 / view.scale })
+
+    // Grabbed five seconds inside c1. The pointer moved to 18.13, so its in point moves from 10
+    // to the nearest quarter-second frame at 13.25 instead of jumping under the pointer.
+    expect(move.gesture).toEqual({ type: 'moveClip', id: 'c1', time: 13.25 })
+    expect(move.drag).toMatchObject({ kind: 'clip', id: 'c1', moved: true })
+  })
+
+  it('a clip click selects on press and seeks on release', () => {
+    const body = { x: 15 / view.scale, y: rowTop(METRICS, 2, 0) + 9, alt: false }
+    const down = onPointerDown(withHandles, body)
+    const up = onPointerUp(withHandles, down.drag, body)
+
+    expect(down.gesture).toEqual({ type: 'selectClip', id: 'c1' })
+    expect(up).toEqual({ drag: null, gesture: { type: 'seek', time: 15 } })
+  })
+
+  it('a shaky clip click seeks but does not move the clip', () => {
+    const body = { x: 15 / view.scale, y: rowTop(METRICS, 2, 0) + 9, alt: false }
+    const down = onPointerDown(withHandles, body)
+    const move = onPointerMove(withHandles, down.drag, { ...body, x: body.x + DRAG_SLOP_PX - 1 })
+    const up = onPointerUp(withHandles, move.drag, { ...body, x: body.x + DRAG_SLOP_PX - 1 })
+
+    expect(move.gesture).toBeNull()
+    expect(up.gesture).toMatchObject({ type: 'seek' })
+  })
+
+  it('releasing a moved clip seeks nowhere', () => {
+    const body = { x: 15 / view.scale, y: rowTop(METRICS, 2, 0) + 9, alt: false }
+    const down = onPointerDown(withHandles, body)
+    const move = onPointerMove(withHandles, down.drag, { ...body, x: body.x + 20 })
+
+    expect(onPointerUp(withHandles, move.drag, { ...body, x: body.x + 20 }).gesture).toBeNull()
   })
 
   it('pressing the empty space under the clips clears the selection', () => {

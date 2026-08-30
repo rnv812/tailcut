@@ -88,6 +88,10 @@ const SAMPLES: Record<Action['type'], Sample> = {
     before: [seek(1), { type: 'setIn' }],
     action: { type: 'trim', id: 'c1', edge: 'out', time: 2 },
   },
+  moveClip: {
+    before: [seek(1), { type: 'setIn' }, seek(3), { type: 'setOut' }],
+    action: { type: 'moveClip', id: 'c1', time: 1.5 },
+  },
 
   // These six crop and export actions all edit the document, so every one of them owes the
   // history a step — which is the law the census below holds them to.
@@ -358,11 +362,20 @@ describe('the depth of the history', () => {
 })
 
 const drag = (edge: 'in' | 'out', time: number): Action => ({ type: 'trim', id: 'c1', edge, time })
+const move = (time: number): Action => ({ type: 'moveClip', id: 'c1', time })
 
 /** A clip to drag the handles of: c1 = [1, 4] on the first run. */
 const withClip = (): EditSession => play([seek(1), { type: 'setIn' }])
 
 describe('merging what belongs to one gesture', () => {
+  it('folds a whole clip move into one step', () => {
+    const moved = play([move(0.8), move(0.6), move(0.4)], withClip())
+
+    expect(moved.history.past).toHaveLength(2)
+    expect(moved.project.doc.clips[0]).toMatchObject({ in: 0.4, out: 3.4 })
+    expect(step(moved, { type: 'undo' }, ctx).project.doc.clips[0]).toMatchObject({ in: 1, out: 4 })
+  })
+
   it('folds a whole drag into one step', () => {
     // A hundred events is what a second of dragging really produces, and it has to undo in one.
     // Half a frame apart, because that is the other half of the same truth: a drag sends more

@@ -60,8 +60,19 @@ test('draws the material of the session at first sight', async ({ page }) => {
   expect(await pixel(page, 45, 24 + 16)).toEqual(rgb(palette.fill['run-video']!))
   // The second lane, at the same time.
   expect(await pixel(page, 45, 24 + 48 + 6 + 16)).toEqual(rgb(palette.fill['run-audio']!))
-  // The playhead at 61.2 s of 180 across 1200 px.
-  expect(await pixel(page, Math.round((61.2 / 180) * 1200), 4)).toEqual(rgb(palette.fill.playhead!))
+  // The playhead is a DOM line so a presented video frame moves it immediately, without waiting
+  // behind the canvas repaint used for the static lanes and ruler.
+  const [canvas, playhead] = await Promise.all([
+    page.locator('canvas').boundingBox(),
+    page.locator('[data-testid="timeline-playhead"]').boundingBox(),
+  ])
+  const playheadX = await page.evaluate(() =>
+    (window as unknown as Stand & { tcXAt: (time: number) => number }).tcXAt(61.2),
+  )
+  expect(canvas).not.toBeNull()
+  expect(playhead).not.toBeNull()
+  expect(Math.abs(playhead!.x - (canvas!.x + playheadX))).toBeLessThan(1.5)
+  expect(playhead!.width).toBeCloseTo(1, 1)
 })
 
 test('lays out and paints three minutes of material well inside a frame', async ({ page }) => {
@@ -110,7 +121,7 @@ type Stand = {
   tcTimeAt: (x: number) => number
 }
 
-test('a wheel notch leaves the time under the pointer where it was', async ({ page }) => {
+test('Alt plus a wheel notch leaves the time under the pointer where it was', async ({ page }) => {
   await openHost(page)
   const box = (await page.locator('canvas').boundingBox())!
 
@@ -118,7 +129,9 @@ test('a wheel notch leaves the time under the pointer where it was', async ({ pa
   const before = await page.evaluate(() => (window as unknown as Stand).tcTimeAt(400))
   const scaleBefore = await page.evaluate(() => (window as unknown as Stand).tcView().scale)
 
+  await page.keyboard.down('Alt')
   await page.mouse.wheel(0, -240)
+  await page.keyboard.up('Alt')
   await page.waitForFunction(
     (was) => (window as unknown as Stand).tcView().scale < was,
     scaleBefore,
@@ -126,6 +139,28 @@ test('a wheel notch leaves the time under the pointer where it was', async ({ pa
 
   const after = await page.evaluate(() => (window as unknown as Stand).tcTimeAt(400))
   expect(Math.abs(after - before)).toBeLessThan(0.005)
+})
+
+test('a vertical wheel pans horizontally through time', async ({ page }) => {
+  await openHost(page)
+  const box = (await page.locator('canvas').boundingBox())!
+
+  await page.evaluate(() => {
+    const stand = window as unknown as Stand
+    stand.tcSetView({ ...stand.tcView(), start: 20, scale: 0.05 })
+  })
+  await page.waitForFunction(() => (window as unknown as Stand).tcView().scale === 0.05)
+  const before = await page.evaluate(() => (window as unknown as Stand).tcView())
+
+  await page.mouse.move(box.x + 400, box.y + 60)
+  await page.mouse.wheel(0, 120)
+  await page.waitForFunction(
+    (start) => (window as unknown as Stand).tcView().start > start,
+    before.start,
+  )
+
+  const after = await page.evaluate(() => (window as unknown as Stand).tcView())
+  expect(after.start).toBeCloseTo(before.start + 120 * before.scale, 3)
 })
 
 test('dragging the material moves it under the hand', async ({ page }) => {

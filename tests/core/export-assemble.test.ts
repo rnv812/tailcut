@@ -54,6 +54,7 @@ function trackOf(bank: Bank, initPath: string, segmentPaths: string[], kind: Tra
       return { bytes, source: bank.add(bytes) }
     }),
     trackId: declared.trackId,
+    kind,
     defaults: trackDefaults(init),
     loneTrack: true,
   })

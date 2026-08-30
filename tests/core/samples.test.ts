@@ -418,6 +418,38 @@ describe('samplesInSegment', () => {
     expect(track!.samples[0]!.at).toBe(268)
   })
 
+  it('uses sample dependency to reject a video key without rejecting an audio entry point', () => {
+    // Some packagers state dependency without also setting sample_is_non_sync_sample. WebCodecs
+    // checks the coded AV1 frame when a chunk is labelled `key` and rejects this exact mismatch,
+    // so absence of the non-sync bit alone cannot make a sample a decoder entry point.
+    const segment = (sampleFlags: number): Uint8Array => {
+      const moof = moofOf(
+        raw('traf', [
+          ...raw('tfhd', [
+            ...be32(0x020000 | 0x000008 | 0x000010 | 0x000020),
+            ...be32(1),
+            ...be32(100),
+            ...be32(3),
+            ...be32(sampleFlags),
+          ]),
+          ...raw('tfdt', [...be32(0), ...be32(0)]),
+          ...raw('trun', [...be32(0x000001), ...be32(1), ...int32(200)]),
+        ]),
+      )
+      return segmentOf(moof, 3)
+    }
+
+    const [predictedVideo] = samplesInSegment(segment(0x01000000), NO_DEFAULTS, {
+      videoTrackId: 1,
+    })
+    const [predictedAudio] = samplesInSegment(segment(0x01000000), NO_DEFAULTS)
+    const [independent] = samplesInSegment(segment(0x02000000), NO_DEFAULTS)
+
+    expect(predictedVideo!.samples[0]!.sync).toBe(false)
+    expect(predictedAudio!.samples[0]!.sync).toBe(true)
+    expect(independent!.samples[0]!.sync).toBe(true)
+  })
+
   it('falls back to the trex when neither the trun nor the tfhd states the flags', () => {
     // Our own writer: a picture track whose trex says "not a sync sample" and whose fragment
     // states no flags at all. This is the shape a converted WebM picture takes whenever the
@@ -825,7 +857,12 @@ describe('sampleRunOf', () => {
     // Handed over backwards, because the caller is free to: the map keeps its chunks in time
     // order but a snapshot may be read in any order, and the writer lays samples down exactly as
     // they arrive.
-    const run = sampleRunOf({ segments: placed([...videoSegments].reverse()), trackId: 1, defaults })
+    const run = sampleRunOf({
+      segments: placed([...videoSegments].reverse()),
+      trackId: 1,
+      kind: 'video',
+      defaults,
+    })
 
     expect(run.samples).toHaveLength(144)
     expect(run.dropped).toBe(0)
@@ -836,7 +873,7 @@ describe('sampleRunOf', () => {
   it('carries a decode time once and says how many copies it dropped', () => {
     // A re-watch: the middle chunk of the recording came back and both copies stayed on the map.
     const segments = placed([videoSegments[0]!, videoSegments[1]!, videoSegments[1]!, videoSegments[2]!])
-    const run = sampleRunOf({ segments, trackId: 1, defaults })
+    const run = sampleRunOf({ segments, trackId: 1, kind: 'video', defaults })
 
     expect(run.samples).toHaveLength(144)
     expect(run.dropped).toBe(48)
@@ -848,7 +885,12 @@ describe('sampleRunOf', () => {
     expect(inside).toEqual([])
     // And the repeat was dropped whole rather than merged into its twin: what comes out is the
     // run the recording would have had if the chunk had arrived once.
-    const once = sampleRunOf({ segments: placed(videoSegments), trackId: 1, defaults })
+    const once = sampleRunOf({
+      segments: placed(videoSegments),
+      trackId: 1,
+      kind: 'video',
+      defaults,
+    })
     expect(ticksOf(run.samples)).toEqual(ticksOf(once.samples))
   })
 
@@ -872,6 +914,7 @@ describe('sampleRunOf', () => {
     const run = sampleRunOf({
       segments: placed([fragment]),
       trackId: 1,
+      kind: 'video',
       defaults: trackDefaults(init),
     })
 
@@ -882,12 +925,18 @@ describe('sampleRunOf', () => {
   it('leaves the trafs of the other tracks of a muxed segment alone', () => {
     const segment = segmentOf(moofOf(trafOf(1, 512, 2, 300), trafOf(2, 1024, 2, 308)), 16)
 
-    expect(sampleRunOf({ segments: placed([segment]), trackId: 2, defaults: NO_DEFAULTS }).samples
+    expect(sampleRunOf({ segments: placed([segment]), trackId: 2, kind: 'audio', defaults: NO_DEFAULTS }).samples
       .map((sample) => sample.dts)).toEqual([0, 1024])
     // Told to take a lone traf, it still does not take one of two: there is no telling which of
     // them the caller meant, and picking the first hands this track the samples of the other.
     expect(
-      sampleRunOf({ segments: placed([segment]), trackId: 9, defaults: NO_DEFAULTS, loneTrack: true })
+      sampleRunOf({
+        segments: placed([segment]),
+        trackId: 9,
+        kind: 'video',
+        defaults: NO_DEFAULTS,
+        loneTrack: true,
+      })
         .samples,
     ).toEqual([])
   })
@@ -898,7 +947,12 @@ describe('sampleRunOf', () => {
     // track it could be about — and the frame table does not: it answers about the number it was
     // given or about nothing at all.
     const segment = segmentOf(moofOf(trafOf(7, 512, 3, 100)), 12)
-    const asked = { segments: placed([segment]), trackId: 1, defaults: NO_DEFAULTS }
+    const asked = {
+      segments: placed([segment]),
+      trackId: 1,
+      kind: 'video' as const,
+      defaults: NO_DEFAULTS,
+    }
 
     expect(sampleRunOf(asked).samples).toEqual([])
     expect(sampleRunOf({ ...asked, loneTrack: true }).samples.map((sample) => sample.dts)).toEqual([
@@ -911,6 +965,7 @@ describe('sampleRunOf', () => {
     const run = sampleRunOf({
       segments: placed([videoSegments[0]!, rubbish, videoSegments[1]!]),
       trackId: 1,
+      kind: 'video',
       defaults,
     })
 
@@ -919,6 +974,9 @@ describe('sampleRunOf', () => {
   })
 
   it('gives an empty run rather than nothing at all when there are no segments', () => {
-    expect(sampleRunOf({ segments: [], trackId: 1, defaults })).toEqual({ samples: [], dropped: 0 })
+    expect(sampleRunOf({ segments: [], trackId: 1, kind: 'video', defaults })).toEqual({
+      samples: [],
+      dropped: 0,
+    })
   })
 })

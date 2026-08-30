@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'preact/hooks'
 import { forcesEncoder, type Clip } from '../core/edit/clip'
 import { newProject } from '../core/edit/project'
 import { newSession } from '../core/edit/session'
+import { canRedo, canUndo } from '../core/edit/history'
 import { chooseCodec, type Choice } from '../core/encode/codec'
 import { geometryOf } from '../core/encode/crop'
 import { estimateFor } from '../core/encode/estimate'
@@ -19,6 +20,7 @@ import type { ClipBand } from '../core/timeline/layout'
 import { snapSet } from '../core/timeline/snap'
 import { formatBytes } from '../shared/format'
 import { HelpSheet } from './help'
+import { EditToolbar } from './edit-toolbar'
 import {
   choiceFor,
   encodeIo,
@@ -30,12 +32,12 @@ import {
 import { liveCodecs } from './export/frames'
 import { cachedProbe, liveProbe } from './export/support'
 import { liveSurface, probeWebpBytes } from './export/webp'
-import { Clips } from './inspector/clips'
+import { ClipBin, Clips } from './inspector/clips'
 import { CropBox, CropControls } from './inspector/crop'
 import { ExportQueue } from './inspector/queue'
 import type { EditorOptions } from './shell'
 import type { PreviewState } from './shell'
-import { Player } from './player/player'
+import { Player, type PlaybackEndMode } from './player/player'
 import { deriveMaterial } from './source/media'
 import { buildPreview, type Preview } from './source/preview'
 import { NO_WAVEFORM, startWaveform, type WaveformState } from './source/waveform'
@@ -220,6 +222,7 @@ function OpenWorkbench({
   const [wave, setWave] = useState<WaveformState>(NO_WAVEFORM)
   const [hover, setHover] = useState<Hover | null>(null)
   const [playing, setPlaying] = useState(false)
+  const [playbackEndMode, setPlaybackEndMode] = useState<PlaybackEndMode>('stop')
   const [shuttle, setShuttle] = useState<ShuttleState>(STILL)
   const [help, setHelp] = useState(false)
 
@@ -372,6 +375,16 @@ function OpenWorkbench({
 
   const fps = derived.ctx.fps || 25
   const index = built ? Math.max(0, built.frames.indexAt(ui.playhead)) : 0
+  const playbackRange = useMemo(() => {
+    if (selected) return { in: selected.in, out: selected.out }
+
+    const first = built?.frames.at(0)
+    const last = built?.frames.at((built?.frames.count() ?? 0) - 1)
+    return {
+      in: first?.pts ?? 0,
+      out: last ? last.pts + last.duration : 0,
+    }
+  }, [selected?.in, selected?.out, built])
 
   const clips = useMemo<ClipBand[]>(
     () =>
@@ -475,6 +488,59 @@ function OpenWorkbench({
         </div>
       </header>
 
+      <aside class="media-panel" data-testid="media-panel">
+        <section class="tc-source-panel">
+          <div class="tc-panel-heading">
+            <div>
+              <h2>Source</h2>
+              <p class="muted">The recording available for this edit.</p>
+            </div>
+          </div>
+          {pictures.length > 1 && (
+            <div class="tc-representation">
+              <label class="option">
+                Picture
+                <select
+                  data-testid="representation"
+                  value={selectedPicture}
+                  onChange={(event) => onPicture(event.currentTarget.value)}
+                >
+                  {pictures.map((track) => (
+                    <option key={track.track.id} value={track.track.id}>
+                      {pictureName(track)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <p class="muted">Switching starts a new edit for that picture.</p>
+            </div>
+          )}
+          <div class="tracks">
+            {material.tracks.map((track) => (
+              <TrackLine key={track.track.id} track={track} />
+            ))}
+          </div>
+          {wave.refused && (
+            <p class="muted" data-testid="no-wave">
+              The sound of this recording cannot be decoded here, so the timeline shows no wave.
+            </p>
+          )}
+        </section>
+
+        <ClipBin
+          doc={doc}
+          selectedId={ui.selectedClipId}
+          fps={fps}
+          dispatch={store.dispatch}
+          onSelect={(clip) => {
+            transport.stop()
+            store.dispatch({ type: 'selectClip', id: clip.id })
+            store.dispatch({ type: 'seek', time: clip.in })
+            store.dispatch({ type: 'zoomToSelection' })
+          }}
+        />
+      </aside>
+
       {preview === 'building' ? (
         <section class="player" data-testid="player">
           <p class="muted">Building the preview…</p>
@@ -490,6 +556,9 @@ function OpenWorkbench({
           playing={playing}
           rate={shuttle.direction > 0 ? shuttle.rate : 1}
           note={shuttleLabel(shuttle)}
+          playbackRange={playbackRange}
+          endMode={playbackEndMode}
+          onEndMode={setPlaybackEndMode}
           overlay={
             // Only where there is something to draw a rectangle of. A recording with no picture
             // gives `frameSize` zero by zero, and a frame at 0 % would be an invisible element
@@ -521,6 +590,16 @@ function OpenWorkbench({
       )}
 
       <section class="timeline" data-testid="timeline">
+        <EditToolbar
+          selected={selected !== undefined}
+          selection={selected ?? null}
+          fps={fps}
+          snapping={ui.snapping}
+          canUndo={canUndo(session.history)}
+          canRedo={canRedo(session.history)}
+          dispatch={store.dispatch}
+          onHelp={() => setHelp(true)}
+        />
         {/* The peaks go over empty or not: with nothing read yet the sound lane draws as one
             quiet line and fills in from the left as the slices arrive, which is the whole of the
             progress indication — there is no spinner and the measurement says none is needed. */}
@@ -545,37 +624,6 @@ function OpenWorkbench({
       </section>
 
       <aside class="inspector" data-testid="inspector">
-        <h2>Source</h2>
-        {pictures.length > 1 && (
-          <div class="tc-representation">
-            <label class="option">
-              Picture
-              <select
-                data-testid="representation"
-                value={selectedPicture}
-                onChange={(event) => onPicture(event.currentTarget.value)}
-              >
-                {pictures.map((track) => (
-                  <option key={track.track.id} value={track.track.id}>
-                    {pictureName(track)}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <p class="muted">Switching starts a new edit for that picture.</p>
-          </div>
-        )}
-        <div class="tracks">
-          {material.tracks.map((track) => (
-            <TrackLine key={track.track.id} track={track} />
-          ))}
-        </div>
-        {wave.refused && (
-          <p class="muted" data-testid="no-wave">
-            The sound of this recording cannot be decoded here, so the timeline shows no wave.
-          </p>
-        )}
-
         <Clips
           doc={doc}
           ctx={ctx}
@@ -584,6 +632,8 @@ function OpenWorkbench({
           fps={fps}
           estimate={estimate}
           dispatch={store.dispatch}
+          selectedOnly
+          showMarkers={false}
         />
 
         {selected && ctx.frameSize.width > 0 && (

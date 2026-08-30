@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'preact/hooks'
+import { useLayoutEffect, useState } from 'preact/hooks'
 import type { EditContext } from '../../core/edit/context'
 import { step, type EditSession, type SessionAction } from '../../core/edit/session'
 
@@ -44,6 +44,8 @@ export function createStore(initial: EditSession, ctx: EditContext): EditorStore
 
 export function useSession(store: EditorStore): EditSession {
   const [session, setSession] = useState(store.get())
-  useEffect(() => store.subscribe(() => setSession(store.get())), [store])
+  // A child measures the timeline in a passive mount effect. Subscribe during layout so that
+  // first measurement cannot update the store before this component starts listening.
+  useLayoutEffect(() => store.subscribe(() => setSession(store.get())), [store])
   return session
 }

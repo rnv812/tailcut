@@ -119,6 +119,7 @@ export function framesOf(input: FrameInput): Frame[] {
   const run = sampleRunOf({
     segments: input.segments,
     trackId: input.trackId,
+    kind: 'video',
     defaults: trackDefaults(input.init),
   })
 

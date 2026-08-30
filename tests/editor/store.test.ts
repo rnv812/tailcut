@@ -1,5 +1,7 @@
 // @vitest-environment happy-dom
-import { describe, it, expect, vi } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
+import { h, render } from 'preact'
+import { useEffect } from 'preact/hooks'
 import { newSession } from '../../src/core/edit/session'
 import { newProject } from '../../src/core/edit/project'
 import { reduce } from '../../src/core/edit/actions'
@@ -7,7 +9,7 @@ import { geometryOf } from '../../src/core/encode/crop'
 import { DEFAULTS, type ExportFormat, type ExportSettings } from '../../src/shared/settings'
 import { FrameTable, type Frame } from '../../src/core/timeline/frames'
 import { planSnapshot, type SnapshotSource } from '../../src/core/snapshot/build'
-import { createStore } from '../../src/editor/state/store'
+import { createStore, useSession, type EditorStore } from '../../src/editor/state/store'
 import { deriveMaterial } from '../../src/editor/source/media'
 import type { Preview } from '../../src/editor/source/preview'
 import type { TrackInfo } from '../../src/shared/types'
@@ -300,5 +302,40 @@ describe('createStore', () => {
 
     expect(first).toHaveBeenCalledTimes(1)
     expect(second).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('useSession', () => {
+  const host = document.createElement('div')
+  document.body.append(host)
+
+  afterEach(() => render(null, host))
+
+  it('subscribes before a child mount effect can update the store', async () => {
+    const { ctx } = deriveMaterial(index, preview)
+    const store = createStore(newSession(newProject(1_000, ctx)), ctx)
+
+    function ResizeOnMount({ target }: { target: EditorStore }) {
+      useEffect(() => target.dispatch({ type: 'resize', widthPx: 800 }), [target])
+      return null
+    }
+
+    function Probe({ target }: { target: EditorStore }) {
+      const session = useSession(target)
+      return h(
+        'div',
+        null,
+        h(ResizeOnMount, { target }),
+        h('span', { 'data-testid': 'width' }, String(session.project.ui.view.widthPx)),
+      )
+    }
+
+    render(h(Probe, { target: store }), host)
+    await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)))
+
+    // Child passive effects run before parent passive effects in Preact. A passive subscription
+    // misses this first measurement and leaves the opening 1200 px bitmap stretched until any
+    // unrelated edit wakes the store.
+    expect(host.querySelector('[data-testid="width"]')!.textContent).toBe('800')
   })
 })

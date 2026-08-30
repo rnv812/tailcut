@@ -16,6 +16,7 @@ export type TimelineGesture =
   | { type: 'pan'; dxPx: number }
   | { type: 'seek'; time: number }
   | { type: 'trim'; id: string; edge: 'in' | 'out'; time: number }
+  | { type: 'moveClip'; id: string; time: number }
   | { type: 'selectClip'; id: string | null }
 
 export interface Surface {
@@ -36,6 +37,7 @@ export type DragState =
   | { kind: 'scrub' }
   | { kind: 'pan'; x: number; from: number; moved: boolean }
   | { kind: 'handle'; id: string; edge: 'in' | 'out' }
+  | { kind: 'clip'; id: string; from: number; in: number; moved: boolean }
   | null
 
 export interface GestureResult {
@@ -58,19 +60,20 @@ export interface WheelInput {
   deltaX: number
   deltaY: number
   deltaMode: number
-  shift: boolean
+  alt: boolean
 }
 
 export function onWheel(input: WheelInput): TimelineGesture | null {
   const dy = wheelPixels(input.deltaY, input.deltaMode)
   const dx = wheelPixels(input.deltaX, input.deltaMode)
 
-  // Shift is the long-standing "scroll sideways" of every browser, and a trackpad sends the
-  // sideways swipe as deltaX. Both mean pan; a plain wheel over this surface means zoom.
-  if (input.shift) return dy === 0 ? null : { type: 'pan', dxPx: -dy }
+  // A trackpad sends a sideways swipe as deltaX, while a mouse wheel sends its travel as deltaY.
+  // Both move through time. Alt gives the vertical wheel to cursor-anchored zoom instead.
   if (Math.abs(dx) > Math.abs(dy)) return { type: 'pan', dxPx: -dx }
   if (dy === 0) return null
-  return { type: 'zoom', atPx: input.x, factor: zoomFactorOf(dy) }
+  return input.alt
+    ? { type: 'zoom', atPx: input.x, factor: zoomFactorOf(dy) }
+    : { type: 'pan', dxPx: -dy }
 }
 
 export interface PointerInput {
@@ -144,7 +147,14 @@ export function onPointerDown(s: Surface, input: PointerInput): GestureResult {
     const handle = handleAt(s, input.x, input.y)
     // Grabbing selects: the inspector has to be showing the clip whose edge is moving.
     if (handle) return { drag: { kind: 'handle', ...handle }, gesture: { type: 'selectClip', id: handle.id } }
-    return { drag: null, gesture: { type: 'selectClip', id: clipAt(s, input.x, input.y)?.id ?? null } }
+    const clip = clipAt(s, input.x, input.y)
+    if (clip) {
+      return {
+        drag: { kind: 'clip', id: clip.id, from: input.x, in: clip.in, moved: false },
+        gesture: { type: 'selectClip', id: clip.id },
+      }
+    }
+    return { drag: null, gesture: { type: 'selectClip', id: null } }
   }
 
   return { drag: { kind: 'pan', x: input.x, from: input.x, moved: false }, gesture: null }
@@ -154,6 +164,14 @@ export function onPointerMove(s: Surface, drag: DragState, input: PointerInput):
   if (!drag) return nothing
   if (drag.kind === 'scrub') return { drag, gesture: seekTo(s, input.x) }
   if (drag.kind === 'handle') return trim(s, drag, input)
+
+  if (drag.kind === 'clip') {
+    const moved = drag.moved || Math.abs(input.x - drag.from) >= DRAG_SLOP_PX
+    const next = { ...drag, moved }
+    if (!moved) return { drag: next, gesture: null }
+    const time = quantize(s.frames, drag.in + xToTime(s.view, input.x) - xToTime(s.view, drag.from))
+    return { drag: next, gesture: { type: 'moveClip', id: drag.id, time } }
+  }
 
   const moved = drag.moved || Math.abs(input.x - drag.from) >= DRAG_SLOP_PX
   return {
@@ -166,6 +184,7 @@ export function onPointerUp(s: Surface, drag: DragState, input: PointerInput): G
   // A press on the material that went nowhere was a click, and a click on the timeline means
   // "put the playhead here" — the same thing the ruler does, without stealing the drag.
   if (drag && drag.kind === 'handle') return { drag: null, gesture: null, hint: null }
+  if (drag && drag.kind === 'clip' && !drag.moved) return { drag: null, gesture: seekTo(s, input.x) }
   if (drag && drag.kind === 'pan' && !drag.moved) return { drag: null, gesture: seekTo(s, input.x) }
   return nothing
 }

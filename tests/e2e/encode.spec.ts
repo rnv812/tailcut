@@ -11,12 +11,46 @@ import {
   launchWithExtension,
   placeCrop,
   probeFile,
+  routeLocal,
   serveLocal,
   typeInto,
 } from './helpers'
 
 const PLAYER_URL = 'https://tailcut.test/encode'
 const FRAME_SECONDS = 0.1
+
+/**
+ * YouTube-style AV1 metadata: predicted samples state sample_depends_on but leave the redundant
+ * sample_is_non_sync_sample bit clear. The coded bytes are untouched, so a decoder remains the
+ * authority on whether the chunk label is truthful.
+ */
+function av1WithDependencyOnly(file: string): Buffer {
+  const bytes = new Uint8Array(readFileSync(file))
+  const out = bytes.slice()
+  const moof = topLevelBoxes(out).find((box) => box.type === 'moof')!
+  const traf = childBoxes(out, moof).find((box) => box.type === 'traf')!
+  const tfhd = childBoxes(out, traf).find((box) => box.type === 'tfhd')!
+  const view = new DataView(out.buffer, out.byteOffset, out.byteLength)
+  const body = tfhd.start + tfhd.headerSize
+  const flags = view.getUint32(body) & 0x00ffffff
+
+  let field = body + 8
+  if (flags & 0x000001) field += 8
+  if (flags & 0x000002) field += 4
+  if (flags & 0x000008) field += 4
+  if (flags & 0x000010) field += 4
+  if (!(flags & 0x000020)) throw new Error('the AV1 fixture has no default sample flags')
+
+  const defaults = view.getUint32(field)
+  if ((defaults & 0x03000000) !== 0x01000000) {
+    throw new Error('the AV1 fixture does not mark its predicted samples as dependent')
+  }
+  if ((defaults & 0x00010000) === 0) {
+    throw new Error('the AV1 fixture already omits its non-sync bit')
+  }
+  view.setUint32(field, defaults & ~0x00010000)
+  return Buffer.from(out)
+}
 
 interface OpenedClip {
   context: BrowserContext
@@ -285,6 +319,47 @@ test('sends an uncropped Optimize clip through the frame path', async () => {
   }
 })
 
+test('decodes AV1 when dependency metadata omits the non-sync bit', async () => {
+  test.setTimeout(180_000)
+  const { context, extensionId } = await launchWithExtension()
+  const player = await context.newPage()
+
+  try {
+    await routeLocal(player, 'codecs.html', PLAYER_URL)
+    let rewrittenChunks = 0
+    await player.route('**/fixtures/av1/chunk-stream0-*.m4s', async (route) => {
+      const name = new URL(route.request().url()).pathname.replace('/fixtures/', '')
+      rewrittenChunks += 1
+      await route.fulfill({
+        body: av1WithDependencyOnly(`tests/fixtures/${name}`),
+        contentType: 'video/mp4',
+      })
+    })
+
+    const feed = [{
+      mime: 'video/mp4; codecs="av01.0.00M.08"',
+      init: '/fixtures/av1/init-stream0.m4s',
+      chunks: [1, 2, 3].map((n) => `/fixtures/av1/chunk-stream0-0000${n}.m4s`),
+    }]
+    await player.goto(`${PLAYER_URL}#${encodeURIComponent(JSON.stringify(feed))}`)
+    await player.waitForFunction(() => (window as unknown as { allAppended?: boolean }).allAppended)
+    expect(rewrittenChunks).toBe(3)
+    await player.evaluate(() => document.querySelector('video')!.play())
+    await player.waitForTimeout(7_000)
+
+    const { editor } = await clickEdit(context, player, extensionId)
+    await editor.waitForFunction(() => (document.querySelector('video')?.readyState ?? 0) >= 2)
+    await typeInto(editor, 'playhead-field', '00:00:01:05')
+    await editor.keyboard.press('i')
+
+    const saved = await exportClipWith(editor, { mode: 'optimize' })
+    expect(saved.progress, 'AV1 never reached the decoder and encoder').not.toHaveLength(0)
+    expect(probeFile(saved.file).streams[0]!.codec_name).toBe('h264')
+  } finally {
+    await context.close()
+  }
+})
+
 test('cuts the selected pixels instead of scaling the whole picture into the crop', async () => {
   test.setTimeout(240_000)
   const { context, editor } = await openClip('00:00:02:00', '00:00:04:00')
@@ -417,7 +492,11 @@ test('runs three copies beside one encode without either lane blocking the other
     await splitAt(editor, '00:00:03:00', 4)
     await splitAt(editor, '00:00:04:00', 5)
     await splitAt(editor, '00:00:05:00', 6)
+    await editor.getByTestId('clip-go-c5').click()
+    await expect(editor.getByTestId('mode-c5')).toBeVisible()
     await editor.getByTestId('mode-c5').selectOption('optimize')
+    await editor.getByTestId('clip-go-c6').click()
+    await expect(editor.getByTestId('mode-c6')).toBeVisible()
     await editor.getByTestId('mode-c6').selectOption('optimize')
     await expect(editor.getByTestId('export')).toBeEnabled()
 

@@ -58,7 +58,8 @@ function reassembled(): { bytes: Uint8Array; segments: PlacedSegment[] } {
 /** The fragmented path, exactly as the editor walks it. */
 function throughFragments(trackId: number): { samples: LocatedSample[]; bytes: Uint8Array } {
   const { bytes, segments } = reassembled()
-  const run = sampleRunOf({ segments, trackId, defaults: trackDefaults(fragInit) })
+  const kind = parseInit(fragInit)!.tracks.find((track) => track.trackId === trackId)!.kind
+  const run = sampleRunOf({ segments, trackId, kind, defaults: trackDefaults(fragInit) })
   return { samples: run.samples, bytes }
 }
 

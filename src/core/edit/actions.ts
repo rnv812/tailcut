@@ -1,6 +1,6 @@
 import type { ExportFormat } from '../../shared/settings'
 import { normalizeCrop, ratioCrop, type Crop, type CropRatio } from '../encode/crop'
-import { quantize, shiftBy } from '../timeline/grid'
+import { boundaryIndexAt, boundaryTime, quantize, shiftBy } from '../timeline/grid'
 import {
   clampView,
   fitAll,
@@ -18,7 +18,7 @@ import { clipById, selectedClip, type Doc, type Project, type Ui } from './proje
  * Everything that can happen to the project.
  *
  * One union for the keyboard, the mouse and the inspector: a clip trimmed by dragging and a clip
- * trimmed by typing a timecode are the same action, so they cannot disagree. The first five
+ * trimmed by typing a timecode are the same action, so they cannot disagree. The first six
  * members match the shapes `TimelineGesture` produces, field for field.
  */
 export type Action =
@@ -26,6 +26,7 @@ export type Action =
   | { type: 'zoom'; atPx: number; factor: number }
   | { type: 'pan'; dxPx: number }
   | { type: 'trim'; id: string; edge: 'in' | 'out'; time: number; typed?: boolean }
+  | { type: 'moveClip'; id: string; time: number }
   | { type: 'selectClip'; id: string | null }
   | { type: 'step'; frames: number }
   | { type: 'skip'; seconds: number }
@@ -85,6 +86,47 @@ function trimTo(project: Project, clip: Clip, edge: 'in' | 'out', time: number, 
   const next = normalizeClip(moved, ctx, edge)
   if (next.in === clip.in && next.out === clip.out) return project
   return replaceClip(project, clip.id, next)
+}
+
+/** The stretch of this representation nearest the clip, including a later recurrence of it. */
+function clipZone(clip: Clip, ctx: EditContext) {
+  let best = ctx.zones.find((zone) => zone.representation === clip.representation)
+  let distance = Number.POSITIVE_INFINITY
+
+  for (const zone of ctx.zones) {
+    if (zone.representation !== clip.representation) continue
+    const next = clip.in < zone.start ? zone.start - clip.in : clip.in > zone.end ? clip.in - zone.end : 0
+    if (next < distance) {
+      best = zone
+      distance = next
+    }
+  }
+
+  return best
+}
+
+/** Moves a whole clip on the frame grid without changing the number of frames it contains. */
+function moveClipTo(project: Project, clip: Clip, time: number, ctx: EditContext): Project {
+  const zone = clipZone(clip, ctx)
+  const low = zone?.start ?? 0
+  const high = zone?.end ?? ctx.duration
+
+  if (!ctx.frames.length) {
+    const duration = clip.out - clip.in
+    const start = Math.max(low, Math.min(high - duration, time))
+    if (start === clip.in) return project
+    return replaceClip(project, clip.id, { ...clip, in: start, out: start + duration })
+  }
+
+  const length = boundaryIndexAt(ctx.frames, clip.out) - boundaryIndexAt(ctx.frames, clip.in)
+  const lowIndex = boundaryIndexAt(ctx.frames, low)
+  const highIndex = boundaryIndexAt(ctx.frames, high)
+  const asked = boundaryIndexAt(ctx.frames, quantize(ctx.frames, time))
+  const startIndex = Math.max(lowIndex, Math.min(highIndex - length, asked))
+  const start = boundaryTime(ctx.frames, startIndex)
+  const end = boundaryTime(ctx.frames, startIndex + length)
+  if (start === clip.in && end === clip.out) return project
+  return replaceClip(project, clip.id, { ...clip, in: start, out: end })
 }
 
 /**
@@ -223,6 +265,11 @@ export function reduce(project: Project, action: Action, ctx: EditContext): Proj
     case 'trim': {
       const clip = clipById(project.doc, action.id)
       return clip ? trimTo(project, clip, action.edge, action.time, ctx) : project
+    }
+
+    case 'moveClip': {
+      const clip = clipById(project.doc, action.id)
+      return clip ? moveClipTo(project, clip, action.time, ctx) : project
     }
 
     case 'splitClip':
@@ -414,6 +461,7 @@ const MODES: { [T in Action['type']]: ModeFor<T> } = {
   // without anybody telling the history that a gesture began or ended.
   trim: (action) =>
     action.typed ? STEP : { kind: 'merge', key: `trim:${action.id}:${action.edge}` },
+  moveClip: (action) => ({ kind: 'merge', key: `move:${action.id}` }),
   renameClip: (action) => ({ kind: 'merge', key: `rename:${action.id}` }),
 
   clearCrop: STEP,

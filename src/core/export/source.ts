@@ -48,6 +48,7 @@ export function sourceTrackOf(input: SourceTrackInput): SourceTrack | null {
   const run = sampleRunOf({
     segments: input.segments.map((segment) => ({ bytes: segment.bytes, source: segment.at })),
     trackId: entry.trackId,
+    kind: input.kind,
     defaults: trackDefaults(input.initBytes),
     loneTrack: true,
   })

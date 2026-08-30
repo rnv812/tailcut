@@ -670,6 +670,7 @@ describe('a run of segments read as one', () => {
     const run = sampleRunOf({
       segments: segments.map((segment) => ({ bytes: segment.bytes, source: segment.at })),
       trackId: AUDIO_TRACK,
+      kind: 'audio',
       defaults: trackDefaults(INIT),
     })
 

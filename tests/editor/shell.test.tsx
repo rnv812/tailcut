@@ -333,12 +333,23 @@ afterEach(() => {
 })
 
 describe('the editor shell', () => {
-  it('lays out the player on top, the inspector right and the timeline below', async () => {
+  it('lays out media, monitor, inspector, and timeline as separate work areas', async () => {
     show(await ready())
 
-    for (const pane of ['player', 'inspector', 'timeline']) {
+    for (const pane of ['media-panel', 'player', 'inspector', 'timeline']) {
       expect(document.querySelector(`[data-testid="${pane}"]`), `the ${pane} pane is missing`).not.toBeNull()
     }
+    expect(document.querySelectorAll('[data-testid="clip-bin"]')).toHaveLength(1)
+    expect(document.querySelectorAll('[data-testid="clips"]')).toHaveLength(1)
+  })
+
+  it('keeps the crop shade inside the picture and gives the timeline an editing row', () => {
+    const html = readFileSync('src/editor/editor.html', 'utf8')
+
+    expect(html).toMatch(/\.tc-picture-frame\s*\{[^}]*overflow:\s*hidden/s)
+    expect(html).toMatch(/\.tc-edit-tool-row\s*\{[^}]*flex-wrap:\s*wrap/s)
+    expect(html).toMatch(/grid-template-areas:\s*"head head head"\s*"media player inspector"\s*"timeline timeline inspector"/s)
+    expect(html).toMatch(/grid-template-rows:\s*auto\s+minmax\([^;]+\)\s+minmax\(300px,\s*42vh\)/s)
   })
 
   it('takes the title and the address of the page out of the snapshot', async () => {
@@ -486,6 +497,32 @@ describe('the editor shell', () => {
     // And the box the frame under the pointer is drawn in, mounted with the strip and hidden
     // until the pointer is over it — mounted, so that the cache of pictures outlives a hover.
     expect(document.querySelector<HTMLElement>('[data-testid="thumb"]')!.hidden).toBe(true)
+  })
+
+  it('shows the selected clip In, Out, and Duration above the timeline', async () => {
+    await mount({ ...(await ready()), preview: previewOf() })
+
+    expect(text('no-selection')).toContain('whole recording')
+    press('i')
+    await settled()
+
+    expect(document.querySelector('[data-testid="selection-summary"]')).not.toBeNull()
+    expect(text('selection-in')).toBe('00:00:00:00')
+    expect(text('selection-out')).toBe('00:00:00:05')
+    expect(text('selection-duration')).toBe('00:00:00:05')
+  })
+
+  it('switches preview playback between stopping and looping at the active range end', async () => {
+    await mount({ ...(await ready()), preview: previewOf() })
+
+    expect(text('end-mode')).toBe('At end: Stop')
+    button('end-mode').click()
+    await settled()
+    expect(text('end-mode')).toBe('At end: Loop')
+
+    button('end-mode').click()
+    await settled()
+    expect(text('end-mode')).toBe('At end: Stop')
   })
 
   it('draws a crop only over a picture with a real source size', async () => {
@@ -948,6 +985,22 @@ describe('the editor shell', () => {
     } finally {
       HTMLElement.prototype.getBoundingClientRect = measured
     }
+  })
+
+  it('a clip chosen from the media panel becomes selected and takes the playhead to its start', async () => {
+    await mount({ ...(await ready()), preview: previewOf() })
+
+    press('i')
+    press('ArrowRight')
+    press('ArrowRight')
+    await settled()
+    expect(text('frame')).toBe('3')
+
+    document.querySelector<HTMLButtonElement>('[data-testid="clip-go-c1"]')!.click()
+    await settled()
+
+    expect(text('frame')).toBe('1')
+    expect(document.querySelector('[data-testid="clip"]')!.className).toContain('selected')
   })
 
   it('counts one break of the recording once, however many lanes stopped for it', async () => {
