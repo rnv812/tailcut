@@ -74,6 +74,14 @@ skipped. The reason each file belongs to its project is written next to it in
 
 Both run headless. `HEADED=1 npm run e2e:fast` puts the windows back.
 
+The Windows hardware leg is separate: `node tools/windows-check.mjs` drives Chrome for Testing over
+CDP, verifies the loaded extension, records a watched minute, and validates the hardware HEVC,
+small-crop software H.264, and animated WebP exports; a supplied 4K input adds the computed-level
+check. It cannot replace Chrome stable or playback checks in other applications because stable and
+Chrome for Testing expose different hardware codecs and file compatibility belongs to each player.
+The remaining evidence is tracked explicitly as `PASS`, `FAIL`, or `NOT RUN` in
+[`docs/manual-checks-windows.md`](docs/manual-checks-windows.md).
+
 ### Live sites
 
 The offline suite never goes to the network: every test serves the fixtures out of the
