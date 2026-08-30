@@ -1,7 +1,7 @@
 import { render } from 'preact'
 import { useEffect, useState } from 'preact/hooks'
 import { setUsed } from '../shared/history-db'
-import { isSnapshotId } from '../shared/protocol'
+import { isSnapshotId, sourceTabIdIn } from '../shared/protocol'
 import { readSettings } from '../shared/settings-store'
 import { loadSnapshot } from './source/snapshot'
 import { buildPreview, type Preview } from './source/preview'
@@ -60,6 +60,7 @@ function Editor() {
       }
 
       const historyId = historyIdIn(window.location.search)
+      const sourceTabId = sourceTabIdIn(window.location.search) ?? undefined
       const options: EditorOptions = {
         askWhere: settings.export.askWhere,
         export: settings.export,
@@ -80,6 +81,7 @@ function Editor() {
           material: loaded.material,
           preview: 'building',
           options,
+          sourceTabId,
         })
       }
 
@@ -93,6 +95,7 @@ function Editor() {
             material: loaded.material,
             preview: 'failed',
             options,
+            sourceTabId,
           })
         }
         return
@@ -108,6 +111,7 @@ function Editor() {
         material: loaded.material,
         preview: built ?? (loaded.material.video ? 'failed' : null),
         options,
+        sourceTabId,
       })
     })()
 

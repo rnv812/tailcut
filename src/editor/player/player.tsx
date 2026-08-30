@@ -27,6 +27,29 @@ interface PlaybackFrames {
   last: number
 }
 
+interface IconButtonProps {
+  testId: string
+  label: string
+  icon: string
+  disabled?: boolean
+  onClick: () => void
+}
+
+function IconButton({ testId, label, icon, disabled, onClick }: IconButtonProps) {
+  return (
+    <button
+      type="button"
+      data-testid={testId}
+      aria-label={label}
+      title={label}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      <span aria-hidden="true">{icon}</span>
+    </button>
+  )
+}
+
 /** First frame whose session PTS is at or after the boundary. */
 function lowerBound(table: FrameTable, boundary: number): number {
   const frames = table.frames()
@@ -53,6 +76,8 @@ export interface PlayerProps {
   preview: Preview
   /** Drawn in the exact box of the coded picture, above the video and below the transport. */
   overlay?: ComponentChildren
+  /** Clip and position controls that belong under the monitor rather than on the timeline. */
+  editorControls?: ComponentChildren
   /** The frame the transport is on, owned above: the timeline moves it too. */
   index: number
   playing: boolean
@@ -66,6 +91,19 @@ export interface PlayerProps {
   endMode: PlaybackEndMode
   /** Change the controlled preview-only behavior at the end of playbackRange. */
   onEndMode: (mode: PlaybackEndMode) => void
+  /** Controlled preview volume from silent (0) to full (1). */
+  volume: number
+  muted: boolean
+  onVolume: (volume: number) => void
+  onMuted: (muted: boolean) => void
+  hasPreviousMarker: boolean
+  hasNextMarker: boolean
+  onRecordingStart: () => void
+  onRecordingEnd: () => void
+  onRangeStart: () => void
+  onRangeEnd: () => void
+  onPreviousMarker: () => void
+  onNextMarker: () => void
   /** Move by a number of frames. Relative, so a burst of key repeats composes instead of racing. */
   onStep: (delta: number) => void
   /** Go to a frame outright: this is what playback reports. */
@@ -76,6 +114,7 @@ export interface PlayerProps {
 export function Player({
   preview,
   overlay,
+  editorControls,
   index,
   playing,
   rate,
@@ -83,6 +122,18 @@ export function Player({
   playbackRange,
   endMode,
   onEndMode,
+  volume,
+  muted,
+  onVolume,
+  onMuted,
+  hasPreviousMarker,
+  hasNextMarker,
+  onRecordingStart,
+  onRecordingEnd,
+  onRangeStart,
+  onRangeEnd,
+  onPreviousMarker,
+  onNextMarker,
   onStep,
   onSeek,
   onPlaying,
@@ -92,6 +143,7 @@ export function Player({
   const indexRef = useRef(index)
   const onSeekRef = useRef(onSeek)
   const onPlayingRef = useRef(onPlaying)
+  const reportedIndex = useRef<number | null>(null)
   const [catchingUp, setCatchingUp] = useState(false)
   const [ready, setReady] = useState(false)
 
@@ -130,10 +182,25 @@ export function Player({
     return () => video.removeEventListener('loadedmetadata', onMetadata)
   }, [preview])
 
-  // Stepping is for a stopped player. While it runs the picture leads and the number follows it.
+  // A stopped player follows every controlled index through the frame-accurate seeker. A running
+  // player uses the effect below so a manual jump does not pause or restart playback.
   useEffect(() => {
     if (ready && !playing) seeker.current?.show(index)
   }, [index, playing, ready])
+
+  // A timeline, marker or transport jump changes the controlled index while the element keeps
+  // playing. Move the element without restarting it. An index just reported by the element is
+  // only the owner reflecting requestVideoFrameCallback back to us and must not seek it again.
+  useEffect(() => {
+    if (!ready || !playing) return
+    if (reportedIndex.current === index) {
+      reportedIndex.current = null
+      return
+    }
+
+    const video = element.current
+    if (video) video.currentTime = table.seekTimeOf(index)
+  }, [index, playing, ready, table])
 
   useEffect(() => {
     const video = element.current
@@ -155,6 +222,7 @@ export function Player({
     // the element; frameSeeker deliberately ignores seeks it did not issue.
     if (ready && (indexRef.current < boundary.first || indexRef.current > boundary.last)) {
       video.currentTime = table.seekTimeOf(boundary.first)
+      reportedIndex.current = boundary.first
       onSeekRef.current(boundary.first)
     }
 
@@ -167,6 +235,13 @@ export function Player({
     const video = element.current
     if (video) video.playbackRate = rate
   }, [rate, playing])
+
+  useEffect(() => {
+    const video = element.current
+    if (!video) return
+    video.volume = Math.max(0, Math.min(1, volume))
+    video.muted = muted
+  }, [volume, muted])
 
   useEffect(() => {
     const video = element.current as FrameCallbackVideo | null
@@ -201,16 +276,19 @@ export function Player({
         if (endMode === 'loop') {
           entered = false
           video.currentTime = table.seekTimeOf(boundary.first)
+          reportedIndex.current = boundary.first
           onSeekRef.current(boundary.first)
         } else {
           stopped = true
           video.pause()
+          reportedIndex.current = boundary.last
           onSeekRef.current(boundary.last)
           onPlayingRef.current(false)
         }
         return
       }
 
+      reportedIndex.current = shown
       onSeekRef.current(shown)
     }
 
@@ -234,6 +312,10 @@ export function Player({
     return () => video.removeEventListener('timeupdate', onTime)
   }, [playing, table, boundary, endMode])
 
+  const playLabel = playing ? 'Pause preview' : 'Play preview'
+  const muteLabel = muted ? 'Unmute preview' : 'Mute preview'
+  const endLabel = endMode === 'loop' ? 'Repeat' : 'Stop after'
+
   return (
     <section class="player" data-testid="player">
       <div class="tc-picture-frame">
@@ -242,22 +324,118 @@ export function Player({
       </div>
 
       <div class="transport">
-        <button data-testid="prev" disabled={index <= 0} onClick={() => onStep(-1)}>
-          ◀ frame
-        </button>
-        <button data-testid="play" onClick={() => onPlaying(!playing)}>
-          {playing ? 'Pause' : 'Play'}
-        </button>
-        <button data-testid="next" disabled={index >= table.count() - 1} onClick={() => onStep(1)}>
-          frame ▶
-        </button>
-        <button
-          data-testid="end-mode"
-          onClick={() => onEndMode(endMode === 'stop' ? 'loop' : 'stop')}
-        >
-          At end: {endMode === 'stop' ? 'Stop' : 'Loop'}
-        </button>
+        <div class="transport-left">
+          <div class="transport-jump transport-jump-start">
+            <IconButton
+              testId="recording-start"
+              label="Go to recording start"
+              icon="⏮"
+              onClick={onRecordingStart}
+            />
+            <IconButton
+              testId="range-start"
+              label="Go to active range start"
+              icon="|◀"
+              disabled={!boundary}
+              onClick={onRangeStart}
+            />
+            <IconButton
+              testId="previous-marker"
+              label="Go to previous marker"
+              icon="◀◆"
+              disabled={!hasPreviousMarker}
+              onClick={onPreviousMarker}
+            />
+          </div>
+        </div>
+
+        <div class="transport-center">
+          <div class="transport-playback">
+            <IconButton
+              testId="prev"
+              label="Previous frame"
+              icon="◀"
+              disabled={index <= 0}
+              onClick={() => onStep(-1)}
+            />
+            <IconButton
+              testId="play"
+              label={playLabel}
+              icon={playing ? '⏸' : '▶'}
+              onClick={() => onPlaying(!playing)}
+            />
+            <IconButton
+              testId="next"
+              label="Next frame"
+              icon="▶"
+              disabled={index >= table.count() - 1}
+              onClick={() => onStep(1)}
+            />
+          </div>
+        </div>
+
+        <div class="transport-right">
+          <div class="transport-jump transport-jump-end">
+            <IconButton
+              testId="next-marker"
+              label="Go to next marker"
+              icon="◆▶"
+              disabled={!hasNextMarker}
+              onClick={onNextMarker}
+            />
+            <IconButton
+              testId="range-end"
+              label="Go to active range end"
+              icon="▶|"
+              disabled={!boundary}
+              onClick={onRangeEnd}
+            />
+            <IconButton
+              testId="recording-end"
+              label="Go to recording end"
+              icon="⏭"
+              onClick={onRecordingEnd}
+            />
+          </div>
+
+          <button
+            type="button"
+            data-testid="end-mode"
+            class="transport-end-mode"
+            aria-label={`End behavior: ${endLabel}`}
+            title={`End behavior: ${endLabel}`}
+            onClick={() => onEndMode(endMode === 'stop' ? 'loop' : 'stop')}
+          >
+            {endLabel}
+          </button>
+
+          <div class="transport-volume">
+            <IconButton
+              testId="mute"
+              label={muteLabel}
+              icon={muted ? '🔇' : '🔊'}
+              onClick={() => onMuted(!muted)}
+            />
+            <input
+              type="range"
+              data-testid="volume"
+              min="0"
+              max="1"
+              step="0.05"
+              value={Math.max(0, Math.min(1, volume))}
+              aria-label="Volume"
+              title="Volume"
+              onInput={(event) => onVolume(event.currentTarget.valueAsNumber)}
+            />
+          </div>
+        </div>
       </div>
+
+      {editorControls && (
+        <div class="transport-edit" data-testid="player-edit-controls">
+          {editorControls}
+        </div>
+      )}
 
       <div class={catchingUp ? 'readout catching-up' : 'readout'}>
         <span data-testid="timecode">{formatTimecode(frame?.pts ?? 0, fps)}</span>

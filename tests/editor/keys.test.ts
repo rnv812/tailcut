@@ -44,12 +44,11 @@ describe('attachKeys', () => {
     expect(dispatch).not.toHaveBeenCalled()
   })
 
-  it('stops playback before it steps', () => {
-    // Stepping while running would have the picture and the playhead pulling in two directions.
+  it('moves the playhead without stopping playback', () => {
     const { dispatch, transport } = stand()
 
     press('ArrowRight')
-    expect(transport.stop).toHaveBeenCalledTimes(1)
+    expect(transport.stop).not.toHaveBeenCalled()
     expect(dispatch).toHaveBeenCalledWith({ type: 'step', frames: 1 })
   })
 

@@ -40,10 +40,8 @@ describe('EditToolbar', () => {
       '1. Move the playhead · 2. Mark or split a clip · 3. Export your clips',
     )
     expect(toolbar.textContent).toContain('New clip')
-    expect(toolbar.textContent).toContain('Set In')
-    expect(toolbar.textContent).toContain('Set Out')
-    expect(toolbar.textContent).toContain('Split')
-    expect(toolbar.textContent).toContain('Add marker')
+    expect(toolbar.querySelector('[data-testid="set-in"]')).toBeNull()
+    expect(toolbar.querySelector('[data-testid="set-out"]')).toBeNull()
   })
 
   it('shows the selected clip boundaries and duration at frame precision', () => {
@@ -71,8 +69,6 @@ describe('EditToolbar', () => {
     const { dispatch, onHelp } = show()
     const ids = [
       'new-clip',
-      'set-in',
-      'set-out',
       'split',
       'add-marker',
       'delete-clip',
@@ -89,8 +85,6 @@ describe('EditToolbar', () => {
 
     expect(dispatch.mock.calls.map(([action]) => action)).toEqual([
       { type: 'addClip' },
-      { type: 'setIn' },
-      { type: 'setOut' },
       { type: 'splitClip' },
       { type: 'addMarker' },
       { type: 'removeClip' },
@@ -112,7 +106,7 @@ describe('EditToolbar', () => {
       expect(button(id).disabled, id).toBe(true)
       button(id).click()
     }
-    for (const id of ['new-clip', 'set-in', 'set-out', 'add-marker', 'fit-all']) {
+    for (const id of ['new-clip', 'add-marker', 'fit-all']) {
       expect(button(id).disabled, id).toBe(false)
     }
     expect(dispatch).not.toHaveBeenCalled()
@@ -121,7 +115,6 @@ describe('EditToolbar', () => {
   it('exposes shortcut hints and the snapping state to assistive technology', () => {
     show({ snapping: false })
 
-    expect(button('set-in').title).toContain('I')
     expect(button('split').title).toContain('S')
     expect(button('undo').title).toContain('Ctrl+Z')
     expect(button('keyboard-help').title).toContain('?')
@@ -129,6 +122,31 @@ describe('EditToolbar', () => {
 
     show({ snapping: true })
     expect(button('toggle-snapping').getAttribute('aria-pressed')).toBe('true')
-    expect(button('toggle-snapping').textContent).toContain('Snapping on')
+    expect(button('toggle-snapping').getAttribute('aria-label')).toContain('snapping')
+  })
+
+  it('uses named SVG icons and keeps text only on the primary clip action', () => {
+    show()
+
+    expect(button('new-clip').textContent).toContain('New clip')
+    for (const id of [
+      'split',
+      'add-marker',
+      'delete-clip',
+      'undo',
+      'redo',
+      'zoom-out',
+      'fit-selection',
+      'fit-all',
+      'zoom-in',
+      'toggle-snapping',
+      'keyboard-help',
+    ]) {
+      const control = button(id)
+      expect(control.querySelector('svg'), `${id} has no icon`).not.toBeNull()
+      expect(control.getAttribute('aria-label'), `${id} has no accessible name`).not.toBeNull()
+      expect(control.title, `${id} has no hover label`).not.toBe('')
+      expect(control.textContent?.trim(), `${id} repeats its label`).toBe('')
+    }
   })
 })

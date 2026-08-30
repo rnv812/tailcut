@@ -3,6 +3,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { render } from 'preact'
 import { Shell, type EditorState } from '../../src/editor/shell'
+import { selectClipFromBin } from '../../src/editor/workbench'
 import { planSnapshot, type SnapshotSource } from '../../src/core/snapshot/build'
 import { SnapshotReader } from '../../src/core/snapshot/read'
 import { materialOf } from '../../src/core/snapshot/material'
@@ -330,9 +331,21 @@ afterEach(() => {
   exportHarness.encodeRequests.length = 0
   exportHarness.openedTracks.length = 0
   exportHarness.skipSave = false
+  vi.unstubAllGlobals()
 })
 
 describe('the editor shell', () => {
+  it('selects and seeks a bin clip without changing the timeline view', () => {
+    const dispatch = vi.fn()
+
+    selectClipFromBin(dispatch, { id: 'c7', in: 12.5 })
+
+    expect(dispatch.mock.calls.map(([action]) => action)).toEqual([
+      { type: 'selectClip', id: 'c7' },
+      { type: 'seek', time: 12.5 },
+    ])
+  })
+
   it('lays out media, monitor, inspector, and timeline as separate work areas', async () => {
     show(await ready())
 
@@ -348,7 +361,7 @@ describe('the editor shell', () => {
 
     expect(html).toMatch(/\.tc-picture-frame\s*\{[^}]*overflow:\s*hidden/s)
     expect(html).toMatch(/\.tc-edit-tool-row\s*\{[^}]*flex-wrap:\s*wrap/s)
-    expect(html).toMatch(/grid-template-areas:\s*"head head head"\s*"media player inspector"\s*"timeline timeline inspector"/s)
+    expect(html).toMatch(/grid-template-areas:\s*"head head head"\s*"media player inspector"\s*"timeline timeline timeline"/s)
     expect(html).toMatch(/grid-template-rows:\s*auto\s+minmax\([^;]+\)\s+minmax\(300px,\s*42vh\)/s)
   })
 
@@ -365,6 +378,29 @@ describe('the editor shell', () => {
 
     expect(mark?.alt).toBe('tailcut')
     expect(mark?.getAttribute('src')).toBe('../assets/tailcut/svg/mark-light.svg')
+  })
+
+  it('returns to the original page tab without closing the editor', async () => {
+    const calls: unknown[] = []
+    vi.stubGlobal('chrome', {
+      tabs: {
+        get: async (tabId: number) => ({ id: tabId, windowId: 23 }),
+        update: async (tabId: number, update: unknown) => calls.push(['tab', tabId, update]),
+      },
+      windows: {
+        update: async (windowId: number, update: unknown) => calls.push(['window', windowId, update]),
+      },
+    })
+    show({ ...(await ready()), sourceTabId: 7 })
+
+    button('return-source').click()
+    await settled()
+
+    expect(calls).toEqual([
+      ['tab', 7, { active: true }],
+      ['window', 23, { focused: true }],
+    ])
+    expect(button('return-source')).not.toBeNull()
   })
 
   it('shows the length of the material, not the distance from end to end', async () => {
@@ -515,14 +551,14 @@ describe('the editor shell', () => {
   it('switches preview playback between stopping and looping at the active range end', async () => {
     await mount({ ...(await ready()), preview: previewOf() })
 
-    expect(text('end-mode')).toBe('At end: Stop')
+    expect(text('end-mode')).toBe('Stop after')
     button('end-mode').click()
     await settled()
-    expect(text('end-mode')).toBe('At end: Loop')
+    expect(text('end-mode')).toBe('Repeat')
 
     button('end-mode').click()
     await settled()
-    expect(text('end-mode')).toBe('At end: Stop')
+    expect(text('end-mode')).toBe('Stop after')
   })
 
   it('draws a crop only over a picture with a real source size', async () => {
@@ -883,18 +919,18 @@ describe('the editor shell', () => {
     await settled()
     expect(text('rate')).toContain('2×')
     // Forwards is the element's own doing, so it is running.
-    expect(text('play')).toBe('Pause')
+    expect(button('play').getAttribute('aria-label')).toBe('Pause preview')
 
     press('k')
     await settled()
     expect(document.querySelector('[data-testid="rate"]')).toBeNull()
-    expect(text('play')).toBe('Play')
+    expect(button('play').getAttribute('aria-label')).toBe('Play preview')
 
     // Backwards the element cannot do at all: the playhead is walked and the picture is stopped.
     press('j')
     await settled()
     expect(text('rate')).toContain('1× back')
-    expect(text('play')).toBe('Play')
+    expect(button('play').getAttribute('aria-label')).toBe('Play preview')
 
     // And the play button clears the shuttle rather than leaving a speed nothing is going at.
     document.querySelector<HTMLButtonElement>('[data-testid="play"]')!.click()
@@ -1003,6 +1039,25 @@ describe('the editor shell', () => {
     expect(document.querySelector('[data-testid="clip"]')!.className).toContain('selected')
   })
 
+  it('keeps the timeline zoom when a clip is chosen from the media panel', async () => {
+    await mount({ ...(await ready()), preview: previewOf() })
+    press('i')
+    press('ArrowRight')
+    press('ArrowRight')
+    press('o')
+    await settled()
+
+    button('fit-all').click()
+    await settled()
+    const timeline = document.querySelector<HTMLElement>('.tc-timeline')!
+    const scale = timeline.dataset.viewScale
+
+    button('clip-go-c1').click()
+    await settled()
+
+    expect(timeline.dataset.viewScale).toBe(scale)
+  })
+
   it('counts one break of the recording once, however many lanes stopped for it', async () => {
     // The picture and the sound never stop at the same instant, so the lane the cut follows is
     // the one that counts. Added up over both lanes this recording has two holes and one break.
@@ -1058,20 +1113,20 @@ describe('the editor shell', () => {
 
     press(' ')
     await settled()
-    expect(text('play')).toBe('Pause')
+    expect(button('play').getAttribute('aria-label')).toBe('Pause preview')
     expect(video.paused, 'the button says Pause and the element was never started').toBe(false)
 
     // The same key again, not a second start: a transport that only ever ran would say Pause
     // for ever and the space bar would be a one-way switch.
     press(' ')
     await settled()
-    expect(text('play')).toBe('Play')
+    expect(button('play').getAttribute('aria-label')).toBe('Play preview')
     expect(video.paused).toBe(true)
 
     // And the button, which reports the state it is going to rather than the one it is in.
     document.querySelector<HTMLButtonElement>('[data-testid="play"]')!.click()
     await settled()
-    expect(text('play')).toBe('Pause')
+    expect(button('play').getAttribute('aria-label')).toBe('Pause preview')
   })
 
   it('takes what playback reports as a frame number and not as an instant', async () => {
@@ -1092,18 +1147,53 @@ describe('the editor shell', () => {
     expect(text('frame')).toBe('3')
   })
 
-  it('stops the picture when a frame is stepped by the button', async () => {
-    // The transport and the playhead pull in two directions otherwise: the element goes on
-    // decoding forwards while the number under it is being walked by hand.
+  it('keeps the picture running when a frame is stepped by the button', async () => {
     await mount({ ...(await ready()), preview: previewOf() })
 
     press(' ')
     await settled()
-    expect(text('play')).toBe('Pause')
+    expect(button('play').getAttribute('aria-label')).toBe('Pause preview')
 
     document.querySelector<HTMLButtonElement>('[data-testid="next"]')!.click()
     await settled()
-    expect(text('play')).toBe('Play')
+    expect(button('play').getAttribute('aria-label')).toBe('Pause preview')
+    expect(document.querySelector<HTMLVideoElement>('[data-testid="preview"]')!.paused).toBe(false)
+  })
+
+  it('navigates the recording, active clip, and markers from the monitor controls', async () => {
+    await mount({ ...(await ready()), preview: previewOf() })
+
+    press('m')
+    press('ArrowRight')
+    press('ArrowRight')
+    press('m')
+    await settled()
+
+    button('recording-end').click()
+    await settled()
+    expect(text('frame')).toBe('5')
+
+    button('previous-marker').click()
+    await settled()
+    expect(text('frame')).toBe('3')
+
+    button('recording-start').click()
+    await settled()
+    button('next-marker').click()
+    await settled()
+    expect(text('frame')).toBe('3')
+
+    press('i')
+    await settled()
+    button('recording-start').click()
+    await settled()
+    button('range-start').click()
+    await settled()
+    expect(text('frame')).toBe('3')
+
+    button('range-end').click()
+    await settled()
+    expect(text('frame')).toBe('5')
   })
 
   it('writes the clip the keyboard made, from the panel mounted in the inspector', async () => {

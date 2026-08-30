@@ -265,7 +265,13 @@ export function Timeline(props: TimelineProps) {
   const playheadX = Math.round(timeToX(props.view, props.playhead))
 
   return (
-    <div class="tc-timeline" ref={host} style={{ position: 'relative', width: '100%' }}>
+    <div
+      class="tc-timeline"
+      ref={host}
+      data-view-start={props.view.start}
+      data-view-scale={props.view.scale}
+      style={{ position: 'relative', width: '100%' }}
+    >
       <canvas ref={canvas} style={{ display: 'block' }} />
       {playheadVisible && (
         <span

@@ -40,7 +40,7 @@ describe('the crop frame', () => {
     expect(box.querySelectorAll('.tc-crop-handle')).toHaveLength(8)
   })
 
-  it('moves the whole frame during a drag and closes the gesture with its final value', () => {
+  it('moves the whole frame during a drag and closes the gesture with its final value', async () => {
     const onCrop = vi.fn()
     render(
       <CropBox
@@ -65,20 +65,17 @@ describe('the crop frame', () => {
     const box = at<HTMLDivElement>('crop-box')
     point(box, 'pointerdown', 100, 100)
     point(box, 'pointermove', 110, 105)
-    expect(onCrop).toHaveBeenNthCalledWith(
-      1,
-      { x: 510, y: 285, width: 960, height: 540 },
-      true,
-    )
+    await Promise.resolve()
+    expect(onCrop).not.toHaveBeenCalled()
+    expect(box.style.left).toBe('26.5625%')
+    expect(box.style.top).toBe('26.38888888888889%')
 
     point(box, 'pointerup', 112, 106)
-    expect(onCrop).toHaveBeenLastCalledWith(
-      { x: 516, y: 288, width: 960, height: 540 },
-      false,
-    )
+    expect(onCrop).toHaveBeenCalledOnce()
+    expect(onCrop).toHaveBeenCalledWith({ x: 516, y: 288, width: 960, height: 540 })
   })
 
-  it('keeps a corner resize inside the source and no smaller than the crop minimum', () => {
+  it('keeps a corner resize inside the source and no smaller than the crop minimum', async () => {
     const onCrop = vi.fn()
     render(
       <CropBox
@@ -103,30 +100,33 @@ describe('the crop frame', () => {
     const southeast = at('crop-handle-se')
     point(southeast, 'pointerdown', 0, 0)
     point(southeast, 'pointermove', 500, 500)
-    expect(onCrop).toHaveBeenLastCalledWith(
-      { x: 100, y: 100, width: 300, height: 200 },
-      true,
-    )
+    await Promise.resolve()
+    expect(onCrop).not.toHaveBeenCalled()
+    expect(at<HTMLDivElement>('crop-box').style.width).toBe('75%')
+    expect(at<HTMLDivElement>('crop-box').style.height).toBe('66.66666666666666%')
+    point(southeast, 'pointerup', 500, 500)
+    expect(onCrop).toHaveBeenCalledWith({ x: 100, y: 100, width: 300, height: 200 })
 
+    onCrop.mockClear()
     const northwest = at('crop-handle-nw')
     point(northwest, 'pointerdown', 0, 0)
     point(northwest, 'pointermove', -500, -500)
-    expect(onCrop).toHaveBeenLastCalledWith(
-      { x: 0, y: 0, width: 300, height: 300 },
-      true,
-    )
+    await Promise.resolve()
+    expect(onCrop).not.toHaveBeenCalled()
+    expect(at<HTMLDivElement>('crop-box').style.left).toBe('0%')
+    expect(at<HTMLDivElement>('crop-box').style.top).toBe('0%')
+    point(northwest, 'pointerup', -500, -500)
+    expect(onCrop).toHaveBeenCalledWith({ x: 0, y: 0, width: 400, height: 300 })
 
+    onCrop.mockClear()
     point(northwest, 'pointerdown', 0, 0)
     point(northwest, 'pointermove', 500, 500)
-    expect(onCrop).toHaveBeenLastCalledWith(
-      { x: 236, y: 236, width: 64, height: 64 },
-      true,
-    )
+    await Promise.resolve()
+    expect(onCrop).not.toHaveBeenCalled()
+    expect(at<HTMLDivElement>('crop-box').style.left).toBe('84%')
+    expect(at<HTMLDivElement>('crop-box').style.top).toBe('78.66666666666666%')
     point(northwest, 'pointerup', 500, 500)
-    expect(onCrop).toHaveBeenLastCalledWith(
-      { x: 236, y: 236, width: 64, height: 64 },
-      false,
-    )
+    expect(onCrop).toHaveBeenCalledWith({ x: 336, y: 236, width: 64, height: 64 })
   })
 })
 

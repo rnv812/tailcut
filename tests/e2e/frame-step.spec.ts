@@ -168,7 +168,7 @@ test('ordinary playback runs and carries the frame number with it', async () => 
 
   try {
     await editor.getByTestId('play').click()
-    await expect(editor.getByTestId('play')).toHaveText('Pause')
+    await expect(editor.getByTestId('play')).toHaveAttribute('aria-label', 'Pause preview')
 
     // A second of playback has to move the frame number on by a good deal more than one step.
     await editor.waitForTimeout(1_000)
@@ -176,7 +176,7 @@ test('ordinary playback runs and carries the frame number with it', async () => 
     expect(running).toBeGreaterThan(10)
 
     await editor.getByTestId('play').click()
-    await expect(editor.getByTestId('play')).toHaveText('Play')
+    await expect(editor.getByTestId('play')).toHaveAttribute('aria-label', 'Play preview')
 
     // Stopped, and stepping from here is exact again.
     const stopped = Number(await editor.getByTestId('frame').textContent())

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   bridgeCapabilityKey,
   editorUrl,
+  sourceTabIdIn,
   historyUrl,
   isBridgeConnect,
   isContentToBridge,
@@ -371,6 +372,13 @@ describe('addresses of the snapshot and the editor', () => {
     expect(editorUrl('0f2c7d1e-4b0a-4a3f-9c2e-9b5a1d6f8c31')).toBe(
       'editor/editor.html?s=0f2c7d1e-4b0a-4a3f-9c2e-9b5a1d6f8c31',
     )
+    expect(editorUrl('0f2c7d1e-4b0a-4a3f-9c2e-9b5a1d6f8c31', 17)).toBe(
+      'editor/editor.html?s=0f2c7d1e-4b0a-4a3f-9c2e-9b5a1d6f8c31&tab=17',
+    )
+    expect(sourceTabIdIn('?s=recording&tab=17')).toBe(17)
+    expect(sourceTabIdIn('?s=recording&tab=-1')).toBeNull()
+    expect(sourceTabIdIn('?s=recording&tab=17.5')).toBeNull()
+    expect(sourceTabIdIn('?s=recording&tab=anything')).toBeNull()
   })
 
   it('opens the history of a session by a door of its own', () => {

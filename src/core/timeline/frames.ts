@@ -5,6 +5,8 @@ import {
   type LocatedSample,
   type PlacedSegment,
 } from '../iso/samples'
+import { keyframeClassifier } from '../codec/keyframe'
+import { sampleEntryBytes } from '../iso/entry'
 import type { Located } from '../../shared/types'
 
 export interface Frame {
@@ -116,11 +118,13 @@ export function framesOfTrack(track: IndexedTiming): Frame[] {
  * it is kept (`SourceTrack.dropped`): a table of what is shown has nobody to tell.
  */
 export function framesOf(input: FrameInput): Frame[] {
+  const sampleEntry = sampleEntryBytes(input.init, input.trackId)
   const run = sampleRunOf({
     segments: input.segments,
     trackId: input.trackId,
     kind: 'video',
     defaults: trackDefaults(input.init),
+    ...(sampleEntry ? { syncOf: keyframeClassifier(sampleEntry) ?? undefined } : {}),
   })
 
   return framesOfTrack({

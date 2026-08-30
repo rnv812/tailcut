@@ -32,9 +32,18 @@ export function snapshotPath(id: string): string {
   return `${SNAPSHOT_DIR}/${snapshotFileName(id)}`
 }
 
-/** Address of the editor for one snapshot, relative to the root of the extension. */
-export function editorUrl(id: string): string {
-  return `${EDITOR_PATH}?s=${encodeURIComponent(id)}`
+/** Address of the editor for one snapshot, with the page tab it may return to. */
+export function editorUrl(id: string, sourceTabId?: number): string {
+  const source = Number.isInteger(sourceTabId) && sourceTabId! >= 0 ? `&tab=${sourceTabId}` : ''
+  return `${EDITOR_PATH}?s=${encodeURIComponent(id)}${source}`
+}
+
+/** The tab an editor may return to, accepted only as Chrome's non-negative integer id. */
+export function sourceTabIdIn(search: string): number | null {
+  const raw = new URLSearchParams(search).get('tab')
+  if (raw === null || !/^\d+$/.test(raw)) return null
+  const id = Number(raw)
+  return Number.isSafeInteger(id) ? id : null
 }
 
 /**

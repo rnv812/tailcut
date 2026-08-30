@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'preact/hooks'
 import { forcesEncoder, type Clip } from '../core/edit/clip'
 import { newProject } from '../core/edit/project'
-import { newSession } from '../core/edit/session'
+import { newSession, type SessionAction } from '../core/edit/session'
 import { canRedo, canUndo } from '../core/edit/history'
 import { chooseCodec, type Choice } from '../core/encode/codec'
 import { geometryOf } from '../core/encode/crop'
@@ -35,6 +35,7 @@ import { liveSurface, probeWebpBytes } from './export/webp'
 import { ClipBin, Clips } from './inspector/clips'
 import { CropBox, CropControls } from './inspector/crop'
 import { ExportQueue } from './inspector/queue'
+import { TimecodeField } from './inspector/timecode-field'
 import type { EditorOptions } from './shell'
 import type { PreviewState } from './shell'
 import { Player, type PlaybackEndMode } from './player/player'
@@ -53,6 +54,7 @@ export interface WorkbenchProps {
   preview: PreviewState
   /** Export settings as read when the tab opened: how a clip is named and where it goes. */
   options: EditorOptions
+  sourceTabId?: number
 }
 
 interface OpenWorkbenchProps extends WorkbenchProps {
@@ -72,6 +74,27 @@ const HOST = (url: string): string => {
   } catch {
     return ''
   }
+}
+
+/** Activates the source tab and then focuses whichever window currently owns it. */
+export async function focusSourceTab(tabId: number): Promise<boolean> {
+  try {
+    const tab = await chrome.tabs.get(tabId)
+    await chrome.tabs.update(tabId, { active: true })
+    if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** A bin click navigates to the clip but leaves the viewport exactly where the user put it. */
+export function selectClipFromBin(
+  dispatch: (action: SessionAction) => void,
+  clip: Pick<Clip, 'id' | 'in'>,
+): void {
+  dispatch({ type: 'selectClip', id: clip.id })
+  dispatch({ type: 'seek', time: clip.in })
 }
 
 /**
@@ -119,7 +142,7 @@ function pictureName(track: MaterialTrack): string {
  * into another would make its times and pixels mean something else. The choice remains useful:
  * either side can be cut and exported, one editing session at a time.
  */
-export function Workbench({ reader, material, preview, options }: WorkbenchProps) {
+export function Workbench({ reader, material, preview, options, sourceTabId }: WorkbenchProps) {
   const initialPicture = material.video?.track.id ?? ''
   const pictures = useMemo(
     () =>
@@ -183,6 +206,7 @@ export function Workbench({ reader, material, preview, options }: WorkbenchProps
       pictures={pictures}
       selectedPicture={selectedPicture}
       onPicture={setSelectedPicture}
+      sourceTabId={sourceTabId}
     />
   )
 }
@@ -203,6 +227,7 @@ function OpenWorkbench({
   pictures,
   selectedPicture,
   onPicture,
+  sourceTabId,
 }: OpenWorkbenchProps) {
   const built = preview === 'building' || preview === 'failed' ? null : preview
   const derived = useMemo(
@@ -223,8 +248,11 @@ function OpenWorkbench({
   const [hover, setHover] = useState<Hover | null>(null)
   const [playing, setPlaying] = useState(false)
   const [playbackEndMode, setPlaybackEndMode] = useState<PlaybackEndMode>('stop')
+  const [volume, setVolume] = useState(1)
+  const [muted, setMuted] = useState(false)
   const [shuttle, setShuttle] = useState<ShuttleState>(STILL)
   const [help, setHelp] = useState(false)
+  const [sourceMissing, setSourceMissing] = useState(false)
 
   // The queue is outside the project and outside the history on purpose: a file handed to the
   // browser cannot be taken back, so Ctrl+Z has no business touching this.
@@ -417,10 +445,6 @@ function OpenWorkbench({
         setShuttle(STILL)
         setPlaying((was) => !was)
       },
-      stop: () => {
-        setShuttle(STILL)
-        setPlaying(false)
-      },
       shuttle: (key) =>
         setShuttle((was) => {
           const next = shuttled(was, key)
@@ -457,6 +481,35 @@ function OpenWorkbench({
   }, [shuttle, store])
 
   const page = reader.index.page
+  const monitorControls = () => (
+    <>
+      <button
+        type="button"
+        class="tc-monitor-edit"
+        data-testid="set-in"
+        title="Set In at the playhead (I)"
+        onClick={() => store.dispatch({ type: 'setIn' })}
+      >
+        Set In
+      </button>
+      <button
+        type="button"
+        class="tc-monitor-edit"
+        data-testid="set-out"
+        title="Set Out at the playhead (O)"
+        onClick={() => store.dispatch({ type: 'setOut' })}
+      >
+        Set Out
+      </button>
+      <TimecodeField
+        id="playhead-field"
+        label="Position"
+        seconds={ui.playhead}
+        fps={fps}
+        onCommit={(time) => store.dispatch({ type: 'seek', time })}
+      />
+    </>
+  )
 
   return (
     <div class="editor">
@@ -486,6 +539,19 @@ function OpenWorkbench({
             </span>
           </div>
         </div>
+        {sourceTabId !== undefined && (
+          <div class="head-actions">
+            <button
+              type="button"
+              data-testid="return-source"
+              title="Return to the video tab"
+              onClick={() => void focusSourceTab(sourceTabId).then((ok) => setSourceMissing(!ok))}
+            >
+              ← Back to video
+            </button>
+            {sourceMissing && <span class="failure">The source tab is no longer open.</span>}
+          </div>
+        )}
       </header>
 
       <aside class="media-panel" data-testid="media-panel">
@@ -532,22 +598,19 @@ function OpenWorkbench({
           selectedId={ui.selectedClipId}
           fps={fps}
           dispatch={store.dispatch}
-          onSelect={(clip) => {
-            transport.stop()
-            store.dispatch({ type: 'selectClip', id: clip.id })
-            store.dispatch({ type: 'seek', time: clip.in })
-            store.dispatch({ type: 'zoomToSelection' })
-          }}
+          onSelect={(clip) => selectClipFromBin(store.dispatch, clip)}
         />
       </aside>
 
       {preview === 'building' ? (
         <section class="player" data-testid="player">
           <p class="muted">Building the preview…</p>
+          <div class="transport-edit" data-testid="player-edit-controls">{monitorControls()}</div>
         </section>
       ) : preview === 'failed' ? (
         <section class="player" data-testid="player">
           <p class="failure">tailcut could not build a preview from this recording.</p>
+          <div class="transport-edit" data-testid="player-edit-controls">{monitorControls()}</div>
         </section>
       ) : built ? (
         <Player
@@ -559,6 +622,36 @@ function OpenWorkbench({
           playbackRange={playbackRange}
           endMode={playbackEndMode}
           onEndMode={setPlaybackEndMode}
+          volume={volume}
+          muted={muted}
+          onVolume={setVolume}
+          onMuted={setMuted}
+          hasPreviousMarker={doc.markers.some((marker) => marker.time < ui.playhead)}
+          hasNextMarker={doc.markers.some((marker) => marker.time > ui.playhead)}
+          onRecordingStart={() =>
+            store.dispatch({ type: 'seek', time: built.frames.at(0)?.pts ?? 0 })
+          }
+          onRecordingEnd={() =>
+            store.dispatch({
+              type: 'seek',
+              time: built.frames.at(built.frames.count() - 1)?.pts ?? 0,
+            })
+          }
+          onRangeStart={() => store.dispatch({ type: 'seek', time: playbackRange.in })}
+          onRangeEnd={() => {
+            let end = built.frames.indexAt(playbackRange.out)
+            if (built.frames.at(end)?.pts === playbackRange.out) end -= 1
+            store.dispatch({ type: 'seek', time: built.frames.at(Math.max(0, end))?.pts ?? 0 })
+          }}
+          onPreviousMarker={() => {
+            const marker = [...doc.markers].reverse().find((one) => one.time < ui.playhead)
+            if (marker) store.dispatch({ type: 'seek', time: marker.time })
+          }}
+          onNextMarker={() => {
+            const marker = doc.markers.find((one) => one.time > ui.playhead)
+            if (marker) store.dispatch({ type: 'seek', time: marker.time })
+          }}
+          editorControls={monitorControls()}
           overlay={
             // Only where there is something to draw a rectangle of. A recording with no picture
             // gives `frameSize` zero by zero, and a frame at 0 % would be an invisible element
@@ -567,16 +660,11 @@ function OpenWorkbench({
               <CropBox
                 crop={selected.crop}
                 frameSize={ctx.frameSize}
-                onCrop={(crop, dragging) =>
-                  store.dispatch({ type: 'setCrop', id: selected.id, crop, dragging })
-                }
+                onCrop={(crop) => store.dispatch({ type: 'setCrop', id: selected.id, crop })}
               />
             ) : null
           }
-          onStep={(frames) => {
-            transport.stop()
-            store.dispatch({ type: 'step', frames })
-          }}
+          onStep={(frames) => store.dispatch({ type: 'step', frames })}
           onSeek={(at) => store.dispatch({ type: 'seek', time: built.frames.at(at)?.pts ?? 0 })}
           onPlaying={(next) => {
             setShuttle(STILL)
@@ -586,6 +674,7 @@ function OpenWorkbench({
       ) : (
         <section class="player" data-testid="player">
           <p class="muted">There is no picture in this recording to play back.</p>
+          <div class="transport-edit" data-testid="player-edit-controls">{monitorControls()}</div>
         </section>
       )}
 
@@ -633,6 +722,7 @@ function OpenWorkbench({
           estimate={estimate}
           dispatch={store.dispatch}
           selectedOnly
+          showPosition={false}
           showMarkers={false}
         />
 

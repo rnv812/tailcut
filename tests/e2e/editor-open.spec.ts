@@ -19,6 +19,34 @@ test('Edit opens an editor tab over the material of the page', async () => {
     for (const pane of ['player', 'inspector', 'timeline']) {
       await expect(editor.getByTestId(pane)).toBeVisible()
     }
+
+    await expect(editor.getByTestId('return-source')).toBeVisible()
+    expect(new URL(editor.url()).searchParams.get('tab')).not.toBeNull()
+
+    await expect.poll(() => editor.evaluate(() => {
+      const pane = document.querySelector('[data-testid="timeline"]')!.getBoundingClientRect()
+      const strip = document.querySelector('.tc-timeline')!.getBoundingClientRect()
+      const canvas = document.querySelector('.tc-timeline canvas')!.getBoundingClientRect()
+      return {
+        paneLeft: Math.round(pane.left),
+        paneRight: Math.round(pane.right),
+        viewport: document.documentElement.clientWidth,
+        strip: Math.round(strip.width),
+        canvas: Math.round(canvas.width),
+      }
+    })).toEqual({
+      paneLeft: 0,
+      paneRight: await editor.evaluate(() => document.documentElement.clientWidth),
+      viewport: await editor.evaluate(() => document.documentElement.clientWidth),
+      strip: expect.any(Number),
+      canvas: expect.any(Number),
+    })
+
+    const widths = await editor.evaluate(() => ({
+      strip: document.querySelector('.tc-timeline')!.getBoundingClientRect().width,
+      canvas: document.querySelector('.tc-timeline canvas')!.getBoundingClientRect().width,
+    }))
+    expect(Math.abs(widths.strip - widths.canvas)).toBeLessThanOrEqual(1)
   } finally {
     await context.close()
   }

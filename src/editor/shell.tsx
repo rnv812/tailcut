@@ -44,6 +44,8 @@ export type EditorState =
       /** `null` means no picture; `failed` means picture exists but no preview could be assembled. */
       preview: PreviewState
       options?: EditorOptions
+      /** Page tab that opened this snapshot; absent for history and direct editor URLs. */
+      sourceTabId?: number
     }
 
 /**
@@ -85,6 +87,7 @@ export function Shell({ state }: { state: EditorState }) {
       material={state.material}
       preview={state.preview}
       options={state.options ?? NO_OPTIONS}
+      sourceTabId={state.sourceTabId}
     />
   )
 }

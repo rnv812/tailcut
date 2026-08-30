@@ -5,8 +5,6 @@ import { shuttleKeyOf, type ShuttleKey } from '../../core/edit/shuttle'
 export interface Transport {
   /** Space: run if stopped, stop if running. */
   toggle(): void
-  /** Anything that moves the playhead by hand stops the picture first. */
-  stop(): void
   shuttle(key: ShuttleKey): void
 }
 
@@ -80,7 +78,6 @@ export function attachKeys(on: Window, input: KeyboardInput): () => void {
     if (!action) return
 
     event.preventDefault()
-    if (action.type === 'step' || action.type === 'skip') input.transport.stop()
     input.dispatch(action)
   }
 

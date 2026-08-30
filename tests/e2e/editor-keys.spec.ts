@@ -72,9 +72,9 @@ test('runs, shuttles and stops on the transport keys', async () => {
 
   try {
     await editor.keyboard.press('Space')
-    await expect(editor.getByTestId('play')).toHaveText('Pause')
+    await expect(editor.getByTestId('play')).toHaveAttribute('aria-label', 'Pause preview')
     await editor.keyboard.press('Space')
-    await expect(editor.getByTestId('play')).toHaveText('Play')
+    await expect(editor.getByTestId('play')).toHaveAttribute('aria-label', 'Play preview')
 
     // L three times: 1×, 2×, 4×.
     await editor.keyboard.press('l')

@@ -19,6 +19,8 @@ const VIDEO_INIT = read('h264/init-stream0.m4s')
 const VIDEO = [1, 2, 3].map((n) => read(`h264/chunk-stream0-0000${n}.m4s`))
 const AUDIO_INIT = read('h264/init-stream1.m4s')
 const AUDIO = [1, 2, 3, 4].map((n) => read(`h264/chunk-stream1-0000${n}.m4s`))
+const AV1_INIT = read('av1/init-stream0.m4s')
+const AV1 = read('av1/chunk-stream0-00001.m4s')
 
 /** One buffer fed both kinds: two traks in the moov, two trafs in every segment. */
 const MUXED_INIT = read('muxed/init-stream0.m4s')
@@ -56,6 +58,48 @@ function renumberedTraf(segment: Uint8Array, trackId: number): Uint8Array {
     tfhd.start + tfhd.headerSize + 4,
     trackId,
   )
+  return copy
+}
+
+/**
+ * The same fragment with every container-level sample dependency word left unknown.
+ *
+ * HLS packagers are allowed to leave these words at zero. That does not turn every coded picture
+ * into a random-access point: zero means the container did not say, so the bitstream has to.
+ */
+function withoutSampleFlags(segment: Uint8Array): Uint8Array {
+  const copy = new Uint8Array(segment)
+  const view = new DataView(copy.buffer, copy.byteOffset, copy.byteLength)
+  const tfhd = findBox(copy, ['moof', 'traf', 'tfhd'])!
+  const tfhdWord = tfhd.start + tfhd.headerSize
+  const tfhdFlags = view.getUint32(tfhdWord) & 0x00ffffff
+  let field = tfhdWord + 8
+  if (tfhdFlags & 0x000001) field += 8
+  if (tfhdFlags & 0x000002) field += 4
+  if (tfhdFlags & 0x000008) field += 4
+  if (tfhdFlags & 0x000010) field += 4
+  if (tfhdFlags & 0x000020) view.setUint32(field, 0)
+
+  const trun = findBox(copy, ['moof', 'traf', 'trun'])!
+  const trunWord = trun.start + trun.headerSize
+  const trunFlags = view.getUint32(trunWord) & 0x00ffffff
+  const count = view.getUint32(trunWord + 4)
+  field = trunWord + 8
+  if (trunFlags & 0x000001) field += 4
+  if (trunFlags & 0x000004) {
+    view.setUint32(field, 0)
+    field += 4
+  }
+  const beforeFlags =
+    (trunFlags & 0x000100 ? 4 : 0) + (trunFlags & 0x000200 ? 4 : 0)
+  const entry =
+    beforeFlags +
+    (trunFlags & 0x000400 ? 4 : 0) +
+    (trunFlags & 0x000800 ? 4 : 0)
+  if (trunFlags & 0x000400) {
+    for (let i = 0; i < count; i++) view.setUint32(field + i * entry + beforeFlags, 0)
+  }
+
   return copy
 }
 
@@ -105,6 +149,33 @@ describe('sourceTrackOf', () => {
     expect(track.sampleEntry.byteLength).toBeGreaterThan(0)
     // The edit offset comes through untouched: every time in this plan is measured from it.
     expect(track.editOffset).toBe(1_024)
+  })
+
+  it('takes video entry points from the bitstream when an HLS fragment leaves its flags unknown', () => {
+    const blindH264 = VIDEO.map(withoutSampleFlags)
+    const blindAv1 = withoutSampleFlags(AV1)
+
+    // The premise and the browser failure: by container metadata alone every picture now looks
+    // like a key frame. WebCodecs checks the coded frame and rejects the first such lie passed as
+    // an EncodedVideoChunk of type `key`.
+    expect(
+      samplesInSegment(blindH264[0]!, new Map(), { loneVideoTrack: true })[0]!.samples.every(
+        (sample) => sample.sync,
+      ),
+    ).toBe(true)
+    expect(
+      samplesInSegment(blindAv1, new Map(), { loneVideoTrack: true })[0]!.samples.every(
+        (sample) => sample.sync,
+      ),
+    ).toBe(true)
+
+    const h264 = sourceTrackOf(placed('video', VIDEO_INIT, blindH264).input)!
+    const av1 = sourceTrackOf(placed('video', AV1_INIT, [blindAv1]).input)!
+
+    expect(h264.samples.flatMap((sample, at) => (sample.sync ? [at] : []))).toEqual([
+      0, 24, 48, 72, 96, 120,
+    ])
+    expect(av1.samples.flatMap((sample, at) => (sample.sync ? [at] : []))).toEqual([0])
   })
 
   it('addresses the bytes of a sample where they really are', () => {

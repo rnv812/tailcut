@@ -2,6 +2,7 @@ import type { ComponentChildren } from 'preact'
 import { ZOOM_KEY_STEP } from '../core/edit/keymap'
 import type { SessionAction } from '../core/edit/session'
 import { formatTimecode } from '../core/timeline/timecode'
+import { Icon, type IconName } from './icon'
 
 export interface EditToolbarSelection {
   in: number
@@ -25,8 +26,9 @@ interface ToolButtonProps {
   title: string
   disabled?: boolean
   pressed?: boolean
+  icon: IconName
   onClick: () => void
-  children: ComponentChildren
+  children?: ComponentChildren
 }
 
 function ToolButton({
@@ -34,6 +36,7 @@ function ToolButton({
   title,
   disabled = false,
   pressed,
+  icon,
   onClick,
   children,
 }: ToolButtonProps) {
@@ -43,11 +46,13 @@ function ToolButton({
       class="tc-edit-tool"
       data-testid={testId}
       title={title}
+      aria-label={title}
       disabled={disabled}
       aria-pressed={pressed}
       onClick={onClick}
     >
-      {children}
+      <Icon name={icon} />
+      {children && <span>{children}</span>}
     </button>
   )
 }
@@ -96,112 +101,92 @@ export function EditToolbar({
           <ToolButton
             testId="new-clip"
             title="Create a new clip at the playhead"
+            icon="plus"
             onClick={() => dispatch({ type: 'addClip' })}
           >
             New clip
           </ToolButton>
           <ToolButton
-            testId="set-in"
-            title="Set In at the playhead (I)"
-            onClick={() => dispatch({ type: 'setIn' })}
-          >
-            Set In
-          </ToolButton>
-          <ToolButton
-            testId="set-out"
-            title="Set Out at the playhead (O)"
-            onClick={() => dispatch({ type: 'setOut' })}
-          >
-            Set Out
-          </ToolButton>
-          <ToolButton
             testId="split"
             title="Split the selected clip at the playhead (S)"
+            icon="split"
             disabled={!selected}
             onClick={() => dispatch({ type: 'splitClip' })}
-          >
-            Split
-          </ToolButton>
+          />
           <ToolButton
             testId="add-marker"
             title="Add a marker at the playhead (M)"
+            icon="marker"
             onClick={() => dispatch({ type: 'addMarker' })}
-          >
-            Add marker
-          </ToolButton>
+          />
           <ToolButton
             testId="delete-clip"
             title="Delete the selected clip (Delete)"
+            icon="trash"
             disabled={!selected}
             onClick={() => dispatch({ type: 'removeClip' })}
-          >
-            Delete
-          </ToolButton>
+          />
         </div>
 
         <div class="tc-edit-tool-group" role="group" aria-label="History">
           <ToolButton
             testId="undo"
             title="Undo (Ctrl+Z)"
+            icon="undo"
             disabled={!canUndo}
             onClick={() => dispatch({ type: 'undo' })}
-          >
-            Undo
-          </ToolButton>
+          />
           <ToolButton
             testId="redo"
             title="Redo (Ctrl+Shift+Z or Ctrl+Y)"
+            icon="redo"
             disabled={!canRedo}
             onClick={() => dispatch({ type: 'redo' })}
-          >
-            Redo
-          </ToolButton>
+          />
         </div>
 
         <div class="tc-edit-tool-group" role="group" aria-label="Timeline view">
           <ToolButton
             testId="zoom-out"
             title="Zoom out around the playhead (−)"
+            icon="zoom-out"
             onClick={() => dispatch({ type: 'zoomStep', factor: ZOOM_KEY_STEP })}
-          >
-            Zoom out
-          </ToolButton>
+          />
           <ToolButton
             testId="fit-selection"
             title="Fit the selected clip (Z)"
+            icon="fit-selection"
             disabled={!selected}
             onClick={() => dispatch({ type: 'zoomToSelection' })}
-          >
-            Fit selection
-          </ToolButton>
+          />
           <ToolButton
             testId="fit-all"
             title="Fit the whole recording (F)"
+            icon="fit-all"
             onClick={() => dispatch({ type: 'fitAll' })}
-          >
-            Fit all
-          </ToolButton>
+          />
           <ToolButton
             testId="zoom-in"
             title="Zoom in around the playhead (+)"
+            icon="zoom-in"
             onClick={() => dispatch({ type: 'zoomStep', factor: 1 / ZOOM_KEY_STEP })}
-          >
-            Zoom in
-          </ToolButton>
+          />
         </div>
 
         <div class="tc-edit-tool-group" role="group" aria-label="Editor options">
           <ToolButton
             testId="toggle-snapping"
-            title="Toggle timeline snapping (N)"
+            title={`Turn timeline snapping ${snapping ? 'off' : 'on'} (N)`}
+            icon="snap"
             pressed={snapping}
             onClick={() => dispatch({ type: 'toggleSnapping' })}
-          >
-            Snapping {snapping ? 'on' : 'off'}
-          </ToolButton>
-          <ToolButton testId="keyboard-help" title="Open keyboard shortcuts (?)" onClick={onHelp}>
-            Keyboard help
-          </ToolButton>
+          />
+          <ToolButton
+            testId="keyboard-help"
+            title="Open keyboard shortcuts (?)"
+            icon="help"
+            onClick={onHelp}
+          />
         </div>
       </div>
     </section>

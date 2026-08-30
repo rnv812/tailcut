@@ -189,7 +189,8 @@ export async function editSession(key: string): Promise<EditResult> {
 
 /** Opens the editor over one snapshot in a tab of its own. */
 export async function openEditor(snapshotId: string): Promise<void> {
-  await openInBoundWindow(editorUrl(snapshotId))
+  const sourceTabId = await targetTabId()
+  await openInBoundWindow(editorUrl(snapshotId, sourceTabId))
 }
 
 /** One recording of the history, as a row of the popup needs it. */

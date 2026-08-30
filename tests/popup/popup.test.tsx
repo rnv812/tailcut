@@ -730,7 +730,7 @@ describe('Edit', () => {
       key: fresh.key,
     })
     expect(chrome.created).toEqual([
-      { url: `chrome-extension://tailcut/editor/editor.html?s=${SNAPSHOT}`, windowId: 23 },
+      { url: `chrome-extension://tailcut/editor/editor.html?s=${SNAPSHOT}&tab=7`, windowId: 23 },
     ])
     // The popup gets out of the way of the tab it has just sent the user to.
     expect(chrome.closed).toBe(true)

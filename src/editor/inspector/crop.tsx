@@ -1,4 +1,4 @@
-import { useRef } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import type { EncodeGeometry } from '../../core/encode/codec'
 import { CROP_RATIOS, MIN_CROP_PX, fullCrop, type Crop, type CropRatio, type SourceSize } from '../../core/encode/crop'
 
@@ -79,8 +79,8 @@ export interface CropBoxProps {
   /** The rectangle, in the source's own pixels; null means the whole picture. */
   crop: Crop | null
   frameSize: SourceSize
-  /** True for every event of a gesture but the last, giving one Ctrl+Z entry per gesture. */
-  onCrop: (crop: Crop, dragging: boolean) => void
+  /** Commits the rectangle once when a pointer gesture ends. */
+  onCrop: (crop: Crop) => void
 }
 
 /**
@@ -100,7 +100,12 @@ export interface CropBoxProps {
 export function CropBox({ crop, frameSize, onCrop }: CropBoxProps) {
   const host = useRef<HTMLDivElement>(null)
   const drag = useRef<Drag | null>(null)
-  const frame = crop ?? fullCrop(frameSize)
+  const committed = crop ?? fullCrop(frameSize)
+  const [frame, setFrame] = useState(committed)
+
+  useEffect(() => {
+    if (!drag.current) setFrame(committed)
+  }, [committed.x, committed.y, committed.width, committed.height])
 
   function begin(event: PointerEvent, handle: Handle | null) {
     event.preventDefault()
@@ -118,20 +123,28 @@ export function CropBox({ crop, frameSize, onCrop }: CropBoxProps) {
     }
   }
 
-  function moveBy(event: PointerEvent, dragging: boolean) {
+  function moveBy(event: PointerEvent, active: boolean) {
+    event.preventDefault()
+    event.stopPropagation()
     const state = drag.current
     if (!state) return
-    if (!dragging) drag.current = null
-
-    onCrop(
-      nextCrop(
-        state,
-        (event.clientX - state.startX) * state.scale,
-        (event.clientY - state.startY) * state.scale,
-        frameSize,
-      ),
-      dragging,
+    const next = nextCrop(
+      state,
+      (event.clientX - state.startX) * state.scale,
+      (event.clientY - state.startY) * state.scale,
+      frameSize,
     )
+    setFrame(next)
+    if (active) return
+
+    drag.current = null
+    onCrop(next)
+  }
+
+  function cancel(event: PointerEvent) {
+    event.stopPropagation()
+    drag.current = null
+    setFrame(committed)
   }
 
   return (
@@ -148,7 +161,7 @@ export function CropBox({ crop, frameSize, onCrop }: CropBoxProps) {
         onPointerDown={(event) => begin(event, null)}
         onPointerMove={(event) => moveBy(event, true)}
         onPointerUp={(event) => moveBy(event, false)}
-        onPointerCancel={() => (drag.current = null)}
+        onPointerCancel={cancel}
       >
         {HANDLES.map((handle) => (
           <span
@@ -158,7 +171,7 @@ export function CropBox({ crop, frameSize, onCrop }: CropBoxProps) {
             onPointerDown={(event) => begin(event, handle)}
             onPointerMove={(event) => moveBy(event, true)}
             onPointerUp={(event) => moveBy(event, false)}
-            onPointerCancel={() => (drag.current = null)}
+            onPointerCancel={cancel}
           />
         ))}
       </div>

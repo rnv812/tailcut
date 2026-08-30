@@ -1,4 +1,5 @@
 import { audioSampleEntry, sampleEntryBytes, sampleEntryOf, videoSampleEntry } from '../iso/entry'
+import { keyframeClassifier } from '../codec/keyframe'
 import { parseInit } from '../iso/init'
 import { samplesInMovie } from '../iso/movie'
 import { editOffset, locateSamples, sampleRunOf, trackDefaults } from '../iso/samples'
@@ -51,6 +52,7 @@ export function sourceTrackOf(input: SourceTrackInput): SourceTrack | null {
     kind: input.kind,
     defaults: trackDefaults(input.initBytes),
     loneTrack: true,
+    ...(input.kind === 'video' ? { syncOf: keyframeClassifier(sampleEntry) ?? undefined } : {}),
   })
 
   if (!run.samples.length) return null

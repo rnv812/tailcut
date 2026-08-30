@@ -399,6 +399,8 @@ export interface SampleRunInput {
    * asked for a numbered track and answers about that number or about nothing.
    */
   loneTrack?: boolean
+  /** Bitstream verdict for a video sample; null leaves the container's sample flag in force. */
+  syncOf?: (bytes: Uint8Array) => boolean | null
 }
 
 /**
@@ -443,7 +445,20 @@ export function sampleRunOf(input: SampleRunInput): SampleRun {
       (input.loneTrack && tracks.length === 1 ? tracks[0] : undefined)
     if (!found) continue
 
-    for (const sample of locateSamples(found.samples, segment.source)) arrived.push(sample)
+    for (const sample of found.samples) {
+      const coded =
+        sample.at >= 0 && sample.at + sample.size <= segment.bytes.byteLength
+          ? segment.bytes.subarray(sample.at, sample.at + sample.size)
+          : new Uint8Array(0)
+      const fromBitstream = input.syncOf?.(coded)
+      arrived.push({
+        dts: sample.dts,
+        pts: sample.pts,
+        duration: sample.duration,
+        sync: fromBitstream ?? sample.sync,
+        source: { at: segment.source.at + sample.at, length: sample.size },
+      })
+    }
   }
 
   // The map keeps its chunks in order of media time, but a caller is free to hand them over in

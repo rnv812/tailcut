@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { render } from 'preact'
+import { render, type ComponentChildren } from 'preact'
 import { FrameTable, type Frame } from '../../src/core/timeline/frames'
 import { Player } from '../../src/editor/player/player'
 import type { Preview } from '../../src/editor/source/preview'
@@ -58,23 +58,51 @@ function fire(mediaTime: number): void {
 function mount(input: {
   index: number
   endMode: 'stop' | 'loop'
+  playing?: boolean
+  volume?: number
+  muted?: boolean
+  hasPreviousMarker?: boolean
+  hasNextMarker?: boolean
+  onStep?: (delta: number) => void
   onSeek?: (index: number) => void
   onPlaying?: (playing: boolean) => void
   onEndMode?: (mode: 'stop' | 'loop') => void
+  onVolume?: (volume: number) => void
+  onMuted?: (muted: boolean) => void
+  onRecordingStart?: () => void
+  onRecordingEnd?: () => void
+  onRangeStart?: () => void
+  onRangeEnd?: () => void
+  onPreviousMarker?: () => void
+  onNextMarker?: () => void
+  editorControls?: ComponentChildren
 }): void {
   render(
     <Player
       preview={preview}
       index={input.index}
-      playing
+      playing={input.playing ?? true}
       rate={1}
       note=""
       playbackRange={range}
       endMode={input.endMode}
-      onStep={() => undefined}
+      volume={input.volume ?? 0.75}
+      muted={input.muted ?? false}
+      hasPreviousMarker={input.hasPreviousMarker ?? true}
+      hasNextMarker={input.hasNextMarker ?? true}
+      onStep={input.onStep ?? (() => undefined)}
       onSeek={input.onSeek ?? (() => undefined)}
       onPlaying={input.onPlaying ?? (() => undefined)}
       onEndMode={input.onEndMode ?? (() => undefined)}
+      onVolume={input.onVolume ?? (() => undefined)}
+      onMuted={input.onMuted ?? (() => undefined)}
+      onRecordingStart={input.onRecordingStart ?? (() => undefined)}
+      onRecordingEnd={input.onRecordingEnd ?? (() => undefined)}
+      onRangeStart={input.onRangeStart ?? (() => undefined)}
+      onRangeEnd={input.onRangeEnd ?? (() => undefined)}
+      onPreviousMarker={input.onPreviousMarker ?? (() => undefined)}
+      onNextMarker={input.onNextMarker ?? (() => undefined)}
+      editorControls={input.editorControls}
     />,
     host,
   )
@@ -117,14 +145,136 @@ describe('Player playback boundary', () => {
     mount({ index: 1, endMode: 'stop', onEndMode })
 
     const button = host.querySelector<HTMLButtonElement>('[data-testid="end-mode"]')!
-    expect(button.textContent).toBe('At end: Stop')
+    expect(button.textContent).toBe('Stop after')
+    expect(button.closest('.transport-playback')).toBeNull()
+    expect(button.closest('.transport-right')).not.toBeNull()
+    expect(host.querySelector('[data-testid="play"]')!.closest('.transport-center')).not.toBeNull()
     button.click()
     expect(onEndMode).toHaveBeenCalledWith('loop')
 
     mount({ index: 1, endMode: 'loop', onEndMode })
-    expect(button.textContent).toBe('At end: Loop')
+    expect(button.textContent).toBe('Repeat')
     button.click()
     expect(onEndMode).toHaveBeenLastCalledWith('stop')
+  })
+
+  it('offers icon-first transport controls with accessible names and tooltips', () => {
+    mount({ index: 2, endMode: 'stop' })
+
+    const expected = new Map([
+      ['recording-start', 'Go to recording start'],
+      ['range-start', 'Go to active range start'],
+      ['previous-marker', 'Go to previous marker'],
+      ['prev', 'Previous frame'],
+      ['play', 'Pause preview'],
+      ['next', 'Next frame'],
+      ['next-marker', 'Go to next marker'],
+      ['range-end', 'Go to active range end'],
+      ['recording-end', 'Go to recording end'],
+      ['mute', 'Mute preview'],
+    ])
+
+    for (const [testId, label] of expected) {
+      const control = host.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`)!
+      expect(control, `${testId} is missing`).not.toBeNull()
+      expect(control.getAttribute('aria-label')).toBe(label)
+      expect(control.title).toBe(label)
+      expect(control.textContent?.trim(), `${testId} has no visible icon`).not.toBe('')
+      expect(control.textContent?.trim()).not.toBe(label)
+    }
+
+    const volume = host.querySelector<HTMLInputElement>('[data-testid="volume"]')!
+    expect(volume.getAttribute('aria-label')).toBe('Volume')
+    expect(volume.title).toBe('Volume')
+  })
+
+  it('keeps edit controls in their own row under the transport', () => {
+    mount({
+      index: 2,
+      endMode: 'stop',
+      editorControls: <button data-testid="set-in">Set In</button>,
+    })
+
+    const row = host.querySelector('[data-testid="player-edit-controls"]')!
+    expect(row).not.toBeNull()
+    expect(row.querySelector('[data-testid="set-in"]')?.textContent).toBe('Set In')
+    expect(row.closest('.transport')).toBeNull()
+  })
+
+  it('runs frame steps and timeline jumps without stopping playback', () => {
+    const onPlaying = vi.fn()
+    const onStep = vi.fn()
+    const jumps = {
+      'recording-start': vi.fn(),
+      'recording-end': vi.fn(),
+      'range-start': vi.fn(),
+      'range-end': vi.fn(),
+      'previous-marker': vi.fn(),
+      'next-marker': vi.fn(),
+    }
+    mount({
+      index: 2,
+      endMode: 'stop',
+      onPlaying,
+      onStep,
+      onRecordingStart: jumps['recording-start'],
+      onRecordingEnd: jumps['recording-end'],
+      onRangeStart: jumps['range-start'],
+      onRangeEnd: jumps['range-end'],
+      onPreviousMarker: jumps['previous-marker'],
+      onNextMarker: jumps['next-marker'],
+    })
+
+    host.querySelector<HTMLButtonElement>('[data-testid="prev"]')!.click()
+    host.querySelector<HTMLButtonElement>('[data-testid="next"]')!.click()
+    expect(onStep.mock.calls).toEqual([[-1], [1]])
+
+    for (const [testId, callback] of Object.entries(jumps)) {
+      host.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`)!.click()
+      expect(callback, `${testId} did not reach its owner`).toHaveBeenCalledOnce()
+    }
+    expect(onPlaying).not.toHaveBeenCalledWith(false)
+  })
+
+  it('disables marker jumps only when no marker exists in that direction', () => {
+    mount({
+      index: 2,
+      endMode: 'stop',
+      hasPreviousMarker: false,
+      hasNextMarker: false,
+    })
+
+    expect(host.querySelector<HTMLButtonElement>('[data-testid="previous-marker"]')!.disabled).toBe(true)
+    expect(host.querySelector<HTMLButtonElement>('[data-testid="next-marker"]')!.disabled).toBe(true)
+    expect(host.querySelector<HTMLButtonElement>('[data-testid="range-start"]')!.disabled).toBe(false)
+  })
+
+  it('applies controlled volume and mute state and reports their controls', async () => {
+    const onVolume = vi.fn()
+    const onMuted = vi.fn()
+    mount({ index: 2, endMode: 'stop', playing: false, volume: 0.4, onVolume, onMuted })
+    await effects()
+
+    const video = host.querySelector<HTMLVideoElement>('video')!
+    const slider = host.querySelector<HTMLInputElement>('[data-testid="volume"]')!
+    expect(video.volume).toBe(0.4)
+    expect(video.muted).toBe(false)
+    expect(slider.valueAsNumber).toBe(0.4)
+
+    slider.value = '0.2'
+    slider.dispatchEvent(new Event('input', { bubbles: true }))
+    expect(onVolume).toHaveBeenCalledWith(0.2)
+    host.querySelector<HTMLButtonElement>('[data-testid="mute"]')!.click()
+    expect(onMuted).toHaveBeenCalledWith(true)
+
+    mount({ index: 2, endMode: 'stop', playing: false, volume: 0.2, muted: true, onMuted })
+    await effects()
+    expect(video.volume).toBe(0.2)
+    expect(video.muted).toBe(true)
+    const mute = host.querySelector<HTMLButtonElement>('[data-testid="mute"]')!
+    expect(mute.getAttribute('aria-label')).toBe('Unmute preview')
+    mute.click()
+    expect(onMuted).toHaveBeenLastCalledWith(false)
   })
 
   it('starts at In when Play is pressed outside the active range', async () => {
@@ -184,10 +334,29 @@ describe('Player playback boundary', () => {
     expect(callback).not.toBeNull()
   })
 
+  it('seeks a controlled frame change while playback keeps running', async () => {
+    const onPlaying = vi.fn()
+    mount({ index: 1, endMode: 'stop', onPlaying })
+    await effects()
+    const plays = play.mock.calls.length
+    pause.mockClear()
+
+    mount({ index: 2, endMode: 'stop', onPlaying })
+    await effects()
+
+    expect(host.querySelector<HTMLVideoElement>('video')!.currentTime).toBe(table.seekTimeOf(2))
+    expect(play).toHaveBeenCalledTimes(plays)
+    expect(pause).not.toHaveBeenCalled()
+    expect(onPlaying).not.toHaveBeenCalledWith(false)
+  })
+
   it('does not restart playback when its reported frame rerenders the controlled player', async () => {
     const onSeek = vi.fn()
     mount({ index: 1, endMode: 'stop', onSeek })
     await effects()
+    const video = host.querySelector<HTMLVideoElement>('video')!
+    video.currentTime = 2
+    fire(2)
     const plays = play.mock.calls.length
     const requests = requestFrame.mock.calls.length
     cancelFrame.mockClear()
@@ -195,6 +364,7 @@ describe('Player playback boundary', () => {
     mount({ index: 2, endMode: 'stop', onSeek })
     await effects()
 
+    expect(video.currentTime).toBe(2)
     expect(play).toHaveBeenCalledTimes(plays)
     expect(requestFrame).toHaveBeenCalledTimes(requests)
     expect(cancelFrame).not.toHaveBeenCalled()

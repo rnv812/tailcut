@@ -705,7 +705,7 @@ describe('pages opened from the popup', () => {
 
     expect(chrome.created).toEqual([
       {
-        url: `chrome-extension://tailcut/editor/editor.html?s=${SNAPSHOT}`,
+        url: `chrome-extension://tailcut/editor/editor.html?s=${SNAPSHOT}&tab=7`,
         windowId: 23,
       },
     ])

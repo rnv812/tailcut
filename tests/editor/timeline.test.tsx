@@ -177,6 +177,14 @@ describe('Timeline', () => {
     expect(calls.some((call) => call.style === PALETTE.fill.playhead)).toBe(false)
   })
 
+  it('exposes the visible time window to accessibility and integration checks', () => {
+    render(<Timeline {...props()} />, host)
+
+    const timeline = host.querySelector<HTMLElement>('.tc-timeline')!
+    expect(timeline.dataset.viewStart).toBe('0')
+    expect(timeline.dataset.viewScale).toBe('0.05')
+  })
+
   it('paints once per frame however many times the props change', async () => {
     // Zooming sends a burst of wheel events; a paint per event is a paint per event wasted.
     const height = sceneHeight(METRICS, 1, 1)
