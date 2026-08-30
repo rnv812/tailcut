@@ -495,6 +495,31 @@ describe('the settings page', () => {
     expect(textAt('export-note')).toContain('re-encoding')
   })
 
+  it('shows the value it actually holds in each of those, greyed out or not', async () => {
+    // A <select> whose value is none of its options shows the first one instead, and says
+    // nothing about it. The codec of §7.4 is `auto`, and while the list ran HEVC / H.264 the
+    // page answered "HEVC, falling back to H.264" about a setting that means H.264 — the very
+    // promise §8.4 was rewritten to withdraw. Disabled is not a licence to say something else.
+    await draw()
+
+    expect(field('format').value).toBe(DEFAULTS.export.format)
+    expect(field('codec').value).toBe(DEFAULTS.export.codec)
+    expect(field('quality').value).toBe(DEFAULTS.export.quality)
+
+    // And every option offered is a value this build knows: a list still offering WebM would put
+    // a format into storage that `merge` throws away on the next read.
+    const values = (testId: string): string[] =>
+      [...field(testId).querySelectorAll('option')].map((option) => option.value)
+
+    expect(values('format')).toEqual(['mp4', 'webp'])
+    expect(values('codec')).toEqual(['auto', 'hevc', 'h264'])
+    for (const id of ['format', 'codec', 'quality'] as const) {
+      expect(values(id), `${id} offers something it cannot store`).toContain(
+        String(DEFAULTS.export[id]),
+      )
+    }
+  })
+
   it('lets through the two export settings this stage can keep', async () => {
     // The name of a file and where it is put need no encoder, so they are live while the rest of
     // the group waits. A name is typed a letter at a time, so it settles like a slider: one write

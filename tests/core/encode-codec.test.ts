@@ -13,6 +13,7 @@ import {
   type LadderOptions,
   type Probe,
 } from '../../src/core/encode/codec'
+import type { ExportQuality } from '../../src/shared/settings'
 
 const geometry = (width: number, height: number, framerate: number): EncodeGeometry => ({
   width,
@@ -134,6 +135,76 @@ const UHD = geometry(3840, 2160, 30)
 
 const keysOf = (g: EncodeGeometry, options: LadderOptions): string[] =>
   ladderFor(g, options).map((rung) => cacheKeyOf(rung.config))
+
+/**
+ * The three quality levels, held to being three.
+ *
+ * Nothing above this block would notice if they were made equal: every assertion about a
+ * quantizer reads `QUANTIZERS[…]` for the number it expects, so a table of three identical rows
+ * satisfies all of them, and `bitrateFor` was only ever spelled out at `low`. Both tables were
+ * mutated to check it — one quantizer for all three levels and a `high` of 0.9 bits a pixel —
+ * and the whole suite stayed green. What the levels are worth is that they differ; that is what
+ * is written out here.
+ */
+describe('the ladder of quality', () => {
+  const LEVELS: ExportQuality[] = ['high', 'medium', 'low']
+
+  it('is three quantizers, spaced far enough apart to be seen', () => {
+    expect(QUANTIZERS).toEqual({ high: 22, medium: 27, low: 33 })
+
+    // Six steps of this scale halve the bitrate, which is where the spacing comes from: a step
+    // of five is most of a halving, and three levels closer together than that would be three
+    // names for one file. Written as the property and not only as the numbers, so that a future
+    // retune has to keep the promise the comment beside the table makes.
+    expect(QUANTIZERS.medium - QUANTIZERS.high).toBeGreaterThanOrEqual(5)
+    expect(QUANTIZERS.low - QUANTIZERS.medium).toBeGreaterThanOrEqual(5)
+    expect(QUANTIZERS.low - QUANTIZERS.high).toBeGreaterThanOrEqual(11)
+
+    // And all three on the scale both codecs count on: 0–51. A quantizer off it is not a worse
+    // picture, it is a configuration the encoder refuses.
+    for (const level of LEVELS) {
+      expect(QUANTIZERS[level], `${level} is off the 0–51 scale`).toBeGreaterThanOrEqual(0)
+      expect(QUANTIZERS[level], `${level} is off the 0–51 scale`).toBeLessThanOrEqual(51)
+    }
+  })
+
+  it('is three asks on the software rung, each smaller than the one above it', () => {
+    expect(BITS_PER_PIXEL).toEqual({ high: 0.1, medium: 0.07, low: 0.045 })
+    expect(BITS_PER_PIXEL.high).toBeGreaterThan(BITS_PER_PIXEL.medium)
+    expect(BITS_PER_PIXEL.medium).toBeGreaterThan(BITS_PER_PIXEL.low)
+
+    // Spelled out at all three and not at `low` alone: 1080p30 is 62.2 million pixels a second,
+    // so an eyeball cannot tell 0.1 from 0.9 in a megabit count, and the number below is the one
+    // the panel will show. High is a little over 6 Mbit/s — the rate the large sites serve
+    // 1080p at (see REFERENCE_BITS_PER_SECOND) — and low is under 3.
+    expect(bitrateFor(HD, 'high')).toBe(6_220_800)
+    expect(bitrateFor(HD, 'medium')).toBe(4_354_560)
+    expect(bitrateFor(HD, 'low')).toBe(2_799_360)
+  })
+
+  it('carries all three the whole way through the ladder, hardware rung and software', async () => {
+    // The tables are one half; that the choice is made from the level asked for is the other. A
+    // ladder that read one row of them would still hand back a configuration, and every claim
+    // above would still hold.
+    const quantizers: number[] = []
+    const bitrates: number[] = []
+
+    for (const quality of LEVELS) {
+      const hardware = await chooseCodec(HD, probeOf(everything).probe, { codec: 'h264', quality })
+      expect(hardware).toMatchObject({ kind: 'h264-hw', control: 'quantizer' })
+      quantizers.push((hardware as { quantizer: number }).quantizer)
+
+      const software = await chooseCodec(HD, probeOf(softwareOnly).probe, { codec: 'h264', quality })
+      expect(software).toMatchObject({ kind: 'h264-sw', control: 'fixed-bitrate' })
+      bitrates.push((software as { bitrate: number }).bitrate)
+    }
+
+    expect(quantizers).toEqual([QUANTIZERS.high, QUANTIZERS.medium, QUANTIZERS.low])
+    expect(new Set(quantizers).size, 'two quality levels ask the encoder for the same picture').toBe(3)
+    expect(bitrates).toEqual([bitrateFor(HD, 'high'), bitrateFor(HD, 'medium'), bitrateFor(HD, 'low')])
+    expect(new Set(bitrates).size, 'two quality levels ask for the same number of bits').toBe(3)
+  })
+})
 
 describe('chooseCodec', () => {
   it('takes the codec the setting names, and never asks about the one it was not asked for', async () => {

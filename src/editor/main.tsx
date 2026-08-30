@@ -46,7 +46,6 @@ function Editor() {
 
         const historyId = historyIdIn(window.location.search)
         const options: EditorOptions = {
-          nameTemplate: settings.export.nameTemplate,
           askWhere: settings.export.askWhere,
           export: settings.export,
           // §7.3: a recording somebody cut a clip out of is a recording they chose, and it is

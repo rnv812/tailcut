@@ -23,6 +23,10 @@ describe('DEFAULTS', () => {
     expect(DEFAULTS.detection).toEqual(BALANCED)
     expect(DEFAULTS.export.format).toBe('mp4')
     expect(DEFAULTS.export.codec).toBe('auto')
+    // The quality is a row of that table too, and it has to be: `auto` is H.264 everywhere
+    // except at the low quality (§8.4), so "the codec defaults to Auto" says nothing about
+    // which codec a fresh installation actually reaches for until this line says `high`.
+    expect(DEFAULTS.export.quality).toBe('high')
     expect(DEFAULTS.export.rewriteHead).toBe(false)
   })
 

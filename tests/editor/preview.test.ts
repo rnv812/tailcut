@@ -27,6 +27,53 @@ const PER_SEGMENT = 48
 const WHOLE = read('plain/whole.mp4')
 const WHOLE_FRAMES = 60
 
+/**
+ * A second intercepted recording, and a different picture: 256×144 against the 320×240 above.
+ *
+ * Here for one claim and one only — that the size of the picture is read off the track of the
+ * file that was assembled. One fixture cannot make that claim: with a single intercepted size in
+ * the file, `{ width: 320, height: 240 }` written out as a constant in `buildPreview` passed the
+ * whole suite, and the ordinary-file test below could not see it, because an ordinary file goes
+ * down the other branch. This is that branch's second size.
+ */
+const MINUTE_INIT = read('minute/init-stream0.m4s')
+const MINUTE_SEGMENT = read('minute/chunk-stream0-00001.m4s')
+
+/**
+ * The same file with its picture declaring another size.
+ *
+ * `width` and `height` of a VisualSampleEntry are two 16-bit fields at a fixed place inside it —
+ * eight bytes of box header, six reserved, the data reference index, two pre-defined, two
+ * reserved and twelve more pre-defined — and they are what a reader is told the picture is. The
+ * two are patched here rather than a second file being added to the repository, because what is
+ * under test is exactly that the number comes out of this declaration: every complete file in
+ * tests/fixtures is 256×144, and one size cannot tell reading from assuming.
+ */
+function declaringSize(file: Uint8Array, width: number, height: number): Uint8Array {
+  const copy = file.slice()
+  const view = new DataView(copy.buffer, copy.byteOffset, copy.byteLength)
+
+  // The four letters appear twice — once as a brand in `ftyp`, once as the type of the sample
+  // entry — and only the second is a box: it is preceded by its own length, which a brand is not.
+  let at = -1
+  for (let index = 4; index + 32 < copy.byteLength; index++) {
+    const type = String.fromCharCode(copy[index]!, copy[index + 1]!, copy[index + 2]!, copy[index + 3]!)
+    const size = view.getUint32(index - 4)
+    if (type === 'avc1' && size >= 86 && index - 4 + size <= copy.byteLength) {
+      at = index
+      break
+    }
+  }
+  expect(at, 'no avc1 sample entry in the fixture').toBeGreaterThan(0)
+  // Read before written: if these two offsets were wrong the patch would land in the middle of
+  // something else and this test would be about nothing.
+  expect([view.getUint16(at + 28), view.getUint16(at + 30)]).toEqual([256, 144])
+  view.setUint16(at + 28, width)
+  view.setUint16(at + 30, height)
+
+  return copy
+}
+
 const page = {
   sessionKey: 'https://site.example/watch|avc1|inf',
   url: 'https://site.example/watch?v=abc',
@@ -269,13 +316,54 @@ describe('buildPreview', () => {
     built.release()
   })
 
+  it('reads it off the track of a second intercepted recording too', async () => {
+    // The same branch as the test above — material that was captured segment by segment, which
+    // is how eighteen of twenty-one live pages are *not* delivered but every large site is — and
+    // a different picture: 256×144 against 320×240. Two sizes down one branch is what makes the
+    // claim above a claim: with one, a constant written into `buildPreview` passed the entire
+    // suite, and neither the ordinary-file test below nor anything else went red.
+    const reader = await snapshotFrom({
+      page,
+      tracks: [
+        {
+          id: 't0',
+          bufferId: 'sb-1',
+          representation: 'video:avc1.4d401e:256x144',
+          kinds: ['video'],
+          info: parseInit(MINUTE_INIT)!,
+          initBytes: MINUTE_INIT,
+          chunks: [{ start: 0, end: 5, bytes: MINUTE_SEGMENT }],
+        },
+      ],
+    })
+    const built = (await buildPreview(reader, materialOf(reader.index)))!
+
+    expect(built.frameSize).toEqual({ width: 256, height: 144 })
+
+    built.release()
+  })
+
   it('reads it off each material rather than assuming one size', async () => {
-    // The other kind of material, and a different picture: 256×144 against the 320×240 above. A
-    // size that came from anywhere but this file's own video track would answer the same twice.
+    // The other kind of material — an ordinary complete file, down the other branch — and the
+    // same question asked of it: a size that came from anywhere but this file's own video track
+    // would answer here with whatever the fragmented path answers.
     const reader = await snapshotOfFile(WHOLE)
     const built = (await buildPreview(reader, materialOf(reader.index)))!
 
     expect(built.frameSize).toEqual({ width: 256, height: 144 })
+
+    built.release()
+  })
+
+  it('reads the ordinary file’s own declaration, and not one size for every file', async () => {
+    // Every complete file in tests/fixtures is 256×144, so the test above cannot tell the size
+    // being read from a constant of that value on this branch — and a constant of that value did
+    // pass it. Here the picture of this one file declares something else, and the preview has to
+    // say what the file says.
+    const reader = await snapshotOfFile(declaringSize(WHOLE, 320, 240))
+    const built = (await buildPreview(reader, materialOf(reader.index)))!
+
+    expect(built.frameSize).toEqual({ width: 320, height: 240 })
 
     built.release()
   })

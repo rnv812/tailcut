@@ -11,7 +11,7 @@ import {
   type Span,
 } from '../../core/timeline/lanes'
 import { hostOf } from '../../shared/format'
-import type { ExportFormat } from '../../shared/settings'
+import { DEFAULTS, type ExportSettings } from '../../shared/settings'
 import type { Preview } from './preview'
 
 export interface EditorMaterial {
@@ -34,12 +34,18 @@ export interface EditorMaterial {
  * It is deliberately not part of the project. A frame table inside the document would be copied
  * into every step of the history, and a hundred steps of undo would hold a hundred copies of a
  * grid of tens of thousands of numbers.
+ *
+ * The Export group of §9.4 arrives whole, as the one thing the tab read it as, rather than field
+ * by field. Two of its fields reach the model — the template a clip is named by and the format a
+ * clip is born in — and a caller passing them one at a time is a caller that can drop one of them
+ * without dropping the other: the name is visible on the screen and the format is not, so the
+ * dropped one would be the format, and nothing would go red. Absent altogether means a tab that
+ * read no settings: no template, and the format of §7.4.
  */
 export function deriveMaterial(
   index: SnapshotIndex,
   preview: Preview | null,
-  nameTemplate?: string,
-  newClipFormat: ExportFormat = 'mp4',
+  exported?: ExportSettings,
 ): EditorMaterial {
   const lanes = lanesOf(index.tracks)
   const picture = laneOf(lanes, 'video')
@@ -60,12 +66,12 @@ export function deriveMaterial(
     // over and the size the encoder will be asked for. Nothing else in the snapshot answers this:
     // `index` describes every representation, and a crop is a rectangle of the open one.
     frameSize: preview?.frameSize ?? { width: 0, height: 0 },
-    newClipFormat,
+    newClipFormat: exported?.format ?? DEFAULTS.export.format,
     runs: picture?.runs ?? [],
     zones: picture?.zones ?? [],
     duration: materialSpan(lanes)?.end ?? 0,
     title: index.page.title,
-    nameTemplate,
+    nameTemplate: exported?.nameTemplate,
     host: hostOf(index.page.url),
   }
 

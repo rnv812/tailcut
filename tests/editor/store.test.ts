@@ -4,7 +4,7 @@ import { newSession } from '../../src/core/edit/session'
 import { newProject } from '../../src/core/edit/project'
 import { reduce } from '../../src/core/edit/actions'
 import { geometryOf } from '../../src/core/encode/crop'
-import type { ExportFormat } from '../../src/shared/settings'
+import { DEFAULTS, type ExportFormat, type ExportSettings } from '../../src/shared/settings'
 import { FrameTable, type Frame } from '../../src/core/timeline/frames'
 import { planSnapshot, type SnapshotSource } from '../../src/core/snapshot/build'
 import { createStore } from '../../src/editor/state/store'
@@ -87,6 +87,12 @@ const preview: Preview = {
   release: () => {},
 }
 
+/** The Export group of §9.4 as a tab reads it, with whatever this test cares about changed. */
+const exported = (over: Partial<ExportSettings> = {}): ExportSettings => ({
+  ...DEFAULTS.export,
+  ...over,
+})
+
 describe('deriveMaterial', () => {
   it('builds the context the model works against out of the snapshot and the preview', () => {
     const { ctx, lanes, gaps, snapGaps } = deriveMaterial(index, preview)
@@ -112,7 +118,7 @@ describe('deriveMaterial', () => {
     // other. The host comes with it because it has nowhere else to come from — `{host}` is one
     // of the five fields the settings page offers, the recording knows the address it was
     // watched at, and the reducer that names a clip knows nothing but the context.
-    const { ctx } = deriveMaterial(index, preview, '{host} {title} {in}')
+    const { ctx } = deriveMaterial(index, preview, exported({ nameTemplate: '{host} {title} {in}' }))
 
     expect(ctx.nameTemplate).toBe('{host} {title} {in}')
     expect(ctx.host).toBe('site.example')
@@ -170,9 +176,10 @@ describe('deriveMaterial', () => {
 
   it('carries the format a new clip is born in out of the settings and into the reducer', () => {
     // §9.4 reaches the model this way and no other: the clip is made by `reduce`, which is pure
-    // and knows nothing but the context it is handed.
+    // and knows nothing but the context it is handed. What carries the group this far is held
+    // by `tests/editor/shell.test.tsx` — see the note on `deriveMaterial`.
     const born = (format?: ExportFormat): string => {
-      const { ctx } = deriveMaterial(index, preview, undefined, format)
+      const { ctx } = deriveMaterial(index, preview, format && exported({ format }))
       const project = reduce(newProject(1_000, ctx), { type: 'addClip' }, ctx)
       expect(project.doc.clips, 'no clip was made to read the format off').toHaveLength(1)
       return project.doc.clips[0]!.format
@@ -181,6 +188,7 @@ describe('deriveMaterial', () => {
     expect(born('webp')).toBe('webp')
     // Absent from the settings is the default of §7.4, and not whatever the last tab used.
     expect(born(undefined)).toBe('mp4')
+    expect(DEFAULTS.export.format).toBe('mp4')
   })
 
   it('opens a snapshot with no preview without falling over', () => {

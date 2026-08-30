@@ -14,15 +14,15 @@ import { Workbench } from './workbench'
  * that changed under a session would take the clips with it.
  */
 export interface EditorOptions extends SaveOptions {
-  /** The template a new clip is named by; absent — the name stage 2 built. */
-  nameTemplate?: string
   /**
-   * §9.4 as the tab read it when it opened: the whole Export group.
+   * §9.4 as the tab read it when it opened: the whole Export group, and not a field of it.
    *
-   * The format a new clip is born in, the codec the ladder is asked for, the quality it is asked
-   * at, and whether a start off a key frame is rewritten. Four settings that stage 4 gives
-   * meaning to, and they arrive together because they are read together — one `readSettings` in
-   * `main.tsx`, before the first frame is drawn.
+   * The template a new clip is named by, the format it is born in, the codec the ladder is asked
+   * for, the quality it is asked at, and whether a start off a key frame is rewritten. They
+   * arrive together because they are read together — one `readSettings` in `main.tsx`, before the
+   * first frame is drawn — and they travel on as one group for a second reason: two of them reach
+   * the model, one of them shows on the screen, and a group handed over field by field is a group
+   * that can lose the invisible one in silence. Absent — a tab that read no settings at all.
    */
   export?: ExportSettings
 }

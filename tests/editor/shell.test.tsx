@@ -7,6 +7,8 @@ import { planSnapshot, type SnapshotSource } from '../../src/core/snapshot/build
 import { SnapshotReader } from '../../src/core/snapshot/read'
 import { materialOf } from '../../src/core/snapshot/material'
 import { FrameTable } from '../../src/core/timeline/frames'
+import type { Preview } from '../../src/editor/source/preview'
+import { DEFAULTS } from '../../src/shared/settings'
 import { METRICS, rowTop } from '../../src/core/timeline/layout'
 import { concatBytes } from '../../src/core/iso/writer'
 import { parseInit } from '../../src/core/iso/init'
@@ -125,9 +127,13 @@ const settled = async () => {
 }
 
 /** Five frames at 25 fps: enough grid for a step, a fit and a clip. */
-const previewOf = () => ({
+const previewOf = (): Preview => ({
   url: 'blob:preview',
   bytes: 10,
+  // The size of the picture the shell would be playing. Nothing on this screen draws a rectangle
+  // over it yet; it is here because `Preview` promises it, and a cast that let it be missing is
+  // how a zero would reach the crop without a word (§8.5).
+  frameSize: { width: 1280, height: 720 },
   frames: FrameTable.of(
     Array.from({ length: 5 }, (_, at) => ({
       pts: at / 25,
@@ -245,7 +251,7 @@ describe('the editor shell', () => {
   })
 
   it('leaves the player pane in place while the preview is being assembled', async () => {
-    show({ ...(await ready()), preview: 'building' } as EditorState)
+    show({ ...(await ready()), preview: 'building' })
 
     expect(document.querySelector('[data-testid="player"]')).not.toBeNull()
     expect(document.querySelector('[data-testid="preview"]')).toBeNull()
@@ -253,14 +259,14 @@ describe('the editor shell', () => {
   })
 
   it('says why there is nothing to play in a snapshot with no picture', async () => {
-    show({ ...(await ready()), preview: null } as EditorState)
+    show({ ...(await ready()), preview: null })
     expect(document.body.textContent).toContain('no picture in this recording')
   })
 
   it('puts the element and the frame readout in the player pane once there is a preview', async () => {
     const preview = previewOf()
 
-    show({ ...(await ready()), preview } as EditorState)
+    show({ ...(await ready()), preview })
 
     expect(document.querySelector<HTMLVideoElement>('[data-testid="preview"]')!.src).toBe(
       'blob:preview',
@@ -274,7 +280,7 @@ describe('the editor shell', () => {
   })
 
   it('answers the keyboard from the tab and not from the player', async () => {
-    await mount({ ...(await ready()), preview: previewOf() } as EditorState)
+    await mount({ ...(await ready()), preview: previewOf() })
     press('ArrowRight')
     await settled()
 
@@ -283,7 +289,7 @@ describe('the editor shell', () => {
   })
 
   it('shows the clip panel, and says how a clip is made', async () => {
-    show({ ...(await ready()), preview: null } as EditorState)
+    show({ ...(await ready()), preview: null })
 
     expect(document.querySelector('[data-testid="clips"]')).not.toBeNull()
     expect(document.body.textContent).toContain('I marks')
@@ -292,7 +298,7 @@ describe('the editor shell', () => {
   it('sends what the keyboard says to the same model the inspector reads', async () => {
     // The whole point of the assembly: I is a press, and the clip it makes shows up in the panel
     // with its In already typed into a box that the panel took off the document.
-    await mount({ ...(await ready()), preview: previewOf() } as EditorState)
+    await mount({ ...(await ready()), preview: previewOf() })
 
     press('ArrowRight')
     press('i')
@@ -307,8 +313,45 @@ describe('the editor shell', () => {
       .toBe('00:00:00:01')
   })
 
+  it('names a new clip by the Export group the tab was opened with', async () => {
+    // The wire held here is the group itself. `main.tsx` reads §9.4 once, the shell carries it,
+    // and the workbench hands it whole to `deriveMaterial`; two of its fields reach the model —
+    // the template a clip is named by, and the format a clip is born in — and only the first of
+    // the two shows on a screen this stage draws. So the format rides here: cut the argument in
+    // `workbench.tsx` and this name falls back to the one stage 2 built, taking the format with
+    // it in silence. That the group's format then reaches a new clip is held next door, in
+    // `tests/editor/store.test.ts`. Measured before it was written: with the format passed as an
+    // argument of its own, dropping it left all 2787 tests green.
+    await mount({
+      ...(await ready()),
+      preview: previewOf(),
+      options: { export: { ...DEFAULTS.export, nameTemplate: '{host} at {in}', format: 'webp' } },
+    })
+
+    press('i')
+    await settled()
+
+    expect(document.querySelectorAll('[data-testid="clip"]')).toHaveLength(1)
+    expect(document.querySelector<HTMLInputElement>('[data-testid="name-c1"]')!.value).toBe(
+      'site.example at 00.00',
+    )
+  })
+
+  it('names it the way stage 2 did when the tab read no settings at all', async () => {
+    // The other end of the same wire, so that the test above cannot be satisfied by a template
+    // baked in anywhere: no Export group, and the name is the page title and the timecode.
+    await mount({ ...(await ready()), preview: previewOf() })
+
+    press('i')
+    await settled()
+
+    expect(document.querySelector<HTMLInputElement>('[data-testid="name-c1"]')!.value).toBe(
+      'Clip — site.example 00.00',
+    )
+  })
+
   it('undoes a press of the keyboard', async () => {
-    await mount({ ...(await ready()), preview: previewOf() } as EditorState)
+    await mount({ ...(await ready()), preview: previewOf() })
 
     press('i')
     await settled()
@@ -320,7 +363,7 @@ describe('the editor shell', () => {
   })
 
   it('puts the whole keyboard on the screen on ? and takes it off on Escape', async () => {
-    await mount({ ...(await ready()), preview: null } as EditorState)
+    await mount({ ...(await ready()), preview: null })
 
     press('?')
     await settled()
@@ -340,7 +383,7 @@ describe('the editor shell', () => {
   })
 
   it('says how fast the shuttle is going, and stops saying it on K', async () => {
-    await mount({ ...(await ready()), preview: previewOf() } as EditorState)
+    await mount({ ...(await ready()), preview: previewOf() })
 
     press('l')
     press('l')
@@ -369,7 +412,7 @@ describe('the editor shell', () => {
   it('sends what the inspector is clicked for back into the same model', async () => {
     // The other direction of the assembly. M drops a marker from the keyboard, and Remove in the
     // panel takes it away again — a panel wired to nothing would show the row and never lose it.
-    await mount({ ...(await ready()), preview: previewOf() } as EditorState)
+    await mount({ ...(await ready()), preview: previewOf() })
 
     press('m')
     await settled()
@@ -392,7 +435,7 @@ describe('the editor shell', () => {
     try {
       // No preview, so the frame grid is empty and a seek lands where it was asked to rather
       // than on the nearest of five frames — the arithmetic under test is the viewport's.
-      await mount({ ...(await ready()), preview: null } as EditorState)
+      await mount({ ...(await ready()), preview: null })
 
       // F fits the whole recording to the width the strip reported, which is how the width
       // gets into the arithmetic at all: laid out over the 1200 px the project opens with, the
@@ -424,7 +467,7 @@ describe('the editor shell', () => {
       ({ width: 800, height: 0, x: 0, y: 0, top: 0, left: 0, right: 800, bottom: 0, toJSON: () => ({}) }) as DOMRect
 
     try {
-      await mount({ ...(await ready()), preview: null } as EditorState)
+      await mount({ ...(await ready()), preview: null })
       press('f')
       press('i')
       await settled()
@@ -482,7 +525,7 @@ describe('the editor shell', () => {
     // There is sound in the snapshot and no AudioDecoder in this environment, which is exactly
     // the state the note exists for: the timeline shows a flat audio lane, and without a word
     // beside it that reads as a recording with no sound in it.
-    await mount({ ...(await ready()), preview: null } as EditorState)
+    await mount({ ...(await ready()), preview: null })
 
     expect(text('no-wave')).toContain('cannot be decoded')
   })
@@ -501,7 +544,7 @@ describe('the editor shell', () => {
   })
 
   it('runs and stops on the space bar and on the button alike', async () => {
-    await mount({ ...(await ready()), preview: previewOf() } as EditorState)
+    await mount({ ...(await ready()), preview: previewOf() })
     const video = document.querySelector<HTMLVideoElement>('[data-testid="preview"]')!
 
     press(' ')
@@ -526,7 +569,7 @@ describe('the editor shell', () => {
     // The element reports the time of the frame on screen in the file's own clock; the model is
     // told a time in the session's. Between them stands the frame table, and handing the index
     // straight to the model would put the playhead at frame two seconds in.
-    await mount({ ...(await ready()), preview: previewOf() } as EditorState)
+    await mount({ ...(await ready()), preview: previewOf() })
     const video = document.querySelector<HTMLVideoElement>('[data-testid="preview"]')!
 
     press(' ')
@@ -543,7 +586,7 @@ describe('the editor shell', () => {
   it('stops the picture when a frame is stepped by the button', async () => {
     // The transport and the playhead pull in two directions otherwise: the element goes on
     // decoding forwards while the number under it is being walked by hand.
-    await mount({ ...(await ready()), preview: previewOf() } as EditorState)
+    await mount({ ...(await ready()), preview: previewOf() })
 
     press(' ')
     await settled()
@@ -617,7 +660,7 @@ describe('the editor shell', () => {
   it('leaves a text box its own letters, mounted in the tab as it is', async () => {
     // The rule that makes the rest of the layout usable, checked where the field really is: the
     // name of a clip is typed into the inspector while the same letters are commands outside it.
-    await mount({ ...(await ready()), preview: previewOf() } as EditorState)
+    await mount({ ...(await ready()), preview: previewOf() })
     press('i')
     await settled()
 

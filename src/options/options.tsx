@@ -587,7 +587,6 @@ export function Options() {
           <span class="label">Format</span>
           <select data-testid="format" disabled value={settings.export.format}>
             <option value="mp4">MP4</option>
-            <option value="webm">WebM</option>
             <option value="webp">Animated WebP</option>
           </select>
         </label>
@@ -595,6 +594,7 @@ export function Options() {
         <label class="row">
           <span class="label">Codec when re-encoding</span>
           <select data-testid="codec" disabled value={settings.export.codec}>
+            <option value="auto">Auto — H.264, or HEVC when the quality is low</option>
             <option value="hevc">HEVC, falling back to H.264</option>
             <option value="h264">H.264</option>
           </select>

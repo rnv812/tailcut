@@ -677,6 +677,16 @@ describe('the framing of a clip', () => {
       oneClip(),
     )
     const before = cropOf(framed)
+    // Said first, and said by value: `toBe` between two nothings passes, so a clip that never
+    // got the rectangle at all would satisfy both identities below without ever holding one.
+    // Checked by breaking it — with the `setCrop` above taken away, the two lines that follow
+    // went on passing.
+    expect(before, 'there is no rectangle here to keep still').toEqual({
+      x: 100,
+      y: 6,
+      width: 332,
+      height: 186,
+    })
 
     const webp = reduce(framed, { type: 'setFormat', id: 'c1', format: 'webp' }, ctx)
     expect(cropOf(webp)).toBe(before)

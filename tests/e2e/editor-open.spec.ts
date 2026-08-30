@@ -24,6 +24,38 @@ test('Edit opens an editor tab over the material of the page', async () => {
   }
 })
 
+test('a clip is born by the Export settings the tab read when it opened', async () => {
+  const { context, player, extensionId } = await recordPlayer()
+
+  try {
+    // Written before the editor is opened, because the tab reads §9.4 once — see `main.tsx` —
+    // and a template written afterwards would reach nothing. This is the only test on either
+    // side of the browser that walks the whole wire: storage, `readSettings`, `EditorOptions`,
+    // `deriveMaterial`, the context, the reducer, the name in the panel. Cut it anywhere and a
+    // clip goes back to being named the way stage 2 named it, taking the format a clip is born
+    // in with it — that one has no pixel on any screen yet (§8.4, and Task 8 draws it).
+    const writer = await openExtensionPage(context, extensionId, 'popup/popup.html')
+    await writer.evaluate(async () => {
+      const address = '/shared/settings-store.js'
+      const { writeSettings }: typeof import('../../src/shared/settings-store') = await import(address)
+      await writeSettings((current) => ({
+        ...current,
+        export: { ...current.export, nameTemplate: '{host} at {in}', format: 'webp' },
+      }))
+    })
+    await writer.close()
+
+    const { editor } = await clickEdit(context, player, extensionId)
+    await editor.waitForFunction(() => (document.querySelector('video')?.readyState ?? 0) >= 2)
+
+    await editor.keyboard.press('i')
+    await expect(editor.getByTestId('clip')).toHaveCount(1)
+    await expect(editor.getByTestId('name-c1')).toHaveValue('tailcut.test at 00.00')
+  } finally {
+    await context.close()
+  }
+})
+
 test('the editor survives a reload of its tab and the closing of the source', async () => {
   const { context, player, extensionId } = await recordPlayer()
 

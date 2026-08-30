@@ -76,8 +76,8 @@ function TrackLine({ track }: { track: MaterialTrack }) {
 export function Workbench({ reader, material, preview, options }: WorkbenchProps) {
   const built = preview === 'building' ? null : preview
   const derived = useMemo(
-    () => deriveMaterial(reader.index, built, options.nameTemplate, options.export?.format),
-    [reader, built, options.nameTemplate, options.export],
+    () => deriveMaterial(reader.index, built, options.export),
+    [reader, built, options.export],
   )
   // A new context is a new store: the frame grid every clip is measured against has changed, and
   // clips measured against the old one would mean something else against the new.
