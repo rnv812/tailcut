@@ -54,6 +54,9 @@ const NOTHING: SessionList = { sessions: [] }
  */
 let boundTabId: number | undefined
 
+/** The window that holds the tab above; editor and settings pages belong beside that tab. */
+let boundWindowId: number | undefined
+
 /**
  * The sessions of the last list, each with the frame it came out of.
  *
@@ -77,8 +80,18 @@ async function targetTabId(): Promise<number | undefined> {
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
   boundTabId = tab?.id
+  boundWindowId = tab?.windowId
   boundUrl = tab?.url ?? ''
   return boundTabId
+}
+
+/** Opens one extension page beside the tab the popup was opened over. */
+async function openInBoundWindow(path: string): Promise<void> {
+  await targetTabId()
+  const url = chrome.runtime.getURL(path)
+  await chrome.tabs.create(
+    boundWindowId === undefined ? { url } : { url, windowId: boundWindowId },
+  )
 }
 
 /**
@@ -176,7 +189,7 @@ export async function editSession(key: string): Promise<EditResult> {
 
 /** Opens the editor over one snapshot in a tab of its own. */
 export async function openEditor(snapshotId: string): Promise<void> {
-  await chrome.tabs.create({ url: chrome.runtime.getURL(editorUrl(snapshotId)) })
+  await openInBoundWindow(editorUrl(snapshotId))
 }
 
 /** One recording of the history, as a row of the popup needs it. */
@@ -250,7 +263,12 @@ export async function storageInUse(): Promise<{ bytes: number; full: boolean }> 
 
 /** Opens the editor over a recording of the history, in a tab of its own. */
 export async function openHistoryEditor(id: string): Promise<void> {
-  await chrome.tabs.create({ url: chrome.runtime.getURL(historyUrl(id)) })
+  await openInBoundWindow(historyUrl(id))
+}
+
+/** Opens settings beside the page they apply to. */
+export async function openSettings(): Promise<void> {
+  await openInBoundWindow('options/options.html')
 }
 
 /** What the switch under the history stands at, and whether it decides anything at all. */

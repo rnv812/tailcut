@@ -11,6 +11,7 @@ import {
   listSessions,
   openEditor,
   openHistoryEditor,
+  openSettings,
   pageUrl,
   pauseThisTab,
   pinHistory,
@@ -287,7 +288,7 @@ function Footer(props: {
           : `${formatBytes(props.inUse.bytes)} on disk`}
       </div>
 
-      <button class="quiet" data-testid="open-settings" onClick={() => chrome.runtime.openOptionsPage()}>
+      <button class="quiet" data-testid="open-settings" onClick={() => void openSettings()}>
         Settings
       </button>
 

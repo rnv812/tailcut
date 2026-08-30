@@ -169,7 +169,7 @@ type Reply = {
  * module stays the real one — the whole road from the tab's answer to the markup is checked.
  */
 function installChrome(reply: Reply) {
-  const created: Array<{ url: string }> = []
+  const created: Array<{ url: string; windowId?: number }> = []
   // The save answer is mutable: the same popup saves more than once, and the second attempt may
   // well go through where the first did not.
   let saveReply: unknown = (reply === 'silent' ? undefined : reply.save) ?? { ok: true }
@@ -183,13 +183,18 @@ function installChrome(reply: Reply) {
   })
 
   vi.stubGlobal('chrome', {
-    runtime: { getURL: (path: string) => `chrome-extension://tailcut/${path}` },
+    runtime: {
+      getURL: (path: string) => `chrome-extension://tailcut/${path}`,
+      // Chrome may place this page wherever it chooses. Kept as a no-op so the settings test
+      // detects that old path by its missing same-window tab rather than by a fake API crash.
+      openOptionsPage: async () => undefined,
+    },
     tabs: {
       // With the address of the page in it. The quick switch below the history is about the site
       // the tab stands on, and no answer of the tab says where that is: an embedded player
       // reports the address of the embed, which is a different site from the page around it.
-      query: async () => [{ id: 7, url: fresh.url }],
-      create: async (options: { url: string }) => {
+      query: async () => [{ id: 7, url: fresh.url, windowId: 23 }],
+      create: async (options: { url: string; windowId?: number }) => {
         created.push(options)
       },
       sendMessage: (tabId: number, message: unknown) => {
@@ -717,7 +722,7 @@ describe('Edit', () => {
       key: fresh.key,
     })
     expect(chrome.created).toEqual([
-      { url: `chrome-extension://tailcut/editor/editor.html?s=${SNAPSHOT}` },
+      { url: `chrome-extension://tailcut/editor/editor.html?s=${SNAPSHOT}`, windowId: 23 },
     ])
     // The popup gets out of the way of the tab it has just sent the user to.
     expect(chrome.closed).toBe(true)
@@ -896,7 +901,17 @@ describe('the history and the switches under it', () => {
     // By the second door of the editor and not by the first: `?h=` is a session of the history,
     // whose material is the pieces on disk, and `?s=` is a snapshot file written for one editing.
     expect(chrome.created).toEqual([
-      { url: 'chrome-extension://tailcut/editor/editor.html?h=h1' },
+      { url: 'chrome-extension://tailcut/editor/editor.html?h=h1', windowId: 23 },
+    ])
+  })
+
+  it('opens settings in the same window as the page', async () => {
+    const chrome = await draw()
+
+    await click(at('open-settings')!)
+
+    expect(chrome.created).toEqual([
+      { url: 'chrome-extension://tailcut/options/options.html', windowId: 23 },
     ])
   })
 

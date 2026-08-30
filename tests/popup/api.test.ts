@@ -127,7 +127,7 @@ type Injected = { tabId?: number; allFrames?: boolean }
  */
 function installChrome(
   options: {
-    tabs?: Array<{ id?: number; url?: string }>
+    tabs?: Array<{ id?: number; url?: string; windowId?: number }>
     /** What each frame of the tab answers a list request with, by frame number. */
     frames?: Record<number, unknown>
     /** Frames that hear the request and never answer it. */
@@ -142,7 +142,8 @@ function installChrome(
 ) {
   const sent: Sent[] = []
   const injected: Injected[] = []
-  let tabs: Array<{ id?: number; url?: string }> = options.tabs ?? [{ id: 7, url: PAGE_URL }]
+  let tabs: Array<{ id?: number; url?: string; windowId?: number }> =
+    options.tabs ?? [{ id: 7, url: PAGE_URL, windowId: 23 }]
   let frames: Record<number, unknown> =
     options.frames ??
     ({ [TOP]: 'listReply' in options ? options.listReply : { sessions: [summary] } })
@@ -153,7 +154,7 @@ function installChrome(
   let failure: Error | null = null
 
   /** Tabs the popup opened: the editor over a snapshot, and the editor over the history. */
-  const created: Array<{ url: string }> = []
+  const created: Array<{ url: string; windowId?: number }> = []
 
   vi.stubGlobal('chrome', {
     runtime: { getURL: (path: string) => `chrome-extension://tailcut/${path}` },
@@ -175,7 +176,7 @@ function installChrome(
         ...(info.active ? [] : [BACKGROUND_TAB]),
         ...tabs,
       ],
-      create: async (options: { url: string }) => {
+      create: async (options: { url: string; windowId?: number }) => {
         created.push(options)
       },
       sendMessage: async (tabId: number, message: unknown, opts: { frameId?: number } = {}) => {
@@ -695,6 +696,33 @@ describe('editSession', () => {
   })
 })
 
+describe('pages opened from the popup', () => {
+  it('opens the snapshot editor in the window that holds the recorded tab', async () => {
+    const chrome = installChrome()
+    const { openEditor } = await importApi()
+
+    await openEditor(SNAPSHOT)
+
+    expect(chrome.created).toEqual([
+      {
+        url: `chrome-extension://tailcut/editor/editor.html?s=${SNAPSHOT}`,
+        windowId: 23,
+      },
+    ])
+  })
+
+  it('opens settings in the window that holds the recorded tab', async () => {
+    const chrome = installChrome()
+    const { openSettings } = await importApi()
+
+    await openSettings()
+
+    expect(chrome.created).toEqual([
+      { url: 'chrome-extension://tailcut/options/options.html', windowId: 23 },
+    ])
+  })
+})
+
 describe('formatDuration', () => {
   it.each([
     [0, '0:00'],
@@ -854,7 +882,7 @@ describe('the history the popup shows', () => {
     // `?h=` and not `?s=`: a snapshot is a file written for one editing, a history session is the
     // pieces on disk and the rows over them, and nothing is copied to open it.
     expect(chrome.created).toEqual([
-      { url: 'chrome-extension://tailcut/editor/editor.html?h=h1' },
+      { url: 'chrome-extension://tailcut/editor/editor.html?h=h1', windowId: 23 },
     ])
   })
 })

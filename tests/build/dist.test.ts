@@ -156,6 +156,13 @@ const REQUIRED_PERMISSIONS: Record<string, string> = {
 }
 
 describe('build', () => {
+  it('runs extension pages in the incognito profile that recorded their material', () => {
+    // A snapshot is written by the bridge inside the source tab and read by a top-level editor
+    // page. Chrome's default `spanning` mode cannot put that extension page in an incognito tab,
+    // so it opens against the regular profile and sees no snapshot at all.
+    expect(manifest().incognito).toBe('split')
+  })
+
   it('puts every file referenced by the manifest in dist', () => {
     const m = manifest()
     const referenced: string[] = [
