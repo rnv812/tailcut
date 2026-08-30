@@ -1,7 +1,11 @@
+import type { ExportFormat } from '../../shared/settings'
+import type { Crop } from '../encode/crop'
 import { applyTemplate } from '../export/naming'
 import { boundaryIndexAt, quantize, shiftBy } from '../timeline/grid'
 import type { Zone } from '../timeline/lanes'
 import type { EditContext } from './context'
+
+export type ClipMode = 'original' | 'optimize'
 
 export interface Clip {
   id: string
@@ -12,9 +16,26 @@ export interface Clip {
   /** §8.3: a clip lives inside one representation, and this names it. */
   representation: string
   sound: boolean
-  /** Stage 4: cropping. The inspector draws it disabled and says why. */
-  crop: null
-  format: 'mp4'
+  /** §8.5: the rectangle of the source picture this clip keeps, or the whole of it. */
+  crop: Crop | null
+  format: ExportFormat
+  /** §8.4: `original` copies the coded frames, `optimize` writes them again, smaller. */
+  mode: ClipMode
+}
+
+/**
+ * Whether this clip has to go through a decoder and an encoder.
+ *
+ * Four reasons, and every one of them is a fact about the clip rather than a preference: a crop
+ * changes the picture, WebP is not a container the coded frames can be moved into, `optimize` is
+ * the request itself, and a start that is not on a sync sample can only be made exact by writing
+ * the head again — which the user asks for with `rewriteHead` (§8.2) and gets nowhere else.
+ */
+export function forcesEncoder(clip: Clip, startsOnKeyframe: boolean, rewriteHead: boolean): boolean {
+  if (clip.crop !== null) return true
+  if (clip.format === 'webp') return true
+  if (clip.mode === 'optimize') return true
+  return rewriteHead && !startsOnKeyframe
 }
 
 export interface Marker {

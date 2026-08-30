@@ -20,6 +20,15 @@ export interface Preview {
   url: string
   bytes: number
   /**
+   * Coded size of the picture this file holds: what a crop is a rectangle of (§8.5).
+   *
+   * Off the plan's own video track rather than off the `<video>` element, and the difference
+   * matters: the element reports the size it is laid out at, which is the window's business, and
+   * a crop is a rectangle of the recording. Zero by zero when the file has no picture at all —
+   * the same nothing `frames` is then.
+   */
+  frameSize: { width: number; height: number }
+  /**
    * The frames of the picture, on both clocks: `pts` is the session, `out` is this file. There is
    * no third number and no origin — the difference between the two is whatever the plan did.
    */
@@ -59,7 +68,11 @@ async function load(
 }
 
 /** The assembled file and its frame table, wrapped as the thing the player is handed. */
-function previewOf(file: Uint8Array, frames: Frame[]): Preview {
+function previewOf(
+  file: Uint8Array,
+  frames: Frame[],
+  frameSize: { width: number; height: number },
+): Preview {
   const url = URL.createObjectURL(
     new Blob([file as Uint8Array<ArrayBuffer>], { type: 'video/mp4' }),
   )
@@ -67,6 +80,7 @@ function previewOf(file: Uint8Array, frames: Frame[]): Preview {
   return {
     url,
     bytes: file.byteLength,
+    frameSize,
     frames: FrameTable.of(frames),
     release: () => URL.revokeObjectURL(url),
   }
@@ -109,7 +123,11 @@ async function fileMaterialPreview(
   if (!file.byteLength) return null
 
   const shown = plan.tracks.find((one) => one.kind === 'video')
-  return previewOf(file, shown ? retimeToPlan(framesOfTrack(source.video), shown) : [])
+  return previewOf(
+    file,
+    shown ? retimeToPlan(framesOfTrack(source.video), shown) : [],
+    { width: shown?.width ?? 0, height: shown?.height ?? 0 },
+  )
 }
 
 /**
@@ -187,5 +205,5 @@ export async function buildPreview(
       )
     : []
 
-  return previewOf(file, frames)
+  return previewOf(file, frames, { width: shown?.width ?? 0, height: shown?.height ?? 0 })
 }

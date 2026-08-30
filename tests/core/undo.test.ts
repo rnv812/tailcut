@@ -88,6 +88,42 @@ const SAMPLES: Record<Action['type'], Sample> = {
     before: [seek(1), { type: 'setIn' }],
     action: { type: 'trim', id: 'c1', edge: 'out', time: 2 },
   },
+
+  // The six of stage 4. Every one of them edits the document, so every one of them owes the
+  // history a step — which is the law the census below holds them to.
+  setCrop: {
+    before: [seek(1), { type: 'setIn' }],
+    action: { type: 'setCrop', id: 'c1', crop: { x: 10, y: 10, width: 200, height: 100 } },
+  },
+  cropRatio: {
+    before: [seek(1), { type: 'setIn' }],
+    action: { type: 'cropRatio', id: 'c1', ratio: '1:1' },
+  },
+  clearCrop: {
+    before: [seek(1), { type: 'setIn' }, { type: 'setCrop', id: 'c1', crop: { x: 10, y: 10, width: 200, height: 100 } }],
+    action: { type: 'clearCrop', id: 'c1' },
+  },
+  // Two clips of the same representation, the second selected and cropped: "apply to all" reads
+  // the selection and writes to the rest, so a table with one clip in it would sample nothing.
+  applyCropToAll: {
+    before: [
+      seek(1),
+      { type: 'setIn' },
+      { type: 'selectClip', id: null },
+      seek(2),
+      { type: 'setIn' },
+      { type: 'setCrop', id: 'c2', crop: { x: 10, y: 10, width: 200, height: 100 } },
+    ],
+    action: { type: 'applyCropToAll' },
+  },
+  setFormat: {
+    before: [seek(1), { type: 'setIn' }],
+    action: { type: 'setFormat', id: 'c1', format: 'webp' },
+  },
+  setMode: {
+    before: [seek(1), { type: 'setIn' }],
+    action: { type: 'setMode', id: 'c1', mode: 'optimize' },
+  },
 }
 
 const samples = (): Array<[Action['type'], Sample]> =>

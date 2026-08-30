@@ -1,3 +1,5 @@
+import type { ExportFormat } from '../../shared/settings'
+import { normalizeCrop, ratioCrop, type Crop, type CropRatio } from '../encode/crop'
 import { quantize, shiftBy } from '../timeline/grid'
 import {
   clampView,
@@ -7,7 +9,7 @@ import {
   zoomAt,
   zoomToward,
 } from '../timeline/view'
-import { clipName, normalizeClip, type Clip, type Marker } from './clip'
+import { clipName, normalizeClip, type Clip, type ClipMode, type Marker } from './clip'
 import { runAt, viewBounds, zoneAt, type EditContext } from './context'
 import type { UndoMode } from './history'
 import { clipById, selectedClip, type Doc, type Project, type Ui } from './project'
@@ -43,6 +45,12 @@ export type Action =
   | { type: 'resize'; widthPx: number }
   | { type: 'setSnapping'; on: boolean }
   | { type: 'toggleSnapping' }
+  | { type: 'setCrop'; id: string; crop: Crop; dragging?: boolean }
+  | { type: 'cropRatio'; id: string; ratio: CropRatio }
+  | { type: 'clearCrop'; id: string }
+  | { type: 'applyCropToAll' }
+  | { type: 'setFormat'; id: string; format: ExportFormat }
+  | { type: 'setMode'; id: string; mode: ClipMode }
 
 /** Returns the project itself when every field is what it already was. */
 function withUi(project: Project, ui: Partial<Ui>): Project {
@@ -62,6 +70,15 @@ function replaceClip(project: Project, id: string, clip: Clip): Project {
     clips: project.doc.clips.map((candidate) => (candidate.id === id ? clip : candidate)),
   })
 }
+
+const sameCrop = (a: Crop | null, b: Crop | null): boolean =>
+  a === b ||
+  (a !== null &&
+    b !== null &&
+    a.x === b.x &&
+    a.y === b.y &&
+    a.width === b.width &&
+    a.height === b.height)
 
 function trimTo(project: Project, clip: Clip, edge: 'in' | 'out', time: number, ctx: EditContext): Project {
   const moved = edge === 'in' ? { ...clip, in: time } : { ...clip, out: time }
@@ -96,7 +113,8 @@ function startClip(project: Project, edge: 'in' | 'out', ctx: EditContext): Proj
     representation: zoneAt(ctx, start)?.representation ?? '',
     sound: true,
     crop: null,
-    format: 'mp4',
+    format: ctx.newClipFormat,
+    mode: 'original',
   }
 
   // The edge the user did not choose is the one that gives way; if there is no room for it to
@@ -233,6 +251,63 @@ export function reduce(project: Project, action: Action, ctx: EditContext): Proj
       return replaceClip(project, clip.id, { ...clip, sound: !clip.sound })
     }
 
+    case 'setCrop': {
+      const clip = clipById(project.doc, action.id)
+      if (!clip) return project
+      const crop = normalizeCrop(action.crop, ctx.frameSize)
+      // The drag sends one of these a frame; a rectangle that came back the same is not an edit,
+      // and letting it through would put a history entry on every pixel the pointer did not move.
+      if (sameCrop(clip.crop, crop)) return project
+      return replaceClip(project, clip.id, { ...clip, crop })
+    }
+
+    case 'cropRatio': {
+      const clip = clipById(project.doc, action.id)
+      if (!clip) return project
+      return replaceClip(project, clip.id, {
+        ...clip,
+        crop: ratioCrop(action.ratio, ctx.frameSize),
+      })
+    }
+
+    case 'clearCrop': {
+      const clip = clipById(project.doc, action.id)
+      if (!clip || clip.crop === null) return project
+      return replaceClip(project, clip.id, { ...clip, crop: null })
+    }
+
+    case 'applyCropToAll': {
+      const from = selectedClip(project)
+      if (!from) return project
+      // Only the clips of the same representation. Another representation is another frame size,
+      // and a 1080p rectangle put on a 480p clip would be pushed inside its edges by
+      // `normalizeCrop` — becoming a different rectangle, silently, which is the one thing
+      // "apply to all" must not do.
+      const clips = project.doc.clips.map((clip) =>
+        clip.id === from.id || clip.representation !== from.representation
+          ? clip
+          : { ...clip, crop: from.crop === null ? null : normalizeCrop(from.crop, ctx.frameSize) },
+      )
+      if (clips.every((clip, at) => clip === project.doc.clips[at])) return project
+      return edited(project, { clips })
+    }
+
+    case 'setFormat': {
+      const clip = clipById(project.doc, action.id)
+      if (!clip || clip.format === action.format) return project
+      // The rectangle is not touched by a change of format, and there is nothing to touch: it was
+      // put right against the picture it is cut from, and the picture does not change when the
+      // container does. An earlier draft re-rounded it here, back when evenness was a rule about
+      // MP4 rather than about 4:2:0 — that was the shape of the bug, not of the fix.
+      return replaceClip(project, clip.id, { ...clip, format: action.format })
+    }
+
+    case 'setMode': {
+      const clip = clipById(project.doc, action.id)
+      if (!clip || clip.mode === action.mode) return project
+      return replaceClip(project, clip.id, { ...clip, mode: action.mode })
+    }
+
     case 'addMarker':
       return addMarker(project, ctx)
 
@@ -340,6 +415,16 @@ const MODES: { [T in Action['type']]: ModeFor<T> } = {
   trim: (action) =>
     action.typed ? STEP : { kind: 'merge', key: `trim:${action.id}:${action.edge}` },
   renameClip: (action) => ({ kind: 'merge', key: `rename:${action.id}` }),
+
+  clearCrop: STEP,
+  cropRatio: STEP,
+  applyCropToAll: STEP,
+  setFormat: STEP,
+  setMode: STEP,
+
+  // A drag of the crop handles is a flood like a trim: hundreds of events, one press of Ctrl+Z.
+  // The key is the clip, not the handle — a frame moved and then resized is one act of framing.
+  setCrop: (action) => (action.dragging ? { kind: 'merge', key: `crop:${action.id}` } : STEP),
 }
 
 /** Every command there is, taken off the table so that the two cannot drift apart. */

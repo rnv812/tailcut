@@ -1,5 +1,6 @@
 import type { Material } from '../core/snapshot/material'
 import type { SnapshotReader } from '../core/snapshot/read'
+import type { ExportSettings } from '../shared/settings'
 import type { SaveOptions } from './export/exporter'
 import type { Preview } from './source/preview'
 import type { SnapshotFailure } from './source/snapshot'
@@ -15,6 +16,15 @@ import { Workbench } from './workbench'
 export interface EditorOptions extends SaveOptions {
   /** The template a new clip is named by; absent — the name stage 2 built. */
   nameTemplate?: string
+  /**
+   * §9.4 as the tab read it when it opened: the whole Export group.
+   *
+   * The format a new clip is born in, the codec the ladder is asked for, the quality it is asked
+   * at, and whether a start off a key frame is rewritten. Four settings that stage 4 gives
+   * meaning to, and they arrive together because they are read together — one `readSettings` in
+   * `main.tsx`, before the first frame is drawn.
+   */
+  export?: ExportSettings
 }
 
 /** §9.4 with nothing to say: every field of it is optional, so absent and empty are one state. */

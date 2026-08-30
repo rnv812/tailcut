@@ -11,6 +11,7 @@ import {
   type Span,
 } from '../../core/timeline/lanes'
 import { hostOf } from '../../shared/format'
+import type { ExportFormat } from '../../shared/settings'
 import type { Preview } from './preview'
 
 export interface EditorMaterial {
@@ -38,6 +39,7 @@ export function deriveMaterial(
   index: SnapshotIndex,
   preview: Preview | null,
   nameTemplate?: string,
+  newClipFormat: ExportFormat = 'mp4',
 ): EditorMaterial {
   const lanes = lanesOf(index.tracks)
   const picture = laneOf(lanes, 'video')
@@ -54,6 +56,11 @@ export function deriveMaterial(
     }),
     keyframes: preview ? preview.frames.keyframeTimes() : new Float64Array(),
     fps: preview ? preview.frames.fps() : 0,
+    // The size of the picture the preview holds, which is the size the crop rectangle is drawn
+    // over and the size the encoder will be asked for. Nothing else in the snapshot answers this:
+    // `index` describes every representation, and a crop is a rectangle of the open one.
+    frameSize: preview?.frameSize ?? { width: 0, height: 0 },
+    newClipFormat,
     runs: picture?.runs ?? [],
     zones: picture?.zones ?? [],
     duration: materialSpan(lanes)?.end ?? 0,

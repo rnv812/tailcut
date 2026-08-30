@@ -2,6 +2,9 @@
 import { describe, it, expect, vi } from 'vitest'
 import { newSession } from '../../src/core/edit/session'
 import { newProject } from '../../src/core/edit/project'
+import { reduce } from '../../src/core/edit/actions'
+import { geometryOf } from '../../src/core/encode/crop'
+import type { ExportFormat } from '../../src/shared/settings'
 import { FrameTable, type Frame } from '../../src/core/timeline/frames'
 import { planSnapshot, type SnapshotSource } from '../../src/core/snapshot/build'
 import { createStore } from '../../src/editor/state/store'
@@ -67,6 +70,9 @@ const index = planSnapshot(source, { id: 'x', capturedAt: 0, producer: 'test' })
 const preview: Preview = {
   url: 'blob:preview',
   bytes: 1,
+  // The size the fixture's own picture track declares — see `info('video')` above. A crop is a
+  // rectangle of this, so a number invented here would be a rectangle of nothing.
+  frameSize: { width: 640, height: 480 },
   frames: FrameTable.of(
     [0, 4].flatMap((from) =>
       Array.from({ length: 50 }, (_, at): Frame => ({
@@ -129,6 +135,52 @@ describe('deriveMaterial', () => {
       { start: 4, end: 6 },
     ])
     expect(ctx.zones.map((zone) => zone.representation)).toEqual(['video:avc1:640x480'])
+  })
+
+  /**
+   * Delivery, not source. What `frameSize` is measured from is the preview's own video track,
+   * and that is proven where a preview is really assembled — `tests/editor/preview.test.ts`.
+   * Here the only claim is that `deriveMaterial` carries the number across without inventing
+   * one, which is exactly what a literal `{ width: 0, height: 0 }` in this file would do.
+   */
+  it('carries the size of the picture from the preview into the context', () => {
+    const { ctx } = deriveMaterial(index, preview)
+
+    expect(ctx.frameSize).toEqual(preview.frameSize)
+    expect(ctx.frameSize).toEqual({ width: 640, height: 480 })
+  })
+
+  it('hands that size on to whoever asks what is being encoded', () => {
+    // The number reaching the field is not the same as the number reaching the encoder. This is
+    // the question the probe and the ladder are asked (§8.4), built out of the context alone.
+    const { ctx } = deriveMaterial(index, preview)
+
+    expect(geometryOf(null, ctx.frameSize, ctx.fps)).toEqual({
+      width: 640,
+      height: 480,
+      framerate: ctx.fps,
+    })
+  })
+
+  it('has no frame size for a tab with no picture in it', () => {
+    // The one place a zero is honest: nothing is open, so there is nothing a crop is a rectangle
+    // of. Everywhere else a zero is a crop that collapses without saying so.
+    expect(deriveMaterial(index, null).ctx.frameSize).toEqual({ width: 0, height: 0 })
+  })
+
+  it('carries the format a new clip is born in out of the settings and into the reducer', () => {
+    // §9.4 reaches the model this way and no other: the clip is made by `reduce`, which is pure
+    // and knows nothing but the context it is handed.
+    const born = (format?: ExportFormat): string => {
+      const { ctx } = deriveMaterial(index, preview, undefined, format)
+      const project = reduce(newProject(1_000, ctx), { type: 'addClip' }, ctx)
+      expect(project.doc.clips, 'no clip was made to read the format off').toHaveLength(1)
+      return project.doc.clips[0]!.format
+    }
+
+    expect(born('webp')).toBe('webp')
+    // Absent from the settings is the default of §7.4, and not whatever the last tab used.
+    expect(born(undefined)).toBe('mp4')
   })
 
   it('opens a snapshot with no preview without falling over', () => {

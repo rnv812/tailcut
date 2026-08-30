@@ -50,6 +50,9 @@ async function preview(): Promise<Preview> {
   return {
     url,
     bytes: file.byteLength,
+    // Off the planned track, the way `previewOf` does it. The stand draws thumbnails and knows
+    // nothing of crops; it needs the field to be a Preview at all.
+    frameSize: { width: plan.tracks[0]!.width, height: plan.tracks[0]!.height },
     frames: FrameTable.of(frames),
     release: () => URL.revokeObjectURL(url),
   }

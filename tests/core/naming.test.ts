@@ -18,6 +18,7 @@ const clip = (name: string): Clip => ({
   sound: true,
   crop: null,
   format: 'mp4',
+  mode: 'original',
 })
 
 describe('sanitizeFileName', () => {

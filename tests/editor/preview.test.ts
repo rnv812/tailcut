@@ -250,6 +250,36 @@ describe('buildPreview', () => {
     })
   })
 
+  /**
+   * The size of the picture, which is the one thing a crop is a rectangle of (§8.5).
+   *
+   * It is taken here rather than off the <video> element on purpose: the element reports the size
+   * it is laid out at, which is the window's business, and a rectangle of that would be a
+   * rectangle of the browser window. Zero is what makes this worth a test of its own — a zero
+   * assembles, passes every other check in this file, and leaves the crop dead: normalizeCrop
+   * clamps all four numbers to nothing, and the encoder is asked for a frame 0×0.
+   */
+  it('reads the size of the picture off the track of the file it assembled', async () => {
+    const built = await preview([0, 1, 2])
+
+    expect(built.frameSize).toEqual({ width: 320, height: 240 })
+    expect(built.frameSize.width, 'a zero here is a crop that collapses in silence').not.toBe(0)
+    expect(built.frameSize.height, 'a zero here is a crop that collapses in silence').not.toBe(0)
+
+    built.release()
+  })
+
+  it('reads it off each material rather than assuming one size', async () => {
+    // The other kind of material, and a different picture: 256×144 against the 320×240 above. A
+    // size that came from anywhere but this file's own video track would answer the same twice.
+    const reader = await snapshotOfFile(WHOLE)
+    const built = (await buildPreview(reader, materialOf(reader.index)))!
+
+    expect(built.frameSize).toEqual({ width: 256, height: 144 })
+
+    built.release()
+  })
+
   it('has nothing to play when the snapshot holds no picture', async () => {
     const reader = await snapshotOf([0])
     const material = materialOf(reader.index)

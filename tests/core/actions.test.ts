@@ -511,6 +511,12 @@ describe('undoModeOf', () => {
       { type: 'addMarker' },
       { type: 'removeMarker', id: 'm1' },
       { type: 'removeMarkerAt' },
+      { type: 'setCrop', id: 'c1', crop: { x: 0, y: 0, width: 64, height: 64 } },
+      { type: 'cropRatio', id: 'c1', ratio: '16:9' },
+      { type: 'clearCrop', id: 'c1' },
+      { type: 'applyCropToAll' },
+      { type: 'setFormat', id: 'c1', format: 'webp' },
+      { type: 'setMode', id: 'c1', mode: 'optimize' },
     ]
 
     for (const action of edits) expect(undoModeOf(action)).toEqual({ kind: 'step' })
@@ -527,6 +533,23 @@ describe('undoModeOf', () => {
     })
   })
 
+  it('merges a crop being dragged, under a key that is the clip and not the handle', () => {
+    // A drag sends one of these a frame, and Ctrl+Z takes back the framing rather than the last
+    // pixel of it. A rectangle moved and then resized is one act of framing; a key per handle
+    // would make it two presses. The rectangle let go of is a step of its own.
+    const crop = { x: 0, y: 0, width: 64, height: 64 }
+
+    expect(undoModeOf({ type: 'setCrop', id: 'c1', crop, dragging: true })).toEqual({
+      kind: 'merge',
+      key: 'crop:c1',
+    })
+    expect(undoModeOf({ type: 'setCrop', id: 'c2', crop, dragging: true })).toEqual({
+      kind: 'merge',
+      key: 'crop:c2',
+    })
+    expect(undoModeOf({ type: 'setCrop', id: 'c1', crop })).toEqual({ kind: 'step' })
+  })
+
   it('keeps a typed trim out of the drag it would otherwise join', () => {
     // A drag of one handle is hundreds of trims and one step of history, and that is right. A
     // value typed into the inspector is one deliberate act: joined to the drag before it, Ctrl+Z
@@ -538,5 +561,134 @@ describe('undoModeOf', () => {
     expect(undoModeOf({ type: 'trim', id: 'c1', edge: 'in', time: 1, typed: true })).toEqual({
       kind: 'step',
     })
+  })
+})
+
+/**
+ * The framing of a clip: a rectangle, a container and a mode (§8.5, §8.4).
+ *
+ * The rectangle is put right against `ctx.frameSize` — the size of the picture the player is
+ * playing — and not against the clip's own idea of anything: a crop is a rectangle of the open
+ * representation, and the fixture's is 854×480.
+ */
+describe('the framing of a clip', () => {
+  /** A fresh document with one clip, `c1`, running from 1 to 4 in the 480p zone. */
+  const oneClip = (): Project => run([at(1), { type: 'setIn' }])
+
+  const cropOf = (project: Project, id = 'c1') =>
+    project.doc.clips.find((clip) => clip.id === id)!.crop
+
+  it('puts an odd rectangle on the chroma grid before it reaches the clip', () => {
+    // All four numbers, offsets included: what is cut from is a 4:2:0 frame, and an odd `x` does
+    // not skew the picture, it refuses to give one — `new VideoFrame(frame, { visibleRect: { x:
+    // 7, … } })` answers "x is not sample-aligned in plane 1". Correcting it here means the
+    // reducer is the last place a rectangle can be odd.
+    const put = run([{ type: 'setCrop', id: 'c1', crop: { x: 101, y: 7, width: 333, height: 187 } }], oneClip())
+
+    expect(cropOf(put)).toEqual({ x: 100, y: 6, width: 332, height: 186 })
+  })
+
+  it('returns the very same project when the rectangle came back the same', () => {
+    // A drag sends one of these a frame. Two pointer positions inside one pixel — or inside one
+    // *pair* of pixels, after the rounding above — are the same rectangle, and an edit written
+    // for each of them would put a step of history on every pixel the pointer did not move.
+    const framed = run(
+      [{ type: 'setCrop', id: 'c1', crop: { x: 100, y: 6, width: 332, height: 186 } }],
+      oneClip(),
+    )
+
+    // The same numbers, and then the odd numbers that round to them: neither is an edit.
+    expect(reduce(framed, { type: 'setCrop', id: 'c1', crop: { x: 100, y: 6, width: 332, height: 186 } }, ctx)).toBe(framed)
+    expect(reduce(framed, { type: 'setCrop', id: 'c1', crop: { x: 101, y: 7, width: 333, height: 187 } }, ctx)).toBe(framed)
+
+    // And a rectangle that moved in its size alone *is* an edit: dragging the bottom-right
+    // handle leaves the corner where it was, and a comparison that only looked at the corner
+    // would freeze the rectangle at whatever size the drag began from.
+    const grown = reduce(framed, { type: 'setCrop', id: 'c1', crop: { x: 100, y: 6, width: 400, height: 186 } }, ctx)
+    expect(grown).not.toBe(framed)
+    expect(cropOf(grown)).toEqual({ x: 100, y: 6, width: 400, height: 186 })
+
+    // And so is a rectangle that only moved: dragging the whole frame keeps its size, and a
+    // comparison of the sides alone would pin it wherever the drag picked it up.
+    const moved = reduce(framed, { type: 'setCrop', id: 'c1', crop: { x: 200, y: 40, width: 332, height: 186 } }, ctx)
+    expect(moved).not.toBe(framed)
+    expect(cropOf(moved)).toEqual({ x: 200, y: 40, width: 332, height: 186 })
+  })
+
+  it('puts a preset rectangle in the middle of the picture', () => {
+    // 854×480 holds a square 480 on a side, and 187 pixels of margin round to 186.
+    const square = run([{ type: 'cropRatio', id: 'c1', ratio: '1:1' }], oneClip())
+
+    expect(cropOf(square)).toEqual({ x: 186, y: 0, width: 480, height: 480 })
+  })
+
+  it('takes the rectangle off again', () => {
+    const framed = run(
+      [{ type: 'setCrop', id: 'c1', crop: { x: 10, y: 10, width: 200, height: 100 } }],
+      oneClip(),
+    )
+
+    expect(cropOf(reduce(framed, { type: 'clearCrop', id: 'c1' }, ctx))).toBeNull()
+  })
+
+  it('returns the very same project when there was no rectangle to take off', () => {
+    const project = oneClip()
+
+    expect(reduce(project, { type: 'clearCrop', id: 'c1' }, ctx)).toBe(project)
+  })
+
+  /** Three clips: two in the 480p zone, one in the 720p zone, the first of them selected. */
+  const threeClips = (): Project =>
+    run([
+      at(1),
+      { type: 'setIn' },
+      { type: 'selectClip', id: null },
+      at(2),
+      { type: 'setIn' },
+      { type: 'selectClip', id: null },
+      at(7),
+      { type: 'setIn' },
+      { type: 'selectClip', id: 'c1' },
+      { type: 'setCrop', id: 'c1', crop: { x: 10, y: 10, width: 200, height: 100 } },
+    ])
+
+  it('gives the selected rectangle to the other clips of the same representation', () => {
+    const spread = reduce(threeClips(), { type: 'applyCropToAll' }, ctx)
+
+    expect(cropOf(spread, 'c2')).toEqual({ x: 10, y: 10, width: 200, height: 100 })
+  })
+
+  it('leaves the clips of another representation alone', () => {
+    // Another representation is another frame size. A 480p rectangle put on a 720p clip would be
+    // pushed inside its edges by `normalizeCrop` and become a different rectangle without a word
+    // — which is the one thing "apply to all" must not do.
+    const spread = reduce(threeClips(), { type: 'applyCropToAll' }, ctx)
+
+    expect(spread.doc.clips.find((clip) => clip.id === 'c3')!.representation).toBe('720p')
+    expect(cropOf(spread, 'c3')).toBeNull()
+  })
+
+  it('does not move the rectangle when the container changes', () => {
+    // Checked by identity, not by value. Evenness is a property of the 4:2:0 frame the picture is
+    // cut from, and that frame is the same whether the clip is written into an MP4 or an
+    // animation; an earlier draft re-rounded the rectangle here, which was the bug, not the fix.
+    const framed = run(
+      [{ type: 'setCrop', id: 'c1', crop: { x: 101, y: 7, width: 333, height: 187 } }],
+      oneClip(),
+    )
+    const before = cropOf(framed)
+
+    const webp = reduce(framed, { type: 'setFormat', id: 'c1', format: 'webp' }, ctx)
+    expect(cropOf(webp)).toBe(before)
+
+    const back = reduce(webp, { type: 'setFormat', id: 'c1', format: 'mp4' }, ctx)
+    expect(cropOf(back)).toBe(before)
+  })
+
+  it('switches the mode, and says nothing happened when it is already that mode', () => {
+    const optimized = reduce(oneClip(), { type: 'setMode', id: 'c1', mode: 'optimize' }, ctx)
+
+    expect(optimized.doc.clips[0]!.mode).toBe('optimize')
+    expect(reduce(optimized, { type: 'setMode', id: 'c1', mode: 'optimize' }, ctx)).toBe(optimized)
   })
 })

@@ -36,6 +36,10 @@ export const ctx: EditContext = {
   zones: ZONES,
   duration: 10,
   title: 'A page about cats',
+  // The open representation is the 480p one the sample clip lives in — the picture a crop of
+  // this material would be a rectangle of.
+  frameSize: { width: 854, height: 480 },
+  newClipFormat: 'mp4',
 }
 
 export const clip = (overrides: Partial<Clip> = {}): Clip => ({
@@ -47,6 +51,7 @@ export const clip = (overrides: Partial<Clip> = {}): Clip => ({
   sound: true,
   crop: null,
   format: 'mp4',
+  mode: 'original',
   ...overrides,
 })
 

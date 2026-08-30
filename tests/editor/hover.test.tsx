@@ -28,6 +28,8 @@ const frames = Array.from({ length: 250 }, (_, index): Frame => ({
 const preview: Preview = {
   url: 'blob:tailcut/preview',
   bytes: 1_024,
+  // Anything but zero: this file is about the hover strip, which never asks about a crop.
+  frameSize: { width: 320, height: 240 },
   frames: FrameTable.of(frames),
   release: () => {},
 }

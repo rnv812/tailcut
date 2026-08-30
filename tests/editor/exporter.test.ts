@@ -155,6 +155,7 @@ const clip = (over: Partial<Clip> = {}): Clip => ({
   sound: true,
   crop: null,
   format: 'mp4',
+  mode: 'original',
   ...over,
 })
 

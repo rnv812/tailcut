@@ -3,6 +3,7 @@ import { ctx, clip, oneQuality, FPS } from './edit-fixture'
 import {
   MIN_CLIP_FRAMES,
   clipName,
+  forcesEncoder,
   heldByQuality,
   normalizeClip,
   stamp,
@@ -214,5 +215,28 @@ describe('clipName', () => {
   it('stamps hours only when there are hours', () => {
     expect(stamp(0)).toBe('00.00')
     expect(stamp(3723)).toBe('01.02.03')
+  })
+})
+
+describe('forcesEncoder', () => {
+  it('names each of the four reasons a clip cannot simply be copied', () => {
+    // Facts about the clip, not preferences. A crop changes the picture; WebP is not a container
+    // coded frames can be moved into; `optimize` is the request itself; and a start that is not
+    // on a sync sample can only be made exact by writing the head again (§8.2), which is what
+    // `rewriteHead` asks for.
+    expect(forcesEncoder(clip({ crop: { x: 0, y: 0, width: 64, height: 64 } }), true, false)).toBe(true)
+    expect(forcesEncoder(clip({ format: 'webp' }), true, false)).toBe(true)
+    expect(forcesEncoder(clip({ mode: 'optimize' }), true, false)).toBe(true)
+    expect(forcesEncoder(clip(), false, true)).toBe(true)
+  })
+
+  it('leaves a clip with none of them on the copying path', () => {
+    // The default clip: no rectangle, an MP4, the coded frames as they are.
+    expect(forcesEncoder(clip(), true, false)).toBe(false)
+    // A start off a key frame is not by itself a reason: without `rewriteHead` the copying path
+    // hides the head with an edit list, which is what stages 2 and 3 have always done.
+    expect(forcesEncoder(clip(), false, false)).toBe(false)
+    // And the setting on its own is not one either, when the clip starts on a key frame.
+    expect(forcesEncoder(clip(), true, true)).toBe(false)
   })
 })

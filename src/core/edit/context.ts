@@ -1,3 +1,4 @@
+import type { ExportFormat } from '../../shared/settings'
 import type { Span, Zone } from '../timeline/lanes'
 import type { ViewBounds } from '../timeline/view'
 
@@ -31,6 +32,23 @@ export interface EditContext {
   keyframes: Float64Array
   /** Frames a second of the open representation. */
   fps: number
+  /**
+   * Coded size of the **open representation**: what a crop is a rectangle of.
+   *
+   * Beside `frames`, `keyframes` and `fps` rather than beside `duration`, and for the same reason
+   * they are: it describes the one representation there are frames of, not the whole recording.
+   * Where it comes from is `deriveMaterial`, off the file the player is playing — see the next
+   * step, and see why a zero here would be a crop that silently collapses to nothing.
+   */
+  frameSize: { width: number; height: number }
+  /**
+   * The format a clip is born in (§9.4), read once when the tab opened.
+   *
+   * Here for the same reason `nameTemplate` is here: a new clip is made by the reducer, which is
+   * pure and knows nothing but this context, and a setting that never reaches the reducer is a
+   * setting that does nothing. Absent from the settings — `'mp4'`, the default of §7.4.
+   */
+  newClipFormat: ExportFormat
   /** Continuous stretches of the picture across **all** representations, in time order. */
   runs: Span[]
   /** Quality zones of the picture across **all** representations, in time order. */
@@ -58,6 +76,8 @@ export const EMPTY_CONTEXT: EditContext = {
   frames: new Float64Array(),
   keyframes: new Float64Array(),
   fps: 0,
+  frameSize: { width: 0, height: 0 },
+  newClipFormat: 'mp4',
   runs: [],
   zones: [],
   duration: 0,
