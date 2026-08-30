@@ -1,13 +1,14 @@
 # tailcut
 
-Clip already-buffered video from any site and save it as MP4.
+Clip already-buffered video from any site and save it as MP4 or animated WebP.
 
 ## Status
 
-Stage 4 of 5 — the re-encoding path is in progress. A crop, Animated WebP,
-`Optimize`, or the rewrite-head setting sends a clip through WebCodecs; the codec
-is chosen for that clip's geometry, the sound is copied unchanged, and copy jobs
-run beside one encoding job in separate queue lanes. The editor reports the
+Stage 4 of 5 — the re-encoding path is in progress. A crop, `Optimize`, or the
+rewrite-head setting re-encodes MP4 through WebCodecs while copying its sound
+unchanged. Animated WebP uses the same decoded frames, writes no sound, and runs
+in the encoding lane. The codec is chosen for that clip's geometry, and copy jobs
+run beside one encoding job in a separate queue lane. The editor reports the
 measured pace after a completed encode, and the export settings are live. The
 sandbox end-to-end checks and the Windows hardware checklist are still open.
 
@@ -16,9 +17,9 @@ batches of eight megabytes, in sealed pieces the writer never comes back to, and
 survives the tab, the browser and an update: the popup lists what was watched,
 pins what should stay, deletes with an undo, and opens any of it in the editor
 without copying a byte. A settings page holds the four groups of §9.4 —
-what to record, what counts as a video, what to keep and how to export — and a
-change to any of them reaches a recording that is already running, without a
-reload.
+what to record, what counts as a video, what to keep and how to export. Recording,
+detection and history changes reach a running recording without a reload. Export
+settings are read when an editor opens.
 
 Under all of it is what the first two stages built: the extension intercepts MSE
 segments, keeps a sliding window indexed by media time, and cuts clips out of it.
@@ -122,6 +123,9 @@ On the development machine (Chromium 151, WSL2), over twenty-five runs:
 Both numbers are printed on every run, so run it to see where your machine
 stands. A number outside that band is not automatically a regression — it is an
 invitation to look at what changed on the synchronous path.
+
+The quiet-tree Task 10 gate measured 27.3 µs, or 1.64 segment copies. Its sealed
+8 MiB write took 9.5 ms.
 
 A page tailcut has refused outright — protected media — costs nothing after the
 refusal: the registry tells the hook, and the copying stops where it starts
