@@ -57,8 +57,11 @@ export interface Settings {
 }
 
 /**
- * §7.4, word for word — its table, in the binary units it counts in: a gigabyte there is 1024³
- * bytes, here and everywhere else in this program (see `formatBytes`, Task 10).
+ * The settings-side defaults, including the adjustable entries of §7.4. A gigabyte there is
+ * 1024³ bytes, here and everywhere else in this program (see `formatBytes`, Task 10).
+ *
+ * The table also says a new clip starts in `Original`. That is an edit-model default rather than
+ * a setting: `startClip` writes it into `Clip.mode`, and the inspector edits it per clip (§8.4).
  */
 export const DEFAULTS: Settings = {
   recording: { mode: 'all', bufferSeconds: 180, allow: [], deny: [] },

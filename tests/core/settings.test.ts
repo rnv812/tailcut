@@ -14,7 +14,7 @@ import {
 } from '../../src/shared/settings'
 
 describe('DEFAULTS', () => {
-  it('is §7.4, word for word', () => {
+  it('matches the documented defaults owned by settings', () => {
     expect(DEFAULTS.recording.bufferSeconds).toBe(180)
     expect(DEFAULTS.recording.mode).toBe('all')
     expect(DEFAULTS.history.toDisk).toBe(true)
