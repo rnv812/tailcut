@@ -4,14 +4,15 @@ Clip already-buffered video from any site and save it as MP4 or animated WebP.
 
 ## Status
 
-Stage 4 of 5 — the re-encoding path is in progress. A crop, `Optimize`, or the
-rewrite-head setting re-encodes MP4 through WebCodecs while copying its sound
-unchanged. Animated WebP uses the same decoded frames, writes no sound, and runs
-in the encoding lane. The codec is chosen for that clip's geometry, and copy jobs
-run beside one encoding job in a separate queue lane. The editor reports the
-measured pace after a completed encode, and the export settings are live. The
-sandbox end-to-end checks are complete. Only the Windows hardware checklist
-remains open.
+Stage 4 of 5 — the re-encoding path and its Windows driver are implemented. A
+crop, `Optimize`, or the rewrite-head setting re-encodes MP4 through WebCodecs
+while copying its sound unchanged. Animated WebP uses the same decoded frames,
+writes no sound, and runs in the encoding lane. The codec is chosen for that
+clip's geometry, and copy jobs run beside one encoding job in a separate queue
+lane. The editor reports the measured pace after a completed encode, and the
+export settings are live. The sandbox end-to-end checks and the mandatory Chrome
+for Testing run are complete. The encode plan is complete at 89 of 89 steps.
+Human-only Windows evidence remains explicitly marked `NOT RUN` in the checklist.
 
 What a tab records is written to disk in
 batches of eight megabytes, in sealed pieces the writer never comes back to, and
@@ -79,6 +80,8 @@ CDP, verifies the loaded extension, records a watched minute, and validates the 
 small-crop software H.264, and animated WebP exports; a supplied 4K input adds the computed-level
 check. It cannot replace Chrome stable or playback checks in other applications because stable and
 Chrome for Testing expose different hardware codecs and file compatibility belongs to each player.
+The mandatory no-argument run passed on 2026-08-30 and wrote
+`/mnt/c/Users/user/AppData/Local/Temp/tailcut/2026-08-30T16-11-41-229Z-2175705b/report.json`.
 The remaining evidence is tracked explicitly as `PASS`, `FAIL`, or `NOT RUN` in
 [`docs/manual-checks-windows.md`](docs/manual-checks-windows.md).
 
