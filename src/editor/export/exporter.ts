@@ -1,4 +1,8 @@
 import type { Clip } from '../../core/edit/clip'
+import type { EditContext } from '../../core/edit/context'
+import type { Choice, EncodeGeometry } from '../../core/encode/codec'
+import { geometryOf } from '../../core/encode/crop'
+import { pathFor } from '../../core/encode/path'
 import { fileNameOf, uniqueNames } from '../../core/export/naming'
 import { planClip, type ClipSource, type ExportPlan } from '../../core/export/plan'
 import {
@@ -7,7 +11,7 @@ import {
   movieTracksOf,
   type SourceTrackInput,
 } from '../../core/export/source'
-import type { ExportIo, ExportRequest } from '../../core/export/run'
+import { NO_ENCODER, type ExportIo, type ExportRequest } from '../../core/export/run'
 import type { Material, MaterialTrack } from '../../core/snapshot/material'
 import type { SnapshotReader } from '../../core/snapshot/read'
 import type { TrackKind } from '../../shared/types'
@@ -84,15 +88,49 @@ export function planOf(source: ClipSource, clip: Clip): ExportPlan {
   return planClip(source, { in: clip.in, out: clip.out, sound: clip.sound })
 }
 
-export function requestsFor(source: ClipSource, clips: readonly Clip[]): ExportRequest[] {
+/**
+ * The document as a queue: one request per clip, each carrying the path it will take.
+ *
+ * The one place a clip's settings become work. Before this the crop, the format and the mode were
+ * three fields nobody downstream read — `requestsFor` built a request out of a name and a
+ * container plan, and every clip went down the copy path whatever the inspector said.
+ *
+ * `choices` is what the tab has already asked the probe, keyed by geometry; a clip whose geometry
+ * is not in it gets `null` and comes back `blocked`, which is why the Export button waits for the
+ * map to be full (workbench.tsx). One entry serves every clip of that geometry.
+ */
+export function requestsFor(
+  source: ClipSource,
+  clips: readonly Clip[],
+  ctx: EditContext,
+  choices: ReadonlyMap<string, Choice>,
+  rewriteHead: boolean,
+): ExportRequest[] {
   const names = uniqueNames(clips.map(fileNameOf))
 
   return clips.map((clip, at) => ({
     clipId: clip.id,
     name: clip.name,
     fileName: names[at]!,
-    plan: planOf(source, clip),
+    path: pathFor(clip, source, ctx, choiceFor(clip, ctx, choices), rewriteHead),
   }))
+}
+
+/**
+ * The key a probe answer is filed under: the same three numbers `cacheKeyOf` is built from.
+ *
+ * Written once and exported, because three places ask with it — the effect that fills the map
+ * (task 10), the lookup below, and the test that counts how many times the browser was asked.
+ */
+export const geometryKey = (g: EncodeGeometry): string => `${g.width}x${g.height}@${g.framerate}`
+
+/** The probe's answer about this clip's picture, under the key the whole tab agrees on. */
+export function choiceFor(
+  clip: Clip,
+  ctx: EditContext,
+  choices: ReadonlyMap<string, Choice>,
+): Choice | null {
+  return choices.get(geometryKey(geometryOf(clip.crop, ctx.frameSize, ctx.fps))) ?? null
 }
 
 /** What the settings and the recording have to say about where a clip goes. */
@@ -115,6 +153,16 @@ export function downloadIo(reader: SnapshotReader, options: SaveOptions = {}): E
 
   return {
     read: (at) => reader.bytesOf(at),
+
+    /**
+     * This io copies and saves; it does not encode, and it says so rather than answering nothing.
+     *
+     * `undefined` here would be handed to `io.save` as a file, and a file of no bytes is a
+     * download the browser accepts and the user cannot open. A rejection carrying the sentence
+     * §8.4 promises lands on the row as "Failed" with something to read instead. Task 10 gives
+     * the tab an io that really encodes — `encodeIo` spreads this one and overrides this method.
+     */
+    encode: () => Promise.reject(new Error(NO_ENCODER)),
 
     save: (file, name) =>
       new Promise((resolve, reject) => {

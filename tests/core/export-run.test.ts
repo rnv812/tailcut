@@ -1,6 +1,9 @@
 import { describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { concatBytes } from '../../src/core/iso/writer'
+import type { EncodingChoice } from '../../src/core/encode/codec'
+import type { ClipPath } from '../../src/core/encode/path'
+import { planFrames } from '../../src/core/encode/plan'
 import { clipSourceOf } from '../../src/core/export/source'
 import { planClip, type ClipSource, type ExportPlan } from '../../src/core/export/plan'
 import {
@@ -50,7 +53,27 @@ const request = (id: string, plan: ExportPlan): ExportRequest => ({
   clipId: id,
   name: id,
   fileName: `${id}.mp4`,
-  plan,
+  path: { kind: 'copy', plan },
+})
+
+const encodingChoice: EncodingChoice = {
+  kind: 'h264-sw',
+  config: { codec: 'avc1.640028', width: 320, height: 240, framerate: 24 },
+  control: 'fixed-bitrate',
+  bitrate: 1_000_000,
+}
+
+const encodePath = (from = 1, to = 3): Extract<ClipPath, { kind: 'encode' }> => ({
+  kind: 'encode',
+  plan: planFrames(source, { in: from, out: to, sound: false }, null, 24)!,
+  choice: encodingChoice,
+})
+
+const pathRequest = (id: string, path: ClipPath): ExportRequest => ({
+  clipId: id,
+  name: id,
+  fileName: `${id}.mp4`,
+  path,
 })
 
 interface Saved {
@@ -58,8 +81,17 @@ interface Saved {
   bytes: number
 }
 
+type TestIo = ExportIo & {
+  saved: Saved[]
+  encode(
+    request: ExportRequest,
+    report: (frames: number) => void,
+    stale: () => boolean,
+  ): Promise<Uint8Array | null>
+}
+
 /** Reads out of the buffer, records what was written, and can be told to lie about the file. */
-function fakeIo(overrides: Partial<ExportIo> = {}): ExportIo & { saved: Saved[] } {
+function fakeIo(overrides: Partial<TestIo> = {}): TestIo {
   const saved: Saved[] = []
 
   return {
@@ -68,6 +100,7 @@ function fakeIo(overrides: Partial<ExportIo> = {}): ExportIo & { saved: Saved[] 
     save: async (file: Uint8Array, fileName: string) => {
       saved.push({ fileName, bytes: file.byteLength })
     },
+    encode: async () => null,
     ...overrides,
   }
 }
@@ -114,6 +147,7 @@ function heldIo(
     },
 
     save: io.save,
+    encode: io.encode,
 
     release(): void {
       holding = false
@@ -207,7 +241,7 @@ describe('the export runner', () => {
     })
 
     const io = fakeIo()
-    const runner = createRunner(io, { parallel: 1, sliceBytes: 4_096 })
+    const runner = createRunner(io, { parallel: { copy: 1, encode: 1 }, sliceBytes: 4_096 })
 
     const seen: number[] = []
     runner.subscribe((queue) => {
@@ -257,6 +291,7 @@ describe('the export runner', () => {
     const io = fakeIo()
     const refusing: ExportIo = {
       read: io.read,
+      encode: io.encode,
       save: async (file, fileName) => {
         if (fileName === 'c2.mp4') throw new Error('the browser refused the download')
         await io.save(file, fileName)
@@ -308,6 +343,7 @@ describe('the export runner', () => {
     let reads = 0
     const io: ExportIo & { saved: Saved[] } = {
       saved: whole.saved,
+      encode: whole.encode,
       read: async (at: Located) => {
         const bytes = await whole.read(at)
         // The tail is read first, so this is the third slice of the loop and not the last.
@@ -342,7 +378,7 @@ describe('the export runner', () => {
     // resolved would leave that list empty whatever the runner did.
     const io = fakeIo()
     const reads = vi.spyOn(io, 'read')
-    const runner = createRunner(io, { parallel: 1, sliceBytes: 4_096 })
+    const runner = createRunner(io, { parallel: { copy: 1, encode: 1 }, sliceBytes: 4_096 })
 
     runner.enqueue([request('c1', planFor(0, 6)), request('c2', planFor(0, 6))])
     runner.cancel(runner.queue().jobs[1]!.id)
@@ -366,6 +402,7 @@ describe('the export runner', () => {
     const io = fakeIo()
     const flaky: ExportIo = {
       read: io.read,
+      encode: io.encode,
       save: async (file, fileName) => {
         if (refuse) throw new Error('not this time')
         await io.save(file, fileName)
@@ -395,7 +432,7 @@ describe('the export runner', () => {
     // believing it had never been called off — it read on, saved, and reported done, and the
     // second run saved the same name again. One "Saved" row in the queue, two files on disk.
     const io = heldIo()
-    const runner = createRunner(io, { parallel: 1, sliceBytes: 4_096 })
+    const runner = createRunner(io, { parallel: { copy: 1, encode: 1 }, sliceBytes: 4_096 })
 
     runner.enqueue([request('c1', planFor(0, 6))])
     const id = runner.queue().jobs[0]!.id
@@ -420,7 +457,7 @@ describe('the export runner', () => {
     // has not read a byte, and 'fail' takes a waiting job as readily as a running one. The file
     // went out and the queue said it had not.
     const io = heldIo([0])
-    const runner = createRunner(io, { parallel: 1, sliceBytes: 4_096 })
+    const runner = createRunner(io, { parallel: { copy: 1, encode: 1 }, sliceBytes: 4_096 })
 
     runner.enqueue([request('c1', planFor(0, 6))])
     const id = runner.queue().jobs[0]!.id
@@ -442,7 +479,7 @@ describe('the export runner', () => {
     // clear the point of no return belonging to the run beside it — and the file goes out twice
     // again by a longer road. The retried row waits, visibly, and starts when the other lets go.
     const io = heldIo()
-    const runner = createRunner(io, { parallel: 1, sliceBytes: 4_096 })
+    const runner = createRunner(io, { parallel: { copy: 1, encode: 1 }, sliceBytes: 4_096 })
 
     runner.enqueue([request('c1', planFor(0, 6))])
     const id = runner.queue().jobs[0]!.id
@@ -465,7 +502,7 @@ describe('the export runner', () => {
     // run out of turns. Past that gate the file is the browser's, so the answer has to be no
     // here — or the row says "Cancelled" over a file that went out all the same.
     const io = fakeIo()
-    const runner = createRunner(io, { parallel: 1, sliceBytes: 4_096 })
+    const runner = createRunner(io, { parallel: { copy: 1, encode: 1 }, sliceBytes: 4_096 })
 
     runner.enqueue([request('c1', planFor(0, 6))])
     const id = runner.queue().jobs[0]!.id
@@ -488,12 +525,13 @@ describe('the export runner', () => {
     const saves: Array<() => void> = []
     const holding: ExportIo = {
       read: io.read,
+      encode: io.encode,
       save: async (file, fileName) => {
         await new Promise<void>((resolve) => saves.push(resolve))
         await io.save(file, fileName)
       },
     }
-    const runner = createRunner(holding, { parallel: 1 })
+    const runner = createRunner(holding, { parallel: { copy: 1, encode: 1 } })
 
     runner.enqueue([request('c1', planFor(0.5, 1.5))])
     await turn()
@@ -520,7 +558,7 @@ describe('the export runner', () => {
     // over behind the refusal would have its run go stale with nothing waiting to replace it,
     // and the row would sit at "Writing" for ever over a file that never arrived.
     const io = heldIo()
-    const runner = createRunner(io, { parallel: 1, sliceBytes: 4_096 })
+    const runner = createRunner(io, { parallel: { copy: 1, encode: 1 }, sliceBytes: 4_096 })
 
     runner.enqueue([request('c1', planFor(0, 6))])
     const id = runner.queue().jobs[0]!.id
@@ -546,6 +584,7 @@ describe('the export runner', () => {
     let refuse = true
     let holding = false
     const flaky: ExportIo = {
+      encode: io.encode,
       read: async (at: Located) => {
         if (holding) await new Promise<void>((resolve) => parked.push(resolve))
         return io.read(at)
@@ -555,7 +594,7 @@ describe('the export runner', () => {
         await io.save(file, fileName)
       },
     }
-    const runner = createRunner(flaky, { parallel: 1, sliceBytes: 4_096 })
+    const runner = createRunner(flaky, { parallel: { copy: 1, encode: 1 }, sliceBytes: 4_096 })
 
     runner.enqueue([request('c1', planFor(0, 6))])
     await runner.settled()
@@ -594,5 +633,179 @@ describe('the export runner', () => {
     await runner.settled()
 
     expect(heard).toHaveLength(before)
+  })
+
+  it('hands an encode path to io without reading its slices in the runner', async () => {
+    const io = fakeIo({ encode: vi.fn(async () => new Uint8Array([1, 2, 3])) })
+    const reads = vi.spyOn(io, 'read')
+    const runner = createRunner(io)
+
+    runner.enqueue([pathRequest('encoded', encodePath())])
+    await runner.settled()
+
+    expect(reads).not.toHaveBeenCalled()
+    expect(io.encode).toHaveBeenCalledTimes(1)
+    expect(io.saved).toEqual([{ fileName: 'encoded.mp4', bytes: 3 }])
+    expect(runner.queue().jobs[0]!.state).toBe('done')
+  })
+
+  it('reports encode progress in frames before the file is finished', async () => {
+    let release!: () => void
+    const parked = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const path = encodePath()
+    const io = fakeIo({
+      encode: async (_request, report) => {
+        report(path.plan.kept)
+        await parked
+        return new Uint8Array([1])
+      },
+    })
+    const runner = createRunner(io)
+
+    runner.enqueue([pathRequest('progress', path)])
+    await turn()
+
+    expect(runner.queue().jobs[0]).toMatchObject({ state: 'running', progress: 1 })
+
+    release()
+    await runner.settled()
+  })
+
+  it('makes a running encode stale on cancel and saves no partial file', async () => {
+    let release!: () => void
+    let stale!: () => boolean
+    const parked = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const io = fakeIo({
+      encode: async (_request, _report, isStale) => {
+        stale = isStale
+        await parked
+        // Return bytes deliberately: the runner's post-encode gate, not a cooperative fake, has
+        // to keep a cancelled attempt from saving a file.
+        return new Uint8Array([1, 2, 3])
+      },
+    })
+    const runner = createRunner(io)
+
+    runner.enqueue([pathRequest('cancelled', encodePath())])
+    const id = runner.queue().jobs[0]!.id
+    runner.cancel(id)
+
+    expect(stale()).toBe(true)
+    expect(runner.queue().jobs[0]!.state).toBe('cancelled')
+
+    release()
+    await turn()
+    expect(io.saved).toEqual([])
+  })
+
+  it('fails one refused encode and drives the next one to completion', async () => {
+    const io = fakeIo({
+      encode: async (asked) => {
+        if (asked.clipId === 'bad') throw new Error('the encoder refused this clip')
+        return new Uint8Array([1, 2])
+      },
+    })
+    const runner = createRunner(io)
+
+    runner.enqueue([pathRequest('bad', encodePath()), pathRequest('good', encodePath(3, 4))])
+    await runner.settled()
+
+    expect(runner.queue().jobs.map((job) => job.state)).toEqual(['failed', 'done'])
+    expect(runner.queue().jobs[0]!.error).toBe('the encoder refused this clip')
+    expect(io.saved).toEqual([{ fileName: 'good.mp4', bytes: 2 }])
+  })
+
+  it('fails each blocked reason in words without calling the encoder, and continues', async () => {
+    const noEncoder = 'This machine has no encoder for that picture.'
+    const noMaterial = 'There is no picture in this clip to re-encode.'
+    const geometry = { width: 320, height: 240, framerate: 24 }
+    const io = fakeIo({ encode: vi.fn(async () => new Uint8Array([1])) })
+    const runner = createRunner(io)
+
+    runner.enqueue([
+      pathRequest('encoder', { kind: 'blocked', reason: 'no-encoder', geometry }),
+      pathRequest('material', { kind: 'blocked', reason: 'no-material', geometry }),
+      pathRequest('good', encodePath()),
+    ])
+    await runner.settled()
+
+    expect(runner.queue().jobs.map((job) => job.state)).toEqual(['failed', 'failed', 'done'])
+    expect(runner.queue().jobs.map((job) => job.error)).toEqual([noEncoder, noMaterial, undefined])
+    expect(io.encode).toHaveBeenCalledTimes(1)
+    expect(io.saved).toEqual([{ fileName: 'good.mp4', bytes: 1 }])
+  })
+
+  it('refuses cancellation after an encoded file has been handed to save', async () => {
+    let release!: () => void
+    const parked = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const io = fakeIo({
+      encode: async () => new Uint8Array([1, 2, 3]),
+      save: async (file, fileName) => {
+        await parked
+        io.saved.push({ fileName, bytes: file.byteLength })
+      },
+    })
+    const runner = createRunner(io)
+
+    runner.enqueue([pathRequest('handed-over', encodePath())])
+    await turn()
+    const id = runner.queue().jobs[0]!.id
+
+    runner.cancel(id)
+    expect(runner.queue().jobs[0]!.state).toBe('running')
+
+    release()
+    await runner.settled()
+    expect(runner.queue().jobs[0]!.state).toBe('done')
+    expect(io.saved).toEqual([{ fileName: 'handed-over.mp4', bytes: 3 }])
+  })
+
+  it('ignores a late progress report from the encode attempt a retry replaced', async () => {
+    let firstReport!: (frames: number) => void
+    let releaseFirst!: () => void
+    let releaseSecond!: () => void
+    let calls = 0
+    const firstParked = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    const secondParked = new Promise<void>((resolve) => {
+      releaseSecond = resolve
+    })
+    const io = fakeIo({
+      encode: async (_request, report) => {
+        calls += 1
+        if (calls === 1) {
+          firstReport = report
+          await firstParked
+          return null
+        }
+        await secondParked
+        return new Uint8Array([1])
+      },
+    })
+    const path = encodePath()
+    const runner = createRunner(io)
+
+    runner.enqueue([pathRequest('retried', path)])
+    const id = runner.queue().jobs[0]!.id
+    runner.cancel(id)
+    runner.retry(id)
+
+    releaseFirst()
+    await turn()
+    expect(calls).toBe(2)
+    expect(runner.queue().jobs[0]).toMatchObject({ state: 'running', progress: 0 })
+
+    firstReport(path.plan.kept)
+    expect(runner.queue().jobs[0]).toMatchObject({ state: 'running', progress: 0 })
+
+    releaseSecond()
+    await runner.settled()
   })
 })

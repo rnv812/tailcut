@@ -1,40 +1,49 @@
 export type JobState = 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
+export type JobKind = 'copy' | 'encode'
 
 export interface Job {
   id: string
   clipId: string
+  kind: JobKind
   /** The clip's name as it stood when the export was asked for. */
   name: string
   fileName: string
   state: JobState
-  /** Coded bytes read so far, as a fraction: 0…1. */
+  /** Coded bytes read, or frames encoded, as a fraction: 0…1. */
   progress: number
-  /** Weight of the file written; zero until there is one. */
+  /** Frames this job has to write; absent on a copy, which counts in bytes. */
+  frames?: number
   bytes: number
   error?: string
   startedAt?: number
   finishedAt?: number
 }
 
-export interface Queue {
-  jobs: Job[]
-  parallel: number
-}
-
 /**
- * How many clips are written at once.
+ * How many clips are written at once, per lane.
  *
- * A lossless clip is a copy of bytes, so this is a limit on memory and not on the processor: each
- * job holds the material it is reading, and three jobs on a three-minute recording is around
- * three hundred megabytes on top of the snapshot and the preview. Re-encoding, when it comes
- * (stage 4), will want a limit of its own for the opposite reason.
+ * Two different limits for two different reasons. A lossless clip is a copy of bytes, so three of
+ * them is a limit on memory: each holds the material it is reading, and three jobs on a
+ * three-minute recording is around three hundred megabytes. A re-encoding clip is a limit on the
+ * machine: there is one hardware encoder, two sessions on it halve each other's speed and double
+ * the memory, and the decoder-encoder pair holds frames on top of that. So copies go three at a
+ * time and re-encodes go one at a time — and a copy never waits behind a re-encode, which is what
+ * §8.6 means by "instantly".
  */
-export const PARALLEL = 3
+export const PARALLEL: Record<JobKind, number> = { copy: 3, encode: 1 }
 
 export const EMPTY_QUEUE: Queue = { jobs: [], parallel: PARALLEL }
 
+export interface Queue {
+  jobs: Job[]
+  parallel: Record<JobKind, number>
+}
+
+/** What a row is built from, and everything a rebuilt row has to carry over. */
+type JobSeed = Pick<Job, 'id' | 'clipId' | 'kind' | 'name' | 'fileName' | 'frames'>
+
 export type QueueEvent =
-  | { type: 'enqueue'; jobs: Array<{ id: string; clipId: string; name: string; fileName: string }> }
+  | { type: 'enqueue'; jobs: JobSeed[] }
   | { type: 'start'; id: string; now: number }
   | { type: 'progress'; id: string; done: number; total: number }
   | { type: 'finish'; id: string; bytes: number; now: number }
@@ -44,11 +53,28 @@ export type QueueEvent =
 
 type JobEvent = Exclude<QueueEvent, { type: 'enqueue' }>
 
-const waiting = (job: { id: string; clipId: string; name: string; fileName: string }): Job => ({
+const waiting = (job: JobSeed): Job => ({
   ...job,
   state: 'queued',
   progress: 0,
   bytes: 0,
+})
+
+/**
+ * The fields a rebuilt row keeps, taken off the row itself.
+ *
+ * `retry` and `cancel` build a fresh row, and every one of these has to survive that. Written as
+ * a projection rather than a literal on purpose: a literal is a list of fields that has to be
+ * extended by hand whenever `Job` grows one, and the field it forgets — `kind` — sends a retried
+ * re-encode into the lane of the copies, where it competes with two others for one encoder.
+ */
+const seedOf = (job: Job): JobSeed => ({
+  id: job.id,
+  clipId: job.clipId,
+  kind: job.kind,
+  name: job.name,
+  fileName: job.fileName,
+  frames: job.frames,
 })
 
 function changed(job: Job, event: JobEvent): Job {
@@ -79,7 +105,7 @@ function changed(job: Job, event: JobEvent): Job {
 
     case 'retry':
       return job.state === 'failed' || job.state === 'cancelled'
-        ? waiting({ id: job.id, clipId: job.clipId, name: job.name, fileName: job.fileName })
+        ? waiting(seedOf(job))
         : job
 
     case 'cancel':
@@ -87,10 +113,7 @@ function changed(job: Job, event: JobEvent): Job {
       // had never been written.
       return job.state === 'queued' || job.state === 'running'
         ? {
-            id: job.id,
-            clipId: job.clipId,
-            name: job.name,
-            fileName: job.fileName,
+            ...seedOf(job),
             state: 'cancelled',
             progress: job.progress,
             bytes: 0,
@@ -118,12 +141,19 @@ export function reduceQueue(queue: Queue, event: QueueEvent): Queue {
   return { ...queue, jobs }
 }
 
-/** The jobs that may be set going right now, in the order they were asked for. */
+/** The jobs that may be set going right now, in the order they were asked for, lane by lane. */
 export function startable(queue: Queue): Job[] {
-  const running = queue.jobs.filter((job) => job.state === 'running').length
-  const room = queue.parallel - running
-  if (room <= 0) return []
-  return queue.jobs.filter((job) => job.state === 'queued').slice(0, room)
+  const room: Record<JobKind, number> = { copy: queue.parallel.copy, encode: queue.parallel.encode }
+  for (const job of queue.jobs) if (job.state === 'running') room[job.kind] -= 1
+
+  const out: Job[] = []
+  for (const job of queue.jobs) {
+    if (job.state !== 'queued') continue
+    if (room[job.kind] <= 0) continue
+    room[job.kind] -= 1
+    out.push(job)
+  }
+  return out
 }
 
 /**

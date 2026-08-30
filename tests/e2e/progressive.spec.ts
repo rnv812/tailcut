@@ -226,13 +226,18 @@ test('a clip written through the export runner, in many slices, plays in a brows
       save: async (file) => {
         saved = file
       },
+      encode: async () => {
+        throw new Error('A copy request reached the encoder.')
+      },
     },
     // A slice small enough to force dozens of reads: the boundaries then fall between samples all
     // over the clip, which is exactly where a wrong one would put half a frame in the file.
     { sliceBytes: 16 * 1024 },
   )
 
-  runner.enqueue([{ clipId: 'c1', name: 'slices', fileName: 'slices.mp4', plan }])
+  runner.enqueue([
+    { clipId: 'c1', name: 'slices', fileName: 'slices.mp4', path: { kind: 'copy', plan } },
+  ])
   await runner.settled()
 
   expect(runner.queue().jobs[0]!.error ?? null, 'the runner refused the clip').toBeNull()

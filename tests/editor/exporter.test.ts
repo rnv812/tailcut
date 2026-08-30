@@ -10,8 +10,10 @@ import { topLevelBoxes } from '../../src/core/iso/reader'
 import { parseInit } from '../../src/core/iso/init'
 import { assembleMp4 } from '../../src/core/export/assemble'
 import { clipSourceFrom, movieTracksOf } from '../../src/core/export/source'
-import { createRunner } from '../../src/core/export/run'
+import { NO_ENCODER, createRunner } from '../../src/core/export/run'
 import type { Clip } from '../../src/core/edit/clip'
+import { EMPTY_CONTEXT } from '../../src/core/edit/context'
+import type { ExportRequest } from '../../src/core/export/run'
 
 const read = (path: string): Uint8Array => new Uint8Array(readFileSync(`tests/fixtures/${path}`))
 
@@ -159,6 +161,14 @@ const clip = (over: Partial<Clip> = {}): Clip => ({
   ...over,
 })
 
+const requests = (source: Parameters<typeof requestsFor>[0], clips: readonly Clip[]) =>
+  requestsFor(source, clips, EMPTY_CONTEXT, new Map(), false)
+
+const copyPlan = (request: ExportRequest) => {
+  if (request.path.kind !== 'copy') throw new Error('the fixture did not take the copy path')
+  return request.path.plan
+}
+
 describe('openClipSource', () => {
   it('indexes the samples of captured material and addresses them in the snapshot', async () => {
     const reader = await capturedSnapshot()
@@ -203,17 +213,18 @@ describe('openClipSource', () => {
     const source = (await openClipSource(reader, material))!
     expect(source.audio, 'the sound was left behind in the buffer it shares').toBeDefined()
 
-    const requests = requestsFor(source, [clip({ in: 1, out: 3 })])
-    expect(requests[0]!.plan.tracks.map((track) => track.kind)).toEqual(['video', 'audio'])
+    const asked = requests(source, [clip({ in: 1, out: 3 })])
+    expect(copyPlan(asked[0]!).tracks.map((track) => track.kind)).toEqual(['video', 'audio'])
 
     const saved: Uint8Array[] = []
     const runner = createRunner({
       read: (at) => reader.bytesOf(at),
+      encode: async () => null,
       save: async (file) => {
         saved.push(file)
       },
     })
-    runner.enqueue(requests)
+    runner.enqueue(asked)
     await runner.settled()
 
     expect(runner.queue().jobs[0]!.state, runner.queue().jobs[0]!.error ?? '').toBe('done')
@@ -234,11 +245,12 @@ describe('openClipSource', () => {
     const saved: Uint8Array[] = []
     const runner = createRunner({
       read: (at) => reader.bytesOf(at),
+      encode: async () => null,
       save: async (file) => {
         saved.push(file)
       },
     })
-    runner.enqueue(requestsFor(source, [asked]))
+    runner.enqueue(requests(source, [asked]))
     await runner.settled()
 
     expect(runner.queue().jobs[0]!.state, runner.queue().jobs[0]!.error ?? '').toBe('done')
@@ -276,20 +288,20 @@ describe('requestsFor', () => {
     const reader = await capturedSnapshot()
     const source = (await openClipSource(reader, materialOf(reader.index)))!
 
-    const requests = requestsFor(source, [
+    const asked = requests(source, [
       clip({ id: 'c1', name: 'Cats 01.23' }),
       clip({ id: 'c2', name: 'Dogs: 02.00' }),
       clip({ id: 'c3', name: 'Cats 01.23' }),
     ])
 
-    expect(requests.map((one) => one.fileName)).toEqual([
+    expect(asked.map((one) => one.fileName)).toEqual([
       'Cats 01.23.mp4',
       'Dogs 02.00.mp4',
       'Cats 01.23 (2).mp4',
     ])
-    expect(requests.map((one) => one.clipId)).toEqual(['c1', 'c2', 'c3'])
+    expect(asked.map((one) => one.clipId)).toEqual(['c1', 'c2', 'c3'])
     // The plan on the request is the plan the estimate was made of, and not a second one.
-    expect(requests[0]!.plan.bytes).toBe(planOf(source, clip({ id: 'c1' })).bytes)
+    expect(copyPlan(asked[0]!).bytes).toBe(planOf(source, clip({ id: 'c1' })).bytes)
   })
 
   it('carries the sound switch of every clip into the plan it is written from', async () => {
@@ -308,11 +320,11 @@ describe('requestsFor', () => {
     expect(silent.bytes).toBeLessThan(loud.bytes)
 
     // And it is that plan the runner is handed, clip by clip, rather than one built for the lot.
-    const requests = requestsFor(source, [
+    const asked = requests(source, [
       clip({ id: 'c1', name: 'Loud', sound: true }),
       clip({ id: 'c2', name: 'Quiet', sound: false }),
     ])
-    expect(requests.map((one) => one.plan.tracks.map((track) => track.kind))).toEqual([
+    expect(asked.map((one) => copyPlan(one).tracks.map((track) => track.kind))).toEqual([
       ['video', 'audio'],
       ['video'],
     ])
@@ -349,6 +361,12 @@ describe('downloadIo', () => {
     })
     return asked
   }
+
+  it('refuses re-encoding because this io only copies and downloads', async () => {
+    await expect(
+      downloadIo({} as SnapshotReader).encode({} as ExportRequest, () => undefined, () => false),
+    ).rejects.toThrow(NO_ENCODER)
+  })
 
   it('hands the file to the browser under the name the clip was given', async () => {
     const asked = stubDownloads(11)

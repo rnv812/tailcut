@@ -295,7 +295,9 @@ export function Workbench({ reader, material, preview, options }: WorkbenchProps
           ready={source !== null}
           clips={doc.clips.length}
           estimate={selected && source ? planOf(source, selected).bytes : null}
-          onExport={() => source && runner.enqueue(requestsFor(source, doc.clips))}
+          onExport={() =>
+            source && runner.enqueue(requestsFor(source, doc.clips, derived.ctx, new Map(), false))
+          }
           onRetry={(id) => runner.retry(id)}
           onCancel={(id) => runner.cancel(id)}
         />

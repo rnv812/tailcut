@@ -1,6 +1,15 @@
 import { assembleMp4 } from './assemble'
 import type { ExportPlan } from './plan'
-import { PARALLEL, reduceQueue, startable, type Job, type Queue, type QueueEvent } from './queue'
+import {
+  PARALLEL,
+  reduceQueue,
+  startable,
+  type Job,
+  type JobKind,
+  type Queue,
+  type QueueEvent,
+} from './queue'
+import { framesOf, laneOf, type ClipPath } from '../encode/path'
 // The lookup lives beside the address space it answers about (Task 3): the runner reads slices,
 // the preview reads snapshot ranges, and both ask the same question of the same shape.
 import { bytesFrom } from './source'
@@ -19,24 +28,61 @@ export const SLICE_SLACK_BYTES = 64 * 1024
 
 export const MATERIAL_GONE = 'The recording is no longer in storage.'
 export const EMPTY_CLIP = 'There is nothing in this clip to write.'
+export const NO_ENCODER = 'This machine has no encoder for that picture.'
+export const NO_MATERIAL = 'There is no picture in this clip to re-encode.'
+
+export interface RunnerOptions {
+  /**
+   * How many at once, per lane — the same pair `Queue.parallel` holds, because it is the same
+   * number and a runner told `3` while its queue counts two lanes would start three re-encodes on
+   * one hardware encoder. Compiler-named: `run.ts(129,34)` is where the old `number` was assigned
+   * into the queue.
+   */
+  parallel?: Record<JobKind, number>
+  sliceBytes?: number
+  now?: () => number
+}
 
 export interface ExportRequest {
   clipId: string
   name: string
   fileName: string
-  plan: ExportPlan
+  /**
+   * What is to be written and how — the whole answer, and the only one.
+   *
+   * The lane, the unit of the progress and which half of the io does the work all come off this
+   * one field, through `laneOf` and `framesOf`. There is deliberately no `kind` and no `plan`
+   * beside it: an encode request has no `ExportPlan` to put in a `plan`, and a `kind` that says
+   * one thing while the path says another is a re-encode quietly written as a copy.
+   */
+  path: ClipPath
 }
 
-/** Everything the runner wants of the world: bytes in, a file out. */
+/**
+ * Everything the runner wants of the world: bytes in, a file out — and frames, when it re-encodes.
+ *
+ * `encode` is **required**, not optional, and it costs ten literals in the tests: an io without
+ * it would take a re-encoding request and answer `undefined`, which the runner would save as a
+ * file. The ten are named in **Files** of this task, with the line the compiler gives each of
+ * them; `tests` is inside `tsconfig.include`, so they are the difference between a green
+ * `npm run typecheck` and a red one.
+ */
 export interface ExportIo {
   read(at: Located): Promise<Uint8Array>
   save(file: Uint8Array, fileName: string): Promise<void>
-}
-
-export interface RunnerOptions {
-  parallel?: number
-  sliceBytes?: number
-  now?: () => number
+  /**
+   * The re-encoding path, whole: it reads its own material, sample by sample, and hands back the
+   * file. The runner does not read for it, because reading every slice first and holding them all
+   * is exactly what a minute of 1080p must not do.
+   *
+   * `report` is called with frames written so far; `stale` is the runner's own attempt gate, and
+   * it is checked on every frame, so a cancelled job stops within a frame rather than at the end.
+   */
+  encode(
+    request: ExportRequest,
+    report: (frames: number) => void,
+    stale: () => boolean,
+  ): Promise<Uint8Array | null>
 }
 
 export interface ExportRunner {
@@ -187,7 +233,36 @@ export function createRunner(io: ExportIo, options: RunnerOptions = {}): ExportR
     emit({ type: 'start', id: job.id, now: now() })
 
     try {
-      const slices = planSlices(request.plan, sliceBytes)
+      const path = request.path
+
+      if (path.kind === 'blocked') {
+        // The answer §8.4 promises, arriving as a failed row rather than as an exception: this
+        // clip is the only one that stops, the rest of the queue drives on (§8.6). The inspector
+        // said the same thing before the button was pressed; this is for the batch that was
+        // started anyway.
+        throw new Error(path.reason === 'no-encoder' ? NO_ENCODER : NO_MATERIAL)
+      }
+
+      if (path.kind !== 'copy') {
+        const total = framesOf(path) ?? 0
+        const file = await io.encode(
+          request,
+          (frames) => {
+            if (!stale()) emit({ type: 'progress', id: job.id, done: frames, total })
+          },
+          stale,
+        )
+        // Called off: `encode` answers null rather than a half file, and the row has already been
+        // rebuilt by `cancel`. Nothing to report and nothing to save.
+        if (file === null || stale()) return
+
+        handedOver.add(job.id)
+        await io.save(file, request.fileName)
+        emit({ type: 'finish', id: job.id, bytes: file.byteLength, now: now() })
+        return
+      }
+
+      const slices = planSlices(path.plan, sliceBytes)
       if (!slices.length) throw new Error(EMPTY_CLIP)
 
       let total = 0
@@ -226,7 +301,7 @@ export function createRunner(io: ExportIo, options: RunnerOptions = {}): ExportR
       // told synchronously, so the last thing the loop reported is a place a call-off can land.
       if (stale()) return
 
-      const file = assembleMp4(request.plan, bytesFrom(slices, buffers))
+      const file = assembleMp4(path.plan, bytesFrom(slices, buffers))
       if (!file.byteLength) throw new Error(EMPTY_CLIP)
 
       handedOver.add(job.id)
@@ -261,7 +336,16 @@ export function createRunner(io: ExportIo, options: RunnerOptions = {}): ExportR
       const jobs = list.map((request) => {
         const id = `j${nextId++}`
         requests.set(id, request)
-        return { id, clipId: request.clipId, name: request.name, fileName: request.fileName }
+        // Lane and unit are read off the path and never passed beside it, so a row cannot end up
+        // in one lane while its work belongs to the other.
+        return {
+          id,
+          clipId: request.clipId,
+          kind: laneOf(request.path),
+          name: request.name,
+          fileName: request.fileName,
+          frames: framesOf(request.path),
+        }
       })
       if (!jobs.length) return
 

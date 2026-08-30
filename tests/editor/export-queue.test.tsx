@@ -30,7 +30,7 @@ const allAt = (testid: string): HTMLElement[] => [
 
 const ONE_JOB: QueueEvent = {
   type: 'enqueue',
-  jobs: [{ id: 'j1', clipId: 'c1', name: 'One', fileName: 'One.mp4' }],
+  jobs: [{ id: 'j1', clipId: 'c1', kind: 'copy', name: 'One', fileName: 'One.mp4' }],
 }
 
 describe('the export panel', () => {
@@ -63,9 +63,9 @@ describe('the export panel', () => {
       {
         type: 'enqueue',
         jobs: [
-          { id: 'j1', clipId: 'c1', name: 'One', fileName: 'One.mp4' },
-          { id: 'j2', clipId: 'c2', name: 'Two', fileName: 'Two.mp4' },
-          { id: 'j3', clipId: 'c3', name: 'Three', fileName: 'Three.mp4' },
+          { id: 'j1', clipId: 'c1', kind: 'copy', name: 'One', fileName: 'One.mp4' },
+          { id: 'j2', clipId: 'c2', kind: 'copy', name: 'Two', fileName: 'Two.mp4' },
+          { id: 'j3', clipId: 'c3', kind: 'copy', name: 'Three', fileName: 'Three.mp4' },
         ],
       },
       { type: 'start', id: 'j1', now: 0 },
