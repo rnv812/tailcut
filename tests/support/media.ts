@@ -20,6 +20,13 @@ export interface Probed {
     /** The shape of the picture as the reader worked it out. Absent on a sound track. */
     sample_aspect_ratio?: string
     display_aspect_ratio?: string
+    /**
+     * What the file says about its colour, and `unknown` where it says nothing — which is a
+     * reader's answer and not a file's: with no `colr` box ffmpeg guesses by frame size.
+     */
+    color_space?: string
+    color_primaries?: string
+    color_transfer?: string
   }>
 }
 
@@ -45,7 +52,7 @@ export function probeFile(file: string): ProbeResult {
       '-count_frames',
       '-show_entries',
       'format=duration:stream=codec_type,codec_name,start_time,duration,nb_read_frames,' +
-        'sample_aspect_ratio,display_aspect_ratio',
+        'sample_aspect_ratio,display_aspect_ratio,color_space,color_primaries,color_transfer',
       '-of', 'json',
       file,
     ],
@@ -174,19 +181,25 @@ function rawFrame(args: string[]): Buffer {
 }
 
 /**
- * Frame number `index` of the picture, as raw RGB, reached by decoding from the first frame.
+ * Frame number `index` of the picture, as raw pixels, reached by decoding from the first frame.
  *
  * By number and not by time, because that is the question a cut is judged by: the clip is right
  * when its first frame is the frame the user pointed at, whatever time either file gives it.
+ *
+ * RGB by default, which is the picture as a viewer sees it — and therefore a picture the colour
+ * matrix has been applied to. Two files carrying the very same coded frames come out different
+ * here when they signal their colour differently, so a comparison of one recording against
+ * another written a second way asks for `yuv420p` instead: those are the samples the codec
+ * decoded, before anybody's matrix.
  */
-export function frameAt(file: string, index: number): Buffer {
+export function frameAt(file: string, index: number, pixelFormat = 'rgb24'): Buffer {
   return rawFrame([
     '-v', 'error',
     '-i', file,
     '-vf', `select='eq(n\\,${index})'`,
     '-vsync', '0',
     '-frames:v', '1',
-    '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-',
+    '-f', 'rawvideo', '-pix_fmt', pixelFormat, '-',
   ])
 }
 
