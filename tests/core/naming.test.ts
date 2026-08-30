@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   MAX_NAME_BYTES,
   applyTemplate,
+  contentTypeOf,
   fileNameOf,
   sanitizeFileName,
   uniqueNames,
@@ -9,7 +10,7 @@ import {
 } from '../../src/core/export/naming'
 import type { Clip } from '../../src/core/edit/clip'
 
-const clip = (name: string): Clip => ({
+const clip = (name: string, format: Clip['format'] = 'mp4'): Clip => ({
   id: 'c1',
   name,
   in: 1,
@@ -17,7 +18,7 @@ const clip = (name: string): Clip => ({
   representation: '480p',
   sound: true,
   crop: null,
-  format: 'mp4',
+  format,
   mode: 'original',
 })
 
@@ -84,8 +85,18 @@ describe('sanitizeFileName', () => {
 })
 
 describe('fileNameOf', () => {
-  it('is the name of the clip with an extension', () => {
+  it('uses the extension of the clip format', () => {
     expect(fileNameOf(clip('A page about cats 01.23'))).toBe('A page about cats 01.23.mp4')
+    expect(fileNameOf(clip('A page about cats 01.23', 'webp'))).toBe('A page about cats 01.23.webp')
+  })
+})
+
+describe('contentTypeOf', () => {
+  it('names WebP as an image and every other file as MP4 video', () => {
+    expect(contentTypeOf('Cats.webp')).toBe('image/webp')
+    expect(contentTypeOf('Cats.mp4')).toBe('video/mp4')
+    expect(contentTypeOf('Cats.bin')).toBe('video/mp4')
+    expect(contentTypeOf('Cats')).toBe('video/mp4')
   })
 })
 
@@ -104,6 +115,10 @@ describe('uniqueNames', () => {
   it('leaves names that differ alone', () => {
     const names = ['one.mp4', 'two.mp4']
     expect(uniqueNames(names)).toEqual(names)
+  })
+
+  it('numbers a repeated WebP name before its extension', () => {
+    expect(uniqueNames(['One.webp', 'One.webp'])).toEqual(['One.webp', 'One (2).webp'])
   })
 })
 

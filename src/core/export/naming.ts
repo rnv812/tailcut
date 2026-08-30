@@ -1,4 +1,5 @@
 import type { Clip } from '../edit/clip'
+import type { ExportFormat } from '../../shared/settings'
 
 /** As much of a name as a file system will take, in characters. The extension goes after it. */
 export const MAX_NAME_LENGTH = 100
@@ -106,9 +107,33 @@ export function sanitizeFileName(text: string, maxLength = MAX_NAME_LENGTH): str
   return base || 'tailcut'
 }
 
+/**
+ * The extension and the content type of each format, side by side so they cannot disagree.
+ *
+ * They are one fact about a file and they used to be two constants in two modules: `.mp4` here
+ * and `video/mp4` in the downloader. An animation then arrived as `clip.mp4` of type `video/mp4`
+ * — a file Chrome will not preview and no messenger will take.
+ */
+const FILE_TYPES: Record<ExportFormat, { extension: string; mime: string }> = {
+  mp4: { extension: '.mp4', mime: 'video/mp4' },
+  webp: { extension: '.webp', mime: 'image/webp' },
+}
+
 /** The file one clip is written to. The name was made of the page title and the timecode (Task 10). */
 export function fileNameOf(clip: Clip): string {
-  return `${sanitizeFileName(clip.name)}.mp4`
+  return `${sanitizeFileName(clip.name)}${FILE_TYPES[clip.format].extension}`
+}
+
+/**
+ * What the browser is told a finished file is, read back off its own name.
+ *
+ * Off the name because that is what the saver has: `ExportIo.save` takes a file and a name, and a
+ * third argument would be a third thing to keep in step with the other two. The extension was
+ * written by `fileNameOf` out of the clip's format, so the extension *is* the format.
+ */
+export function contentTypeOf(fileName: string): string {
+  const known = Object.values(FILE_TYPES).find((type) => fileName.endsWith(type.extension))
+  return (known ?? FILE_TYPES.mp4).mime
 }
 
 /** The same list with repeats numbered: one batch never writes two files over one name. */

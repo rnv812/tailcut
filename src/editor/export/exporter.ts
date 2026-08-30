@@ -3,7 +3,7 @@ import type { EditContext } from '../../core/edit/context'
 import type { Choice, EncodeGeometry } from '../../core/encode/codec'
 import { geometryOf } from '../../core/encode/crop'
 import { pathFor } from '../../core/encode/path'
-import { fileNameOf, uniqueNames } from '../../core/export/naming'
+import { contentTypeOf, fileNameOf, uniqueNames } from '../../core/export/naming'
 import { planClip, type ClipSource, type ExportPlan } from '../../core/export/plan'
 import {
   clipSourceFrom,
@@ -169,7 +169,7 @@ export function downloadIo(reader: SnapshotReader, options: SaveOptions = {}): E
         // A Blob takes a view over a plain ArrayBuffer; the writer allocates its own, and it is
         // never shared.
         const url = URL.createObjectURL(
-          new Blob([file as Uint8Array<ArrayBuffer>], { type: 'video/mp4' }),
+          new Blob([file as Uint8Array<ArrayBuffer>], { type: contentTypeOf(name) }),
         )
 
         chrome.downloads.download(

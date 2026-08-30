@@ -343,7 +343,10 @@ describe('requestsFor', () => {
 })
 
 describe('downloadIo', () => {
-  afterEach(() => vi.unstubAllGlobals())
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
 
   const stubDownloads = (id: number | undefined) => {
     const asked: Array<{ url: string; filename: string }> = []
@@ -375,6 +378,20 @@ describe('downloadIo', () => {
     expect(asked).toHaveLength(1)
     expect(asked[0]!.filename).toBe('Cats.mp4')
     expect(asked[0]!.url).toMatch(/^blob:/)
+  })
+
+  it('uses the file extension as the Blob content type', async () => {
+    const blobs: Blob[] = []
+    vi.spyOn(URL, 'createObjectURL').mockImplementation((blob) => {
+      blobs.push(blob as Blob)
+      return `blob:${blobs.length}`
+    })
+    stubDownloads(11)
+
+    await downloadIo({} as SnapshotReader).save(new Uint8Array([1]), 'Cats.webp')
+    await downloadIo({} as SnapshotReader).save(new Uint8Array([2]), 'Cats.mp4')
+
+    expect(blobs.map(({ type }) => type)).toEqual(['image/webp', 'video/mp4'])
   })
 
   it('lets the address outlive the call, so the download is not cut off halfway', async () => {
