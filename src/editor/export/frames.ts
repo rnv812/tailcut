@@ -178,3 +178,79 @@ export async function* decodedFrames(
     }
   }
 }
+/**
+ * The real thing.
+ *
+ * `drainTo` is where the pace of the whole export is decided, on both sides, and it listens to
+ * `dequeue` rather than polling. A poll here would be a `setTimeout`, and Chrome floors a nested
+ * one at 4 ms — which caps any loop built on it at about 140 frames a second whatever the codecs
+ * are doing. That cap has already been mistaken once for a property of a codec.
+ */
+export function liveCodecs(): Codecs {
+  /** Both queues drain the same way; only the object they belong to differs. */
+  const drainer = (
+    codec: VideoDecoder | VideoEncoder,
+    depth: () => number,
+  ): ((limit: number) => Promise<void>) =>
+    (limit) =>
+      new Promise<void>((resolve) => {
+        const check = () => {
+          if (depth() <= limit) {
+            codec.removeEventListener('dequeue', check)
+            resolve()
+          }
+        }
+        codec.addEventListener('dequeue', check)
+        check()
+      })
+
+  return {
+    decoder(config, on) {
+      const decoder = new VideoDecoder({ output: on.frame, error: on.error })
+      decoder.configure(config)
+      return {
+        decode: (chunk) => decoder.decode(chunk),
+        flush: () => decoder.flush(),
+        close: () => decoder.close(),
+        get queued() {
+          return decoder.decodeQueueSize
+        },
+        drainTo: drainer(decoder, () => decoder.decodeQueueSize),
+      }
+    },
+
+    encoder(config, on) {
+      const encoder = new VideoEncoder({ output: on.chunk, error: on.error })
+      encoder.configure(config)
+      return {
+        encode: (frame, options) => encoder.encode(frame, options),
+        flush: () => encoder.flush(),
+        close: () => encoder.close(),
+        get queued() {
+          return encoder.encodeQueueSize
+        },
+        drainTo: drainer(encoder, () => encoder.encodeQueueSize),
+      }
+    },
+
+    chunk: (init) => new EncodedVideoChunk(init),
+
+    /**
+     * The crop, and the only line of this program that cuts a picture.
+     *
+     * `visibleRect` is how WebCodecs says "this rectangle of it": the encoder reads the visible
+     * rectangle and writes it at the size it was configured with, and those two are equal here by
+     * construction — `plan.geometry` is `geometryOf(plan.crop, …)`. Without this the encoder
+     * would be handed the whole frame and would *scale* it into that box.
+     *
+     * The timestamp is carried over deliberately: it is the key the encoded chunk is found by on
+     * the way back, and a frame that lost it could not be placed in the track.
+     */
+    cut: (frame, crop) =>
+      new VideoFrame(frame, {
+        visibleRect: { x: crop.x, y: crop.y, width: crop.width, height: crop.height },
+        timestamp: frame.timestamp,
+        ...(frame.duration === null ? {} : { duration: frame.duration }),
+      }),
+  }
+}

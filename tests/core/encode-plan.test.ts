@@ -520,8 +520,10 @@ describe('planFrames: the entry point in the scale the transport counts in', () 
     expect(stamp(edge.pts, timescale)).toBe(plan.headUs)
 
     // Kept, because it is the frame the stream will hand out. Said in ticks instead, the plan
-    // would count one frame fewer than the stream produces: an extra sample in the track, paired
-    // with the duration of the one after it, and a progress bar that runs past its own total.
+    // would count one frame fewer than the stream produces — and the extra one would not even be
+    // refused: its timestamp is the entry frame's own, so the guard in `encodeToTrack` knows the
+    // number. It would be written as a sample with no duration left over for it, and the progress
+    // would run past its own total.
     expect(edge.keep).toBe(true)
     expect(plan.frames.filter((frame) => stamp(frame.pts, timescale) >= plan.headUs)).toEqual(
       plan.frames.filter((frame) => frame.keep),

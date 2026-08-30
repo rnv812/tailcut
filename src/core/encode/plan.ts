@@ -119,9 +119,10 @@ export function planFrames(
       // change. `decodedFrames` can only ask a decoded frame for its `timestamp`, which is
       // microseconds; if this said `pts >= video.skipTicks` the two would be two roundings of one
       // boundary, agreeing at every timescale anyone has seen and free to disagree at one nobody
-      // has. Disagreement here is not a frame out of place — it is a chunk the encoder returns
-      // that `encodeToTrack` has no ticks for, and the job dies with "The encoder returned a frame
-      // that was never sent to it."
+      // has. Disagreement is not a frame out of place — it is a frame the stream hands over that
+      // this plan never counted, and its timestamp is the entry frame's own, so the guard in
+      // `encodeToTrack` lets it through: a sample is written with no duration left to give it,
+      // and the progress runs past its own total.
       keep: Math.round((pts * 1_000_000) / video.timescale) >= headUs,
     }
   })
