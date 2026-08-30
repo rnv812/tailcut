@@ -749,7 +749,7 @@ describe('the bridge puts segments into the session registry', () => {
     expect(lastAt).toBeGreaterThanOrEqual(afterFirst)
   })
 
-  it('promises the piece a gapped buffer can be saved as, and says a piece was left out', async () => {
+  it('promises every piece of a gapped buffer joined into one clip', async () => {
     const win = await loadBridge()
     win.context()
 
@@ -759,17 +759,17 @@ describe('the bridge puts segments into the session registry', () => {
     // player went on loading from a new position. A two-second gap is a gap, not rounding.
     win.append(seg3Bytes)
 
-    // The popup draws the file from this summary. Six seconds from start to end would promise
-    // material that does not exist — between the 2nd and the 4th second the registry is empty —
-    // and four seconds would promise both pieces where a save writes one continuous clip.
+    // The popup draws the file from this summary. Six seconds from start to end would count the
+    // hole, while two would discard one of the recorded pieces. The writer joins both into four
+    // continuous seconds and the notice says what happened to their clock.
     expect(await win.list()).toEqual([
       {
         key: keyFor(PAGE_URL),
         url: PAGE_URL,
         title: PAGE_TITLE,
         lastAt: expect.any(Number),
-        duration: 2,
-        bytes: seg1Bytes.byteLength,
+        duration: 4,
+        bytes: seg1Bytes.byteLength + seg3Bytes.byteLength,
         omits: 'gap',
       },
     ])
@@ -1355,18 +1355,18 @@ describe('the bridge saves what it collected as a file', () => {
     return win
   }
 
-  it('hands Chrome the init and the longest run, not the first one around', async () => {
+  it('hands Chrome every run when the later one is longer', async () => {
     // Runs 0…1.95 and 3.95…6.02: the second one is longer.
     const win = await withAudio(0, 2, 3)
 
     await win.save(audioKey)
 
     expect(digest(...mediaOf(await win.savedBytes()))).toBe(
-      digest(...mediaOf(audioBytes[2]!), ...mediaOf(audioBytes[3]!)),
+      digest(...mediaOf(audioBytes[0]!), ...mediaOf(audioBytes[2]!), ...mediaOf(audioBytes[3]!)),
     )
   })
 
-  it('takes the long run when it is not the last one either', async () => {
+  it('hands Chrome every run when the earlier one is longer', async () => {
     // Runs 0…3.95 and 5.97…6.02: the first one is longer. A tail of half a second is ordinary:
     // the player loaded a piece after a rewind and stopped.
     const win = await withAudio(0, 1, 3)
@@ -1374,7 +1374,7 @@ describe('the bridge saves what it collected as a file', () => {
     await win.save(audioKey)
 
     expect(digest(...mediaOf(await win.savedBytes()))).toBe(
-      digest(...mediaOf(audioBytes[0]!), ...mediaOf(audioBytes[1]!)),
+      digest(...mediaOf(audioBytes[0]!), ...mediaOf(audioBytes[1]!), ...mediaOf(audioBytes[3]!)),
     )
   })
 

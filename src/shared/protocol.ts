@@ -242,12 +242,13 @@ export interface SoundSource {
 export const SOURCE_EVENT = 'tailcut:source'
 
 /**
- * Why a saved file will hold less than the session does.
+ * What the popup must explain about a saved file.
  *
  * A session gathers everything the page played; a file is one continuous clip of one quality
  * with one stream per kind, and the difference between the two has to be said out loud. The
- * length in the summary already counts only what will be written — this says what was left
- * out of that count, so that a shorter number than the user expected has a reason beside it.
+ * length in the summary already counts only what will be written. Every entry except `gap` says
+ * what was left out of that count; `gap` says that every recorded stretch is present but its
+ * source clock is joined in the output.
  *
  * - `track` — a stream the ingest boundary refused: its container or codec cannot be written
  *   out, nothing of it was ever collected, and the file is short of a whole kind of media.
@@ -265,7 +266,7 @@ export const SOURCE_EVENT = 'tailcut:source'
  *   same material over again at another quality, an alternate is other material altogether —
  *   a dub beside the original, a commentary beside the film. Measured on w3schools' mov_bbb.mp4,
  *   one picture and two soundtracks, which the popup called "recorded at more than one quality".
- * - `gap` — the material is not continuous, and a save takes the longest unbroken stretch.
+ * - `gap` — the material is not continuous, and the saved file joins all recorded stretches.
  */
 export type Omission = 'track' | 'sound' | 'rendition' | 'alternate' | 'gap' | 'soundShort'
 

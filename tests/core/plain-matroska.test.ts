@@ -248,6 +248,45 @@ describe('matroskaFileOf', () => {
       expect(unexpectedWarnings(decodeWarnings(written))).toEqual([])
     }
   })
+
+  it('joins every buffered stretch without taking samples from the hole', async () => {
+    const file = await open(whole)
+    const cut = cutPlain(file, [
+      { start: 0, end: 1 },
+      { start: 4, end: 6 },
+    ])
+
+    expect(cut, 'nothing could be cut out of the buffered stretches').not.toBeNull()
+    expect(cut!.stretches).toBe(2)
+    expect(cut!.plan.duration).toBeCloseTo(3, 1)
+
+    const video = file.tracks.find((track) => track.kind === 'video')!
+    const sourceTimes = cut!.plan.tracks[0]!.samples.map((planned) => {
+      const source = video.samples.find(
+        (sample) =>
+          sample.source.at === planned.source.at && sample.source.length === planned.source.length,
+      )
+      expect(source, 'the plan names a frame outside the indexed source').toBeTruthy()
+      return source!.pts / video.timescale
+    })
+
+    expect(sourceTimes.some((time) => time < 1)).toBe(true)
+    expect(sourceTimes.some((time) => time >= 4)).toBe(true)
+    expect(sourceTimes.every((time) => time < 1 || time >= 4)).toBe(true)
+
+    const reads = readsFor(planRanges(cut!.plan))
+    const buffers = reads.map((at: Located) => whole.subarray(at.at, at.at + at.length))
+    const written = writeTemp(
+      'plain-matroska-gaps.mp4',
+      assembleMp4(cut!.plan, bytesFrom(reads, buffers)),
+    )
+    const probed = probeFile(written)
+
+    expect(probed.stderr).toBe('')
+    expect(Number(probed.probed!.streams[0]!.nb_read_frames)).toBe(30)
+    expect(Number(probed.probed!.format.duration)).toBeCloseTo(3, 1)
+    expect(unexpectedWarnings(decodeWarnings(written))).toEqual([])
+  })
 })
 
 /** Where an ASCII word lies in a buffer. */

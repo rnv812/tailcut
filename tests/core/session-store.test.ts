@@ -1822,7 +1822,7 @@ describe('summarize', () => {
     expect(summary.duration).toBeCloseTo(1.9505, 4)
   })
 
-  it('counts a gap in one track as a gap in the clip', () => {
+  it('joins a picture gap even when sound was buffered through it', () => {
     const store = new SessionStore()
     store.append({ ...videoBuffer, bytes: init })
     store.append({ ...audioBuffer, bytes: audioInit })
@@ -1831,15 +1831,41 @@ describe('summarize', () => {
     store.append({ ...videoBuffer, bytes: videoSegs[2]! })
     for (const bytes of audioSegs) store.append({ ...audioBuffer, bytes })
 
-    // Sound alone bridges no gap: two cuttable stretches of two seconds each, and a save writes
-    // one continuous clip. Four seconds here would be four seconds of a two-second file.
-    //
-    // 1.9505 and not a round two: the sound of this clip is cut at 1.9505, and the segment after
-    // that one reaches only fifty milliseconds into the stretch — it stays out, and the clip is
-    // as long as the sound that is in it.
+    // Sound continues through the two seconds the picture is missing because its longer segments
+    // were fetched ahead. Save all follows the picture the viewer actually loaded, trims that
+    // invisible audio prefetch and joins the two recorded picture runs.
     const summary = summarize(store.list()[0]!)
-    expect(summary.duration).toBeCloseTo(1.9505, 4)
+    expect(summary.duration).toBeCloseTo(4, 4)
     expect(summary.omits).toBe('gap')
+  })
+
+  it('joins the whole picture hole when the two track boundaries differ by a packet', () => {
+    const store = new SessionStore()
+    store.append({ ...videoBuffer, bytes: init })
+    store.append({ ...audioBuffer, bytes: audioInit })
+    store.append({ ...videoBuffer, bytes: videoSegs[0]! })
+    store.append({ ...videoBuffer, bytes: videoSegs[2]! })
+    store.append({ ...audioBuffer, bytes: audioSegs[0]! })
+    store.append({ ...audioBuffer, bytes: audioSegs[2]! })
+    store.append({ ...audioBuffer, bytes: audioSegs[3]! })
+
+    // Picture is absent for exactly two seconds. Sound is absent for 88064 ticks at 44100 Hz,
+    // about three milliseconds less because packets and frames have different grids. The picture
+    // remains the authority, so the popup promises four joined seconds rather than a visible
+    // pause of that packet rounding.
+    expect(summarize(store.list()[0]!).duration).toBeCloseTo(4, 6)
+  })
+
+  it('keeps a sound-only gap on the clock while the picture continues', () => {
+    const store = new SessionStore()
+    store.append({ ...videoBuffer, bytes: init })
+    store.append({ ...audioBuffer, bytes: audioInit })
+    for (const bytes of videoSegs) store.append({ ...videoBuffer, bytes })
+    store.append({ ...audioBuffer, bytes: audioSegs[0]! })
+    store.append({ ...audioBuffer, bytes: audioSegs[2]! })
+    store.append({ ...audioBuffer, bytes: audioSegs[3]! })
+
+    expect(summarize(store.list()[0]!).duration).toBeCloseTo(6, 4)
   })
 
   it('reports the one representation a save takes, not the two together', () => {
@@ -1933,7 +1959,7 @@ describe('selectMaterial', () => {
     expect(chosen(store).map((track) => track[0])).toEqual(['video init', 'audio init'])
   })
 
-  it('takes the longest stretch where both tracks are there at once', () => {
+  it('takes every stretch inside the common envelope', () => {
     const store = new SessionStore()
     store.append({ ...videoBuffer, bytes: init })
     store.append({ ...audioBuffer, bytes: audioInit })
@@ -1943,13 +1969,12 @@ describe('selectMaterial', () => {
     store.append({ ...audioBuffer, bytes: audioSegs[2]! })
     store.append({ ...audioBuffer, bytes: audioSegs[3]! })
 
-    // Picture runs 0…6 whole, so the choice is between 0…1.95 and 3.95…6.02 — the later, longer
-    // one. The video fragment 2…4 is left behind: the clip begins at 3.95 and holds fifty
-    // milliseconds of it, so taking it whole would put two seconds of silent picture in front of
-    // a two-second clip. The fragment 4…6 is the picture of the stretch itself.
+    // Picture continues while sound is absent, so that interval stays on the clock rather than
+    // being removed. Both recorded stretches of sound and every picture segment between their
+    // first and last common instants reach the gap-aware writer.
     expect(chosen(store)).toEqual([
-      ['video init', 'video 4…6'],
-      ['audio init', 'audio 3', 'audio 4'],
+      ['video init', 'video 0…2', 'video 2…4', 'video 4…6'],
+      ['audio init', 'audio 1', 'audio 3', 'audio 4'],
     ])
   })
 
@@ -1965,7 +1990,7 @@ describe('selectMaterial', () => {
     expect(chosen(store)).toEqual([['video init', 'video 0…2', 'video 2…4', 'video 4…6']])
   })
 
-  it('saves the longest run of a session that has only one track', () => {
+  it('saves every run of a session that has only one track', () => {
     const store = new SessionStore()
     store.append({ ...audioBuffer, bytes: audioInit })
     // Runs 0…1.95 and 3.95…6.02: the second one is longer.
@@ -1973,7 +1998,7 @@ describe('selectMaterial', () => {
     store.append({ ...audioBuffer, bytes: audioSegs[2]! })
     store.append({ ...audioBuffer, bytes: audioSegs[3]! })
 
-    expect(chosen(store)).toEqual([['audio init', 'audio 3', 'audio 4']])
+    expect(chosen(store)).toEqual([['audio init', 'audio 1', 'audio 3', 'audio 4']])
   })
 
   it('has nothing to give while a kind is still without a fragment', () => {
@@ -2160,13 +2185,13 @@ describe('the summary and the file it promises', () => {
     expect(summarize(session).bytes).toBe(savedBytes(selectMaterial(session)))
   })
 
-  it('promises the run a save takes, not the sum of the runs', () => {
+  it('promises the joined duration of every run a save takes', () => {
     const session = jumpedForward()
 
-    // Two seconds watched, the middle skipped, two more watched. A save writes one continuous
-    // stretch, so four seconds in the popup is two seconds of file.
-    expect(summarize(session).duration).toBe(2)
-    expect(summarize(session).duration).toBe(savedSeconds(selectMaterial(session)))
+    // Two seconds watched, the middle skipped, two more watched. Both stretches reach the writer,
+    // which removes the shared hole and writes four continuous seconds.
+    expect(summarize(session).duration).toBe(4)
+    expect(selectMaterial(session)[0]!.segments).toHaveLength(2)
   })
 
   it('promises nothing at all while there is nothing to cut', () => {
@@ -2182,7 +2207,7 @@ describe('the summary and the file it promises', () => {
     expect(summarize(switchedQuality()).omits).toBe('rendition')
   })
 
-  it('says the material is in pieces and one of them is saved', () => {
+  it('says the material is in pieces and they will be joined', () => {
     expect(summarize(jumpedForward()).omits).toBe('gap')
   })
 

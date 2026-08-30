@@ -169,6 +169,35 @@ describe('cutPlain over a page that plays its sound apart', () => {
     expect(cut.plan.duration).toBeCloseTo(3.5, 1)
   })
 
+  it('joins picture gaps under a continuous head of the separate soundtrack', async () => {
+    const { file } = await openPicture()
+    const spans = [
+      { start: 0, end: 1 },
+      { start: 2, end: file.durationSeconds },
+    ]
+    const sound = openSound()
+    const silent = cutPlain(file, spans)!
+    const paired = cutPlain(file, spans, { track: sound })!
+
+    expect(paired.stretches).toBe(2)
+    expect(paired.plan.duration).toBe(silent.plan.duration)
+
+    const audio = paired.plan.tracks.find((track) => track.kind === 'audio')!
+    const base = soundBaseOf(file)
+    const indexes = audio.samples.map((sample) =>
+      sound.samples.findIndex(
+        (source) =>
+          source.source.at === sample.source.at - base &&
+          source.source.length === sample.source.length,
+      ),
+    )
+
+    expect(indexes[0]).toBe(0)
+    expect(indexes.every((index, at) => index === at)).toBe(true)
+    const sounded = audio.samples.reduce((ticks, sample) => ticks + sample.duration, 0)
+    expect(sounded / audio.timescale).toBeCloseTo(paired.plan.duration, 1)
+  })
+
   it('takes the sound from the start of the track, where the page itself pairs them', async () => {
     const { file } = await openPicture()
     const sound = openSound()

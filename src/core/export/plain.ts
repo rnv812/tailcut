@@ -1,7 +1,14 @@
 import { isoEncrypted } from '../iso/encryption'
 import { parseInit } from '../iso/init'
 import type { RangeReader } from '../iso/locate'
-import { planClip, presentationSpan, type ClipSource, type ExportPlan, type SourceTrack } from './plan'
+import {
+  AUDIO_WARMUP_PACKETS,
+  planClip,
+  presentationSpan,
+  type ClipSource,
+  type ExportPlan,
+  type SourceTrack,
+} from './plan'
 import { MAX_BRIDGED_GAP } from './ranges'
 import { clipSourceFrom, movieTracksOf } from './source'
 
@@ -125,7 +132,7 @@ export function plainFileOf(moov: Uint8Array, total: number): PlainFile | null {
 
 export interface PlainCut {
   plan: ExportPlan
-  /** How many separate stretches of the material the element holds; the longest is saved. */
+  /** How many separate stretches of the material the element holds; every one is saved. */
   stretches: number
   /**
    * The file holds more than one track of a kind, and a clip carries one of each.
@@ -255,8 +262,9 @@ function pairedSource(file: PlainFile, sound: SoundApart | undefined): ClipSourc
  *
  * `buffered` is the element's own account of the material, clamped to what the tables actually
  * describe: a browser is free to report a range a hair past the last frame, and a clip must not
- * be planned over material that is not there. Of the stretches that survive, the longest is
- * taken — the same rule the captured path uses for the longest run of its map.
+ * be planned over material that is not there. Every stretch that survives is kept in the sparse
+ * source handed to the ordinary clip planner, which removes the holes between them without ever
+ * naming a sample from an unwatched interval.
  */
 export function cutPlain(
   file: PlainFile,
@@ -270,23 +278,39 @@ export function cutPlain(
   const paired = source.audio !== undefined && own.audio === undefined
 
   const cover = presentationSpan(source.video)
-  let longest: Span | undefined
-  let stretches = 0
+  const held = heldSpans(buffered, cover)
+  const decodable = decodableSpans(source.video, held)
+  if (decodable.length === 0) return null
+  const clip = { start: decodable[0]!.start, end: decodable[decodable.length - 1]!.end }
 
-  for (const span of buffered) {
-    const held = { start: Math.max(span.start, cover.start), end: Math.min(span.end, cover.end) }
-    if (!(held.end > held.start)) continue
-    stretches += 1
-    if (!longest || held.end - held.start > longest.end - longest.start) longest = held
+  const video = samplesIn(source.video, decodable)
+  if (video.samples.length === 0) return null
+
+  let plan: ExportPlan
+  if (paired && source.audio) {
+    // A separate soundtrack has no shared media clock with the picture. Its settled meaning is
+    // the head of that track under the whole clip, so first close the picture's holes and then
+    // cut that much continuous sound from zero. Treating its own continuous clock as the
+    // picture's would keep every picture gap open instead.
+    const picture = planClip({ video }, { in: clip.start, out: clip.end, sound: false })
+    const sound = planClip(
+      { video: source.audio },
+      { in: 0, out: picture.duration, sound: false },
+    )
+    const audio = sound.tracks[0]
+    plan = {
+      tracks: audio ? [...picture.tracks, audio] : picture.tracks,
+      duration: picture.duration,
+      bytes: picture.bytes + (audio ? sound.bytes : 0),
+    }
+  } else {
+    const audio = source.audio ? samplesIn(source.audio, decodable) : undefined
+    plan = planClip(audio?.samples.length ? { video, audio } : { video }, {
+      in: clip.start,
+      out: clip.end,
+      sound: audio !== undefined,
+    })
   }
-
-  if (!longest) return null
-
-  const plan = planClip(source, {
-    in: longest.start,
-    out: longest.end,
-    sound: source.audio !== undefined,
-  })
   if (plan.tracks.length === 0) return null
 
   const of = (kind: 'video' | 'audio'): number =>
@@ -294,14 +318,105 @@ export function cutPlain(
 
   return {
     plan,
-    stretches,
+    stretches: held.length,
     alternate: of('video') > 1 || of('audio') > 1,
     paired,
     // The track ran out before the picture did. Measured against the clip that was actually
     // planned and not against the two files' lengths: what the user is owed a word about is the
     // silence at the end of the file they are about to be handed.
-    soundShort: paired && soundEndsEarly(plan, longest),
+    soundShort: paired && soundEndsEarly(plan, { start: 0, end: plan.duration }),
   }
+}
+
+/** Buffered ranges clamped to the source, sorted and merged where they touch. */
+function heldSpans(buffered: readonly Span[], cover: Span): Span[] {
+  const spans = buffered
+    .map((span) => ({ start: Math.max(span.start, cover.start), end: Math.min(span.end, cover.end) }))
+    .filter((span) => span.end > span.start)
+    .sort((a, b) => a.start - b.start)
+  const merged: Span[] = []
+
+  for (const span of spans) {
+    const last = merged[merged.length - 1]
+    if (last && span.start <= last.end) last.end = Math.max(last.end, span.end)
+    else merged.push({ ...span })
+  }
+
+  return merged
+}
+
+/** Presentation time of one source sample, in the clock used by HTMLMediaElement. */
+function sampleTime(track: SourceTrack, pts: number): number {
+  return (pts - track.editOffset) / track.timescale
+}
+
+/**
+ * Starts every resumed video stretch at a sync frame that lies inside it.
+ *
+ * A dependency prefix can be hidden at the head of a file by its one edit, but not at every seam
+ * of a progressive file. Starting a resumed run before its buffered range would expose unwatched
+ * frames; starting it on a predicted frame would make it undecodable. Audio and intra-only
+ * sources need no such adjustment.
+ */
+function decodableSpans(lead: SourceTrack, spans: readonly Span[]): Span[] {
+  if (lead.kind !== 'video') return spans.map((span) => ({ ...span }))
+
+  const result: Span[] = []
+  for (const span of spans) {
+    let start: number | undefined
+    for (const sample of lead.samples) {
+      if (!sample.sync) continue
+      const at = sampleTime(lead, sample.pts)
+      if (at >= span.start && at < span.end) {
+        start = at
+        break
+      }
+    }
+    if (start !== undefined) result.push({ start, end: span.end })
+  }
+  return result
+}
+
+/** The samples of every held stretch, kept in complete decode-order runs. */
+function samplesIn(track: SourceTrack, spans: readonly Span[]): SourceTrack {
+  if (track.kind === 'video') {
+    const indexes = new Set<number>()
+
+    for (const span of spans) {
+      const first = track.samples.findIndex(
+        (sample) => sample.sync && sampleTime(track, sample.pts) === span.start,
+      )
+      if (first < 0) continue
+
+      let last = first - 1
+      for (let i = first; i < track.samples.length; i++) {
+        // Stop at the first future reference outside the held stretch. Frames composed before
+        // the boundary but decoded after that reference depend on material the browser did not
+        // hold, so taking them while dropping the reference would make the resumed file corrupt;
+        // taking the reference would expose an unwatched frame at the seam.
+        if (sampleTime(track, track.samples[i]!.pts) >= span.end) break
+        last = i
+      }
+      for (let i = first; i <= last; i++) indexes.add(i)
+    }
+
+    return { ...track, samples: track.samples.filter((_sample, index) => indexes.has(index)) }
+  }
+
+  const indexes = new Set<number>()
+  for (const [index, sample] of track.samples.entries()) {
+    const at = sampleTime(track, sample.pts)
+    if (spans.some((span) => at >= span.start && at < span.end)) indexes.add(index)
+  }
+
+  const first = Math.min(...indexes)
+  if (Number.isFinite(first)) {
+    for (let index = Math.max(0, first - AUDIO_WARMUP_PACKETS); index < first; index++) {
+      indexes.add(index)
+    }
+  }
+
+  return { ...track, samples: track.samples.filter((_sample, index) => indexes.has(index)) }
 }
 
 /**

@@ -295,14 +295,14 @@ test('the popup reaches the other sessions of the page', async () => {
   await browser.close()
 })
 
-test('the popup says what a save will leave out, and only while there is something', async () => {
+test('the popup explains a gapped save, and only while that recording is selected', async () => {
   const { browser, popup, answer } = await offlinePopup()
 
-  // The length shown is already the length of the file, so the notice does not correct a number
-  // — it says why the number is shorter than the time spent watching.
+  // The length shown is already the length of the joined file; the notice explains why a seek in
+  // the recording will not be a pause in the saved clip.
   await answer([{ ...SUMMARY, omits: 'gap' }, OLDER])
   await expect(popup.getByTestId('omits')).toHaveText(
-    'Recording has gaps: the longest piece is saved.',
+    'Recording gaps are joined in the saved clip.',
   )
 
   // The notice belongs to the session it was sent about: the one picked out of the list will be

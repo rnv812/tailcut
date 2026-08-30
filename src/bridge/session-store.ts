@@ -121,8 +121,8 @@ export interface PlainMaterial {
   /**
    * Stretches of media time the element holds, in seconds — its own `buffered`, less whatever
    * eviction has taken off the front. This is what a save may take from, and the popup states
-   * the length of the longest of them; see the note at the head of core/export/plain.ts for why
-   * it is this and not the whole file.
+   * their joined playable length; see the note at the head of core/export/plain.ts for why it is
+   * this and not the whole file.
    */
   buffered: Span[]
   /**
@@ -378,15 +378,6 @@ function commonStretches(chosen: Track[]): Span[] {
   return common ?? []
 }
 
-/** The longest of the stretches; undefined — there are none. */
-function longestOf(spans: Span[]): Span | undefined {
-  let longest: Span | undefined
-  for (const span of spans) {
-    if (!longest || span.end - span.start > longest.end - longest.start) longest = span
-  }
-  return longest
-}
-
 /**
  * Whether the clip holds most of a segment: at least as much of it as it leaves outside.
  *
@@ -449,13 +440,65 @@ function extentOf(chunks: Chunk[]): Span | null {
   return { start, end }
 }
 
+/** The part of an envelope every selected track can actually put in the file. */
+function commonExtentOf(picked: Chunk[][], envelope: Span): Span | null {
+  let start = envelope.start
+  let end = envelope.end
+
+  for (const chunks of picked) {
+    const extent = extentOf(chunks)
+    if (!extent) return null
+    if (extent.start > start) start = extent.start
+    if (extent.end < end) end = extent.end
+  }
+
+  return end > start ? { start, end } : null
+}
+
+/** Holes between selected chunks, clipped to the part the file covers. */
+function holesIn(chunks: Chunk[], clip: Span): Span[] {
+  const map = new PtsMap()
+  for (const chunk of chunks) map.insert(chunk)
+
+  const holes: Span[] = []
+  const runs = map.runs()
+  for (let at = 1; at < runs.length; at++) {
+    const start = Math.max(clip.start, runs[at - 1]!.end)
+    const end = Math.min(clip.end, runs[at]!.start)
+    if (end > start) holes.push({ start, end })
+  }
+  return holes
+}
+
 /**
- * What of the session the file will not hold, the heaviest loss first.
+ * Length after the progressive writer joins the holes it is allowed to join.
+ *
+ * The lead is the picture where there is one, and otherwise the only track. Every one of its
+ * holes goes. Sound a player fetched ahead through a picture hole is trimmed by saveAllMp4 before
+ * the ordinary gap planner runs: Save all follows the picture the viewer actually loaded rather
+ * than preserving an invisible audio prefetch as a pause. Counting over the chunk map avoids
+ * parsing every captured sample merely to draw the popup.
+ */
+function joinedLengthOf(picked: Chunk[][], envelope: Span): number {
+  const clip = commonExtentOf(picked, envelope)
+  const leadChunks = picked[0]
+  if (!clip || !leadChunks) return 0
+
+  let pulled = 0
+  for (const hole of holesIn(leadChunks, clip)) {
+    pulled += hole.end - hole.start
+  }
+
+  return Math.max(0, clip.end - clip.start - pulled)
+}
+
+/**
+ * What the popup must explain about the file, the heaviest loss first.
  *
  * Ordered because the popup has one line for this and the interface is minimal by design: the
  * first of these is the one that changes the file most. A missing kind of media is a file that
- * plays without a picture; a rendition and a gap only shorten it, and the length in the summary
- * has already counted them.
+ * plays without a picture; a rendition shortens it. `gap` is the one informational entry: no
+ * material is omitted, but its session clock is joined on the way to the file.
  */
 function omissionsOf(losses: {
   refusedTracks: boolean
@@ -473,6 +516,8 @@ function omissionsOf(losses: {
   if (losses.soundLost) omitted.push('sound')
   if (losses.rendition) omitted.push('rendition')
   if (losses.alternate) omitted.push('alternate')
+  // Kept as the established protocol token, but unlike the entries above this is information:
+  // every stretch reaches the file and the writer joins their shared holes.
   if (losses.stretches > 1) omitted.push('gap')
   // Last of the list: the clip has its sound and it runs out early, which is the mildest of
   // these and the only one that is about the tail rather than about what was left behind.
@@ -509,7 +554,7 @@ export interface SavePlan {
    * init segments alone, or a file whose element holds not one whole frame yet.
    */
   bytes: number
-  /** What the file will not hold of what the session has; empty when it holds all of it. */
+  /** Losses the file has, plus the established `gap` token when recorded runs will be joined. */
   omitted: Omission[]
   /**
    * The sound of this clip comes from a track the page was playing beside the picture, rather
@@ -526,8 +571,8 @@ export interface SavePlan {
  * two qualities where a file carries one. So the summary is not written to resemble the
  * selection: both are read off this.
  *
- * What comes out is one continuous clip — the tracks the file will hold, the stretch of time it
- * will cover, the weight of the media data going into it, and what stayed behind. Material of
+ * What comes out is one continuous clip — the tracks the file will hold, its joined playable
+ * time, the weight of the media data going into it, and what stayed behind. Material of
  * nothing means there is nothing to cut: a session of init segments alone, or one whose second
  * buffer has not brought a fragment yet.
  */
@@ -587,11 +632,14 @@ function planPlainSave(session: Session, material: PlainMaterial): SavePlan {
 function planCapturedSave(session: Session): SavePlan {
   const chosen = mainTracks(session)
   const stretches = commonStretches(chosen)
-  const longest = longestOf(stretches)
+  const first = stretches[0]
+  const last = stretches[stretches.length - 1]
+  const envelope = first && last ? { start: first.start, end: last.end } : undefined
 
-  // Every chosen track covers the whole of that stretch — it is their common part — so none of
-  // them comes out of this with nothing, and no track reaches the file as an empty stream.
-  const picked = longest ? chosen.map((track) => chunksIn(track, longest)) : []
+  // The common edges keep a file from beginning or ending with a missing kind. Inside them every
+  // recorded run is kept: planPreview closes shared holes and preserves one-sided ones so neither
+  // real sound nor real picture is thrown away merely because the other track paused.
+  const picked = envelope ? chosen.map((track) => chunksIn(track, envelope)) : []
 
   const material: MuxTrack[] = picked.map((chunks, index) => ({
     initBytes: chosen[index]!.initBytes,
@@ -603,7 +651,7 @@ function planCapturedSave(session: Session): SavePlan {
 
   return {
     source: { kind: 'captured', tracks: material },
-    duration: longest ? lengthOf(picked, longest) : 0,
+    duration: envelope ? joinedLengthOf(picked, envelope) : 0,
     bytes,
     omitted: omissionsOf({
       refusedTracks: session.refusedTracks,
@@ -621,32 +669,6 @@ function planCapturedSave(session: Session): SavePlan {
     // pairing is a property of material that was never intercepted.
     pairedSound: false,
   }
-}
-
-/**
- * How long the clip is: the part of the stretch that every chosen track really covers.
- *
- * Not the stretch itself. A segment left out at an edge (see chunksIn) shortens the track it
- * belonged to, and the number the popup shows has to be the one the file delivers with all of
- * its tracks present — a promise of more than is there is the failure this whole computation
- * exists to prevent. Whole segments then carry the file a rounding past this number at the other
- * edge, and running a moment longer than promised is not the same kind of lie.
- */
-function lengthOf(picked: Chunk[][], stretch: Span): number {
-  let start = stretch.start
-  let end = stretch.end
-
-  for (const chunks of picked) {
-    const extent = extentOf(chunks)
-    // A chosen track with no segment at all: nothing of the clip can be shown, so it is of no
-    // length. chunksIn does not produce this — every chosen track has material in the stretch —
-    // and the guard is here so that a future caller of it cannot make the number a lie.
-    if (!extent) return 0
-    if (extent.start > start) start = extent.start
-    if (extent.end < end) end = extent.end
-  }
-
-  return Math.max(0, end - start)
 }
 
 /**
@@ -2396,9 +2418,9 @@ export function fileSnapshotSourceOf(
         info,
         initBytes: file,
         movie: { at: moov.start, length: moov.size },
-        // One stretch, from zero: the cut that assembled this file took the longest run the
-        // element held and closed nothing, so what came out is continuous from end to end and
-        // its own clock starts at its first frame.
+        // One stretch, from zero: the cut that assembled this file already joined every buffered
+        // run, so what came out is continuous from end to end and its own clock starts at its
+        // first frame.
         chunks: [{ start: 0, end: duration, bytes: NO_SEGMENT }],
       },
     ],

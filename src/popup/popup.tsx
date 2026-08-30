@@ -65,7 +65,7 @@ const OMITTED: Record<Omission, string> = {
   sound: 'This page plays its sound in a separate track that tailcut could not read; the clip is silent.',
   rendition: 'Recorded at more than one quality; one is saved.',
   alternate: 'This file has more than one picture or sound track; one of each is saved.',
-  gap: 'Recording has gaps: the longest piece is saved.',
+  gap: 'Recording gaps are joined in the saved clip.',
   // The same page, paired: the track ran out before the picture did, and nothing is looped round
   // to cover the rest. The page played what it played.
   soundShort: 'The separate soundtrack is shorter than the picture; the clip ends in silence.',

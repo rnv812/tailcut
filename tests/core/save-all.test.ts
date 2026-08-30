@@ -84,6 +84,25 @@ function decode(file: string): void {
   expect(run.stderr, 'decoding the file produces warnings').toBe('')
 }
 
+/** Presentation times of every decoded picture, in ascending order. */
+function pictureTimes(file: string): number[] {
+  const run = spawnSync(
+    'ffprobe',
+    [
+      '-v', 'error',
+      '-select_streams', 'v:0',
+      '-show_entries', 'frame=best_effort_timestamp_time',
+      '-of', 'csv=p=0',
+      file,
+    ],
+    { encoding: 'utf8' },
+  )
+
+  expect(run.error).toBeUndefined()
+  expect(run.status, run.stderr).toBe(0)
+  return run.stdout.trim().split('\n').map(Number).filter(Number.isFinite)
+}
+
 /** One frame as raw pixels, reached however the arguments say. */
 function frame(args: string[], what: string): Buffer {
   const run = spawnSync('ffmpeg', args, { maxBuffer: 64 * 1024 * 1024 })
@@ -295,6 +314,27 @@ describe('Save all, written as an ordinary mp4', () => {
 
     expect(mediaOf(file)).toHaveLength(1)
     expect(digest(...mediaOf(file))).toBe(digest(...H264.video.segments.flatMap(mediaOf)))
+  })
+
+  it('joins every picture run even when sound was buffered through its hole', () => {
+    const video = { ...H264.video, segments: [H264.video.segments[0]!, H264.video.segments[2]!] }
+    const material = recorded([video, H264.audio])
+    const expectedFrames = Number(
+      probe(onDisk('save-h264-one-sided-gap-source.mp4', muxFragmentedMp4(recorded([video]))))
+        .streams[0]!.nb_read_frames,
+    )
+    const file = onDisk('save-h264-one-sided-gap.mp4', saveAllMp4(material))
+    const times = pictureTimes(file)
+
+    expect(times.length).toBeGreaterThanOrEqual(expectedFrames)
+    expect(times.length).toBeLessThanOrEqual(expectedFrames + 1)
+    let widest = 0
+    for (let index = 1; index < times.length; index++) {
+      widest = Math.max(widest, times[index]! - times[index - 1]!)
+    }
+    expect(widest).toBeLessThan(0.15)
+    expect(Number(probe(file).format.duration)).toBeCloseTo(4, 1)
+    decode(file)
   })
 
   it('lays two tracks out one after the other, picture first', () => {

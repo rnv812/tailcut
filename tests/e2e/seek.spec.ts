@@ -13,6 +13,7 @@ const PLAYER_URL = 'https://tailcut.test/minute'
 /** Frames of the fixture are 0.1 seconds apart, samples of its sound 0.046. */
 const VIDEO_STEP = 0.1
 const AUDIO_STEP = 1024 / 22050
+const VIDEO_FRAMES_PER_SEGMENT = 60
 
 /** Room for the rounding of two timescales; anything past it is a hole and not a rounding. */
 const NO_HOLE = 0.05
@@ -102,11 +103,10 @@ test('a file saved after seeking has no hole in it', async () => {
   expect(Math.max(...played.appended.video)).toBeGreaterThanOrEqual(7)
 
   const popup = await openPopupOn(context, page, extensionId)
-  // The material is in two pieces and the file will hold one of them. The popup says so in a
-  // line, and — this is the point — the length beside it is the length of that one piece: the
-  // sum of the two would promise a clip half of which no file will ever contain.
+  // Both pieces will be joined. The notice says what happens instead of describing one of them as
+  // lost, and the duration beside it is the duration of all recorded material after the join.
   await expect(popup.getByTestId('omits')).toHaveText(
-    'Recording has gaps: the longest piece is saved.',
+    'Recording gaps are joined in the saved clip.',
   )
   const promised = secondsOf(await popup.getByTestId('duration').innerText())
 
@@ -126,12 +126,16 @@ test('a file saved after seeking has no hole in it', async () => {
   const picture = frameTimes(file, 'v')
   const sound = frameTimes(file, 'a')
 
-  // One unbroken stretch of each: the saved file holds the longer of the two runs and not both of
-  // them stitched over the hole.
+  // One unbroken stretch of each: the saved file holds every recorded segment, stitched over the
+  // hole. The exact picture count makes selecting either run alone fail even though such a file
+  // would also have no large timestamp step.
   expect(widestStep(picture)).toBeLessThan(VIDEO_STEP + NO_HOLE)
   expect(widestStep(sound)).toBeLessThan(AUDIO_STEP + NO_HOLE)
+  expect(picture).toHaveLength(
+    new Set(played.appended.video).size * VIDEO_FRAMES_PER_SEGMENT,
+  )
 
-  // And it is the stretch the jump forward opened, not a second or two of leftovers.
+  // And the joined result is substantial, not a second or two of leftovers.
   const covered = picture[picture.length - 1]! - picture[0]!
   expect(covered).toBeGreaterThan(12)
 

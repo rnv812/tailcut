@@ -399,7 +399,28 @@ describe('what an ordinary file promises, and what it delivers', () => {
     expect(summary.omits).toBeUndefined()
   })
 
-  it('says a gap out loud and saves the longest piece', async () => {
+  it('keeps the decoder warm-up before the first buffered audio packet', async () => {
+    const page = registry()
+
+    page.says()
+    page.store.promotePending(SOURCE)
+    await page.store.settled()
+
+    const session = page.store.list()[0]!
+    const plan = planSave(session)
+    expect(plan.source.kind).toBe('plain')
+
+    const indexed = session.plain!.file.tracks.find((track) => track.kind === 'audio')!
+    const audio = plan.source.kind === 'plain'
+      ? plan.source.plan.tracks.find((track) => track.kind === 'audio')!
+      : undefined
+
+    expect(audio).toBeDefined()
+    expect(audio!.samples[0]!.source).toEqual(indexed.samples[0]!.source)
+    expect(audio!.skipTicks).toBe(indexed.editOffset)
+  })
+
+  it('says a gap out loud and joins every decodable buffered piece', async () => {
     const page = registry()
 
     // A file the viewer jumped forward inside: the browser holds the head and the tail and
@@ -414,9 +435,24 @@ describe('what an ordinary file promises, and what it delivers', () => {
     expect(summary.omits).toBe('gap')
     expect(summary.duration).toBeCloseTo(3, 0)
 
-    const { probe } = await saved(session, 'plain-session-gap.mp4')
+    const { plan, file, probe } = await saved(session, 'plain-session-gap.mp4')
     expect(probe.stderr).toBe('')
+    expect(decodeWarnings(file)).toBe('')
     expect(Number(probe.probed!.format.duration)).toBeCloseTo(summary.duration, 1)
+
+    expect(plan.source.kind).toBe('plain')
+    const indexed = session.plain!.file.tracks.find((track) => track.kind === 'video')!
+    const planned = plan.source.kind === 'plain' ? plan.source.plan.tracks[0]!.samples : []
+    const sourceTimes = planned.map((sample) => {
+      const original = indexed.samples.find(
+        (candidate) =>
+          candidate.source.at === sample.source.at && candidate.source.length === sample.source.length,
+      )!
+      return (original.pts - indexed.editOffset) / indexed.timescale
+    })
+    expect(sourceTimes.some((time) => time < 1)).toBe(true)
+    expect(sourceTimes.some((time) => time >= 4)).toBe(true)
+    expect(sourceTimes.every((time) => time < 1 || time >= 4)).toBe(true)
   })
 
   it('answers nothing to save while the element holds nothing', async () => {

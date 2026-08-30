@@ -459,7 +459,7 @@ describe('the popup', () => {
     // Not the same news as a rendition, and it was told as one: over a file holding one picture
     // and two soundtracks the popup said the video had been recorded at more than one quality.
     ['alternate', 'This file has more than one picture or sound track; one of each is saved.'],
-    ['gap', 'Recording has gaps: the longest piece is saved.'],
+    ['gap', 'Recording gaps are joined in the saved clip.'],
     // A page that keeps its sound in an element of its own, where that element could not be used.
     // The clip really is silent, and on such a page a silent clip reads as a defect in the saving
     // rather than as a page whose sound was somewhere tailcut could not follow.

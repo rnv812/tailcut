@@ -1,7 +1,7 @@
 import { audioSampleEntry, videoSampleEntry } from '../iso/entry'
 import type { MuxTrack } from '../mux'
 import { assembleMp4 } from './assemble'
-import { planPreview } from './plan'
+import { AUDIO_WARMUP_PACKETS, planPreview, type ClipSource, type SourceTrack } from './plan'
 import { ByteMap, clipSourceOf, type SourceTrackInput } from './source'
 
 /**
@@ -26,6 +26,63 @@ function inputsOf(track: MuxTrack, map: ByteMap): SourceTrackInput[] {
   return inputs
 }
 
+interface Span {
+  start: number
+  end: number
+}
+
+/** Continuous decode-time runs of one track, in seconds. */
+function runsOf(track: SourceTrack): Span[] {
+  const runs: Span[] = []
+
+  for (const sample of track.samples) {
+    const start = sample.dts / track.timescale
+    const end = (sample.dts + sample.duration) / track.timescale
+    const last = runs[runs.length - 1]
+    if (last && start <= last.end) last.end = Math.max(last.end, end)
+    else runs.push({ start, end })
+  }
+
+  return runs
+}
+
+/**
+ * Sound under the recorded picture, excluding audio fetched ahead across a picture hole.
+ *
+ * Save all is defined by the picture the viewer actually loaded. A player commonly buffers a
+ * longer audio segment across a seek, and treating those unseen seconds as material keeps a
+ * visible pause in the output. Retain packets that overlap a picture run plus the decoder warm-up
+ * at the head; the ordinary gap planner then joins both tracks by the same amount.
+ */
+function soundUnderPicture(source: ClipSource): ClipSource {
+  if (source.video.kind !== 'video' || !source.audio) return source
+
+  const picture = runsOf(source.video)
+  if (picture.length <= 1) return source
+  const indexes = new Set<number>()
+
+  for (const [index, sample] of source.audio.samples.entries()) {
+    const start = sample.dts / source.audio.timescale
+    const end = (sample.dts + sample.duration) / source.audio.timescale
+    if (picture.some((run) => end > run.start && start < run.end)) indexes.add(index)
+  }
+
+  const first = Math.min(...indexes)
+  if (Number.isFinite(first)) {
+    for (let index = Math.max(0, first - AUDIO_WARMUP_PACKETS); index < first; index++) {
+      indexes.add(index)
+    }
+  }
+
+  return {
+    video: source.video,
+    audio: {
+      ...source.audio,
+      samples: source.audio.samples.filter((_sample, index) => indexes.has(index)),
+    },
+  }
+}
+
 /**
  * Everything the session holds, as an ordinary mp4.
  *
@@ -42,5 +99,5 @@ export function saveAllMp4(tracks: readonly MuxTrack[]): Uint8Array {
   const source = clipSourceOf(tracks.flatMap((track) => inputsOf(track, map)))
   if (!source) return new Uint8Array(0)
 
-  return assembleMp4(planPreview(source), (at) => map.bytesOf(at))
+  return assembleMp4(planPreview(soundUnderPicture(source)), (at) => map.bytesOf(at))
 }
