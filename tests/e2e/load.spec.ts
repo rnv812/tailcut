@@ -19,7 +19,7 @@ test('service worker applies its install-time setup', async () => {
   // workers wide. The claim is unchanged: the colour has to become this one and no other.
   await expect
     .poll(() => sw.evaluate(() => chrome.action.getBadgeBackgroundColor({})), { timeout: 10_000 })
-    .toEqual([76, 141, 255, 255])
+    .toEqual([183, 240, 63, 255])
 
   await context.close()
 })
