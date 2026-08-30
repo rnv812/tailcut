@@ -278,7 +278,7 @@ function Footer(props: {
         {props.paused ? 'Resume on this page' : 'Pause on this page'}
       </button>
 
-      <div class="muted in-use" data-testid="in-use">
+      <div class="muted in-use" data-testid="in-use" data-bytes={props.inUse.bytes}>
         {/* A full disk is a state and not an error: the browser is within its rights to refuse
             (§7.4), the sweeper has already lowered the ceiling to fit, and what the user needs to
             know is that nothing new is going down until room is made. */}

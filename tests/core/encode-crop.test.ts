@@ -133,6 +133,11 @@ describe('geometryOf', () => {
     expect(geometryOf(null, LANDSCAPE, 30)).toEqual({ width: 1920, height: 1080, framerate: 30 })
     // Which is what the whole picture is as a rectangle, so the two cannot come apart.
     expect(fullCrop(LANDSCAPE)).toEqual({ x: 0, y: 0, width: 1920, height: 1080 })
+    expect(geometryOf(null, { width: 51, height: 33 }, 30)).toEqual({
+      width: 50,
+      height: 32,
+      framerate: 30,
+    })
   })
 
   it('asks for the size of the rectangle when there is one, at the framerate it was given', () => {

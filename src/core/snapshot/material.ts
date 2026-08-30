@@ -99,15 +99,43 @@ function richest(tracks: MaterialTrack[], kind: TrackKind): MaterialTrack | null
   return best
 }
 
+/** The independent sound beside a picture; a muxed picture already carries its own. */
+function soundFor(tracks: MaterialTrack[], video: MaterialTrack | null): MaterialTrack | null {
+  if (video?.kinds.includes('audio')) return null
+  return richest(
+    tracks.filter((track) => !track.kinds.includes('video')),
+    'audio',
+  )
+}
+
+/**
+ * Opens one recorded picture track without hiding the rest of the snapshot.
+ *
+ * A track id, rather than a representation string, is the stable identity here: two source
+ * buffers are allowed to describe the same codec and size, while their bytes are still distinct.
+ * An unknown or empty picture is ignored so a stale UI choice cannot strand valid material.
+ */
+export function selectPicture(material: Material, trackId: string): Material {
+  const video = material.tracks.find(
+    (track) =>
+      track.track.id === trackId && track.kinds.includes('video') && track.duration > 0,
+  )
+  if (!video || video === material.video) return material
+
+  return {
+    ...material,
+    video,
+    audio: soundFor(material.tracks, video),
+    duration: video.duration,
+  }
+}
+
 export function materialOf(index: SnapshotIndex): Material {
   const tracks = index.tracks.map(trackMaterialOf)
   const video = richest(tracks, 'video')
-  // A muxed init puts both kinds into one buffer, and then the picture track is the sound track:
-  // choosing it twice would put the same segments into the file twice.
-  const audio = richest(
-    tracks.filter((track) => track !== video),
-    'audio',
-  )
+  // A muxed init puts both kinds into one buffer, and then the picture track is the sound track.
+  // Another muxed representation is not its companion: it is another picture with other bytes.
+  const audio = soundFor(tracks, video)
 
   let bytes = 0
   for (const track of tracks) bytes += track.bytes

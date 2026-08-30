@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { gapsBetween, materialOf } from '../../src/core/snapshot/material'
+import { gapsBetween, materialOf, selectPicture } from '../../src/core/snapshot/material'
 import { planSnapshot, type SnapshotSource } from '../../src/core/snapshot/build'
 import type { TrackInfo, TrackKind } from '../../src/shared/types'
 
@@ -101,6 +101,26 @@ describe('materialOf', () => {
     expect(material.representations).toEqual(['video:avc1:640x480', 'video:avc1:1280x720'])
   })
 
+  it('opens another recorded picture without changing the material inventory', () => {
+    const material = materialOf(
+      indexOf([
+        track('short', 'video', 'video:avc1:640x480', [[0, 2]]),
+        track('long', 'video', 'video:avc1:1280x720', [[2, 8]]),
+        track('sound', 'audio', 'audio:mp4a:0x0', [[0, 8]]),
+      ]),
+    )
+
+    const opened = selectPicture(material, 'short')
+
+    expect(material.video!.track.id, 'the premise is that another picture opened by default').toBe(
+      'long',
+    )
+    expect(opened.video!.track.id).toBe('short')
+    expect(opened.audio!.track.id).toBe('sound')
+    expect(opened.duration).toBe(2)
+    expect(opened.tracks).toBe(material.tracks)
+  })
+
   it('lets a track with no material be neither the picture nor the sound', () => {
     const index = indexOf([
       track('t0', 'video', 'video:avc1:640x480', []),
@@ -124,6 +144,21 @@ describe('materialOf', () => {
 
     expect(material.video!.track.id).toBe('t0')
     expect(material.audio, 'a muxed track has no separate sound track').toBeNull()
+  })
+
+  it('does not take sound from another muxed picture representation', () => {
+    const first = {
+      ...track('first', 'video', 'muxed:avc1+mp4a:640x480', [[0, 6]]),
+      kinds: ['video', 'audio'] as TrackKind[],
+    }
+    const second = {
+      ...track('second', 'video', 'muxed:avc1+mp4a:1280x720', [[6, 8]]),
+      kinds: ['video', 'audio'] as TrackKind[],
+    }
+    const material = materialOf(indexOf([first, second]))
+
+    expect(material.audio).toBeNull()
+    expect(selectPicture(material, 'second').audio).toBeNull()
   })
 
   it('measures the material by the picture, or by the sound where there is none', () => {

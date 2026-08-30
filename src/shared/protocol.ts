@@ -1,6 +1,19 @@
 /** Path to the bridge page inside the extension package. */
 export const BRIDGE_PATH = 'bridge/bridge.html'
 
+/** Prefix of the short-lived extension-storage slot used to authenticate one bridge frame. */
+const BRIDGE_CAPABILITY_PREFIX = 'bridge-capability:'
+
+/** A public random identifier names the slot; its value is the private capability. */
+export function bridgeCapabilityKey(id: string): string {
+  return `${BRIDGE_CAPABILITY_PREFIX}${id}`
+}
+
+/** Both halves of a bridge capability are independent 128-bit values written as lowercase hex. */
+export function isBridgeCapability(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{32}$/.test(value)
+}
+
 /** Path to the editor page inside the extension package. */
 export const EDITOR_PATH = 'editor/editor.html'
 
@@ -105,6 +118,36 @@ export type PageToBridge =
    * the registry (src/bridge/session-store.ts) and described over `SoundApart`.
    */
   | ({ type: 'tc:sound' } & SoundSource)
+
+/**
+ * The one message sent through the page window to open the private control channel.
+ *
+ * The public identifier is in the bridge URL. Its value lives briefly in extension storage, which
+ * the page cannot read; possession of that value is what lets the isolated content script hand the
+ * bridge a MessagePort. Every command below then travels only through that port.
+ */
+export interface BridgeConnect {
+  type: 'tc:connect'
+  capability: string
+}
+
+/**
+ * Control facts produced by the isolated content script rather than by the page hook.
+ *
+ * Kept apart from PageToBridge because these messages change extension state: a rejection drops
+ * material, encryption refuses the page, and the context decides whether recording is allowed.
+ * A page may supply its own media bytes, but it must not be able to forge any of these controls.
+ */
+export type ContentToBridge =
+  | { type: 'tc:context'; url: string; title: string }
+  | {
+      type: 'tc:verdict'
+      sourceId: string
+      verdict: 'reject' | 'hold' | 'promote'
+    }
+  | { type: 'tc:player'; sourceId: string; widthPx: number }
+  | { type: 'tc:encrypted' }
+  | { type: 'tc:unreachable' }
 
 /**
  * A media element playing an ordinary file: `currentSrc` is an http(s) address rather than a blob
@@ -550,6 +593,26 @@ export const isPageToBridge = guarding<PageToBridge>({
   'tc:duration': () => true,
   'tc:plain': () => true,
   'tc:sound': () => true,
+})
+
+export const isBridgeConnect = guarding<BridgeConnect>({
+  'tc:connect': (message) => isBridgeCapability(message.capability),
+})
+
+export const isContentToBridge = guarding<ContentToBridge>({
+  'tc:context': (message) =>
+    typeof message.url === 'string' && typeof message.title === 'string',
+  'tc:verdict': (message) =>
+    typeof message.sourceId === 'string' &&
+    (message.verdict === 'reject' ||
+      message.verdict === 'hold' ||
+      message.verdict === 'promote'),
+  'tc:player': (message) =>
+    typeof message.sourceId === 'string' &&
+    typeof message.widthPx === 'number' &&
+    Number.isFinite(message.widthPx),
+  'tc:encrypted': () => true,
+  'tc:unreachable': () => true,
 })
 
 export const isTabToExtension = guarding<TabToExtension>({ 'tc:recording': () => true })

@@ -45,6 +45,8 @@ test('what was watched before the browser was closed is still there after it ope
       // The volume shown is the index's own sum, and it is not zero after a restart: the totals
       // row survived, and the repair did not decide the disk was empty.
       await expect(popup.getByTestId('in-use')).not.toHaveText('0 KB on disk')
+      const bytesOnDisk = Number(await popup.getByTestId('in-use').getAttribute('data-bytes'))
+      expect(bytesOnDisk).toBeGreaterThan(0)
 
       const [editor] = await Promise.all([
         context.waitForEvent('page'),
@@ -157,22 +159,27 @@ test('the repair reconciles the index with the disk at start-up', async () => {
         // And the other half, asked for by hand: the orphan was made seconds ago, and the repair
         // that ran at start-up was right to leave it alone. With no grace there is nothing to
         // wait for, and nothing was changed anywhere to arrange that.
+        const address = '/shared/history-db.js'
+        const { piecesOf, sessionById, readTotals }: typeof import('../../src/shared/history-db') =
+          await import(address)
+
+        const root = await navigator.storage.getDirectory()
+        const dir = await (await root.getDirectoryHandle('history')).getDirectoryHandle(id)
+        const before: string[] = []
+        for await (const [name] of dir.entries()) before.push(name)
+
         const sweeperAt = '/sw/sweeper.js'
         const { repair, liveIo }: typeof import('../../src/sw/sweeper') = await import(sweeperAt)
         await repair(liveIo(), 0)
 
-        const address = '/shared/history-db.js'
-        const { piecesOf, sessionById, readTotals }: typeof import('../../src/shared/history-db') =
-          await import(address)
         const session = await sessionById(id)
         const pieces = await piecesOf(id)
 
-        const root = await navigator.storage.getDirectory()
-        const dir = await (await root.getDirectoryHandle('history')).getDirectoryHandle(id)
         const names: string[] = []
         for await (const [name] of dir.entries()) names.push(name)
 
         return {
+          orphanWasPresent: before.includes('zzzz-999999.tcm'),
           rows: pieces.map((piece) => piece.file).sort(),
           files: names.sort(),
           bytes: session?.bytes ?? 0,
@@ -183,6 +190,7 @@ test('the repair reconciles the index with the disk at start-up', async () => {
       // Every row has its file and every file has its row — of a session that still has both,
       // which is what the second batch above is for.
       expect(state.rows.length, 'the repair left the session with nothing').toBeGreaterThan(0)
+      expect(state.orphanWasPresent, 'the start-up repair took the fresh orphan first').toBe(true)
       expect(state.rows).toEqual(state.files)
       expect(state.files).not.toContain('zzzz-999999.tcm')
       expect(state.totals).toBe(state.bytes)

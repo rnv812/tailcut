@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { sessionKey } from '../../src/core/session-key'
 import { boxBody, childBoxes, topLevelBoxes } from '../../src/core/iso/reader'
 import { movieTracksOf } from '../../src/core/export/source'
-import { isSnapshotId, snapshotPath } from '../../src/shared/protocol'
+import { bridgeCapabilityKey, isSnapshotId, snapshotPath } from '../../src/shared/protocol'
 import { decodeFooter, decodeIndex, FOOTER_BYTES } from '../../src/core/snapshot/format'
 import type {
   BridgeToPage,
@@ -95,6 +95,8 @@ const buffer = (bytes: Uint8Array): ArrayBuffer => bytes.slice().buffer
 const PAGE_URL = 'https://site.example/watch?v=abc'
 const PAGE_TITLE = 'Clip — site.example'
 const REFERRER = 'https://referrer.example/from'
+const CAPABILITY_ID = '0123456789abcdef0123456789abcdef'
+const CAPABILITY = 'fedcba9876543210fedcba9876543210'
 
 /**
  * The key the registry holds the session of this page under. It is never an address:
@@ -131,6 +133,21 @@ function port() {
     received,
     postMessage(message: unknown) {
       received.push(message)
+    },
+  }
+}
+
+/** The private port handed to the bridge: its peer drives messages into `onmessage`. */
+function controlPort() {
+  const received: unknown[] = []
+  return {
+    received,
+    onmessage: null as ((event: MessageEvent) => void) | null,
+    postMessage(message: unknown) {
+      received.push(message)
+    },
+    deliver(data: unknown, ports: ReturnType<typeof port>[] = []) {
+      this.onmessage?.({ data, ports } as unknown as MessageEvent)
     },
   }
 }
@@ -230,7 +247,11 @@ function installWindow(referrer = REFERRER, stored?: unknown) {
    * set has to be able to move a setting under a page that is already recording — which is the
    * whole shape of the feature and cannot be asked of a constant.
    */
-  const storage: Record<string, unknown> = stored === undefined ? {} : { [SETTINGS_KEY]: stored }
+  const storage: Record<string, unknown> = {
+    [bridgeCapabilityKey(CAPABILITY_ID)]: CAPABILITY,
+    ...(stored === undefined ? {} : { [SETTINGS_KEY]: stored }),
+  }
+  const removedStorageKeys: string[] = []
   type StorageListener = (
     changes: Record<string, { newValue?: unknown; oldValue?: unknown }>,
     area: string,
@@ -247,6 +268,7 @@ function installWindow(referrer = REFERRER, stored?: unknown) {
   // The document of the bridge lives on the extension origin; the referrer is the only thing it
   // knows about the page that inserted it before tc:context arrives.
   vi.stubGlobal('document', { referrer })
+  vi.stubGlobal('location', { hash: `#${CAPABILITY_ID}` })
 
   /** Downloads that were started, in the shape the bridge orders them from Chrome. */
   const downloads: Download[] = []
@@ -341,6 +363,10 @@ function installWindow(referrer = REFERRER, stored?: unknown) {
           }
           for (const listener of [...storageListeners]) listener(changes, 'local')
         },
+        remove: async (key: string) => {
+          removedStorageKeys.push(key)
+          delete storage[key]
+        },
       },
       onChanged: {
         addListener: (listener: StorageListener) => storageListeners.push(listener),
@@ -367,7 +393,7 @@ function installWindow(referrer = REFERRER, stored?: unknown) {
     },
   })
 
-  const deliver = (
+  const deliverWindow = (
     data: unknown,
     options: { from?: Receiver; ports?: ReturnType<typeof port>[] } = {},
   ): Receiver => {
@@ -377,10 +403,57 @@ function installWindow(referrer = REFERRER, stored?: unknown) {
     return from
   }
 
+  let control: ReturnType<typeof controlPort> | null = null
+  const controlTypes = new Set([
+    'tc:append',
+    'tc:source',
+    'tc:worker',
+    'tc:duration',
+    'tc:plain',
+    'tc:sound',
+    'tc:context',
+    'tc:verdict',
+    'tc:player',
+    'tc:encrypted',
+    'tc:unreachable',
+    'tc:list',
+    'tc:save',
+    'tc:edit',
+    'tc:pause',
+  ])
+
+  /** Routes declared controls through the authenticated port and page data through the window. */
+  const deliver = (
+    data: unknown,
+    options: { from?: Receiver; ports?: ReturnType<typeof port>[] } = {},
+  ): Receiver => {
+    const type = (data as { type?: unknown } | null)?.type
+    if (control && typeof type === 'string' && controlTypes.has(type)) {
+      control.deliver(data, options.ports)
+      return options.from ?? receiver()
+    }
+    return deliverWindow(data, options)
+  }
+
   return {
     parent,
     top,
     deliver,
+    /** Delivers through the page window even when controls have their authenticated port. */
+    deliverWindow,
+    /** Opens the control port with the capability that only extension storage exposes. */
+    async connect(): Promise<void> {
+      control = controlPort()
+      deliverWindow(
+        { type: 'tc:connect', capability: CAPABILITY },
+        { from: parent, ports: [control as unknown as ReturnType<typeof port>] },
+      )
+      for (let turn = 0; turn < 4; turn++) await Promise.resolve()
+      expect(control.received, 'the bridge did not accept the authenticated control port').toEqual([
+        { type: 'tc:ready' },
+      ])
+    },
+    removedStorageKeys,
     /**
      * Asks the bridge the way the popup does: through a message channel.
      *
@@ -552,6 +625,7 @@ async function loadBridge(referrer?: string, stored?: unknown) {
   vi.resetModules()
   await import('../../src/bridge/bridge')
   for (let turn = 0; turn < 4; turn++) await Promise.resolve()
+  await win.connect()
   return win
 }
 
@@ -586,6 +660,28 @@ describe('the handshake of the bridge', () => {
       targetOriginOf(win.parent.posts[0]?.to),
       'the handshake is nailed to a particular address',
     ).toBe('*')
+  })
+
+  it('deletes the one-time capability after reading it', async () => {
+    const win = await loadBridge()
+
+    expect(win.removedStorageKeys).toEqual([bridgeCapabilityKey(CAPABILITY_ID)])
+  })
+
+  it('does not give a control port to the embedding page or consume the real capability', async () => {
+    const win = installWindow()
+    vi.resetModules()
+    await import('../../src/bridge/bridge')
+    const attacker = controlPort()
+
+    win.deliverWindow(
+      { type: 'tc:connect', capability: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+      { from: win.parent, ports: [attacker as unknown as ReturnType<typeof port>] },
+    )
+    for (let turn = 0; turn < 4; turn++) await Promise.resolve()
+
+    expect(attacker.received).toEqual([])
+    await win.connect()
   })
 })
 
@@ -737,17 +833,15 @@ describe('the bridge puts segments into the session registry', () => {
     expect(win.downloads[0]!.filename).toBe('Night broadcast.mp4')
   })
 
-  it('coerces a non-string context to strings instead of passing it on', async () => {
+  it('ignores a context whose fields are not strings', async () => {
     const win = await loadBridge()
 
-    // The bridge takes tc:context from anyone on the page: any script can address it, not only
-    // our content script. Nobody checked the fields, so anything at all could travel into the
-    // summary of the session — the very thing the popup signs it with — and a URL object beside
-    // a number is exactly what a script that means no harm would send.
+    // The control port is private, but postMessage is still untyped at runtime. A malformed sender
+    // must not replace the safe referrer fallback with coerced objects.
     win.deliver({ type: 'tc:context', url: new URL(PAGE_URL), title: 42 })
     win.append(initBytes)
 
-    expect(await win.list()).toMatchObject([{ url: PAGE_URL, title: '42' }])
+    expect(await win.list()).toMatchObject([{ url: REFERRER, title: '' }])
   })
 
   it('records nothing at all under an address that is not one', async () => {
@@ -757,7 +851,7 @@ describe('the bridge puts segments into the session registry', () => {
     // against — and the same is true of about:blank and of a data: document. A recording the
     // settings page cannot turn off is worse than no recording (see siteAllows), so there is
     // none, and the hook is told to stop copying for good measure.
-    win.deliver({ type: 'tc:context', url: { href: PAGE_URL }, title: 42 })
+    win.deliver({ type: 'tc:context', url: '[object Object]', title: '42' })
     win.append(initBytes)
 
     expect(await win.list()).toEqual([])
@@ -899,6 +993,28 @@ describe('the bridge and foreign messages', () => {
     // that thinks of sending the bridge a tc:list.
     expect(sender.posts, 'the session list went into the page window').toEqual([])
     expect(reply.received).toHaveLength(1)
+  })
+
+  it('does not let the embedding page pause its own recording', async () => {
+    const win = await loadBridge()
+    const reply = port()
+
+    win.deliverWindow({ type: 'tc:pause', on: true }, { ports: [reply] })
+    await Promise.resolve()
+
+    // The page and the isolated content script share an origin and a parent WindowProxy, so neither
+    // one authenticates this command. The control channel itself has to be unavailable to the page.
+    expect(reply.received).toEqual([])
+  })
+
+  it('accepts the same pause request through the authenticated control port', async () => {
+    const win = await loadBridge()
+    const reply = port()
+
+    win.deliver({ type: 'tc:pause', on: true }, { ports: [reply] })
+    await Promise.resolve()
+
+    expect(reply.received).toEqual([{ ok: true, paused: true }])
   })
 })
 

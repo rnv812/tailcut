@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render } from 'preact'
 import {
   DEFAULTS,
@@ -121,6 +121,10 @@ beforeEach(() => {
   // popup does, and the old body still holds the preact tree of the last render — cleared with
   // innerHTML it would be reconciled against nodes that are no longer in the document.
   document.documentElement.replaceChild(document.createElement('body'), document.body)
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
 })
 
 describe('the settings page', () => {
@@ -427,7 +431,6 @@ describe('the settings page', () => {
     expect(textAt('volume')).toBe('0 KB')
     expect(at('disk-full')).toBeNull()
     expect(at('clear-refused')).toBeNull()
-    vi.unstubAllGlobals()
   })
 
   it('says so when the wipe was refused, instead of drawing a zero over it', async () => {
@@ -446,7 +449,6 @@ describe('the settings page', () => {
     // And what is shown is what the index says now, read back rather than guessed at.
     expect(textAt('volume')).toContain('2.00 GB')
     expect(textAt('disk-full')).toContain('Disk full')
-    vi.unstubAllGlobals()
   })
 
   it('says the same when there is no worker to hear it at all', async () => {
@@ -465,7 +467,6 @@ describe('the settings page', () => {
 
     expect(textAt('clear-refused')).toContain('Nothing was cleared')
     expect(textAt('volume')).toContain('2.00 GB')
-    vi.unstubAllGlobals()
   })
 
   it('says how much of a long buffer a tab will actually keep', async () => {

@@ -845,6 +845,9 @@ describe('history', () => {
   it('shows the volume in use out of the index', async () => {
     await draw()
     expect(document.querySelector('[data-testid="in-use"]')!.textContent).toContain('1.50 GB')
+    expect(document.querySelector('[data-testid="in-use"]')!.getAttribute('data-bytes')).toBe(
+      String(1.5 * 1024 ** 3),
+    )
     expect(document.querySelector('[data-testid="in-use"]')!.textContent).not.toContain('full')
   })
 

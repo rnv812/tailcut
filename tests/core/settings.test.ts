@@ -45,6 +45,13 @@ describe('merge', () => {
     expect(merge({ recording: { bufferSeconds: 60 } }).recording.mode).toBe('all')
   })
 
+  it('refuses settings groups carried by an array or an inherited property', () => {
+    const array = Object.assign([], { recording: { bufferSeconds: 60 } })
+    const inherited = Object.create({ recording: { bufferSeconds: 60 } })
+
+    expect([merge(array), merge(inherited)]).toEqual([DEFAULTS, DEFAULTS])
+  })
+
   it('keeps what was stored', () => {
     const stored = merge({ recording: { bufferSeconds: 60, deny: ['a.example'] } })
     expect(stored.recording.bufferSeconds).toBe(60)
@@ -160,6 +167,20 @@ describe('merge', () => {
     })
     expect(merged.recording.deny).toEqual(['example.com', 'x.example', 'ok.example'])
   })
+
+  it('stores a hostname without the port whether it was pasted as an address or typed bare', () => {
+    const merged = merge({
+      recording: { deny: ['https://X.Example:8080/watch', 'x.example:9090'] },
+    })
+
+    expect(merged.recording.deny).toEqual(['x.example'])
+  })
+
+  it('stores a bare internationalized hostname as ASCII', () => {
+    const merged = merge({ recording: { deny: ['пример.рф'] } })
+
+    expect(merged.recording.deny).toEqual(['xn--e1afmkfd.xn--p1ai'])
+  })
 })
 
 describe('presetOf', () => {
@@ -216,6 +237,10 @@ describe('siteAllows', () => {
         'https://ads.site.example/x',
       ),
     ).toBe(false)
+  })
+
+  it('denies a listed hostname on a nonstandard port', () => {
+    expect(siteAllows(with_({ deny: ['site.example'] }), 'https://site.example:8080/watch')).toBe(false)
   })
 
   it('records nothing at an address it cannot read', () => {

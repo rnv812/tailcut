@@ -257,6 +257,20 @@ describe('split', () => {
       [1, 3],
     ])
     expect(cut.doc.clips.map((clip) => clip.id)).toEqual(['c1', 'c2'])
+    expect(cut.doc.clips[0]!.name).toBe(one.doc.clips[0]!.name)
+  })
+
+  it('leaves clips on either side of the split in their document order', () => {
+    const two = run([
+      { type: 'selectClip', id: null },
+      at(6),
+      { type: 'setIn' },
+      { type: 'selectClip', id: 'c1' },
+      at(1),
+    ], one)
+    const cut = reduce(two, { type: 'splitClip' }, ctx)
+
+    expect(cut.doc.clips.map((clip) => clip.id)).toEqual(['c1', 'c3', 'c2'])
   })
 
   it('the halves add up to the whole and keep its settings', () => {

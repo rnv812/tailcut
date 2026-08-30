@@ -109,6 +109,21 @@ describe('watchSettings', () => {
 })
 
 describe('liveSettings', () => {
+  it('does not apply an initial read that finishes after it was stopped', async () => {
+    let finish!: (value: Record<string, unknown>) => void
+    ;(globalThis as { chrome: { storage: { local: { get: unknown } } } }).chrome.storage.local.get =
+      vi.fn(() => new Promise<Record<string, unknown>>((resolve) => { finish = resolve }))
+    const changed = vi.fn()
+    const live = liveSettings(changed)
+
+    live.stop()
+    finish({ [SETTINGS_KEY]: { recording: { bufferSeconds: 45 } } })
+    await live.ready
+
+    expect(changed).not.toHaveBeenCalled()
+    expect(live.get()).toEqual(DEFAULTS)
+  })
+
   it('works in a context with no chrome at all', async () => {
     // The watcher builds one of these, and the watcher is tested in happy-dom with no extension
     // around it. Throwing here would not be a failing assertion but a file that cannot be

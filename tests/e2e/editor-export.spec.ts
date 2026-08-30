@@ -155,10 +155,13 @@ test('cuts two clips, one of them across a hole, and writes both to disk', async
     // point and decoded after the last frame that is kept, so nothing references it and it does
     // not come. That is the two-frame step at the very end, and it is the only step over one.
     const second = probeFile(across!)
+    expect(second.streams.map((stream) => stream.codec_type)).toEqual(['video', 'audio'])
     expect(Number(second.streams[0]!.nb_read_frames)).toBe(26)
 
     const picture = frameTimes(across!, 'v')
+    const sound = frameTimes(across!, 'a')
     expect(picture).toHaveLength(26)
+    expect(sound.length).toBeGreaterThan(0)
     expect(Number(second.format.duration)).toBeCloseTo(picture[picture.length - 1]! + FRAME, 2)
 
     // The invariants that outlive the counts. The seam is under a frame and a half — the two
@@ -167,6 +170,8 @@ test('cuts two clips, one of them across a hole, and writes both to disk', async
     expect(widestStep(picture.slice(0, -1))).toBeLessThan(1.5 * FRAME)
     expect(widestStep(picture.slice(0, -1))).toBeGreaterThan(FRAME)
     expect(widestStep(picture)).toBeLessThanOrEqual(2 * FRAME + 0.001)
+    expect(widestStep(sound)).toBeLessThan(0.05)
+    expect(sound.at(-1)).toBeGreaterThan(0.9)
 
     // Frames 36 and 47 of the recording — the last twelve before the hole.
     expect(frameByIndex(across!, 0).equals(sourceFrame(1.5))).toBe(true)

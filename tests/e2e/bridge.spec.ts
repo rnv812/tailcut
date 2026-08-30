@@ -131,19 +131,22 @@ async function chunkBytes(): Promise<number> {
  * tests/bridge/bridge.test.ts and in tests/e2e/worker.spec.ts.
  */
 function listSessions(page: Page, timeout = 3_000): Promise<Summary[] | null> {
-  return page.evaluate(async (limit) => {
-    const iframe = document.querySelector<HTMLIFrameElement>('iframe[data-tailcut]')!
-    const channel = new MessageChannel()
+  const answer = async (): Promise<Summary[] | null> => {
+    const worker = page.context().serviceWorkers()[0]
+    if (!worker) return null
+    return worker.evaluate(async (url) => {
+      const tab = (await chrome.tabs.query({})).find((candidate) => candidate.url === url)
+      if (tab?.id === undefined) return null
+      const reply = (await chrome.tabs.sendMessage(
+        tab.id,
+        { type: 'tc:list' },
+        { frameId: 0 },
+      )) as { sessions: Summary[] } | undefined
+      return reply?.sessions ?? null
+    }, page.url())
+  }
 
-    return new Promise<Summary[] | null>((resolve) => {
-      const timer = setTimeout(() => resolve(null), limit)
-      channel.port1.onmessage = (event) => {
-        clearTimeout(timer)
-        resolve((event.data as { sessions: Summary[] }).sessions)
-      }
-      iframe.contentWindow!.postMessage({ type: 'tc:list' }, '*', [channel.port2])
-    })
-  }, timeout)
+  return Promise.race([answer().catch(() => null), page.waitForTimeout(timeout).then(() => null)])
 }
 
 /**
@@ -445,7 +448,6 @@ test('a second source of the same video fills in the session instead of opening 
   // fragment is already on its map. It also shows that the bytes travel by transfer: the buffer
   // is detached at the sender.
   const detached = await page.evaluate(async () => {
-    const target = document.querySelector<HTMLIFrameElement>('iframe[data-tailcut]')!.contentWindow!
     const load = async (rel: string): Promise<ArrayBuffer> =>
       (await fetch(`/fixtures/${rel}`)).arrayBuffer()
 
@@ -454,7 +456,7 @@ test('a second source of the same video fills in the session instead of opening 
       await load('h264/chunk-stream0-00001.m4s'),
     ]
     for (const bytes of segments) {
-      target.postMessage(
+      window.postMessage(
         { type: 'tc:append', sourceId: 'second', bufferId: 'sb', mime: 'video/mp4', bytes },
         '*',
         [bytes],

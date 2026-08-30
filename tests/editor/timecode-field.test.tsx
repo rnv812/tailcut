@@ -83,6 +83,7 @@ describe('TimecodeField', () => {
     expect(onCommit).not.toHaveBeenCalled()
     expect(field().value).toBe('1:2x')
     expect(field().getAttribute('aria-invalid')).toBe('true')
+    expect(field().className).toContain('invalid')
   })
 
   it('forgets the complaint at the next keystroke', async () => {

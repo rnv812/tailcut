@@ -99,8 +99,8 @@ async function open(htmlFile: string, url: string) {
     probe.tcEncrypted = 0
     probe.tcRefused = 0
 
-    window.addEventListener('message', (event: MessageEvent) => {
-      const data = event.data as Record<string, unknown> | null
+    const record = (value: unknown) => {
+      const data = value as Record<string, unknown> | null
       if (!data || typeof data !== 'object') return
 
       if (data.type === 'tc:verdict') {
@@ -114,6 +114,30 @@ async function open(htmlFile: string, url: string) {
       } else if (data.type === 'tc:refused') {
         probe.tcRefused++
       }
+    }
+
+    // The bridge assigns the receiver of its authenticated port after this initializer runs. Wrap
+    // that receiver in the bridge frame only; the page and isolated content world use other realms.
+    const onMessage = Object.getOwnPropertyDescriptor(MessagePort.prototype, 'onmessage')
+    if (location.protocol === 'chrome-extension:' && onMessage?.get && onMessage.set) {
+      Object.defineProperty(MessagePort.prototype, 'onmessage', {
+        ...onMessage,
+        set(handler) {
+          onMessage.set!.call(
+            this,
+            handler === null
+              ? null
+              : function (this: MessagePort, event: MessageEvent) {
+                  record(event.data)
+                  return handler.call(this, event)
+                },
+          )
+        },
+      })
+    }
+
+    window.addEventListener('message', (event: MessageEvent) => {
+      record(event.data)
     })
   })
 
@@ -199,19 +223,22 @@ async function verdictsWhen(
  * tests/bridge/bridge.test.ts and in tests/e2e/worker.spec.ts.
  */
 function listSessions(page: Page, timeout = 3_000): Promise<Summary[] | null> {
-  return page.evaluate(async (limit) => {
-    const iframe = document.querySelector<HTMLIFrameElement>('iframe[data-tailcut]')!
-    const channel = new MessageChannel()
+  const answer = async (): Promise<Summary[] | null> => {
+    const worker = page.context().serviceWorkers()[0]
+    if (!worker) return null
+    return worker.evaluate(async (url) => {
+      const tab = (await chrome.tabs.query({})).find((candidate) => candidate.url === url)
+      if (tab?.id === undefined) return null
+      const reply = (await chrome.tabs.sendMessage(
+        tab.id,
+        { type: 'tc:list' },
+        { frameId: 0 },
+      )) as { sessions: Summary[] } | undefined
+      return reply?.sessions ?? null
+    }, page.url())
+  }
 
-    return new Promise<Summary[] | null>((resolve) => {
-      const timer = setTimeout(() => resolve(null), limit)
-      channel.port1.onmessage = (event) => {
-        clearTimeout(timer)
-        resolve((event.data as { sessions: Summary[] }).sessions)
-      }
-      iframe.contentWindow!.postMessage({ type: 'tc:list' }, '*', [channel.port2])
-    })
-  }, timeout)
+  return Promise.race([answer().catch(() => null), page.waitForTimeout(timeout).then(() => null)])
 }
 
 /** Waits until the registry comes to the expected shape and gives back the last thing seen. */

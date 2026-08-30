@@ -121,12 +121,15 @@ export function hevcLevelIdc(g: EncodeGeometry): number {
 /**
  * What a probe answer is about — the whole question, never less.
  *
- * Never a single global boolean: support flips with width, with height, with framerate and with
- * whether hardware was demanded. All four are here and nothing else is.
+ * Never a single global boolean: support flips with codec, width, height, framerate, whether
+ * hardware was demanded, rate-control mode and bitrate. The ladder and explicit support probes
+ * vary all seven, so every one is here.
  */
 export function cacheKeyOf(config: VideoEncoderConfig): string {
   const accel = config.hardwareAcceleration ?? 'no-preference'
-  return `${config.codec}|${config.width}x${config.height}@${config.framerate ?? 0}|${accel}`
+  const mode = config.bitrateMode ?? 'default'
+  const bitrate = config.bitrate ?? 'default'
+  return `${config.codec}|${config.width}x${config.height}@${config.framerate ?? 0}|${accel}|${mode}|${bitrate}`
 }
 
 /**

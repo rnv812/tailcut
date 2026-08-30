@@ -22,6 +22,7 @@ describe('parseEntry', () => {
     expect(parseEntry('250f', FPS, 0)).toBe(10)
     expect(parseEntry('0f', FPS, 0)).toBe(0)
     expect(parseEntry(' 250 F ', FPS, 0)).toBe(10)
+    expect(parseEntry('250f', 24_000 / 1_001, 0)).toBeCloseTo(250 / 24, 9)
   })
 
   it('reads an offset from where the value stands now', () => {

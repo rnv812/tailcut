@@ -86,16 +86,30 @@ describe('cacheKeyOf', () => {
     )
   })
 
-  it('holds the whole question — codec, size, framerate, acceleration — and not one boolean', () => {
+  it('tells apart two configurations that differ in the bitrate mode alone', () => {
+    expect(cacheKeyOf(config({ bitrateMode: 'quantizer' }))).not.toBe(
+      cacheKeyOf(config({ bitrateMode: 'constant' })),
+    )
+  })
+
+  it('tells apart two constant-bitrate configurations that differ in the bitrate alone', () => {
+    expect(cacheKeyOf(config({ bitrateMode: 'constant', bitrate: 2_000_000 }))).not.toBe(
+      cacheKeyOf(config({ bitrateMode: 'constant', bitrate: 4_000_000 })),
+    )
+  })
+
+  it('holds the whole probe question and not one boolean', () => {
     // Written out in full because this is the shape of the bug §8.4 names: one flag per install
-    // is a key with none of these four in it, and it answers about a clip nobody asked about.
-    expect(cacheKeyOf(config())).toBe('avc1.640028|1920x1080@30|prefer-hardware')
+    // answers about a clip and rate-control request nobody asked about.
+    expect(cacheKeyOf(config())).toBe(
+      'avc1.640028|1920x1080@30|prefer-hardware|default|default',
+    )
     expect(cacheKeyOf(config({ codec: 'hev1.1.6.L150.B0', width: 3840, height: 2160 }))).toBe(
-      'hev1.1.6.L150.B0|3840x2160@30|prefer-hardware',
+      'hev1.1.6.L150.B0|3840x2160@30|prefer-hardware|default|default',
     )
     // A configuration that demands nothing is its own question, not the same one as either demand.
     expect(cacheKeyOf(config({ hardwareAcceleration: undefined }))).toBe(
-      'avc1.640028|1920x1080@30|no-preference',
+      'avc1.640028|1920x1080@30|no-preference|default|default',
     )
   })
 })
@@ -135,6 +149,20 @@ const UHD = geometry(3840, 2160, 30)
 
 const keysOf = (g: EncodeGeometry, options: LadderOptions): string[] =>
   ladderFor(g, options).map((rung) => cacheKeyOf(rung.config))
+
+describe('ladderFor', () => {
+  it('gives the probe and the encoder independent configurations on every rung', () => {
+    for (const rung of ladderFor(HD, { codec: 'auto', quality: 'low' })) {
+      const choice = rung.choice
+      if (choice.kind === 'none') throw new Error('a ladder rung must be encodable')
+
+      expect(choice.config).not.toBe(rung.config)
+      const encoderWidth = choice.config.width
+      rung.config.width = 128
+      expect(choice.config.width).toBe(encoderWidth)
+    }
+  })
+})
 
 /**
  * The three quality levels, held to being three.
@@ -220,7 +248,9 @@ describe('chooseCodec', () => {
     expect(choice).toMatchObject({ kind: 'h264-hw', control: 'quantizer', quantizer: QUANTIZERS.high })
     // Not merely "HEVC did not win": it was never a question. A user who asked for H.264 is not
     // told about a codec they ruled out, and the tab does not pay for probing it.
-    expect(h264.asked).toEqual(['avc1.640028|1920x1080@30|prefer-hardware'])
+    expect(h264.asked).toEqual([
+      'avc1.640028|1920x1080@30|prefer-hardware|quantizer|default',
+    ])
 
     // Asked again on a machine that grants no hardware at all, so that the ladder is walked to
     // its end rather than stopping on its first rung: a claim about what is never asked is worth
@@ -241,7 +271,9 @@ describe('chooseCodec', () => {
     expect(await chooseCodec(HD, high.probe, { codec: 'auto', quality: 'high' })).toMatchObject({
       kind: 'h264-hw',
     })
-    expect(high.asked[0]).toBe('avc1.640028|1920x1080@30|prefer-hardware')
+    expect(high.asked[0]).toBe(
+      'avc1.640028|1920x1080@30|prefer-hardware|quantizer|default',
+    )
 
     const medium = probeOf(everything)
     expect(await chooseCodec(HD, medium.probe, { codec: 'auto', quality: 'medium' })).toMatchObject({
@@ -253,7 +285,9 @@ describe('chooseCodec', () => {
       kind: 'hevc-hw',
       quantizer: QUANTIZERS.low,
     })
-    expect(low.asked[0]).toBe('hev1.1.6.L120.B0|1920x1080@30|prefer-hardware')
+    expect(low.asked[0]).toBe(
+      'hev1.1.6.L120.B0|1920x1080@30|prefer-hardware|quantizer|default',
+    )
   })
 
   it('falls to software H.264 when nothing hardware is granted, and says so by its control', async () => {
@@ -281,9 +315,9 @@ describe('chooseCodec', () => {
     expect(choice).toEqual({
       kind: 'none',
       tried: [
-        'avc1.640028|1920x1080@30|prefer-hardware',
-        'hev1.1.6.L120.B0|1920x1080@30|prefer-hardware',
-        'avc1.640028|1920x1080@30|prefer-software',
+        'avc1.640028|1920x1080@30|prefer-hardware|quantizer|default',
+        'hev1.1.6.L120.B0|1920x1080@30|prefer-hardware|quantizer|default',
+        'avc1.640028|1920x1080@30|prefer-software|constant|6220800',
       ],
     })
     expect(asked.asked).toEqual(choice.kind === 'none' ? choice.tried : [])
@@ -294,9 +328,9 @@ describe('chooseCodec', () => {
     await chooseCodec(UHD, asked.probe, { codec: 'auto', quality: 'high' })
 
     expect(asked.asked).toEqual([
-      'avc1.640033|3840x2160@30|prefer-hardware',
-      'hev1.1.6.L150.B0|3840x2160@30|prefer-hardware',
-      'avc1.640033|3840x2160@30|prefer-software',
+      'avc1.640033|3840x2160@30|prefer-hardware|quantizer|default',
+      'hev1.1.6.L150.B0|3840x2160@30|prefer-hardware|quantizer|default',
+      'avc1.640033|3840x2160@30|prefer-software|constant|24883200',
     ])
     // The bug this is here for: with a hardcoded 4.0 both H.264 rungs are refused at 4K and the
     // clip is told there is no encoder on a machine that encodes 4K.
@@ -373,13 +407,13 @@ describe('chooseCodec', () => {
     // And the two hardware rungs are the only thing the setting reorders: H.264 alone never
     // grows an HEVC rung, and the software rung is last in every arrangement.
     expect(keysOf(HD, { codec: 'h264', quality: 'low' })).toEqual([
-      'avc1.640028|1920x1080@30|prefer-hardware',
-      'avc1.640028|1920x1080@30|prefer-software',
+      'avc1.640028|1920x1080@30|prefer-hardware|quantizer|default',
+      'avc1.640028|1920x1080@30|prefer-software|constant|2799360',
     ])
     expect(keysOf(HD, { codec: 'hevc', quality: 'high' })).toEqual([
-      'hev1.1.6.L120.B0|1920x1080@30|prefer-hardware',
-      'avc1.640028|1920x1080@30|prefer-hardware',
-      'avc1.640028|1920x1080@30|prefer-software',
+      'hev1.1.6.L120.B0|1920x1080@30|prefer-hardware|quantizer|default',
+      'avc1.640028|1920x1080@30|prefer-hardware|quantizer|default',
+      'avc1.640028|1920x1080@30|prefer-software|constant|6220800',
     ])
   })
 })

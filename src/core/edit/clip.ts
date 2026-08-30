@@ -146,6 +146,11 @@ export function normalizeClip(clip: Clip, ctx: EditContext, moved: 'in' | 'out' 
 
 const pad = (value: number): string => (value < 10 ? `0${value}` : String(value))
 
+const localDate = (): string => {
+  const now = new Date()
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+}
+
 /** A timecode a file name can carry: dots, not colons. */
 export function stamp(seconds: number): string {
   const whole = Math.max(0, Math.floor(seconds))
@@ -182,7 +187,7 @@ export function clipName(input: {
         title: shortTitle(input.title),
         in: stamp(input.at),
         out: stamp(input.to ?? input.at),
-        date: new Date().toISOString().slice(0, 10),
+        date: localDate(),
         host: input.host ?? '',
       }) || shortTitle(input.title)
     : `${shortTitle(input.title)} ${stamp(input.at)}`

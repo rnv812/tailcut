@@ -79,9 +79,7 @@ export function formatWhen(at: number, now = Date.now()): string {
   // A row with no moment written in it: nothing at all, rather than a day in 1970.
   if (!Number.isFinite(at) || at <= 0) return ''
 
-  // A clock that moved backwards under a row already written — the machine woke up and corrected
-  // itself, the row came off a profile carried over. It happened, and not in the future.
-  const ago = Math.max(0, now - at)
+  const ago = now - at
   if (ago < 60_000) return 'just now'
   if (ago < 3_600_000) return `${Math.floor(ago / 60_000)} min ago`
   if (ago < DAY_MS) return `${Math.floor(ago / 3_600_000)} h ago`

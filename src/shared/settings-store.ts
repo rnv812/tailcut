@@ -94,8 +94,10 @@ export function liveSettings(
   onChange?: (next: Settings, previous: Settings) => void,
 ): LiveSettings {
   let current = DEFAULTS
+  let stopped = false
 
   const apply = (next: Settings): void => {
+    if (stopped) return
     const previous = current
     current = next
     onChange?.(next, previous)
@@ -106,7 +108,11 @@ export function liveSettings(
     return settings
   })
 
-  const stop = watchSettings((next) => apply(next))
+  const stopWatching = watchSettings((next) => apply(next))
+  const stop = (): void => {
+    stopped = true
+    stopWatching()
+  }
 
   return { get: () => current, ready, stop }
 }

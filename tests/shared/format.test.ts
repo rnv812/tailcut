@@ -104,4 +104,8 @@ describe('formatWhen', () => {
   ])('%s → %s', (at, expected) => {
     expect(formatWhen(at, NOW)).toBe(expected)
   })
+
+  it('rounds elapsed minutes down to completed minutes', () => {
+    expect(formatWhen(NOW - 90_000, NOW)).toBe('1 min ago')
+  })
 })

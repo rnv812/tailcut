@@ -207,13 +207,13 @@ test('walks the whole ladder down to the software rung, whatever the codec setti
     // this the three greens above would be equally green if `chooseCodec` returned the software
     // rung unconditionally — which is exactly the shape of bug this whole file exists to catch.
     expect(walked.find((run) => run.setting === 'hevc')!.asked).toEqual([
-      'hev1.1.6.L120.B0|1920x1080@30|prefer-hardware',
-      'avc1.640028|1920x1080@30|prefer-hardware',
-      'avc1.640028|1920x1080@30|prefer-software',
+      'hev1.1.6.L120.B0|1920x1080@30|prefer-hardware|quantizer|default',
+      'avc1.640028|1920x1080@30|prefer-hardware|quantizer|default',
+      'avc1.640028|1920x1080@30|prefer-software|constant|6220800',
     ])
     expect(walked.find((run) => run.setting === 'h264')!.asked).toEqual([
-      'avc1.640028|1920x1080@30|prefer-hardware',
-      'avc1.640028|1920x1080@30|prefer-software',
+      'avc1.640028|1920x1080@30|prefer-hardware|quantizer|default',
+      'avc1.640028|1920x1080@30|prefer-software|constant|6220800',
     ])
   } finally {
     await close()

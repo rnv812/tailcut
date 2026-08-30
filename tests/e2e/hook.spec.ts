@@ -83,8 +83,8 @@ async function open(url: string, html?: string) {
       return `${bytes.byteLength}:${hash}`
     }
 
-    window.addEventListener('message', (event: MessageEvent) => {
-      const data = event.data as Record<string, unknown> | null
+    const record = (value: unknown) => {
+      const data = value as Record<string, unknown> | null
       if (!data || typeof data !== 'object') return
 
       if (typeof data.type === 'string' && data.type.startsWith('tc:')) {
@@ -104,6 +104,30 @@ async function open(url: string, html?: string) {
           objectUrl: String(data.objectUrl),
         })
       }
+    }
+
+    // In the extension frame this sees only messages delivered by the authenticated port. The
+    // page and the isolated content world have separate MessagePort prototypes.
+    const onMessage = Object.getOwnPropertyDescriptor(MessagePort.prototype, 'onmessage')
+    if (location.protocol === 'chrome-extension:' && onMessage?.get && onMessage.set) {
+      Object.defineProperty(MessagePort.prototype, 'onmessage', {
+        ...onMessage,
+        set(handler) {
+          onMessage.set!.call(
+            this,
+            handler === null
+              ? null
+              : function (this: MessagePort, event: MessageEvent) {
+                  record(event.data)
+                  return handler.call(this, event)
+                },
+          )
+        },
+      })
+    }
+
+    window.addEventListener('message', (event: MessageEvent) => {
+      record(event.data)
     })
   })
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { BRIDGE_PATH, SOURCE_EVENT } from '../../src/shared/protocol'
+import { BRIDGE_PATH, SOURCE_EVENT, bridgeCapabilityKey } from '../../src/shared/protocol'
 
 const EXTENSION_ORIGIN = 'chrome-extension://abcdefghijklmnopabcdefghijklmnop'
 const BRIDGE_URL = `${EXTENSION_ORIGIN}/${BRIDGE_PATH}`
@@ -109,6 +109,8 @@ function installDom(
     contentType?: string
     /** A document that will not make an element at all: the bridge can never be built in it. */
     noFrames?: boolean
+    /** Holds the extension-storage write so early page messages exercise the setup queue. */
+    holdCapabilityStorage?: boolean
   } = {},
 ) {
   const created: FakeElement[] = []
@@ -118,6 +120,41 @@ function installDom(
   const videos: ReturnType<typeof fakeVideo>[] = []
   /** The clock of the watcher: time is moved by tick(), not by the timer queue. */
   let now = 0
+  const extensionStorage: Record<string, unknown> = {}
+  const removedStorageKeys: string[] = []
+  let releaseStorage: (() => void) | null = null
+  const storageGate = options.holdCapabilityStorage
+    ? new Promise<void>((resolve) => {
+        releaseStorage = resolve
+      })
+    : Promise.resolve()
+
+  /** A deterministic MessageChannel whose receiver exposes the transfer list to this harness. */
+  class TestPort {
+    onmessage: ((event: MessageEvent) => void) | null = null
+    peer: TestPort | null = null
+
+    postMessage(data: unknown, transfer?: unknown[]): void {
+      this.peer?.onmessage?.({
+        data,
+        ports: (transfer ?? []).filter((item): item is TestPort => item instanceof TestPort),
+        transfer,
+      } as unknown as MessageEvent)
+    }
+  }
+
+  class TestMessageChannel {
+    port1 = new TestPort()
+    port2 = new TestPort()
+
+    constructor() {
+      this.port1.peer = this.port2
+      this.port2.peer = this.port1
+    }
+  }
+
+  vi.stubGlobal('MessagePort', TestPort)
+  vi.stubGlobal('MessageChannel', TestMessageChannel)
 
   // Only setTimeout stays real: the waits for microtasks below rest on it. The watcher polls on
   // setInterval, and the test has to decide for itself when that fires.
@@ -199,7 +236,22 @@ function installDom(
         return Promise.resolve(undefined)
       },
     },
+    storage: {
+      local: {
+        set: async (patch: Record<string, unknown>) => {
+          Object.assign(extensionStorage, patch)
+          await storageGate
+        },
+        remove: async (key: string) => {
+          removedStorageKeys.push(key)
+          delete extensionStorage[key]
+        },
+      },
+    },
   })
+
+  const controlPosts: Array<{ message: unknown; transfer: unknown }> = []
+  let bridgeControlPort: TestPort | null = null
 
   return {
     created,
@@ -263,18 +315,16 @@ function installDom(
      * way. That it goes out at all is checked by the "page context" describe.
      */
     forwarded: (): Array<{ message: unknown; transfer: unknown }> =>
-      created.flatMap((element) =>
-        element.posted.filter(
-          (post) => (post.message as { type?: unknown } | null)?.type !== 'tc:context',
-        ),
+      controlPosts.filter(
+        (post) => (post.message as { type?: unknown } | null)?.type !== 'tc:context',
       ),
     /** Every page context the content script has sent to the bridge, in order. */
     contexts: (): unknown[] =>
-      created.flatMap((element) =>
-        element.posted
-          .map((post) => post.message)
-          .filter((message) => (message as { type?: unknown } | null)?.type === 'tc:context'),
-      ),
+      controlPosts
+        .map((post) => post.message)
+        .filter((message) => (message as { type?: unknown } | null)?.type === 'tc:context'),
+    /** Everything sent through the authenticated bridge port, in FIFO order. */
+    postsToBridge: (): Array<{ message: unknown; transfer: unknown }> => [...controlPosts],
     /**
      * Delivers an extension request — the way the popup and the service worker send it. Gives
      * back what the listener answered synchronously (true holds the reply channel open) and the
@@ -296,8 +346,7 @@ function installDom(
     },
     /** The ports the content script handed the bridge along with the extension requests. */
     portsToBridge: (): MessagePort[] =>
-      created
-        .flatMap((element) => element.posted)
+      controlPosts
         .flatMap((post) => (Array.isArray(post.transfer) ? post.transfer : []))
         .filter((item): item is MessagePort => item instanceof MessagePort),
     /** Addresses the frames have started loading and not yet answered. */
@@ -308,8 +357,30 @@ function installDom(
       if (!element) throw new Error('no frame has started loading')
       element.loaded = element.pending.shift()!
       element.fire('load')
+      const connect = element.posted.find(
+        (post) => (post.message as { type?: unknown } | null)?.type === 'tc:connect',
+      )
+      const port = Array.isArray(connect?.transfer) ? connect.transfer[0] : undefined
+      const id = new URL(element.loaded).hash.slice(1)
+      const expected = extensionStorage[bridgeCapabilityKey(id)]
+      if (
+        port instanceof TestPort &&
+        (connect?.message as { capability?: unknown }).capability === expected
+      ) {
+        bridgeControlPort = port
+        bridgeControlPort.onmessage = (event: MessageEvent) => {
+          controlPosts.push({
+            message: event.data,
+            transfer: (event as MessageEvent & { transfer?: unknown }).transfer,
+          })
+        }
+        bridgeControlPort.postMessage({ type: 'tc:ready' })
+      }
       return element.loaded
     },
+    releaseCapabilityStorage: (): void => releaseStorage?.(),
+    removedStorageKeys,
+    extensionStorage,
   }
 }
 
@@ -346,7 +417,15 @@ describe('ensureBridge', () => {
     // The address is built from the same constant as in the code: what is checked here is the
     // path to it — chrome.runtime.getURL of BRIDGE_PATH. That the constant itself points at a
     // file that exists and is declared in the manifest is checked by tests/build/dist.test.ts.
-    expect(iframe.src).toBe(BRIDGE_URL)
+    expect(iframe.src).toMatch(new RegExp(`^${BRIDGE_URL}#[0-9a-f]{32}$`))
+    const entry = Object.entries(dom.extensionStorage)[0]
+    expect(entry).toBeDefined()
+    const [key, capability] = entry!
+    expect(key).toBe(bridgeCapabilityKey(new URL(iframe.src).hash.slice(1)))
+    expect(capability).toMatch(/^[0-9a-f]{32}$/)
+    expect(iframe.src, 'the page-readable address exposed the private capability').not.toContain(
+      String(capability),
+    )
     expect(iframe.dataset.tailcut).toBe('bridge')
     expect(iframe.attributes['aria-hidden']).toBe('true')
     expect(dom.appended).toEqual([iframe])
@@ -412,9 +491,45 @@ describe('ensureBridge', () => {
     await pending
 
     expect(loadedAtResolve, 'the promise gave back the frame before the bridge had loaded').toBe(
-      BRIDGE_URL,
+      dom.created[0]!.src,
     )
     expect(dom.pendingLoads(), 'the frame went somewhere other than the bridge page').toEqual([])
+  })
+
+  it('removes the fallback capability entry after the bridge authenticates', async () => {
+    const dom = installDom()
+    const { ensureBridge } = await importContent()
+    const key = Object.keys(dom.extensionStorage)[0]!
+
+    dom.deliverLoad()
+    await ensureBridge()
+
+    expect(dom.removedStorageKeys).toContain(key)
+    expect(dom.extensionStorage).toEqual({})
+  })
+
+  it('holds an early media message while capability storage and the bridge are pending', async () => {
+    const dom = installDom({ holdCapabilityStorage: true })
+    await importContent()
+    const buffer = new ArrayBuffer(8)
+    const message = {
+      type: 'tc:append',
+      sourceId: 's1',
+      bufferId: 'b1',
+      mime: 'video/mp4',
+      bytes: buffer,
+    }
+
+    await dom.deliverMessage(message)
+    expect(dom.created, 'the frame waited for storage and missed the first page script').toHaveLength(1)
+    expect(dom.forwarded(), 'the early segment was sent into no bridge').toEqual([])
+
+    dom.releaseCapabilityStorage()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    dom.deliverLoad()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(dom.forwarded()).toEqual([{ message, transfer: [buffer] }])
   })
 })
 
@@ -500,7 +615,7 @@ describe('the page context for the bridge', () => {
     dom.deliverLoad()
 
     // The title and the address of the page: on the extension origin the bridge knows neither.
-    expect(dom.created[0]!.posted).toEqual([{ message: CONTEXT, transfer: undefined }])
+    expect(dom.contexts()).toEqual([CONTEXT])
   })
 
   it('goes out before the first forwarded segment', async () => {
@@ -519,7 +634,7 @@ describe('the page context for the bridge', () => {
     // The order is the whole point: a session is opened by the first init segment, and the
     // address and the title have to be with the bridge by then, or the session is born nameless.
     expect(
-      dom.created[0]!.posted.map((post) => (post.message as { type: string }).type),
+      dom.postsToBridge().map((post) => (post.message as { type: string }).type),
       'the segment outran the page context',
     ).toEqual(['tc:context', 'tc:append'])
   })
@@ -667,7 +782,7 @@ describe('the page context for the bridge', () => {
 
     // A session is opened by the first init segment, so the fresh address has to be with the
     // bridge before the bytes are — not on the poll that comes after them.
-    const posts = dom.created[0]!.posted
+    const posts = dom.postsToBridge()
     expect(posts.map((post) => (post.message as { type: string }).type)).toEqual([
       'tc:context',
       'tc:context',
@@ -1011,6 +1126,8 @@ describe('requests from the popup and the service worker', () => {
     // reads is an error in the console of somebody's page — and because the relay's own refusal
     // is the thing under test, not the runner's opinion of an unhandled one.
     await expect(ensureBridge(), 'setup: the bridge was built after all').rejects.toBeDefined()
+    expect(dom.extensionStorage, 'failed setup left a capability key behind').toEqual({})
+    expect(dom.removedStorageKeys).toHaveLength(1)
 
     const { answers, kept } = dom.askTab({ type: 'tc:list' })
     await new Promise((resolve) => setTimeout(resolve, 0))

@@ -1,13 +1,19 @@
 import {
   BRIDGE_PATH,
   SOURCE_EVENT,
+  bridgeCapabilityKey,
   isExtensionToTab,
   isPageToBridge,
+  type BridgeConnect,
+  type ContentToBridge,
+  type ExtensionToTab,
+  type PageToBridge,
   type TabToExtension,
 } from '../shared/protocol'
 import { bindSource, registerSource, registerWorkerSource, startWatching } from './watcher'
 
 let bridgePromise: Promise<HTMLIFrameElement> | null = null
+let bridgePort: MessagePort | null = null
 
 /**
  * The origin the bridge of this frame speaks from.
@@ -117,24 +123,41 @@ function pageContext(): PageContext {
  * The bridge lives on the extension origin and sees neither the address nor the title of the page
  * for itself, and its document.referrer runs dry under the referrer policy of the site.
  */
-function tellContext(iframe: HTMLIFrameElement): void {
+function tellContext(): void {
   const context = pageContext()
   if (toldContext?.url === context.url && toldContext.title === context.title) return
 
   toldContext = context
-  iframe.contentWindow?.postMessage({ type: 'tc:context', ...context }, '*')
+  tellBridge({ type: 'tc:context', ...context })
 }
 
-/** Inserts an invisible iframe on the extension origin and gives it back once it has loaded. */
-export function ensureBridge(): Promise<HTMLIFrameElement> {
-  if (bridgePromise) return bridgePromise
+/** A random 128-bit value available on insecure pages as well as secure ones. */
+function randomCapability(): string {
+  const words = crypto.getRandomValues(new Uint32Array(4))
+  return Array.from(words, (word) => word.toString(16).padStart(8, '0')).join('')
+}
 
-  bridgePromise = new Promise((resolve) => {
+/** Sends a message through the private port after the bridge has authenticated it. */
+function tellBridge(
+  message: PageToBridge | ContentToBridge | ExtensionToTab,
+  transfer: Transferable[] = [],
+): void {
+  if (transfer.length > 0) bridgePort?.postMessage(message, transfer)
+  else bridgePort?.postMessage(message)
+}
+
+/** Inserts the bridge frame now, then opens its port once the capability is in extension storage. */
+function insertBridge(
+  id: string,
+  capability: string,
+  storage: { ready: boolean; settled: Promise<void> },
+): Promise<HTMLIFrameElement> {
+  return new Promise((resolve, reject) => {
     const iframe = document.createElement('iframe')
     // The address goes in before the insertion: a frame inserted without one loads about:blank
     // first, and the listener below would hand out the promise on that load — a frame with no
     // bridge in it yet.
-    iframe.src = chrome.runtime.getURL(BRIDGE_PATH)
+    iframe.src = `${chrome.runtime.getURL(BRIDGE_PATH)}#${id}`
     iframe.dataset.tailcut = 'bridge'
     iframe.setAttribute('aria-hidden', 'true')
     iframe.style.cssText =
@@ -143,19 +166,77 @@ export function ensureBridge(): Promise<HTMLIFrameElement> {
     iframe.addEventListener(
       'load',
       () => {
-        // The context goes out before the resolve: otherwise the first segments would land in a
-        // session with no address to it.
-        tellContext(iframe)
-        resolve(iframe)
+        const connect = (): void => {
+          const target = iframe.contentWindow
+          if (!target) return
+
+          const channel = new MessageChannel()
+          channel.port1.onmessage = (event: MessageEvent) => {
+            const reply = event.data as { type?: unknown } | null
+            if (reply?.type !== 'tc:ready' || bridgePort) return
+
+            bridgePort = channel.port1
+            // The context enters the same FIFO port as the first segment and enters it first.
+            // Separate window and port channels have no ordering guarantee between them.
+            tellContext()
+            resolve(iframe)
+          }
+
+          const message: BridgeConnect = { type: 'tc:connect', capability }
+          target.postMessage(message, BRIDGE_ORIGIN, [channel.port2])
+        }
+
+        if (storage.ready) connect()
+        else void storage.settled.then(connect).catch(reject)
       },
       { once: true },
     )
 
-    // The script runs at document_start: <html> is parsed, <head> and <body> are not yet, so the
-    // bridge goes in as a direct child of documentElement straight away. Waiting for
-    // DOMContentLoaded is out — the player opens its MediaSource and gathers segments earlier.
+    // The script runs at document_start: <html> is parsed, <head> and <body> are not yet.
     document.documentElement.appendChild(iframe)
   })
+}
+
+/** Stores a one-time capability, then gives the bridge back once it has claimed the private port. */
+async function buildBridge(): Promise<HTMLIFrameElement> {
+  const id = randomCapability()
+  const capability = randomCapability()
+  const key = bridgeCapabilityKey(id)
+  let cleanup: ReturnType<typeof setTimeout> | undefined
+  const storage = {
+    ready: false,
+    settled: chrome.storage.local.set({ [key]: capability }),
+  }
+
+  // Start the expiry only once a key can exist. Starting it before a delayed write could remove
+  // nothing and then let that write leave an entry with no bound at all.
+  void storage.settled.then(
+    () => {
+      storage.ready = true
+      cleanup = setTimeout(() => {
+        void chrome.storage.local.remove(key).catch(() => undefined)
+      }, 10_000)
+    },
+    () => undefined,
+  )
+
+  try {
+    // Insertion is synchronous with this call. Only the connection waits for the private value to
+    // become readable, so the frame keeps its document_start contract and early media waits here.
+    return await insertBridge(id, capability, storage)
+  } finally {
+    if (cleanup !== undefined) clearTimeout(cleanup)
+    await chrome.storage.local.remove(key).catch(() => undefined)
+  }
+}
+
+/** Inserts an invisible iframe on the extension origin and gives it back once authenticated. */
+export function ensureBridge(): Promise<HTMLIFrameElement> {
+  if (bridgePromise) return bridgePromise
+
+  // The listener below is installed in this same module turn. Media messages that arrive while the
+  // storage write or frame load is pending wait on this promise; none are dropped by setup.
+  bridgePromise = buildBridge()
 
   return bridgePromise
 }
@@ -171,7 +252,7 @@ function watchContext(): void {
   setInterval(() => {
     const context = pageContext()
     if (toldContext?.url === context.url && toldContext.title === context.title) return
-    void ensureBridge().then(tellContext)
+    void ensureBridge().then(() => tellContext())
   }, CONTEXT_POLL_MS)
 }
 
@@ -223,7 +304,7 @@ window.addEventListener('message', async (event: MessageEvent) => {
   // alone and learns which element plays it from SOURCE_EVENT below.
   if (message.type === 'tc:worker') registerWorkerSource(message.sourceId)
 
-  const iframe = await ensureBridge()
+  await ensureBridge()
 
   // The page is read here, in front of whatever it is that arrived, and not left to the poll.
   //
@@ -236,12 +317,12 @@ window.addEventListener('message', async (event: MessageEvent) => {
   //
   // It costs two string comparisons per message: tellContext sends nothing when the page has not
   // moved, which on an ordinary page is every time after the first.
-  tellContext(iframe)
+  tellContext()
 
   if (message.type === 'tc:append') {
-    iframe.contentWindow?.postMessage(message, '*', [message.bytes])
+    tellBridge(message, [message.bytes])
   } else {
-    iframe.contentWindow?.postMessage(message, '*')
+    tellBridge(message)
   }
 })
 
@@ -260,9 +341,9 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
       // finished putting in. Answered with the nothing that a frame without a content script in
       // it answers — the callers already read that as "could not be reached" — because this
       // listener has said an answer is coming, and silence is the one thing it may not send.
-      if (!iframe.contentWindow) return sendResponse(undefined)
+      if (!bridgePort || !iframe.contentWindow) return sendResponse(undefined)
 
-      iframe.contentWindow.postMessage(message, '*', [channel.port2])
+      tellBridge(message, [channel.port2])
     })
     .catch(() => sendResponse(undefined))
 
@@ -278,15 +359,15 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
 // then leaves its neighbour on the same page alone.
 startWatching(
   async (sourceId, verdict) => {
-    const iframe = await ensureBridge()
-    iframe.contentWindow?.postMessage({ type: 'tc:verdict', sourceId, verdict }, '*')
+    await ensureBridge()
+    tellBridge({ type: 'tc:verdict', sourceId, verdict })
   },
   // The page holds a player this extension cannot reach: its MediaSource lives in a worker that
   // the hook was not allowed to wrap, so not a byte of it was ever copied and none ever will be.
   // The popup is told, because a popup that shows nothing looks broken rather than honest.
   async () => {
-    const iframe = await ensureBridge()
-    iframe.contentWindow?.postMessage({ type: 'tc:unreachable' }, '*')
+    await ensureBridge()
+    tellBridge({ type: 'tc:unreachable' })
   },
   // A media element of the page says the material it is being fed is encrypted. That is the
   // stream speaking for itself and the one thing a page cannot feign: asking the browser about
@@ -294,8 +375,8 @@ startWatching(
   // like any other. The registry reads the same protection out of the boxes it parses; this is
   // for the material that never reaches the parser.
   async () => {
-    const iframe = await ensureBridge()
-    iframe.contentWindow?.postMessage({ type: 'tc:encrypted' }, '*')
+    await ensureBridge()
+    tellBridge({ type: 'tc:encrypted' })
   },
   // A media element of this page is playing an ordinary file (§5.6). There is no material to
   // carry — the browser fetched the file itself and the hook in the MAIN world never saw it — so
@@ -303,16 +384,16 @@ startWatching(
   // goes to is the one that can act on it: the bridge stands on the extension origin, which is
   // the only place a ranged fetch of somebody else's CDN is not refused.
   async (source) => {
-    const iframe = await ensureBridge()
-    iframe.contentWindow?.postMessage({ type: 'tc:plain', ...source }, '*')
+    await ensureBridge()
+    tellBridge({ type: 'tc:plain', ...source })
   },
   // An <audio> of this page is playing a soundtrack of its own (§5.6). It is not a recording and
   // never becomes one: what it can be is the sound of a picture on the same page that has none,
   // and the registry decides that. Like a plain source it carries no material — the browser
   // fetched the track itself — so what crosses is the address and what the element knows of it.
   async (source) => {
-    const iframe = await ensureBridge()
-    iframe.contentWindow?.postMessage({ type: 'tc:sound', ...source }, '*')
+    await ensureBridge()
+    tellBridge({ type: 'tc:sound', ...source })
   },
   // The size of the player one of these streams is being watched in. §7.3 counts a big player as
   // a sign that a recording is worth keeping, and triage is the only thing on the page that ever
@@ -322,8 +403,8 @@ startWatching(
   //
   // Not a message per poll: only a width larger than the one already reported is said at all.
   async (sourceId, widthPx) => {
-    const iframe = await ensureBridge()
-    iframe.contentWindow?.postMessage({ type: 'tc:player', sourceId, widthPx }, '*')
+    await ensureBridge()
+    tellBridge({ type: 'tc:player', sourceId, widthPx })
   },
 )
 

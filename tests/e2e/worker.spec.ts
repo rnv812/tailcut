@@ -124,8 +124,8 @@ async function open(
       return `${bytes.byteLength}:${hash}`
     }
 
-    window.addEventListener('message', (event: MessageEvent) => {
-      const data = event.data as Record<string, unknown> | null
+    const record = (value: unknown) => {
+      const data = value as Record<string, unknown> | null
       if (!data || typeof data !== 'object') return
 
       if (data.type === 'tc:append') {
@@ -143,6 +143,30 @@ async function open(
       } else if (data.type === 'tc:worker') {
         target.tcWorker.push(String(data.sourceId))
       }
+    }
+
+    // In the bridge frame this wraps the receiver of the authenticated content-script port. Page
+    // and isolated-world ports have prototypes in their own realms and do not reach this probe.
+    const onMessage = Object.getOwnPropertyDescriptor(MessagePort.prototype, 'onmessage')
+    if (location.protocol === 'chrome-extension:' && onMessage?.get && onMessage.set) {
+      Object.defineProperty(MessagePort.prototype, 'onmessage', {
+        ...onMessage,
+        set(handler) {
+          onMessage.set!.call(
+            this,
+            handler === null
+              ? null
+              : function (this: MessagePort, event: MessageEvent) {
+                  record(event.data)
+                  return handler.call(this, event)
+                },
+          )
+        },
+      })
+    }
+
+    window.addEventListener('message', (event: MessageEvent) => {
+      record(event.data)
     })
   })
 

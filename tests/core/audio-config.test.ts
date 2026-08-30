@@ -67,6 +67,21 @@ describe('audioSpecificConfig', () => {
     ])
     expect(audioSpecificConfig(overrun)).toBeNull()
   })
+
+  it('requires every descriptor in an esds to have the tag its level names', () => {
+    const wrongEs = esdsOf(AAC_LC)
+    wrongEs[4] = 0x06
+    expect(audioSpecificConfig(wrongEs)).toBeNull()
+
+    const wrongDecoder = esdsOf(AAC_LC)
+    wrongDecoder[9] = 0x06
+    expect(audioSpecificConfig(wrongDecoder)).toBeNull()
+
+    const wrongSpecific = esdsOf(AAC_LC)
+    wrongSpecific[24] = 0x06
+    expect(audioSpecificConfig(wrongSpecific)).toBeNull()
+    expect(audioSpecificConfig(esdsOf([]))).toBeNull()
+  })
 })
 
 describe('opusHeadOf', () => {

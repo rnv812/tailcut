@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { ctx, clip, oneQuality, FPS } from './edit-fixture'
 import {
   MIN_CLIP_FRAMES,
@@ -93,6 +93,21 @@ describe('normalizeClip', () => {
     expect([late.in, late.out]).toEqual([9, 10])
   })
 
+  it('chooses the home stretch by the in point when a clip spans two equal candidates', () => {
+    const spanning = clip({ representation: '480p', in: 1, out: 9 })
+
+    expect(normalizeClip(spanning, flapping)).toMatchObject({ in: 1, out: 4 })
+  })
+
+  it('recognises a quality change whose zones meet at the same frame', () => {
+    const adjacent = {
+      ...ctx,
+      zones: [zone(0, 4, '480p'), zone(4, 10, '720p')],
+    }
+
+    expect(heldByQuality(clip({ in: 1, out: 4 }), adjacent)!.representation).toBe('720p')
+  })
+
   it('names the quality behind a clip standing on the start of its zone', () => {
     const first = clip({ representation: '720p', in: 6, out: 8 })
 
@@ -102,6 +117,7 @@ describe('normalizeClip', () => {
   it('says nothing about a clip that is not standing against a boundary', () => {
     expect(heldByQuality(clip({ in: 1, out: 3 }), ctx)).toBeNull()
     expect(heldByQuality(clip({ in: 1, out: 9 }), oneQuality)).toBeNull()
+    expect(heldByQuality(clip({ representation: '480p', in: 8.5, out: 9.5 }), flapping)).toBeNull()
   })
 
   it('a clip of a representation the material does not have is bounded by the material', () => {
@@ -206,10 +222,19 @@ describe('clipName', () => {
     )
   })
 
-  it('dates a clip by the day and not by the month', () => {
-    expect(clipName({ title: 'Cats', at: 0, taken: [], template: '{date}' })).toMatch(
-      /^\d{4}-\d{2}-\d{2}$/,
-    )
+  it('dates a clip by the local calendar day', () => {
+    const timezone = process.env.TZ
+    process.env.TZ = 'Asia/Tokyo'
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2024-01-01T16:00:00.000Z'))
+
+    try {
+      expect(clipName({ title: 'Cats', at: 0, taken: [], template: '{date}' })).toBe('2024-01-02')
+    } finally {
+      vi.useRealTimers()
+      if (timezone === undefined) delete process.env.TZ
+      else process.env.TZ = timezone
+    }
   })
 
   it('stamps hours only when there are hours', () => {

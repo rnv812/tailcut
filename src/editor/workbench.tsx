@@ -12,7 +12,7 @@ import { EMPTY_QUEUE, type Queue } from '../core/export/queue'
 import { createRunner } from '../core/export/run'
 import type { ClipSource } from '../core/export/plan'
 import { STILL, shuttleAdvance, shuttleLabel, type ShuttleState, shuttled } from '../core/edit/shuttle'
-import type { Material, MaterialTrack } from '../core/snapshot/material'
+import { selectPicture, type Material, type MaterialTrack } from '../core/snapshot/material'
 import type { SnapshotReader } from '../core/snapshot/read'
 import type { Hover } from '../core/timeline/hover'
 import type { ClipBand } from '../core/timeline/layout'
@@ -34,9 +34,10 @@ import { Clips } from './inspector/clips'
 import { CropBox, CropControls } from './inspector/crop'
 import { ExportQueue } from './inspector/queue'
 import type { EditorOptions } from './shell'
+import type { PreviewState } from './shell'
 import { Player } from './player/player'
 import { deriveMaterial } from './source/media'
-import type { Preview } from './source/preview'
+import { buildPreview, type Preview } from './source/preview'
 import { NO_WAVEFORM, startWaveform, type WaveformState } from './source/waveform'
 import { createStore, useSession } from './state/store'
 import { attachKeys, type Transport } from './state/keys'
@@ -46,10 +47,16 @@ import { Timeline } from './timeline/timeline'
 export interface WorkbenchProps {
   reader: SnapshotReader
   material: Material
-  /** 'building' while the preview is being assembled; null when there is no picture. */
-  preview: Preview | 'building' | null
+  /** `null` means no picture; `failed` means picture exists but no preview could be assembled. */
+  preview: PreviewState
   /** §9.4 as the tab read it when it opened: how a clip is named and where it goes. */
   options: EditorOptions
+}
+
+interface OpenWorkbenchProps extends WorkbenchProps {
+  pictures: MaterialTrack[]
+  selectedPicture: string
+  onPicture: (trackId: string) => void
 }
 
 const duration = (seconds: number): string => {
@@ -95,6 +102,89 @@ function TrackLine({ track }: { track: MaterialTrack }) {
   )
 }
 
+/** What distinguishes two choices without asking a person to parse a SourceBuffer id. */
+function pictureName(track: MaterialTrack): string {
+  const declared = track.track.info.tracks.find((one) => one.kind === 'video')
+  const size = declared && declared.width > 0 ? `${declared.width}×${declared.height}` : 'picture'
+  return `${size} · ${duration(track.duration)} · ${track.track.representation}`
+}
+
+/**
+ * Owns which one of the snapshot's picture representations is open.
+ *
+ * A representation switch deliberately remounts the workbench below. Its frame grid, crop
+ * geometry and export source are one indivisible context, and carrying an edit made against one
+ * into another would make its times and pixels mean something else. The choice remains useful:
+ * either side can be cut and exported, one editing session at a time.
+ */
+export function Workbench({ reader, material, preview, options }: WorkbenchProps) {
+  const initialPicture = material.video?.track.id ?? ''
+  const pictures = useMemo(
+    () =>
+      material.tracks.filter(
+        (track) => track.kinds.includes('video') && track.duration > 0,
+      ),
+    [material],
+  )
+  const [selectedPicture, setSelectedPicture] = useState(initialPicture)
+  const selectedMaterial = useMemo(
+    () => selectPicture(material, selectedPicture),
+    [material, selectedPicture],
+  )
+  const [opened, setOpened] = useState<{ trackId: string; preview: PreviewState }>({
+    trackId: initialPicture,
+    preview,
+  })
+
+  useEffect(() => {
+    if (selectedPicture === initialPicture) {
+      setOpened((was) =>
+        was.trackId === selectedPicture && was.preview === preview
+          ? was
+          : { trackId: selectedPicture, preview },
+      )
+      return
+    }
+
+    let live = true
+    let built: Preview | null = null
+    setOpened({ trackId: selectedPicture, preview: 'building' })
+
+    void buildPreview(reader, selectedMaterial)
+      .then((next) => {
+        built = next
+        if (!live) {
+          next?.release()
+          return
+        }
+        setOpened({ trackId: selectedPicture, preview: next ?? 'failed' })
+      })
+      .catch(() => {
+        if (live) setOpened({ trackId: selectedPicture, preview: 'failed' })
+      })
+
+    return () => {
+      live = false
+      built?.release()
+    }
+  }, [reader, selectedMaterial, selectedPicture, initialPicture, preview])
+
+  const shown = opened.trackId === selectedPicture ? opened.preview : 'building'
+
+  return (
+    <OpenWorkbench
+      key={selectedPicture}
+      reader={reader}
+      material={selectedMaterial}
+      preview={shown}
+      options={options}
+      pictures={pictures}
+      selectedPicture={selectedPicture}
+      onPicture={setSelectedPicture}
+    />
+  )
+}
+
 /**
  * The editor, assembled.
  *
@@ -103,11 +193,19 @@ function TrackLine({ track }: { track: MaterialTrack }) {
  * held here beside the store is the transport — running or not, and how fast — which lives
  * exactly as long as the finger and is deliberately outside the undo history.
  */
-export function Workbench({ reader, material, preview, options }: WorkbenchProps) {
-  const built = preview === 'building' ? null : preview
+function OpenWorkbench({
+  reader,
+  material,
+  preview,
+  options,
+  pictures,
+  selectedPicture,
+  onPicture,
+}: OpenWorkbenchProps) {
+  const built = preview === 'building' || preview === 'failed' ? null : preview
   const derived = useMemo(
-    () => deriveMaterial(reader.index, built, options.export),
-    [reader, built, options.export],
+    () => deriveMaterial(reader.index, built, options.export, selectedPicture),
+    [reader, built, options.export, selectedPicture],
   )
   // A new context is a new store: the frame grid every clip is measured against has changed, and
   // clips measured against the old one would mean something else against the new.
@@ -373,6 +471,10 @@ export function Workbench({ reader, material, preview, options }: WorkbenchProps
         <section class="player" data-testid="player">
           <p class="muted">Building the preview…</p>
         </section>
+      ) : preview === 'failed' ? (
+        <section class="player" data-testid="player">
+          <p class="failure">tailcut could not build a preview from this recording.</p>
+        </section>
       ) : built ? (
         <Player
           preview={built}
@@ -436,6 +538,25 @@ export function Workbench({ reader, material, preview, options }: WorkbenchProps
 
       <aside class="inspector" data-testid="inspector">
         <h2>Source</h2>
+        {pictures.length > 1 && (
+          <div class="tc-representation">
+            <label class="option">
+              Picture
+              <select
+                data-testid="representation"
+                value={selectedPicture}
+                onChange={(event) => onPicture(event.currentTarget.value)}
+              >
+                {pictures.map((track) => (
+                  <option key={track.track.id} value={track.track.id}>
+                    {pictureName(track)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p class="muted">Switching starts a new edit for that picture.</p>
+          </div>
+        )}
         <div class="tracks">
           {material.tracks.map((track) => (
             <TrackLine key={track.track.id} track={track} />

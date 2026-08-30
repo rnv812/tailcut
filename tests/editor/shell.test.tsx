@@ -7,7 +7,7 @@ import { planSnapshot, type SnapshotSource } from '../../src/core/snapshot/build
 import { SnapshotReader } from '../../src/core/snapshot/read'
 import { materialOf } from '../../src/core/snapshot/material'
 import { FrameTable } from '../../src/core/timeline/frames'
-import type { Preview } from '../../src/editor/source/preview'
+import { buildPreview, type Preview } from '../../src/editor/source/preview'
 import { DEFAULTS } from '../../src/shared/settings'
 import { METRICS, rowTop } from '../../src/core/timeline/layout'
 import { concatBytes } from '../../src/core/iso/writer'
@@ -21,6 +21,7 @@ const exportHarness = vi.hoisted(() => ({
   surfaceCalls: 0,
   encodeIoCalls: 0,
   encodeRequests: [] as Array<{ path: { kind: string; plan?: { geometry: { width: number; height: number; framerate: number }; kept: number }; choice?: { kind: string; quantizer?: number } } }>,
+  openedTracks: [] as Array<string | null>,
   skipSave: false,
 }))
 
@@ -65,6 +66,10 @@ vi.mock('../../src/editor/export/exporter', async () => {
   )
   return {
     ...actual,
+    openClipSource: async (...args: Parameters<typeof actual.openClipSource>) => {
+      exportHarness.openedTracks.push(args[1].video?.track.id ?? null)
+      return actual.openClipSource(...args)
+    },
     encodeIo: (...args: unknown[]) => {
       exportHarness.encodeIoCalls += 1
       const reader = args[0] as SnapshotReader
@@ -181,6 +186,49 @@ async function cuttable(): Promise<Extract<EditorState, { status: 'ready' }>> {
   return { status: 'ready', reader, material: materialOf(reader.index), preview: null }
 }
 
+/** Two picture representations whose different frame counts make the one on screen observable. */
+async function switchable(): Promise<Extract<EditorState, { status: 'ready' }>> {
+  const long: SnapshotSource['tracks'][number] = {
+    id: 'v-long',
+    bufferId: 'sb-long',
+    representation: 'video:avc1.4d401e:320x240-long',
+    kinds: ['video'],
+    info: parseInit(CUT_INIT)!,
+    initBytes: CUT_INIT,
+    chunks: CUT_SEGMENTS.slice(0, 2).map((bytes, at) => ({
+      start: at * 2,
+      end: at * 2 + 2,
+      bytes,
+    })),
+  }
+  const plan = planSnapshot(
+    {
+      page,
+      tracks: [
+        long,
+        {
+          ...long,
+          id: 'v-short',
+          bufferId: 'sb-short',
+          representation: 'video:avc1.4d401e:320x240-short',
+          chunks: [{ start: 4, end: 6, bytes: CUT_SEGMENTS[2]! }],
+        },
+      ],
+    },
+    { id: 'switchable', capturedAt: 1_756_022_400_000, producer: 'tailcut test' },
+  )
+  const file = concatBytes(plan.parts)
+  const reader = (await SnapshotReader.open(
+    async (at, length) => file.subarray(at, at + length),
+    file.byteLength,
+  ))!
+  const material = materialOf(reader.index)
+  const preview = await buildPreview(reader, material)
+
+  expect(preview, 'the default representation did not assemble').not.toBeNull()
+  return { status: 'ready', reader, material, preview }
+}
+
 /** The ready state, spelled out rather than as the union: the tests build on top of it. */
 async function ready(): Promise<Extract<EditorState, { status: 'ready' }>> {
   const plan = planSnapshot(source, { id: 'x', capturedAt: 1_756_022_400_000, producer: 'tailcut test' })
@@ -280,6 +328,7 @@ afterEach(() => {
   exportHarness.surfaceCalls = 0
   exportHarness.encodeIoCalls = 0
   exportHarness.encodeRequests.length = 0
+  exportHarness.openedTracks.length = 0
   exportHarness.skipSave = false
 })
 
@@ -318,6 +367,49 @@ describe('the editor shell', () => {
     expect(tracks[0]).toContain('avc1.640028')
     expect(tracks[0]).toContain('1280×720')
     expect(tracks[1]).toContain('mp4a.40.2')
+  })
+
+  it('opens every recorded picture with its own preview, grid and visible span', async () => {
+    exportHarness.skipSave = true
+    await mount(await switchable())
+
+    const picker = document.querySelector<HTMLSelectElement>('[data-testid="representation"]')
+    expect(picker, 'there is no way to open the other recorded picture').not.toBeNull()
+    expect([...picker!.options].map((option) => option.value)).toEqual(['v-long', 'v-short'])
+    expect(text('frame-count')).toBe('96')
+    expect(text('duration')).toBe('0:04')
+    expect(document.body.textContent).toContain('Switching starts a new edit')
+
+    press('i')
+    await settled()
+    expect(document.querySelectorAll('[data-testid="clip"]')).toHaveLength(1)
+
+    select('representation', 'v-short')
+    await until(() => text('frame-count') === '48', 'the second representation never opened')
+
+    expect(text('duration')).toBe('0:02')
+    expect(
+      document.querySelectorAll('[data-testid="clip"]'),
+      'the old picture edit crossed into a different frame grid',
+    ).toHaveLength(0)
+
+    const playhead = document.querySelector<HTMLInputElement>('[data-testid="playhead-field"]')!
+    playhead.value = '4'
+    playhead.dispatchEvent(new Event('input', { bubbles: true }))
+    playhead.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await settled()
+    press('i')
+    await settled()
+
+    expect(
+      document.querySelectorAll('[data-testid="clip"]'),
+      'the visible second-representation zone cannot be cut',
+    ).toHaveLength(1)
+
+    await until(() => !button('export').disabled, 'the selected representation was not indexed')
+    button('export').click()
+    await until(() => text('job-state') === 'Saved', 'the selected representation could not export')
+    expect(exportHarness.openedTracks.at(-1)).toBe('v-short')
   })
 
   it('removes the stage-three placeholders now that clip controls do the work', async () => {
@@ -363,6 +455,13 @@ describe('the editor shell', () => {
   it('says why there is nothing to play in a snapshot with no picture', async () => {
     show({ ...(await ready()), preview: null })
     expect(document.body.textContent).toContain('no picture in this recording')
+  })
+
+  it('does not call an assembly failure a recording with no picture', async () => {
+    show({ ...(await ready()), preview: 'failed' })
+
+    expect(document.body.textContent).toContain('could not build a preview')
+    expect(document.body.textContent).not.toContain('no picture in this recording')
   })
 
   it('puts the element and the frame readout in the player pane once there is a preview', async () => {

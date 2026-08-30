@@ -46,8 +46,17 @@ export function deriveMaterial(
   index: SnapshotIndex,
   preview: Preview | null,
   exported?: ExportSettings,
+  pictureTrackId?: string,
 ): EditorMaterial {
-  const lanes = lanesOf(index.tracks)
+  // A frame grid describes one picture track. When the caller names that track, showing another
+  // picture's zones beside it would offer stretches this editor cannot seek or cut until the
+  // representation is opened. Independent sound remains visible beside every picture.
+  const visibleTracks = pictureTrackId
+    ? index.tracks.filter(
+        (track) => track.id === pictureTrackId || !track.kinds.includes('video'),
+      )
+    : index.tracks
+  const lanes = lanesOf(visibleTracks)
   const picture = laneOf(lanes, 'video')
   const rows = preview ? preview.frames.frames() : []
 

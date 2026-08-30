@@ -66,6 +66,24 @@ const source: SnapshotSource = {
 
 const index = planSnapshot(source, { id: 'x', capturedAt: 0, producer: 'test' }).index
 
+const switchedIndex = planSnapshot(
+  {
+    page: source.page,
+    tracks: [
+      source.tracks[0]!,
+      {
+        ...source.tracks[0]!,
+        id: 'v-second',
+        bufferId: 'sb-v-second',
+        representation: 'video:avc1:1280x720',
+        chunks: [{ start: 8, end: 10, bytes: new Uint8Array(8) }],
+      },
+      source.tracks[1]!,
+    ],
+  },
+  { id: 'switched', capturedAt: 0, producer: 'test' },
+).index
+
 /** A frame table over the same material: two runs of fifty frames, nothing inside the hole. */
 const preview: Preview = {
   url: 'blob:preview',
@@ -110,6 +128,7 @@ describe('deriveMaterial', () => {
     expect(ctx.fps).toBeCloseTo(FPS, 6)
     // Frame boundaries, so a handle can stand on the end of the material and never inside a hole.
     expect(ctx.frames.length).toBe(102)
+    expect(ctx.frames.at(-1)).toBeCloseTo(6, 6)
     expect(ctx.keyframes.length).toBe(2)
   })
 
@@ -141,6 +160,16 @@ describe('deriveMaterial', () => {
       { start: 4, end: 6 },
     ])
     expect(ctx.zones.map((zone) => zone.representation)).toEqual(['video:avc1:640x480'])
+  })
+
+  it('shows only the picture zones of the representation whose frame grid is open', () => {
+    const { ctx, lanes } = deriveMaterial(switchedIndex, preview, undefined, 'v')
+
+    expect(ctx.zones.map((zone) => zone.representation)).toEqual(['video:avc1:640x480'])
+    expect(lanes.find((lane) => lane.kind === 'video')!.runs).toEqual([
+      { start: 0, end: 2 },
+      { start: 4, end: 6 },
+    ])
   })
 
   /**

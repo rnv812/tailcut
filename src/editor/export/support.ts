@@ -21,10 +21,10 @@ export function liveProbe(): Probe {
 /**
  * The same probe, asked once per question.
  *
- * The question is the whole key — codec, size, framerate, acceleration — and never a single
- * boolean per install: support flips with every one of the four. The cache lives as long as the
- * tab: a browser that grew a codec while the editor was open is not a case worth a stale answer
- * for, and a tab that reopened has asked again anyway.
+ * The question is the whole key — codec, size, framerate, acceleration, rate-control mode and
+ * bitrate — and never a single boolean per install. The cache lives as long as the tab: a browser
+ * that grew a codec while the editor was open is not a case worth a stale answer for, and a tab
+ * that reopened has asked again anyway.
  */
 export function cachedProbe(probe: Probe): Probe {
   const answers = new Map<string, Promise<boolean>>()

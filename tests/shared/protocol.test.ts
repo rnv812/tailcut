@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest'
 import {
+  bridgeCapabilityKey,
   editorUrl,
   historyUrl,
+  isBridgeConnect,
+  isContentToBridge,
   isExtensionToTab,
   isExtensionToWorker,
   isPageToBridge,
@@ -10,6 +13,7 @@ import {
   snapshotFileName,
   snapshotPath,
   type BridgeToPage,
+  type ContentToBridge,
   type ExtensionToTab,
   type ExtensionToWorker,
   type PageToBridge,
@@ -272,6 +276,16 @@ const everyExtensionToTab: { [K in ExtensionToTab['type']]: Extract<ExtensionToT
   'tc:pause': { type: 'tc:pause', on: true },
 }
 
+const everyContentToBridge: {
+  [K in ContentToBridge['type']]: Extract<ContentToBridge, { type: K }>
+} = {
+  'tc:context': { type: 'tc:context', url: 'https://site.example/watch', title: 'Clip' },
+  'tc:verdict': { type: 'tc:verdict', sourceId: 's1', verdict: 'promote' },
+  'tc:player': { type: 'tc:player', sourceId: 's1', widthPx: 1280 },
+  'tc:encrypted': { type: 'tc:encrypted' },
+  'tc:unreachable': { type: 'tc:unreachable' },
+}
+
 describe('a guard knows every kind its own union describes', () => {
   it.each(Object.entries(everyPageToBridge))('isPageToBridge takes %s', (_type, message) => {
     expect(isPageToBridge(message)).toBe(true)
@@ -283,6 +297,34 @@ describe('a guard knows every kind its own union describes', () => {
 
   it.each(Object.entries(everyTabToExtension))('isTabToExtension takes %s', (_type, message) => {
     expect(isTabToExtension(message)).toBe(true)
+  })
+
+  it.each(Object.entries(everyContentToBridge))('isContentToBridge takes %s', (_type, message) => {
+    expect(isContentToBridge(message)).toBe(true)
+  })
+})
+
+describe('the authenticated bridge control channel', () => {
+  const capability = '0123456789abcdef0123456789abcdef'
+
+  it('names the private storage slot from a public random identifier', () => {
+    expect(bridgeCapabilityKey('fedcba9876543210fedcba9876543210')).toBe(
+      'bridge-capability:fedcba9876543210fedcba9876543210',
+    )
+  })
+
+  it('takes only a connection carrying a full random capability', () => {
+    expect(isBridgeConnect({ type: 'tc:connect', capability })).toBe(true)
+    expect(isBridgeConnect({ type: 'tc:connect', capability: 'guess' })).toBe(false)
+    expect(isBridgeConnect({ type: 'tc:connect' })).toBe(false)
+  })
+
+  it('checks the claims carried by content-script controls', () => {
+    expect(isContentToBridge({ type: 'tc:verdict', sourceId: 's1', verdict: 'drop' })).toBe(false)
+    expect(isContentToBridge({ type: 'tc:player', sourceId: 's1', widthPx: '1280' })).toBe(false)
+    expect(isContentToBridge({ type: 'tc:context', url: 'https://site.example', title: 42 })).toBe(
+      false,
+    )
   })
 })
 

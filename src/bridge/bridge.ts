@@ -1,6 +1,10 @@
 import { sanitizeFileName } from '../core/export/naming'
 import { planSnapshot, type SnapshotMeta } from '../core/snapshot/build'
 import {
+  bridgeCapabilityKey,
+  isBridgeCapability,
+  isBridgeConnect,
+  isContentToBridge,
   isExtensionToTab,
   isPageToBridge,
   snapshotPath,
@@ -8,6 +12,7 @@ import {
   type BridgeToPage,
   type EditResult,
   type ExtensionToTab,
+  type PageToBridge,
   type PauseResult,
   type SaveResult,
   type SessionList,
@@ -587,86 +592,83 @@ async function freezeFile(session: Session, meta: SnapshotMeta): Promise<EditRes
   return { ok: true, snapshotId: meta.id }
 }
 
-window.addEventListener('message', (event: MessageEvent) => {
+/** Acts only on messages that arrived through the authenticated control port. */
+function receiveControl(event: MessageEvent): void {
   const data = event.data
 
-  if (data?.type === 'tc:context') {
-    pageContext = { url: String(data.url), title: String(data.title) }
-    // The sessions of this page take the title on as well. A session is signed at the moment its
-    // first init segment arrives, and the page learns its own title later than that: recording
-    // starts at document_start, and a single-page application loads the next video without a
-    // navigation. Left to the moment of opening alone, the popup would say "Untitled" for a
-    // video that has a name, and the saved file would be named after nothing.
-    store.pageIsAt(pageContext.url, pageContext.title)
-    contextKnown = true
-    // The address decides whether anything is recorded here, so the answer is worked out when the
-    // address arrives and again whenever it changes — never before it, and never on a timer.
-    applyRecordingMode()
+  if (isContentToBridge(data)) {
+    if (data.type === 'tc:context') {
+      pageContext = { url: data.url, title: data.title }
+      // The sessions of this page take the title on as well. A session is signed at the moment its
+      // first init segment arrives, and the page learns its own title later than that: recording
+      // starts at document_start, and a single-page application loads the next video without a
+      // navigation. Left to the moment of opening alone, the popup would say "Untitled" for a
+      // video that has a name, and the saved file would be named after nothing.
+      store.pageIsAt(pageContext.url, pageContext.title)
+      contextKnown = true
+      // The address decides whether anything is recorded here, so the answer is worked out when the
+      // address arrives and again whenever it changes — never before it, and never on a timer.
+      applyRecordingMode()
+      return
+    }
+
+    // An element of the page is playing a stream out of a worker that the hook was not allowed to
+    // wrap: measured on a page whose policy forbids blob workers, where the material of such a
+    // player passes the extension by entirely. There is nothing to record and nothing to fix, and
+    // the one thing owed to the user is to be told — a popup that shows nothing looks broken.
+    if (data.type === 'tc:unreachable') {
+      unreachable = true
+      return
+    }
+
+    // A media element of the page has fired `encrypted`: the material it is being fed carries
+    // protection, and that is the end of this page — §5.4 refuses encrypted media outright, and the
+    // refusal is acted on here rather than left to triage. A verdict speaks about an element the
+    // watcher has found, and on a page whose <video> lives in a shadow root it never finds one:
+    // tv.apple.com reported its DRM four times while no verdict was ever spoken, and the registry
+    // went on offering the material of a protected page for saving.
+    //
+    // The other half of the same refusal needs no message at all — the registry reads protection
+    // out of the boxes it parses anyway. This is for material it never gets to parse.
+    if (data.type === 'tc:encrypted') {
+      store.refuseEncrypted()
+      tellRefusal()
+      return
+    }
+
+    // The size of the player a stream is being watched in, measured by the same poll of the same
+    // isolated world that speaks the verdicts. A value signal of §7.3 and nothing else: no file,
+    // list or save depends on it. Kept whatever the verdict says afterwards: a rejection is a
+    // freeze and not an erasure (§5.5).
+    if (data.type === 'tc:player') {
+      store.sawPlayer(data.sourceId, data.widthPx)
+      return
+    }
+
+    // The triage verdict is passed by the content script on signals from <video>: the hook in the
+    // MAIN world always copies the bytes, and deciding what stays is the isolated world's work.
+    const sourceId = data.sourceId
+    if (data.verdict === 'reject') store.dropPending(sourceId)
+    if (data.verdict === 'hold') store.resumePending(sourceId)
+    if (data.verdict === 'promote') store.promotePending(sourceId)
+    // A promotion is the moment a page that has been playing for six seconds becomes a recording,
+    // and on a page that appended everything in its first second it is the only such moment.
+    tellRecording()
     return
   }
 
-  // Requests from the popup arrive through a port: chrome.runtime.sendMessage does not reach
-  // this iframe, it is addressed to the content script. Through the declared guard and not by
-  // the type alone: postMessage takes anything, and a request half made is not a request.
+  // Requests from the popup arrive through a transferred reply port. chrome.runtime.sendMessage
+  // reaches the content script, which passes only its declared requests through this private port.
   if (isExtensionToTab(data)) {
     void answer(data, event.ports[0])
     return
   }
 
-  // An element of the page is playing a stream out of a worker that the hook was not allowed to
-  // wrap: measured on a page whose policy forbids blob workers, where the material of such a
-  // player passes the extension by entirely. There is nothing to record and nothing to fix, and
-  // the one thing owed to the user is to be told — a popup that shows nothing looks broken.
-  if (data?.type === 'tc:unreachable') {
-    unreachable = true
-    return
-  }
+  if (isPageToBridge(data)) receivePage(data)
+}
 
-  // A media element of the page has fired `encrypted`: the material it is being fed carries
-  // protection, and that is the end of this page — §5.4 refuses encrypted media outright, and the
-  // refusal is acted on here rather than left to triage. A verdict speaks about an element the
-  // watcher has found, and on a page whose <video> lives in a shadow root it never finds one:
-  // tv.apple.com reported its DRM four times while no verdict was ever spoken, and the registry
-  // went on offering the material of a protected page for saving.
-  //
-  // The other half of the same refusal needs no message at all — the registry reads protection out
-  // of the boxes it parses anyway. This is for the material it never gets to parse: a stream in a
-  // container it does not read, or a player whose bytes come by a road of their own.
-  if (data?.type === 'tc:encrypted') {
-    store.refuseEncrypted()
-    tellRefusal()
-    return
-  }
-
-  // The size of the player a stream is being watched in, measured by the same poll of the same
-  // isolated world that speaks the verdicts. A value signal of §7.3 and nothing else: no file, no
-  // list and no save depends on it, which is why a forged one could do no harm beyond flattering
-  // a recording of the page's own.
-  //
-  // Kept whatever the verdict says afterwards. A rejection is a freeze and not an erasure (§5.5),
-  // and the size the player had while it was playing stays true.
-  if (data?.type === 'tc:player') {
-    store.sawPlayer(String(data.sourceId), Number(data.widthPx) || 0)
-    return
-  }
-
-  // The triage verdict is passed by the content script on signals from <video>: the hook in the
-  // MAIN world always copies the bytes, and deciding what stays of them is the work of the
-  // isolated world. The verdict is addressed, so a rejection acts on exactly its own source.
-  if (data?.type === 'tc:verdict') {
-    const sourceId = String(data.sourceId)
-    if (data.verdict === 'reject') store.dropPending(sourceId)
-    if (data.verdict === 'hold') store.resumePending(sourceId)
-    if (data.verdict === 'promote') store.promotePending(sourceId)
-    // A promotion is the moment a page that has been playing for six seconds becomes a recording,
-    // and on a page that appended everything it had in the first second it is the only moment
-    // there is: nothing arrives here afterwards to carry the word out.
-    tellRecording()
-    return
-  }
-
-  if (!isPageToBridge(data)) return
-
+/** Takes media facts forwarded by the content script through the same ordered private port. */
+function receivePage(data: PageToBridge): void {
   // The page has stated how long the whole video is. It is the third component of the merge key
   // (§6.1) and the only one that tells two videos of a feed apart where the address does not
   // change from one to the next; the registry decides for itself whether it is news.
@@ -697,8 +699,7 @@ window.addEventListener('message', (event: MessageEvent) => {
 
   // An <audio> of the page is playing a soundtrack of its own. It is not a recording and does not
   // become one: what it can be is the sound of a picture on this page that has none, which the
-  // registry decides. Nothing of the material travels here either — the browser fetched the track
-  // and the hook never saw it.
+  // registry decides. Nothing of the material travels here either.
   if (data.type === 'tc:sound') {
     store.sound({
       sourceId: data.sourceId,
@@ -726,13 +727,47 @@ window.addEventListener('message', (event: MessageEvent) => {
     })
 
     // The registry reads protection out of the boxes it was parsing anyway, so the refusal may
-    // begin here as readily as it does in tc:encrypted above — and this is the one that fires on
-    // the pages that never announce themselves.
+    // begin here as readily as it does in tc:encrypted above.
     tellRefusal()
-
-    // After the refusal and never before it: a page that has just been refused holds no session
-    // any more, and there is nothing here for the badge to count.
+    // After the refusal and never before it: a page just refused holds no session for the badge.
     tellRecording()
+  }
+}
+
+let controlConnected = false
+
+/** Gives the one caller holding this frame's capability a private control port. */
+async function connectControl(event: MessageEvent): Promise<void> {
+  const port = event.ports[0]
+  if (controlConnected || !port || event.source !== window.parent) return
+
+  const id = location.hash.slice(1)
+  if (!isBridgeCapability(id)) return
+
+  const key = bridgeCapabilityKey(id)
+  let expected: unknown
+  try {
+    expected = (await chrome.storage.local.get(key))[key]
+  } catch {
+    return
+  }
+  if (!isBridgeCapability(expected) || event.data.capability !== expected || controlConnected) return
+
+  // A wrong guess must not consume the real caller's capability. The matching read does: remove it
+  // before making the port live, with the content script's bounded cleanup as the fallback.
+  await chrome.storage.local.remove(key).catch(() => undefined)
+
+  controlConnected = true
+  port.onmessage = receiveControl
+  const ready: BridgeToPage = { type: 'tc:ready' }
+  port.postMessage(ready)
+}
+
+window.addEventListener('message', (event: MessageEvent) => {
+  const data = event.data
+
+  if (isBridgeConnect(data)) {
+    void connectControl(event)
   }
 })
 

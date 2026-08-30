@@ -153,6 +153,9 @@ const asBoolean = (value: unknown, fallback: boolean): boolean =>
 const asOneOf = <T extends string>(value: unknown, allowed: readonly T[], fallback: T): T =>
   typeof value === 'string' && (allowed as readonly string[]).includes(value) ? (value as T) : fallback
 
+const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && Object.getPrototypeOf(value) === Object.prototype
+
 /**
  * A host out of whatever the user typed, or empty when it is not one.
  *
@@ -168,14 +171,20 @@ function asHost(value: unknown): string {
 
   if (text.includes('://')) {
     try {
-      return new URL(text).host
+      return new URL(text).hostname
     } catch {
       return ''
     }
   }
 
-  // A bare host and nothing else: no slash, no space, at least one dot or a name like localhost.
-  return /^[a-z0-9.-]+$/.test(text) ? text : ''
+  // A bare host and nothing else: URL parsing removes a port and turns an internationalized name
+  // into the ASCII form that URL.hostname uses when the current page is matched.
+  if (!/^[\p{L}\p{N}.:-]+$/u.test(text)) return ''
+  try {
+    return new URL(`https://${text}`).hostname
+  } catch {
+    return ''
+  }
 }
 
 function asHosts(value: unknown): string[] {
@@ -198,7 +207,7 @@ function asHosts(value: unknown): string[] {
  * update in both directions.
  */
 export function merge(stored: unknown): Settings {
-  const source = (typeof stored === 'object' && stored !== null ? stored : {}) as Record<string, unknown>
+  const source = isPlainRecord(stored) ? stored : {}
   const group = (name: string): Record<string, unknown> => {
     const value = source[name]
     return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {}
@@ -297,7 +306,7 @@ export function siteAllows(settings: Settings, url: string): boolean {
 
   let host = ''
   try {
-    host = new URL(url).host.toLowerCase()
+    host = new URL(url).hostname.toLowerCase()
   } catch {
     return false
   }

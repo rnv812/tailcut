@@ -6,6 +6,10 @@ import type { Preview } from './source/preview'
 import type { SnapshotFailure } from './source/snapshot'
 import { Workbench } from './workbench'
 
+export type EditorFailure = SnapshotFailure | 'open-failed' | 'preview-failed'
+
+export type PreviewState = Preview | 'building' | 'failed' | null
+
 /**
  * What §9.4 has to say to an open editor, read once when the tab opened.
  *
@@ -32,30 +36,34 @@ const NO_OPTIONS: EditorOptions = {}
 
 export type EditorState =
   | { status: 'opening' }
-  | { status: 'failed'; reason: SnapshotFailure }
+  | { status: 'failed'; reason: EditorFailure }
   | {
       status: 'ready'
       reader: SnapshotReader
       material: Material
-      /** 'building' while the preview is being assembled; null when the snapshot has no picture. */
-      preview: Preview | 'building' | null
+      /** `null` means no picture; `failed` means picture exists but no preview could be assembled. */
+      preview: PreviewState
       options?: EditorOptions
     }
 
 /**
  * What the editor says when there is nothing to edit.
  *
- * Four states and four sentences. A blank screen would be the same screen for a snapshot the
- * browser reclaimed, a write that was cut off and an address somebody typed — and the three want
- * three different things done about them.
+ * Every refusal gets its own sentence. A blank screen would make a reclaimed snapshot, an
+ * interrupted write, a bad address and an assembly failure look alike, although each needs a
+ * different response.
  */
-export const FAILURE_TEXT: Record<SnapshotFailure, string> = {
+export const FAILURE_TEXT: Record<EditorFailure, string> = {
   'no-id': 'This page opens from the tailcut popup. Press Edit on a recording to open it here.',
   missing:
     'This recording is no longer in storage. The browser reclaims space on its own, and a snapshot is not kept forever.',
   unfinished:
     'This recording was not finished being written. It was interrupted partway, and there is nothing to open.',
   empty: 'This recording holds no material to edit yet.',
+  'open-failed':
+    'tailcut could not open this recording because storage or editor settings could not be read.',
+  'preview-failed':
+    'tailcut could not build a preview from this recording. Its picture material may be incomplete.',
 }
 
 export function Shell({ state }: { state: EditorState }) {

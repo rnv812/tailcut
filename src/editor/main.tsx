@@ -37,27 +37,43 @@ function Editor() {
     // The settings are waited for rather than filled in afterwards: the name template is part of
     // the context every clip is named against, and a context that changed under a session would
     // take the clips of that session with it.
-    void Promise.all([loadSnapshot(window.location.search), readSettings()]).then(
-      async ([loaded, settings]) => {
-        if (!loaded.ok) {
-          setState({ status: 'failed', reason: loaded.reason })
-          return
-        }
+    void (async () => {
+      let opened: Awaited<ReturnType<typeof loadSnapshot>>
+      let settings: Awaited<ReturnType<typeof readSettings>>
 
-        const historyId = historyIdIn(window.location.search)
-        const options: EditorOptions = {
-          askWhere: settings.export.askWhere,
-          export: settings.export,
-          // §7.3: a recording somebody cut a clip out of is a recording they chose, and it is
-          // kept ahead of one that was only watched. Nothing to say for a snapshot: it is a
-          // temporary of this one editing and the sweeper takes it by age.
-          onSaved: historyId
-            ? () => void setUsed(historyId, Date.now()).catch(() => undefined)
-            : undefined,
-        }
+      try {
+        const result = await Promise.all([
+          loadSnapshot(window.location.search),
+          readSettings(),
+        ])
+        opened = result[0]
+        settings = result[1]
+      } catch {
+        if (!dropped) setState({ status: 'failed', reason: 'open-failed' })
+        return
+      }
 
-        // The screen goes up first and the preview follows: assembling it reads the whole of the
-        // material out of storage, and a title that waits for a hundred megabytes is a blank tab.
+      const loaded = opened
+      if (!loaded.ok) {
+        if (!dropped) setState({ status: 'failed', reason: loaded.reason })
+        return
+      }
+
+      const historyId = historyIdIn(window.location.search)
+      const options: EditorOptions = {
+        askWhere: settings.export.askWhere,
+        export: settings.export,
+        // §7.3: a recording somebody cut a clip out of is a recording they chose, and it is
+        // kept ahead of one that was only watched. Nothing to say for a snapshot: it is a
+        // temporary of this one editing and the sweeper takes it by age.
+        onSaved: historyId
+          ? () => void setUsed(historyId, Date.now()).catch(() => undefined)
+          : undefined,
+      }
+
+      // The screen goes up first and the preview follows: assembling it reads the whole of the
+      // material out of storage, and a title that waits for a hundred megabytes is a blank tab.
+      if (!dropped) {
         setState({
           status: 'ready',
           reader: loaded.reader,
@@ -65,21 +81,35 @@ function Editor() {
           preview: 'building',
           options,
         })
+      }
 
+      try {
         built = await buildPreview(loaded.reader, loaded.material)
-        if (dropped) {
-          built?.release()
-          return
+      } catch {
+        if (!dropped) {
+          setState({
+            status: 'ready',
+            reader: loaded.reader,
+            material: loaded.material,
+            preview: 'failed',
+            options,
+          })
         }
-        setState({
-          status: 'ready',
-          reader: loaded.reader,
-          material: loaded.material,
-          preview: built,
-          options,
-        })
-      },
-    )
+        return
+      }
+
+      if (dropped) {
+        built?.release()
+        return
+      }
+      setState({
+        status: 'ready',
+        reader: loaded.reader,
+        material: loaded.material,
+        preview: built ?? (loaded.material.video ? 'failed' : null),
+        options,
+      })
+    })()
 
     return () => {
       dropped = true
