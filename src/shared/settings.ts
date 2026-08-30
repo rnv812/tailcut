@@ -13,8 +13,8 @@ import { BALANCED, LOOSE, STRICT, type TriageConfig } from '../core/triage'
 export const SETTINGS_KEY = 'settings'
 
 export type RecordingMode = 'all' | 'allowlist' | 'off'
-export type ExportFormat = 'mp4' | 'webm' | 'webp'
-export type ExportCodec = 'hevc' | 'h264'
+export type ExportFormat = 'mp4' | 'webp'
+export type ExportCodec = 'auto' | 'hevc' | 'h264'
 export type ExportQuality = 'high' | 'medium' | 'low'
 export type DetectionPreset = 'loose' | 'balanced' | 'strict' | 'custom'
 
@@ -66,7 +66,7 @@ export const DEFAULTS: Settings = {
   history: { toDisk: true, keepDays: 7, ceilingBytes: 4 * 1024 ** 3 },
   export: {
     format: 'mp4',
-    codec: 'hevc',
+    codec: 'auto',
     rewriteHead: false,
     // The name a clip gets by default is the one stage 2 built by hand: the page title and the
     // timecode it starts at. Written as a template so that the setting has something to change.
@@ -232,8 +232,8 @@ export function merge(stored: unknown): Settings {
       ceilingBytes: asNumber(history.ceilingBytes, DEFAULTS.history.ceilingBytes, LIMITS.ceilingBytes),
     },
     export: {
-      format: asOneOf(exported.format, ['mp4', 'webm', 'webp'] as const, DEFAULTS.export.format),
-      codec: asOneOf(exported.codec, ['hevc', 'h264'] as const, DEFAULTS.export.codec),
+      format: asOneOf(exported.format, ['mp4', 'webp'] as const, DEFAULTS.export.format),
+      codec: asOneOf(exported.codec, ['auto', 'hevc', 'h264'] as const, DEFAULTS.export.codec),
       rewriteHead: asBoolean(exported.rewriteHead, DEFAULTS.export.rewriteHead),
       nameTemplate:
         typeof exported.nameTemplate === 'string' && exported.nameTemplate.trim()

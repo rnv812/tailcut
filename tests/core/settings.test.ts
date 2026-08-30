@@ -22,7 +22,7 @@ describe('DEFAULTS', () => {
     expect(DEFAULTS.history.ceilingBytes).toBe(4 * 1024 ** 3)
     expect(DEFAULTS.detection).toEqual(BALANCED)
     expect(DEFAULTS.export.format).toBe('mp4')
-    expect(DEFAULTS.export.codec).toBe('hevc')
+    expect(DEFAULTS.export.codec).toBe('auto')
     expect(DEFAULTS.export.rewriteHead).toBe(false)
   })
 
@@ -110,6 +110,35 @@ describe('merge', () => {
     expect(merge({ export: { nameTemplate: 7 } }).export.nameTemplate).toBe(
       DEFAULTS.export.nameTemplate,
     )
+  })
+
+  it('turns a stored webm into mp4, and needs not one line of migration to do it', () => {
+    // §8.4 knows two formats and this build writes one container: a clip is assembled by the MP4
+    // writer, and there is nothing here that could write a WebM. A profile that stored `webm`
+    // under an earlier build is read by `asOneOf`, which does not know the word and hands back
+    // the default — which is why the union losing a member costs no migration at all.
+    expect(merge({ export: { format: 'webm' } }).export.format).toBe('mp4')
+    // And the format that stayed is still read as itself, or the line above would prove nothing.
+    expect(merge({ export: { format: 'webp' } }).export.format).toBe('webp')
+    expect(merge({ export: { format: 'mp4' } }).export.format).toBe('mp4')
+  })
+
+  it('keeps every codec of the three and refuses a fourth', () => {
+    // The setting decides the order of the two hardware rungs, so a value that survives storage
+    // as something else would silently reorder the ladder.
+    expect(merge({ export: { codec: 'auto' } }).export.codec).toBe('auto')
+    expect(merge({ export: { codec: 'hevc' } }).export.codec).toBe('hevc')
+    expect(merge({ export: { codec: 'h264' } }).export.codec).toBe('h264')
+    expect(merge({ export: { codec: 'av1' } }).export.codec).toBe('auto')
+    expect(merge({ export: { codec: 7 } }).export.codec).toBe('auto')
+  })
+
+  it('stands the codec on auto when nothing was stored', () => {
+    // Auto is H.264 except where the quality asked for is low: HEVC's measured advantage is
+    // +0.029 SSIM at 800 kbit/s and +0.0003 at 2 Mbit/s, so a default of HEVC would have been
+    // paid for in players that cannot open the file, for three ten-thousandths of an SSIM.
+    expect(merge({}).export.codec).toBe('auto')
+    expect(merge({ export: {} }).export.codec).toBe('auto')
   })
 
   it('lowercases and trims a host, drops what is not one, and keeps it once', () => {
