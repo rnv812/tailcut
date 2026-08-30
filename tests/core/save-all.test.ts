@@ -319,21 +319,25 @@ describe('Save all, written as an ordinary mp4', () => {
   it('joins every picture run even when sound was buffered through its hole', () => {
     const video = { ...H264.video, segments: [H264.video.segments[0]!, H264.video.segments[2]!] }
     const material = recorded([video, H264.audio])
-    const expectedFrames = Number(
+    const expectedPackets = Number(
       probe(onDisk('save-h264-one-sided-gap-source.mp4', muxFragmentedMp4(recorded([video]))))
-        .streams[0]!.nb_read_frames,
+        .streams[0]!.nb_read_packets,
     )
     const file = onDisk('save-h264-one-sided-gap.mp4', saveAllMp4(material))
     const times = pictureTimes(file)
+    const saved = probe(file)
 
-    expect(times.length).toBeGreaterThanOrEqual(expectedFrames)
-    expect(times.length).toBeLessThanOrEqual(expectedFrames + 1)
+    // Packet count is the container fact. FFmpeg 4 decodes one repeated boundary frame while
+    // FFmpeg 6 drops one reordered boundary frame (97 and 95 for the same 96 stored packets), so
+    // decoded frame count is deliberately not used to decide whether material was preserved.
+    expect(Number(saved.streams[0]!.nb_read_packets)).toBe(expectedPackets)
+    expect(times.length).toBeGreaterThan(0)
     let widest = 0
     for (let index = 1; index < times.length; index++) {
       widest = Math.max(widest, times[index]! - times[index - 1]!)
     }
     expect(widest).toBeLessThan(0.15)
-    expect(Number(probe(file).format.duration)).toBeCloseTo(4, 1)
+    expect(Number(saved.format.duration)).toBeCloseTo(4, 1)
     decode(file)
   })
 
