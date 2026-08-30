@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useState } from 'preact/hooks'
+import { forcesEncoder, type Clip } from '../core/edit/clip'
 import { newProject } from '../core/edit/project'
 import { newSession } from '../core/edit/session'
+import type { Choice } from '../core/encode/codec'
+import { geometryOf } from '../core/encode/crop'
+import { estimateFor } from '../core/encode/estimate'
+import { EMPTY_PACE, type PaceBook } from '../core/encode/pace'
+import { pathFor } from '../core/encode/path'
 import { EMPTY_QUEUE, type Queue } from '../core/export/queue'
 import { createRunner } from '../core/export/run'
 import type { ClipSource } from '../core/export/plan'
@@ -10,9 +16,18 @@ import type { SnapshotReader } from '../core/snapshot/read'
 import type { Hover } from '../core/timeline/hover'
 import type { ClipBand } from '../core/timeline/layout'
 import { snapSet } from '../core/timeline/snap'
+import { formatBytes } from '../shared/format'
 import { HelpSheet } from './help'
-import { downloadIo, openClipSource, planOf, requestsFor } from './export/exporter'
+import {
+  choiceFor,
+  downloadIo,
+  geometryKey,
+  openClipSource,
+  planOf,
+  requestsFor,
+} from './export/exporter'
 import { Clips } from './inspector/clips'
+import { CropBox, CropControls } from './inspector/crop'
 import { ExportQueue } from './inspector/queue'
 import type { EditorOptions } from './shell'
 import { Player } from './player/player'
@@ -38,15 +53,26 @@ const duration = (seconds: number): string => {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
 }
 
-const weight = (bytes: number): string =>
-  bytes < 1024 * 1024 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`
-
 const HOST = (url: string): string => {
   try {
     return new URL(url).host
   } catch {
     return ''
   }
+}
+
+/**
+ * What a measured WebP weight is about: this clip, this frame, this length.
+ *
+ * Keyed by all three and not by the id alone. The probe encodes real frames of the rectangle it
+ * was given, so a rectangle the user moved makes the old number a number about a different
+ * picture — and a map keyed by the id would go on showing it for the life of the tab.
+ */
+const probeKey = (clip: Clip): string => {
+  const frame = clip.crop
+    ? `${clip.crop.x},${clip.crop.y},${clip.crop.width},${clip.crop.height}`
+    : 'full'
+  return `${clip.id}:${frame}:${clip.in}:${clip.out}`
 }
 
 function TrackLine({ track }: { track: MaterialTrack }) {
@@ -59,7 +85,7 @@ function TrackLine({ track }: { track: MaterialTrack }) {
       <span class="codec">{declared?.codec ?? 'unknown'}</span>
       {size && <span class="muted">{size}</span>}
       <span class="muted">
-        {duration(track.duration)} · {weight(track.bytes)}
+        {duration(track.duration)} · {formatBytes(track.bytes)}
       </span>
     </div>
   )
@@ -99,6 +125,18 @@ export function Workbench({ reader, material, preview, options }: WorkbenchProps
   // browser cannot be taken back, so Ctrl+Z has no business touching this.
   const [queue, setQueue] = useState<Queue>(EMPTY_QUEUE)
   const [source, setSource] = useState<ClipSource | null>(null)
+  /** The ladder's answer per geometry. Filled by the probe effect below (task 10); read here. */
+  const [choices] = useState<ReadonlyMap<string, Choice>>(new Map())
+  /** How fast this machine has actually encoded. Empty until it has (§8.6). `onPace` notes into it. */
+  const [pace] = useState<PaceBook>(EMPTY_PACE)
+  /**
+   * `probeKey → bytes` a WebP animation of that clip would weigh, measured on three real frames.
+   *
+   * Until it answers the panel writes "weighing a few of its frames…", which is the honest word.
+   */
+  const [probed] = useState<ReadonlyMap<string, number>>(new Map())
+
+  const rewriteHead = options.export?.rewriteHead ?? false
   const runner = useMemo(() => createRunner(downloadIo(reader, options)), [reader, options])
 
   useEffect(() => runner.subscribe(setQueue), [runner])
@@ -114,6 +152,43 @@ export function Workbench({ reader, material, preview, options }: WorkbenchProps
   }, [reader, material])
 
   const selected = doc.clips.find((clip) => clip.id === ui.selectedClipId)
+  /** The clip whose animation weight is being measured, and what that measurement is about. */
+  const selectedProbeKey = selected ? probeKey(selected) : null
+
+  const ctx = derived.ctx
+
+  // Every geometry the document holds, not the selected clip's. A batch export puts all of them
+  // in the queue at once, and a clip whose geometry was never asked about would reach `pathFor`
+  // with no answer and come back `blocked` — "this machine has no encoder for 1920 × 1080" said
+  // about five clips out of six, on a machine that encodes all six.
+  const wanted = useMemo(
+    () =>
+      new Map(
+        doc.clips
+          .filter((clip) => forcesEncoder(clip, ctx.keyframes.includes(clip.in), rewriteHead))
+          .filter((clip) => clip.format !== 'webp')
+          .map((clip) => {
+            const geometry = geometryOf(clip.crop, ctx.frameSize, ctx.fps)
+            return [geometryKey(geometry), geometry] as const
+          }),
+      ),
+    [doc.clips, ctx, rewriteHead],
+  )
+
+  /** True while any geometry of the document is still unanswered: the Export button waits on it. */
+  const probing = [...wanted.keys()].some((key) => !choices.has(key))
+
+  const estimate = useMemo(() => {
+    if (!selected || !source) return null
+    const path = pathFor(selected, source, ctx, choiceFor(selected, ctx, choices), rewriteHead)
+    return estimateFor({
+      path,
+      duration: selected.out - selected.in,
+      sourceBytes: planOf(source, selected).bytes,
+      pace,
+      probedBytes: selectedProbeKey ? (probed.get(selectedProbeKey) ?? null) : null,
+    })
+  }, [selected, selectedProbeKey, source, ctx, choices, rewriteHead, pace, probed])
 
   useEffect(() => {
     const job = startWaveform(reader, material, setWave)
@@ -207,7 +282,7 @@ export function Workbench({ reader, material, preview, options }: WorkbenchProps
         <div class="meta">
           <span data-testid="duration">{duration(material.duration)}</span>
           <span class="muted" data-testid="bytes">
-            {weight(material.bytes)}
+            {formatBytes(material.bytes)}
           </span>
           {/* The holes of the lane the cut follows, not of both lanes added up: one break of
               the recording is one gap, however many tracks stopped for it (Task 7). */}
@@ -228,6 +303,20 @@ export function Workbench({ reader, material, preview, options }: WorkbenchProps
           playing={playing}
           rate={shuttle.direction > 0 ? shuttle.rate : 1}
           note={shuttleLabel(shuttle)}
+          overlay={
+            // Only where there is something to draw a rectangle of. A recording with no picture
+            // gives `frameSize` zero by zero, and a frame at 0 % would be an invisible element
+            // catching the pointer over a player.
+            selected && ctx.frameSize.width > 0 ? (
+              <CropBox
+                crop={selected.crop}
+                frameSize={ctx.frameSize}
+                onCrop={(crop, dragging) =>
+                  store.dispatch({ type: 'setCrop', id: selected.id, crop, dragging })
+                }
+              />
+            ) : null
+          }
           onStep={(frames) => {
             transport.stop()
             store.dispatch({ type: 'step', frames })
@@ -283,38 +372,40 @@ export function Workbench({ reader, material, preview, options }: WorkbenchProps
 
         <Clips
           doc={doc}
-          ctx={derived.ctx}
+          ctx={ctx}
           selectedId={ui.selectedClipId}
           playhead={ui.playhead}
           fps={fps}
+          estimate={estimate}
           dispatch={store.dispatch}
         />
+
+        {selected && ctx.frameSize.width > 0 && (
+          <CropControls
+            crop={selected.crop}
+            // The one producer of this prop, and it is `geometryOf` rather than a second sum of
+            // the same numbers: the probe key, the estimate and the encoder are all built from
+            // this call, so the line under the frame cannot name a picture the file will not be.
+            geometry={geometryOf(selected.crop, ctx.frameSize, ctx.fps)}
+            onRatio={(ratio) => store.dispatch({ type: 'cropRatio', id: selected.id, ratio })}
+            onReset={() => store.dispatch({ type: 'clearCrop', id: selected.id })}
+            onApplyToAll={() => store.dispatch({ type: 'applyCropToAll' })}
+          />
+        )}
 
         <ExportQueue
           queue={queue}
           ready={source !== null}
           clips={doc.clips.length}
-          estimate={selected && source ? planOf(source, selected).bytes : null}
+          estimate={estimate}
+          probing={probing}
           onExport={() =>
-            source && runner.enqueue(requestsFor(source, doc.clips, derived.ctx, new Map(), false))
+            source && runner.enqueue(requestsFor(source, doc.clips, ctx, choices, rewriteHead))
           }
           onRetry={(id) => runner.retry(id)}
           onCancel={(id) => runner.cancel(id)}
         />
 
-        <h2>Clip</h2>
-        <label class="option">
-          <input type="checkbox" data-testid="crop" disabled />
-          Crop
-        </label>
-        <label class="option">
-          <input type="checkbox" data-testid="webp" disabled />
-          Animated WebP
-        </label>
-        <p class="muted" data-testid="reencode-note">
-          Cropping and WebP need re-encoding, which this version does not do. The clip is copied
-          from the recording as it is.
-        </p>
       </aside>
 
       <HelpSheet open={help} onClose={() => setHelp(false)} />

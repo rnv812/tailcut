@@ -1,3 +1,4 @@
+import type { ComponentChildren } from 'preact'
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { formatTimecode } from '../../core/timeline/timecode'
 import { frameSeeker, type FrameSeeker } from './seek'
@@ -13,6 +14,8 @@ type FrameCallbackVideo = HTMLVideoElement & {
 
 export interface PlayerProps {
   preview: Preview
+  /** Drawn in the exact box of the coded picture, above the video and below the transport. */
+  overlay?: ComponentChildren
   /** The frame the transport is on, owned above: the timeline moves it too. */
   index: number
   playing: boolean
@@ -27,7 +30,17 @@ export interface PlayerProps {
   onPlaying: (playing: boolean) => void
 }
 
-export function Player({ preview, index, playing, rate, note, onStep, onSeek, onPlaying }: PlayerProps) {
+export function Player({
+  preview,
+  overlay,
+  index,
+  playing,
+  rate,
+  note,
+  onStep,
+  onSeek,
+  onPlaying,
+}: PlayerProps) {
   const element = useRef<HTMLVideoElement | null>(null)
   const seeker = useRef<FrameSeeker | null>(null)
   const [catchingUp, setCatchingUp] = useState(false)
@@ -117,7 +130,10 @@ export function Player({ preview, index, playing, rate, note, onStep, onSeek, on
 
   return (
     <section class="player" data-testid="player">
-      <video ref={element} src={preview.url} preload="auto" data-testid="preview" />
+      <div class="tc-picture-frame">
+        <video ref={element} src={preview.url} preload="auto" data-testid="preview" />
+        {overlay}
+      </div>
 
       <div class="transport">
         <button data-testid="prev" disabled={index <= 0} onClick={() => onStep(-1)}>

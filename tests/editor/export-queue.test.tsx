@@ -3,6 +3,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render } from 'preact'
 import { ExportQueue, type ExportQueueProps } from '../../src/editor/inspector/queue'
 import { EMPTY_QUEUE, reduceQueue, type Queue, type QueueEvent } from '../../src/core/export/queue'
+import type { Estimate } from '../../src/core/encode/estimate'
 
 const host = document.createElement('div')
 document.body.append(host)
@@ -14,7 +15,8 @@ const props = (over: Partial<ExportQueueProps> = {}): ExportQueueProps => ({
   queue: EMPTY_QUEUE,
   ready: true,
   clips: 2,
-  estimate: 4_200_000,
+  estimate: { kind: 'copy', bytes: 4_200_000 },
+  probing: false,
   onExport: vi.fn(),
   onRetry: vi.fn(),
   onCancel: vi.fn(),
@@ -39,7 +41,9 @@ describe('the export panel', () => {
     render(<ExportQueue {...one} />, host)
 
     expect(at('export').textContent).toContain('Export 2 clips')
-    expect(at('estimate').textContent).toContain('4.0 MB')
+    expect(at('estimate').textContent).toBe(
+      'Selected clip: about 4.0 MB, copied from the recording as it is.',
+    )
 
     at('export').click()
     expect(one.onExport).toHaveBeenCalledTimes(1)
@@ -47,6 +51,98 @@ describe('the export panel', () => {
     // One clip is not "Export 1 clips": the two are different strings and the panel says both.
     render(<ExportQueue {...props({ clips: 1 })} />, host)
     expect(at('export').textContent).toBe('Export 1 clip')
+  })
+
+  it('uses the recorded weight without inventing a hardware encoded weight', () => {
+    const estimate: Estimate = {
+      kind: 'encode',
+      rung: 'h264-hw',
+      geometry: { width: 1920, height: 1080, framerate: 30 },
+      frames: 300,
+      seconds: 10,
+      bytes: null,
+      sourceCodec: 'avc1',
+      inflates: false,
+      sourceBytes: 4_200_000,
+    }
+
+    render(<ExportQueue {...props({ estimate })} />, host)
+
+    expect(at('estimate').textContent).toBe(
+      'Selected clip: 4.0 MB in the recording, and smaller than that once re-encoded — constant quality promises a picture, not a size.',
+    )
+    expect(at('estimate').textContent).not.toContain('about')
+  })
+
+  it('calls the software encoded weight a floor against the recording', () => {
+    const estimate: Estimate = {
+      kind: 'encode',
+      rung: 'h264-sw',
+      geometry: { width: 1920, height: 1080, framerate: 30 },
+      frames: 300,
+      seconds: 10,
+      bytes: 1_200_000,
+      sourceCodec: 'avc1',
+      inflates: false,
+      sourceBytes: 4_200_000,
+    }
+
+    render(<ExportQueue {...props({ estimate })} />, host)
+
+    expect(at('estimate').textContent).toBe(
+      'Selected clip: no smaller than 1.1 MB, against 4.0 MB in the recording.',
+    )
+  })
+
+  it('waits for a WebP probe before naming a weight', () => {
+    const estimate: Estimate = {
+      kind: 'webp',
+      geometry: { width: 640, height: 360, framerate: 15 },
+      frames: 150,
+      seconds: null,
+      bytes: null,
+      sourceBytes: 4_200_000,
+    }
+
+    render(<ExportQueue {...props({ estimate })} />, host)
+
+    expect(at('estimate').textContent).toBe('Selected clip: weighing a few of its frames…')
+  })
+
+  it('compares a measured WebP animation with its recorded material', () => {
+    const estimate: Estimate = {
+      kind: 'webp',
+      geometry: { width: 640, height: 360, framerate: 15 },
+      frames: 150,
+      seconds: 10,
+      bytes: 900_000,
+      sourceBytes: 4_200_000,
+    }
+
+    render(<ExportQueue {...props({ estimate })} />, host)
+
+    expect(at('estimate').textContent).toBe(
+      'Selected clip: about 879 KB as an animation, against 4.0 MB in the recording.',
+    )
+  })
+
+  it('draws no weight line for a clip with no export path', () => {
+    const estimate: Estimate = {
+      kind: 'none',
+      reason: 'no-encoder',
+      geometry: { width: 1920, height: 1080, framerate: 30 },
+    }
+
+    render(<ExportQueue {...props({ estimate })} />, host)
+
+    expect(host.querySelector('[data-testid="estimate"]')).toBeNull()
+  })
+
+  it('waits for the encoder probe before allowing export', () => {
+    render(<ExportQueue {...props({ probing: true })} />, host)
+
+    expect(at('export').hasAttribute('disabled')).toBe(true)
+    expect(at('export').textContent).toBe('Checking the encoder…')
   })
 
   it('offers nothing while there is nothing to export or nothing to export from', () => {
@@ -80,6 +176,68 @@ describe('the export panel', () => {
     expect(allAt('job-state').map((one) => one.textContent)).toEqual(['Saved', 'Writing', 'Waiting'])
     expect(allAt('job')[0]!.textContent).toContain('2.3 MB')
     expect(allAt('job')[1]!.textContent).toContain('30%')
+  })
+
+  it('counts frames for a running encode instead of showing byte progress', () => {
+    const queue = play([
+      {
+        type: 'enqueue',
+        jobs: [
+          {
+            id: 'j1',
+            clipId: 'c1',
+            kind: 'encode',
+            name: 'One',
+            fileName: 'One.mp4',
+            frames: 200,
+          },
+        ],
+      },
+      { type: 'start', id: 'j1', now: 0 },
+      { type: 'progress', id: 'j1', done: 30, total: 100 },
+    ])
+
+    render(<ExportQueue {...props({ queue })} />, host)
+
+    expect(at('job').textContent).toContain('60 of 200 frames')
+    expect(at('job').textContent).not.toContain('30%')
+    expect(host.querySelector('[data-testid="waiting-j1"]')).toBeNull()
+  })
+
+  it('explains why an encode is waiting without saying a queued copy is stuck', () => {
+    const queue = play([
+      {
+        type: 'enqueue',
+        jobs: [
+          { id: 'j1', clipId: 'c1', kind: 'copy', name: 'One', fileName: 'One.mp4' },
+          {
+            id: 'j2',
+            clipId: 'c2',
+            kind: 'encode',
+            name: 'Two',
+            fileName: 'Two.mp4',
+            frames: 200,
+          },
+        ],
+      },
+    ])
+
+    render(<ExportQueue {...props({ queue })} />, host)
+
+    expect(at('waiting-j2').textContent).toBe('Waiting for the encoder')
+    expect(host.querySelector('[data-testid="waiting-j1"]')).toBeNull()
+  })
+
+  it('uses the shared size units for a completed job', () => {
+    const queue = play([
+      ONE_JOB,
+      { type: 'start', id: 'j1', now: 0 },
+      { type: 'finish', id: 'j1', bytes: 2 * 1024 * 1024 * 1024, now: 1 },
+    ])
+
+    render(<ExportQueue {...props({ queue })} />, host)
+
+    expect(at('job').textContent).toContain('2.00 GB')
   })
 
   it('says how much longer the job it is on has to run', () => {

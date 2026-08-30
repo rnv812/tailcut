@@ -127,13 +127,13 @@ const settled = async () => {
 }
 
 /** Five frames at 25 fps: enough grid for a step, a fit and a clip. */
-const previewOf = (): Preview => ({
+const previewOf = (frameSize = { width: 1280, height: 720 }): Preview => ({
   url: 'blob:preview',
   bytes: 10,
   // The size of the picture the shell would be playing. Nothing on this screen draws a rectangle
   // over it yet; it is here because `Preview` promises it, and a cast that let it be missing is
   // how a zero would reach the crop without a word (§8.5).
-  frameSize: { width: 1280, height: 720 },
+  frameSize,
   frames: FrameTable.of(
     Array.from({ length: 5 }, (_, at) => ({
       pts: at / 25,
@@ -160,6 +160,12 @@ const button = (testId: string): HTMLButtonElement =>
 
 const press = (key: string, init: KeyboardEventInit = {}) =>
   window.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...init }))
+
+const point = (target: Element, type: string, clientX: number, clientY: number): void => {
+  target.dispatchEvent(
+    new PointerEvent(type, { bubbles: true, clientX, clientY, pointerId: 1 }),
+  )
+}
 
 /**
  * Puts the editor up and waits until it is listening.
@@ -215,15 +221,12 @@ describe('the editor shell', () => {
     expect(tracks[1]).toContain('mp4a.40.2')
   })
 
-  it('shows crop and WebP disabled, with the reason beside them', async () => {
+  it('removes the stage-three placeholders now that clip controls do the work', async () => {
     show(await ready())
 
-    const crop = document.querySelector<HTMLInputElement>('[data-testid="crop"]')!
-    const webp = document.querySelector<HTMLInputElement>('[data-testid="webp"]')!
-
-    expect(crop.disabled).toBe(true)
-    expect(webp.disabled).toBe(true)
-    expect(text('reencode-note')).toContain('re-encoding')
+    expect(document.querySelector('[data-testid="crop"]')).toBeNull()
+    expect(document.querySelector('[data-testid="webp"]')).toBeNull()
+    expect(document.querySelector('[data-testid="reencode-note"]')).toBeNull()
   })
 
   it('says so while the snapshot is being opened', () => {
@@ -277,6 +280,162 @@ describe('the editor shell', () => {
     // And the box the frame under the pointer is drawn in, mounted with the strip and hidden
     // until the pointer is over it — mounted, so that the cache of pictures outlives a hover.
     expect(document.querySelector<HTMLElement>('[data-testid="thumb"]')!.hidden).toBe(true)
+  })
+
+  it('draws a crop only over a picture with a real source size', async () => {
+    await mount({ ...(await ready()), preview: previewOf() })
+    press('i')
+    await settled()
+
+    expect(document.querySelector('[data-testid="crop-host"]')).not.toBeNull()
+
+    render(null, document.body)
+    document.body.innerHTML = ''
+    await mount({
+      ...(await ready()),
+      preview: { ...previewOf(), frameSize: { width: 0, height: 0 } },
+    })
+    press('i')
+    await settled()
+
+    expect(document.querySelectorAll('[data-testid="clip"]')).toHaveLength(1)
+    expect(document.querySelector('[data-testid="crop-host"]')).toBeNull()
+    expect(document.querySelector('[data-testid="crop-geometry"]')).toBeNull()
+  })
+
+  it('names and prices the geometry the crop will actually encode', async () => {
+    await mount({ ...(await cuttable()), preview: previewOf({ width: 320, height: 240 }) })
+    press('i')
+    await settled()
+
+    button('crop-ratio-9:16').click()
+    await settled()
+
+    expect(text('crop-geometry')).toBe('134 × 240')
+    await until(
+      () => text('cost-c1').includes('no encoder for 134 × 240'),
+      `the crop verdict never arrived: ${text('cost-c1') || 'no cost line'}`,
+    )
+    expect(button('export').disabled).toBe(true)
+    expect(button('export').textContent).toBe('Checking the encoder…')
+
+    button('crop-reset').click()
+    await until(
+      () => text('cost-c1').includes('Copied from the recording'),
+      `the reset verdict never arrived: ${text('cost-c1') || 'no cost line'}`,
+    )
+    expect(text('crop-geometry')).toBe('320 × 240')
+    expect(button('export').textContent).toBe('Export 1 clip')
+  })
+
+  it('applies the selected crop to every clip through the shared model', async () => {
+    await mount({ ...(await ready()), preview: previewOf() })
+    press('i')
+    press('ArrowRight')
+    press('ArrowRight')
+    press('s')
+    await settled()
+
+    button('crop-ratio-9:16').click()
+    button('crop-apply-all').click()
+    await settled()
+
+    document.querySelector<HTMLElement>('[data-id="c1"]')!.click()
+    await settled()
+    expect(text('crop-geometry')).toBe('404 × 720')
+    expect(document.querySelector<HTMLSelectElement>('[data-testid="mode-c1"]')!.disabled).toBe(
+      true,
+    )
+  })
+
+  it('keeps a crop dragged over the player in the shared model', async () => {
+    await mount({ ...(await ready()), preview: previewOf() })
+    press('i')
+    await settled()
+    button('crop-ratio-9:16').click()
+    await settled()
+
+    vi.spyOn(
+      document.querySelector<HTMLDivElement>('[data-testid="crop-host"]')!,
+      'getBoundingClientRect',
+    ).mockReturnValue({
+      width: 640,
+      height: 360,
+      x: 0,
+      y: 0,
+      top: 0,
+      right: 640,
+      bottom: 360,
+      left: 0,
+      toJSON: () => ({}),
+    })
+
+    const box = document.querySelector<HTMLDivElement>('[data-testid="crop-box"]')!
+    expect(box.style.left).toBe('34.21875%')
+    point(box, 'pointerdown', 100, 100)
+    point(box, 'pointermove', 110, 100)
+    point(box, 'pointerup', 110, 100)
+    await settled()
+
+    expect(document.querySelector<HTMLDivElement>('[data-testid="crop-box"]')!.style.left).toBe(
+      '35.78125%',
+    )
+  })
+
+  it('waits for every MP4 geometry but never asks the MP4 ladder about WebP', async () => {
+    await mount({ ...(await ready()), preview: previewOf() })
+    press('i')
+    press('ArrowRight')
+    press('ArrowRight')
+    press('s')
+    await settled()
+
+    // Split selects c2. Change the unselected c1 directly: the controls stop their events from
+    // selecting the row, and the batch still has to wait for work outside the selected one.
+    const mode = document.querySelector<HTMLSelectElement>('[data-testid="mode-c1"]')!
+    mode.value = 'optimize'
+    mode.dispatchEvent(new Event('change', { bubbles: true }))
+    await settled()
+
+    expect(button('export').textContent).toBe('Checking the encoder…')
+
+    const format = document.querySelector<HTMLSelectElement>('[data-testid="format-c1"]')!
+    format.value = 'webp'
+    format.dispatchEvent(new Event('change', { bubbles: true }))
+    await settled()
+    expect(button('export').textContent).toBe('Export 2 clips')
+  })
+
+  it('uses rewrite-head for both the selected verdict and the whole batch', async () => {
+    await mount({
+      ...(await cuttable()),
+      preview: previewOf({ width: 320, height: 240 }),
+      options: { export: { ...DEFAULTS.export, rewriteHead: false } },
+    })
+    press('ArrowRight')
+    press('i')
+    await until(
+      () => text('cost-c1').includes('Copied from the recording'),
+      `the copy verdict never arrived: ${text('cost-c1') || 'no cost line'}`,
+    )
+    expect(button('export').textContent).toBe('Export 1 clip')
+
+    render(null, document.body)
+    document.body.innerHTML = ''
+    await mount({
+      ...(await cuttable()),
+      preview: previewOf({ width: 320, height: 240 }),
+      options: { export: { ...DEFAULTS.export, rewriteHead: true } },
+    })
+    press('ArrowRight')
+    press('i')
+    await until(
+      () => text('cost-c1').includes('no encoder for 320 × 240'),
+      `the rewrite verdict never arrived: ${text('cost-c1') || 'no cost line'}`,
+    )
+
+    expect(button('export').disabled).toBe(true)
+    expect(button('export').textContent).toBe('Checking the encoder…')
   })
 
   it('answers the keyboard from the tab and not from the player', async () => {

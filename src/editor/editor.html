@@ -60,6 +60,9 @@
      boundary and not a failure — nothing has gone wrong, and there is nothing to press. */
   .tc-clip-note { margin: 6px 0 0; color: #e0a33c; font-size: 11px; }
 
+  .tc-picture-frame { position: relative; display: flex; min-height: 0;
+    max-width: 100%; max-height: 100%; }
+  .tc-picture-frame > video { display: block; }
   .tc-crop-host { position: absolute; inset: 0; pointer-events: none; }
   .tc-crop-box { position: absolute; box-sizing: border-box; border: 1px solid #e0a33c;
     box-shadow: 0 0 0 100vmax rgba(8, 10, 12, 0.55); pointer-events: auto; cursor: move; }
@@ -75,6 +78,7 @@
   .tc-crop-w { left: -5px; top: calc(50% - 5px); cursor: ew-resize; }
   .tc-crop-controls { display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
     margin-top: 6px; }
+  .tc-clip-warn { color: #e0a33c; }
 
   .tc-marker-list { list-style: none; margin: 0; padding: 0; }
   .tc-marker { display: flex; gap: 8px; align-items: center; padding: 2px 0; }
