@@ -8,7 +8,7 @@ export interface ExportQueueProps {
   ready: boolean
   clips: number
   /**
-   * What the selected clip will weigh, as data (Task 8); null when nothing is selected.
+   * What the selected clip will weigh, as data; null when nothing is selected.
    *
    * The panel prints the **weight** and nothing else about the price. The rung, the frames, the
    * geometry and the seconds are written under the clip row by `costNote` (clips.tsx), and a
@@ -17,7 +17,7 @@ export interface ExportQueueProps {
    */
   estimate: Estimate | null
   /**
-   * The ladder has not answered for every geometry the document holds (§8.6).
+   * The ladder has not answered for every geometry the document holds.
    *
    * The button waits for it rather than sending clips into a queue that would answer "no encoder"
    * about geometries nobody asked about. It is milliseconds — `isConfigSupported` answers at
@@ -125,7 +125,7 @@ function Row({
   )
 }
 
-/** The Export button, what the selected clip would weigh, and the queue under it (§8.6, §9.3). */
+/** The Export button, the selected clip's estimated size, and the queue beneath it. */
 export function ExportQueue({
   queue,
   ready,
@@ -142,7 +142,7 @@ export function ExportQueue({
     <section class="tc-export" data-testid="export-panel">
       <h2>Export</h2>
 
-      {/* Disabled while the ladder is still answering: §8.6 asks whether there is an encoder for
+      {/* Disabled while the ladder is still answering whether there is an encoder for
           this picture **before** the queue starts, and a press that lands a millisecond early
           would send every clip of an unasked geometry down `blocked`. */}
       <button

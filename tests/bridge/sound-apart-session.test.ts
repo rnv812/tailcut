@@ -6,7 +6,7 @@ import { writeSaveFile } from '../../src/bridge/write'
 import { probeFile, writeTemp } from '../support/media'
 
 /**
- * The page shape this whole road exists for (§5.6), as the registry sees it.
+ * The split picture-and-sound page shape this path exists for, as the registry sees it.
  *
  * A `<video src>` of 3.5 s with no audio track in it, looping; an `<audio src>` of 24.5 s beside
  * it, seven times as long, looping on a cycle of its own. Measured on coub: 9.48 s of picture
@@ -183,7 +183,7 @@ describe('a page that plays its sound apart from its picture', () => {
     const page = await paired()
 
     // The whole track is 98 kB and a clip of three and a half seconds can use fourteen of them.
-    // §2 puts downloading somebody's material out of scope, and a soundtrack is a music file.
+    // Downloading unwatched material is out of scope, and a soundtrack is a music file.
     expect(page.served(TRACK)).toBeLessThan(40_000)
     expect(page.served(TRACK)).toBeGreaterThan(0)
   })
@@ -277,7 +277,7 @@ describe('a page that plays its sound apart from its picture', () => {
     const page = registry()
 
     // A track the browser has one second of. What is offered is what really passed through the
-    // player, which is the same promise the picture is held to (§5.6).
+    // player, because both halves must have been watched together.
     page.plays({ buffered: [[0, 1]] })
     page.shows()
     page.store.promotePending(SOURCE)
@@ -327,7 +327,7 @@ describe('a page that plays its sound apart, paused', () => {
   it('keeps the pairing when the viewer pauses to open the popup', async () => {
     const page = await paired()
 
-    // Which is what a viewer does before saving. §5.5: a pause freezes and does not erase, and
+    // Which is what a viewer does before saving. A pause freezes capture without erasing it, and
     // read live the page is silent at exactly the moment somebody is deciding to save from it.
     page.plays({ playing: false })
     await page.store.settled()

@@ -2,15 +2,14 @@
 <meta charset="utf-8" />
 <title>clearkey player</title>
 <!--
-  Страница, на которой играет защищённый поток — форма dash.js ClearKey sample и tv.apple.com:
-  сперва бесплатное превью в открытую, потом лицензионный материал, зашифрованный по Common
-  Encryption. Обхода защиты здесь нет и быть не может: расширение отказывается по самому виду
-  материала — по боксам encv/sinf/tenc в ините, — и ни один зашифрованный байт оно не читает и
-  прочесть не может.
+  A page shaped like the dash.js ClearKey sample and tv.apple.com: an unencrypted free preview is
+  followed by licensed material protected with Common Encryption. The extension never attempts to
+  bypass that protection. It rejects the stream based on the init segment's encv/sinf/tenc boxes
+  without reading any encrypted payload bytes.
 
-  Защищённый инит появляется по сигналу из теста. К этому моменту первый ролик успевает отыграть
-  испытательный срок, и сессия подтверждена: отказ сортировки такую сессию только замораживает и
-  сохраняет накопленное (§5.5). Отказ по шифрованию обязан быть сильнее — не оставить ничего.
+  The protected init arrives when the test requests it. By then the first video has passed
+  classification and established a session. A later classification refusal would preserve its
+  captured material, but encryption rejection must remove the session completely.
 -->
 <video id="clear" controls width="640" style="background:#000"></video>
 <video id="licensed" controls width="640" style="background:#000"></video>
@@ -21,14 +20,14 @@
     '/fixtures/h264/chunk-stream0-00002.m4s',
     '/fixtures/h264/chunk-stream0-00003.m4s',
   ]
-  /** Инит защищённого потока: encv вместо avc1, внутри sinf с frma, schm и tenc. */
+  /** A protected init: encv instead of avc1, with frma, schm, and tenc inside sinf. */
   const CENC_INIT = '/fixtures/cenc/init-stream0.m4s'
 
   const MIME = 'video/mp4; codecs="avc1.4d401e"'
 
   const bytes = async (url) => (await fetch(url)).arrayBuffer()
 
-  /** Дописка с ожиданием updateend: тест должен знать, что байты действительно ушли. */
+  /** Appends and waits for updateend so the test knows the bytes were accepted. */
   const appendTo = (sb, buffer) =>
     new Promise((resolve, reject) => {
       sb.addEventListener('updateend', resolve, { once: true })
@@ -41,9 +40,9 @@
 
   window.appended = 0
   window.allAppended = false
-  /** Что случилось с защищённым инитом: null — ещё не дописывали. */
+  /** Result of appending the protected init; null means it has not been appended yet. */
   window.protectedAppend = null
-  /** Сколько чистых сегментов дописано уже после того, как защита появилась. */
+  /** Number of clear segments appended after protected material appeared. */
   window.appendedAfter = 0
 
   const clear = document.getElementById('clear')
@@ -68,8 +67,8 @@
   }
 
   /**
-   * Второй плеер страницы открывает защищённый поток. Тест решает, когда: к этому моменту первый
-   * уже заработал подтверждённую сессию, и видно, что отказ забирает и её.
+   * The page's second player opens a protected stream when the test decides. By then the first
+   * player has an established session, proving that encryption rejection removes it as well.
    */
   window.playProtected = async () => {
     const licensed = document.getElementById('licensed')
@@ -77,8 +76,8 @@
     licensed.src = URL.createObjectURL(source)
     await opened(source)
 
-    // Тип буфера — обычный avc1: именно так объявляет его DASH-плеер, а то, что материал
-    // защищён, стоит в самомините (frma называет исходный кодек).
+    // The buffer advertises ordinary avc1, as a DASH player does. Protection is declared inside
+    // the init segment, where frma names the original codec.
     const sb = source.addSourceBuffer(MIME)
     try {
       await appendTo(sb, await bytes(CENC_INIT))
@@ -88,7 +87,7 @@
     }
   }
 
-  /** Первый плеер продолжает играть как ни в чём не бывало: отказ расширения его не касается. */
+  /** The first player keeps playing because the extension's refusal must not affect the page. */
   window.appendMore = async () => {
     await appendTo(clearBuffer, await bytes(SEGMENTS[0]))
     window.appendedAfter++

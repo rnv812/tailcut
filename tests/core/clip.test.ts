@@ -58,7 +58,7 @@ describe('normalizeClip', () => {
   })
 
   it('lets a clip cross a hole, because a hole is not a change of quality', () => {
-    // The whole point of the stage (§8.2): the material stops and starts again, the quality
+    // Gaps collapse in the output: the material stops and starts again, while the quality
     // never changed, and the export collapses the hole out of the clip. A clip stopped at the
     // edge of a hole could not be made to span one at all.
     const fixed = normalizeClip(clip({ in: 1, out: 9 }), oneQuality)
@@ -77,7 +77,7 @@ describe('normalizeClip', () => {
   })
 
   it('stops a clip at a change of quality, and names the quality it stopped at', () => {
-    // §8.3: two resolutions in one track need an encoder, so the handle stops at the boundary of
+    // Two resolutions in one track need an encoder, so the handle stops at the boundary of
     // the zone the clip belongs to and the inspector says why. There is no way past it here.
     const fixed = normalizeClip(clip({ in: 1, out: 9 }), ctx)
 
@@ -206,7 +206,7 @@ describe('clipName', () => {
     expect(clipName({ title: 'Cats', at: 83, taken: ['Cats'], template: '{title}' })).toBe('Cats (2)')
   })
 
-  it('falls back to the name of stage 2 when the template says nothing', () => {
+  it('falls back to the default name when the template says nothing', () => {
     // A field the user cleared, or typed three spaces into, gives a name made of the title —
     // not an empty one, and not a file called "tailcut".
     expect(clipName({ title: 'Cats', at: 83, taken: [], template: '   ' })).toBe('Cats')
@@ -247,7 +247,7 @@ describe('forcesEncoder', () => {
   it('names each of the four reasons a clip cannot simply be copied', () => {
     // Facts about the clip, not preferences. A crop changes the picture; WebP is not a container
     // coded frames can be moved into; `optimize` is the request itself; and a start that is not
-    // on a sync sample can only be made exact by writing the head again (§8.2), which is what
+    // on a sync sample can only be made exact by re-encoding the head, which is what
     // `rewriteHead` asks for.
     expect(forcesEncoder(clip({ crop: { x: 0, y: 0, width: 64, height: 64 } }), true, false)).toBe(true)
     expect(forcesEncoder(clip({ format: 'webp' }), true, false)).toBe(true)

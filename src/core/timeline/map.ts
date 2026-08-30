@@ -1,19 +1,19 @@
 import type { Chunk, Run } from '../../shared/types'
 
-/** Зазор меньше этого считаем следствием округления, а не разрывом. */
+/** A smaller gap is treated as rounding error rather than a discontinuity. */
 export const GAP_TOLERANCE_SECONDS = 0.05
 
 /**
- * Продолжает ли кусок начатый прогон: граница включена, зазор ровно в допуск —
- * ещё округление. Вынесено из runs(), потому что через вычитание времён медиа
- * попасть в точную границу почти невозможно, а проверять её надо.
+ * Whether a chunk continues the current run. The boundary is inclusive: a gap exactly equal to
+ * the tolerance is still rounding error. This is separate from runs() because media timestamp
+ * subtraction rarely lands on the exact boundary, while the boundary itself still needs a test.
  */
 export function continuesRun(lastEnd: number, start: number): boolean {
   return start - lastEnd <= GAP_TOLERANCE_SECONDS
 }
 
 /**
- * Совпадение начал с такой точностью означает тот же самый кусок.
+ * Starts this close together identify the same chunk.
  *
  * Exported because the history joins the same pieces by the same rule a second time, over the
  * rows of the index rather than over the material (`historyIndexOf` in `src/core/history/index.ts`):
@@ -24,29 +24,29 @@ export function continuesRun(lastEnd: number, start: number): boolean {
 export const SAME_CHUNK_TOLERANCE_SECONDS = 0.001
 
 export class PtsMap {
-  /** Всегда отсортирован по start. */
+  /** Always sorted by start. */
   private chunks: Chunk[] = []
 
   /**
-   * Кладёт кусок на карту и отвечает, взяла ли его.
+   * Inserts a chunk into the map and reports whether the map accepted it.
    *
-   * Ответ появился ради писателя истории: повторный просмотр даёт совпадающий интервал (§6.3),
-   * карта его отбрасывает, и без этого ответа тот же материал уезжал бы на диск второй раз и
-   * считался бы в длительности сессии дважды. Замена более длинным вариантом — тоже «взяла»:
-   * на карте теперь лежит другой кусок, и он на диске нужен.
+   * The history writer needs the result because a replay produces an overlapping interval that
+   * the map rejects. Without this answer the same material would be written and counted twice.
+   * Replacing an existing chunk with a longer version also counts as accepted because the map now
+   * contains different material that must be written.
    */
   insert(chunk: Chunk): boolean {
     if (chunk.end <= chunk.start) return false
 
     const at = this.lowerBound(chunk.start)
 
-    // Тот же участок мог прийти повторно с микросдвигом начала в любую сторону:
-    // такой близнец стоит либо на найденной позиции, либо непосредственно перед ней.
+    // The same interval may arrive again with a tiny start shift in either direction, so its
+    // duplicate is either at the insertion point or immediately before it.
     for (const i of [at - 1, at]) {
       const existing = this.chunks[i]
       if (!existing) continue
       if (Math.abs(existing.start - chunk.start) >= SAME_CHUNK_TOLERANCE_SECONDS) continue
-      // Оставляем более длинный вариант.
+      // Keep the longer version.
       if (chunk.end > existing.end) {
         this.chunks[i] = chunk
         return true
@@ -89,23 +89,22 @@ export class PtsMap {
   span(): { start: number; end: number } | null {
     const first = this.chunks[0]
     if (!first) return null
-    // Куски могут перекрываться, поэтому самый дальний конец не обязательно
-    // у последнего по началу.
+    // Chunks may overlap, so the furthest end need not belong to the latest start.
     let end = first.end
     for (const c of this.chunks) if (c.end > end) end = c.end
     return { start: first.start, end }
   }
 
   /**
-   * Оставляет окно вокруг текущей позиции: всё прошлое дальше windowSeconds
-   * выбрасывается, загруженное наперёд сохраняется целиком.
+   * Keeps a window behind the current position: older history beyond `windowSeconds` is evicted,
+   * while material buffered ahead is preserved in full.
    */
   evict(windowSeconds: number, currentTime: number): void {
     const cutoff = currentTime - windowSeconds
     this.chunks = this.chunks.filter((c) => c.end > cutoff)
   }
 
-  /** Индекс первого куска с началом не меньше заданного. */
+  /** Index of the first chunk whose start is at least the requested value. */
   private lowerBound(start: number): number {
     let lo = 0
     let hi = this.chunks.length

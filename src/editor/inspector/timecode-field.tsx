@@ -62,7 +62,7 @@ export function TimecodeField({ label, seconds, fps, onCommit, id, disabled }: T
             event.preventDefault()
             commit()
             // The entry is over, so the box gives the focus back: the editor turns its whole
-            // keyboard off while a field is focused (state/keys.ts, Task 14), and a hand that
+            // keyboard off while a field is focused (state/keys.ts), and a hand that
             // types a timecode and then presses I means the command, not the letter. The blur
             // that follows commits once more, and harmlessly: it runs in this same handler, before
             // Preact has rendered anything, so it sees the same `state.text` and the same

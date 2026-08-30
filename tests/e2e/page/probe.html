@@ -2,17 +2,17 @@
 <meta charset="utf-8" />
 <title>probing player</title>
 <!--
-  Страница, которая спрашивает браузер про системы ключей и играет в открытую. Форма статьи
-  edition.cnn.com: шестнадцать вызовов requestMediaKeySystemAccess на полутора секундах — часть
-  отклонена, часть выдана, — setMediaKeys только с null, и ни одного бокса шифрования в потоке.
+  A page that probes browser key systems while playing clear material. It matches an edition.cnn.com
+  article: sixteen requestMediaKeySystemAccess calls in one and a half seconds, some rejected and some
+  granted, setMediaKeys called only with null, and no encryption box in the stream.
 
-  Раньше расширение снимало запись со всей страницы по самому обращению к EME, и настоящее видео
-  367x648 со звуком, которое смотрели сорок секунд, терялось целиком. Спрашивать — это намерение,
-  а не материал: страница обязана быть записана полностью.
+  The extension once discarded every recording on a page merely because it used EME. A real
+  367x648 video with audio, watched for forty seconds, was lost. A probe expresses intent rather
+  than protected material, so this page must be recorded completely.
 -->
 <video id="v" controls width="640" style="background:#000"></video>
 <script>
-  /** Системы ключей, которые перебирает обычный плеер. Часть браузер не даст, часть даст. */
+  /** Key systems probed by an ordinary player; the browser rejects some and grants others. */
   const KEY_SYSTEMS = [
     'com.widevine.alpha',
     'com.microsoft.playready',
@@ -39,11 +39,11 @@
   video.src = URL.createObjectURL(mediaSource)
 
   window.appended = 0
-  /** Сколько зондов ушло и сколько из них браузер удовлетворил. */
+  /** Number of probes made and accepted by the browser. */
   window.probes = { asked: 0, granted: 0, refused: 0 }
   window.probesDone = false
 
-  /** Перебор возможностей — ровно то, что делает плеер новостного сайта перед стартом. */
+  /** Capability probing matches what a news-site player does before starting. */
   async function probe() {
     for (const keySystem of KEY_SYSTEMS) {
       window.probes.asked++
@@ -55,8 +55,8 @@
       }
     }
 
-    // Ключи элементу так и не присоединяются: страница только спрашивала. Именно так вёл себя
-    // измеренный плеер — setMediaKeys вызывался единственный раз и с null.
+    // No keys are attached to the element because the page only probes. The measured player did
+    // the same: setMediaKeys was called exactly once with null.
     await video.setMediaKeys(null)
     window.probesDone = true
   }

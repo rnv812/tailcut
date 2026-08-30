@@ -507,7 +507,7 @@ describe('the popup', () => {
 
     // Not a loss — the length above already counts it — but not the video's own sound either.
     // On such a page the picture and the track are two files of different lengths looping on
-    // cycles of their own, and the clip takes the track from its start (§5.6).
+    // cycles of their own, and a split-track clip takes each track from its start.
     expect(textAt('paired-sound')).toBe(
       'Sound here is a separate looping track on this page, taken from its start.',
     )
@@ -952,7 +952,7 @@ describe('the history and the switches under it', () => {
     rows = [{ ...row, lastSeenAt: Date.now() - 26 * 3_600_000 }]
     await draw()
 
-    // §9.2 lists the recent sessions with their time. Three rows all reading "4:00" are three
+    // Recent sessions include their recording time. Three rows all reading "4:00" are three
     // rows the user cannot tell apart, and the moment is what tells yesterday's recording from
     // last month's; the weight beside the address is the other half of the same question — what
     // is on disk, and what taking a row back would give.

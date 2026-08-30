@@ -154,7 +154,7 @@ test('a clip cut out of the middle plays in a browser from the frame it was cut 
 
   expect(played.error).toBeNull()
   expect(played.ended).toBe(true)
-  // 71 frames: the 70 asked for and the one reordered frame the container cannot hide (§8.2).
+  // 71 frames: the 70 requested plus one reordered frame the container cannot hide.
   expect(played.duration).toBeCloseTo(71 / 24, 2)
   expect(played.reached).toBeGreaterThan(70 / 24)
   expect(played.frameColours).toBeGreaterThan(1)

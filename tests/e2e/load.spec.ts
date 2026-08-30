@@ -9,7 +9,7 @@ test('extension loads and exposes a service worker', async () => {
 
 test('service worker applies its install-time setup', async () => {
   const { context } = await launchWithExtension()
-  // launchWithExtension уже дождался воркера, поэтому список непустой
+  // launchWithExtension already waited for the worker, so this list is non-empty.
   const sw = context.serviceWorkers()[0]!
 
   // Polled, not read once. The worker appears the moment the browser has evaluated its script,

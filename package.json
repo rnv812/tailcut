@@ -1,15 +1,14 @@
 {
   "name": "tailcut",
   "version": "0.1.0",
-  "description": "Clip already-buffered video from any site and save it as MP4",
+  "description": "Turn already-buffered web video into precise MP4 clips or animated WebP",
   "scripts": {
     "test": "vitest run",
     "build": "node build.mjs",
     "dev": "node build.mjs --watch",
     "e2e": "playwright test",
     "e2e:fast": "playwright test --project=working",
-    "typecheck": "tsc --noEmit",
-    "plan:check": "node tools/check-plan-blocks.mjs"
+    "typecheck": "tsc --noEmit"
   },
   "repository": {
     "type": "git",

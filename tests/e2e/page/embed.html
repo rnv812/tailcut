@@ -1,13 +1,13 @@
 <!doctype html>
 <meta charset="utf-8" />
 <!--
-  Обычнейшая раскладка: плеер живёт во вложенном фрейме, а верхняя страница — чужой хост.
-  Content-скрипты объявлены с all_frames, поэтому мост встаёт в обоих документах, и рукопожатие
-  каждого обязано прийти своему фрейму. Адрес плеера здесь тот же, что PAGE_URL в bridge.spec.ts.
+  A common layout: the player lives in a nested frame while the top page belongs to another host.
+  Content scripts use all_frames, so the bridge runs in both documents and each handshake must
+  reach its own frame. The player URL matches PAGE_URL in bridge.spec.ts.
 -->
 <title>embedding host</title>
 <script>
-  // Слушатель ставится до фрейма с плеером: рукопожатие, ушедшее не туда, всплывёт здесь.
+  // Install the listener before the player frame so a misrouted handshake is visible here.
   window.bridgeReady = []
   window.addEventListener('message', (e) => {
     if (e.data && e.data.type === 'tc:ready') window.bridgeReady.push(e.origin)

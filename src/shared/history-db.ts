@@ -27,13 +27,13 @@ export const TOTALS_KEY = 'totals'
 
 export interface HistorySessionRow {
   id: string
-  /** Merge key (§6.1): what a second tab playing the same video finds this session by. */
+  /** What a second tab playing the same video uses to find this session. */
   key: string
   url: string
   title: string
   createdAt: number
   lastSeenAt: number
-  /** The user asked to keep it: eviction never takes it (§7.3). */
+  /** The user asked to keep it, so eviction never takes it. */
   pinned: boolean
   /** When the user last took it into the editor — opened it or cut from it; 0 — never. */
   usedAt: number
@@ -44,7 +44,7 @@ export interface HistorySessionRow {
    * Media time this session covers, joined: what makes `seconds` a length and not a sum.
    *
    * Kept on the row rather than worked out on reading, because reading happens in the popup and
-   * the popup computes nothing (§9.2). One entry per stretch of watching — a session watched
+   * the popup computes nothing. One entry per stretch of watching — a session watched
    * through is one — and a new entry only where the material really has a hole in it.
    */
   covered: Span[]
@@ -75,14 +75,14 @@ export interface TotalsRow {
    * The ceiling this program is actually keeping to, when the browser has proved it cannot have
    * the one from the settings; 0 — nothing has refused us.
    *
-   * The ceiling of §7.4 is ours to keep, but the quota is the browser's to give, and it is
+   * The configured ceiling is ours to keep, but the quota is the browser's to give, and it is
    * allowed to refuse long before four gigabytes — the storage is best-effort and always was.
    * Without this, a refusal below our own ceiling is a writer that retries every thirty seconds
    * for ever while a sweeper finds nothing to free (`totals.bytes - ceilingBytes` is negative),
    * and nothing anywhere says a word to the user.
    */
   cappedBytes: number
-  /** When storage last refused a write for being full; 0 — never. Read by the popup and §9.4. */
+  /** When storage last refused a write for being full; 0 means never. */
   fullAt: number
 }
 
@@ -110,7 +110,7 @@ export function openHistoryDb(): Promise<IDBDatabase> {
       const db = request.result
       if (!db.objectStoreNames.contains(SESSIONS)) {
         const sessions = db.createObjectStore(SESSIONS, { keyPath: 'id' })
-        // Two tabs playing one video are one session (§6.1), and the key is how the second of
+        // Two tabs playing one video are one session, and the key is how the second of
         // them finds the first. Unique, so that a race between two frames ends in a refusal one
         // of them can read rather than in two directories for one video.
         sessions.createIndex('key', 'key', { unique: true })
@@ -164,7 +164,7 @@ function transaction(db: IDBDatabase, stores: string[], mode: IDBTransactionMode
  * The identity of this session on disk, opened if it has none.
  *
  * By merge key, so that a reload, a second tab and a return to the same video a day later fill in
- * one session rather than breed three (§6.1) — the same rule the registry in the frame follows,
+ * one session rather than breed three — the same rule the registry in the frame follows,
  * over the same key.
  */
 export async function openSession(
@@ -239,7 +239,7 @@ export async function recordPiece(
 
   // The first place an init landed in is the place the row keeps, and every later one is ignored.
   // Not because a repeat is impossible — `HistoryTrack.init` names the case where it is not, two
-  // merge keys gathering at once and becoming one session (§6.1) — but because otherwise which of
+  // merge keys gathering at once and becoming one session, but because otherwise which of
   // the two the index names would be decided by the order they landed in. The spare copy sits
   // inside a piece that is material anyway, and nothing reads it.
   const tracks = [...session.tracks]
@@ -262,7 +262,7 @@ export async function recordPiece(
     bytes: session.bytes + piece.bytes,
     // The largest player the video was ever watched in, across every tab and every day the
     // session was fed — the frame knows only its own, and a row that took the latest would
-    // shrink back to a corner the moment somebody watched it in one (§7.3).
+    // shrink back to a corner the moment somebody watched it in one.
     widthPx: Math.max(session.widthPx, event.widthPx),
     covered,
     seconds: secondsOf(covered),
@@ -284,7 +284,7 @@ const NO_TOTALS: TotalsRow = { id: TOTALS_KEY, bytes: 0, cappedBytes: 0, fullAt:
  * Bytes and nothing else. A count of the sessions was kept here beside them and is gone: it was
  * added under a condition and taken away without one, so a session whose pieces had all been
  * evicted was counted twice and one deleted before its first piece landed subtracted a unit it
- * had never added. Nothing read it — neither the popup, which shows the volume (§9.2), nor the
+ * had never added. Nothing read it — neither the popup, which shows the volume, nor the
  * sweeper, which works off `bytes` — so what stood here was a number that could only be wrong.
  * The count of what is on disk is `listSessions().length`, worked out where it is wanted.
  */
@@ -349,7 +349,7 @@ export async function markStorageFull(now: number): Promise<void> {
  * Two callers, and both of them for the same reason: the mark is a fact about a machine at a
  * moment, and the moment can pass. The repair at start-up forgets it because the user may have
  * swept the disk since, and one attempt per start of the browser is a cheap way to find out; the
- * wipe of §9.4 forgets it because there is nothing left on the disk for the browser to have
+ * settings-page wipe forgets it because there is nothing left on the disk for the browser to have
  * refused. If it is still full, the next batch says so within half a minute.
  */
 export async function clearStorageFull(): Promise<void> {
@@ -366,7 +366,7 @@ export async function clearStorageFull(): Promise<void> {
 }
 
 /**
- * The same session under another merge key (§6.1).
+ * The same session under another merge key.
  *
  * The key of a session changes while it is being recorded — a soft navigation moves it to the
  * address the page went to, the length the player states turns `live` into a number — and the row
@@ -415,7 +415,7 @@ export async function renameSession(
  *
  * `includeHidden` gives back every row there is, and exactly one caller passes it: the sweeper,
  * which is the only thing in the program that has to see what nobody else may. A deleted row is
- * what tells it which files to take once the undo of §9.2 has expired, and an empty one is a
+ * what tells it which files to take once the undo period has expired, and an empty one is a
  * session whose first piece never landed — the repair reconciles those against the disk. Every
  * other reader wants the history as the user sees it, which is what the default is.
  */
@@ -495,7 +495,7 @@ export async function dropSessionRows(id: string): Promise<void> {
   await finished(tx)
 }
 
-/** Takes named pieces out of a session: eviction by the buffer length (§7.3). */
+/** Takes named pieces out of a session when they fall outside the buffer length. */
 export async function dropPieceRows(id: string, files: readonly string[]): Promise<number> {
   if (!files.length) return 0
 
@@ -516,7 +516,7 @@ export async function dropPieceRows(id: string, files: readonly string[]): Promi
 
   if (session) {
     // The length is rebuilt from what is left rather than reduced by what went: a stretch is
-    // covered by any piece that holds it, and the same seconds are often in two of them (§6.1).
+    // covered by any piece that holds it, and the same seconds are often in two of them.
     // Subtracting would shorten a session that lost nothing.
     const left = (await promised(pieces.index('sessionId').getAll(id))) as HistoryPieceRow[]
     let covered: Span[] = []

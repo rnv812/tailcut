@@ -7,7 +7,7 @@ import type { ChunkStored, SessionRekeyed } from './session-store'
 /**
  * How long a batch waits for more material before going down as it is.
  *
- * This is the loss window of §7.5, named as a number: a crash takes at most this much material
+ * This constant names the loss window: a crash takes at most this much material
  * with it. Two seconds and not two hundred milliseconds for a measured reason — Chrome throttles
  * the timers of a cross-origin frame that is out of the viewport to 1 Hz, and a 200 ms timer
  * would silently become a second. A two-second one arrives on time throttled or not.
@@ -65,10 +65,10 @@ export interface HistoryIo {
    * stamp the chunks carry is regularly older than the measurement: a player is measured half a
    * second into the page at the earliest, and a site that hands over its whole video in the first
    * second has cut every chunk it will ever cut before then. Stamped alone, such a session would
-   * lie on the disk at a width of nothing and be swept as worthless (§7.3).
+   * lie on the disk at a width of nothing and be swept as worthless.
    *
    * It answers 0 rather than the truth in one ordinary case, and that is why the stamp is kept
-   * beside it: the key of a session moves while it is being recorded (§6.1), and a batch gathered
+   * beside it: the key of a session moves while it is being recorded, and a batch gathered
    * under the old one lands after the move — see `rekey`, where the batch travels and the event
    * that signs it keeps the key it was gathered under.
    */
@@ -119,7 +119,7 @@ export class HistoryWriter {
    *
    * `opened` fills in on the queue, an await after the batch that needed it went down; this fills
    * in the moment that batch is queued. The difference is a few milliseconds and it matters to
-   * exactly one caller — `rekey` (Task 4), which runs on an event and can land inside that await.
+   * exactly one caller, `rekey`, which runs on an event and can land inside that await.
    */
   private claimed = new Set<string>()
   /**
@@ -144,7 +144,7 @@ export class HistoryWriter {
 
   constructor(private readonly io: HistoryIo) {}
 
-  /** Whether anything is written at all: the switch of §7.2, wired to the setting in Task 9. */
+  /** Whether anything is written at all, wired directly to the disk-history setting. */
   setEnabled(on: boolean): void {
     if (this.enabled === on) return
     this.enabled = on
@@ -339,7 +339,7 @@ export class HistoryWriter {
     //
     // `claimed`: from this line until the identity lands in `opened` the index may be answering,
     // and to anything reading `opened` alone this key looks like a key that has never written a
-    // byte. `rekey` reads it (Task 4).
+    // byte. `rekey` reads it.
     //
     // `carried`: this batch is taking the init segments of `layout.inits` down with it, and the
     // next batch of a burst must not take them down again.

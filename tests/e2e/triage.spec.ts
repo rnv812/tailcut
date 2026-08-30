@@ -569,7 +569,7 @@ test('a page that plays encrypted media is left with nothing at all', async () =
 
   // The clear preview plays out its probation first, exactly as the trailer of tv.apple.com does
   // before that page ever mentions EME. A session that has served it is confirmed, and a
-  // rejection of a confirmed session is the freeze of §5.5: recording stops and everything
+  // Rejecting a confirmed session freezes capture: recording stops and everything
   // collected stays. So this is the state in which a weaker refusal leaves the material behind.
   await page.evaluate(() => {
     const video = document.querySelector<HTMLVideoElement>('#clear')!
@@ -599,8 +599,8 @@ test('a page that plays encrypted media is left with nothing at all', async () =
     'the browser refused the protected init, so the page never played what is under test',
   ).toBe('accepted')
 
-  // Everything goes with it, the six seconds already earned in the clear included. §2 promises
-  // the user that a protected page is refused outright, and a session left in the list is an
+  // Everything goes with it, including the six seconds captured in the clear. Encryption refusal
+  // guarantees that a protected page is refused outright, and a session left in the list is an
   // offer to save it.
   expect(
     await sessionsWhen(page, (sessions) => sessions.length === 0),

@@ -2,9 +2,9 @@
 <meta charset="utf-8" />
 <title>shadow player</title>
 <!--
-  Плеер внутри открытого shadow root — так устроен tv.apple.com: играющий <video> 1265x712,
-  которого document.querySelectorAll('video') не находит. Всё остальное на странице обычное:
-  MediaSource создаётся в главном мире, адрес из createObjectURL кладётся в video.src.
+  A player inside an open shadow root, matching tv.apple.com: a playing 1265x712 <video> that
+  document.querySelectorAll('video') cannot find. Everything else is ordinary: MediaSource is
+  created in the main world and the URL returned by createObjectURL is assigned to video.src.
 -->
 <div id="host"></div>
 <script>
@@ -23,8 +23,7 @@
   video.src = URL.createObjectURL(mediaSource)
 
   window.appended = 0
-  // Тесту нужен адрес потока, а до элемента в shadow root он дотянуться не должен уметь:
-  // страница называет его сама.
+  // The test needs the stream URL but must not reach into the shadow root, so the page exposes it.
   window.playerSrc = video.src
 
   mediaSource.addEventListener('sourceopen', async () => {

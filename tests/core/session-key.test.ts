@@ -2,25 +2,25 @@ import { describe, it, expect } from 'vitest'
 import { sessionKey, normalizeUrl } from '../../src/core/session-key'
 
 describe('normalizeUrl', () => {
-  it('срезает метку времени и параметры отслеживания', () => {
+  it('removes timestamps and tracking parameters', () => {
     const a = normalizeUrl('https://site.example/watch?v=abc&t=42s&utm_source=x&si=zz')
     const b = normalizeUrl('https://site.example/watch?v=abc')
     expect(a).toBe(b)
   })
 
-  it('сохраняет параметр, определяющий само видео', () => {
+  it('preserves a parameter that identifies the video itself', () => {
     const a = normalizeUrl('https://site.example/watch?v=abc')
     const b = normalizeUrl('https://site.example/watch?v=xyz')
     expect(a).not.toBe(b)
   })
 
-  it('отбрасывает якорь', () => {
+  it('drops the fragment', () => {
     expect(normalizeUrl('https://site.example/v/1#comments')).toBe(
       normalizeUrl('https://site.example/v/1'),
     )
   })
 
-  it('не спотыкается о мусор вместо адреса', () => {
+  it('handles garbage in place of a URL', () => {
     expect(normalizeUrl('not a url')).toBe('not a url')
   })
 })
@@ -28,41 +28,40 @@ describe('normalizeUrl', () => {
 describe('sessionKey', () => {
   const input = { url: 'https://site.example/watch?v=abc', codecs: ['avc1'], durationSeconds: 600 }
 
-  it('перезагрузка страницы даёт тот же ключ', () => {
+  it('returns the same key after a page reload', () => {
     expect(sessionKey(input)).toBe(sessionKey({ ...input, url: input.url + '&t=90' }))
   })
 
-  it('другое видео даёт другой ключ', () => {
+  it('returns a different key for a different video', () => {
     expect(sessionKey(input)).not.toBe(
       sessionKey({ ...input, url: 'https://site.example/watch?v=zzz' }),
     )
   })
 
-  it('другая длительность на том же адресе даёт другой ключ — это другой ролик', () => {
+  it('returns a different key for a different duration at the same URL', () => {
     expect(sessionKey(input)).not.toBe(sessionKey({ ...input, durationSeconds: 61 }))
   })
 
-  it('порядок кодеков не влияет', () => {
+  it('ignores codec order', () => {
     expect(sessionKey({ ...input, codecs: ['avc1', 'mp4a'] })).toBe(
       sessionKey({ ...input, codecs: ['mp4a', 'avc1'] }),
     )
   })
 
-  it('дробная разница в длительности не расщепляет сессию', () => {
+  it('does not split a session over a fractional duration difference', () => {
     expect(sessionKey(input)).toBe(sessionKey({ ...input, durationSeconds: 600.4 }))
   })
 
-  it('прямой эфир без известной длительности даёт стабильный ключ', () => {
+  it('returns a stable key for a live stream with unknown duration', () => {
     const live = { ...input, durationSeconds: Infinity }
     expect(sessionKey(live)).toBe(sessionKey({ ...live }))
   })
 })
 
-// Дальше — проверки сверх плана: они закрывают то, что плановые десять не пиннят
-// (сортировку параметров, разбор служебных параметров, границы компонентов ключа,
-// ветку «длительность неизвестна») и требование пережить строку, которая адресом не является.
+// These checks pin parameter sorting, auxiliary-parameter parsing, key-component boundaries, the
+// unknown-duration branch, and the requirement to survive a string that is not a URL.
 
-describe('normalizeUrl: строка, которая не является адресом', () => {
+describe('normalizeUrl: string that is not a URL', () => {
   const garbage = [
     '',
     '   ',
@@ -75,19 +74,19 @@ describe('normalizeUrl: строка, которая не является ад�
   ]
 
   for (const input of garbage) {
-    it(`возвращает как есть и не бросает: ${JSON.stringify(input)}`, () => {
+    it(`returns unchanged without throwing: ${JSON.stringify(input)}`, () => {
       expect(() => normalizeUrl(input)).not.toThrow()
       expect(normalizeUrl(input)).toBe(input)
     })
   }
 
-  it('повторный проход по мусору ничего не меняет', () => {
+  it('leaves garbage unchanged on a second pass', () => {
     for (const input of garbage) {
       expect(normalizeUrl(normalizeUrl(input))).toBe(input)
     }
   })
 
-  it('ключ на мусорном адресе считается и различает источники', () => {
+  it('computes a key for a garbage URL and distinguishes sources', () => {
     const base = { codecs: ['avc1'], durationSeconds: 600 }
     expect(() => sessionKey({ ...base, url: 'not a url' })).not.toThrow()
     expect(sessionKey({ ...base, url: 'not a url' })).toBe(sessionKey({ ...base, url: 'not a url' }))
@@ -97,25 +96,25 @@ describe('normalizeUrl: строка, которая не является ад�
   })
 })
 
-describe('normalizeUrl: служебные параметры', () => {
+describe('normalizeUrl: auxiliary parameters', () => {
   const bare = 'https://site.example/watch?v=abc'
 
-  // Проверяются заходы к одному и тому же видео, а не список имён из реализации:
-  // требование звучит как «пришёл к тому же ролику другой дорогой — та же сессия».
+  // Test different routes to the same video, not an implementation-defined list of names. Reaching
+  // the same video by another route must produce the same session.
 
-  it('ссылка «поделиться» сходится с каноническим адресом', () => {
+  it('normalizes a share link to the canonical URL', () => {
     expect(normalizeUrl(`${bare}&t=42s&si=Kx9pQ&pp=ygUFdGVzdA&feature=shared`)).toBe(
       normalizeUrl(bare),
     )
   })
 
-  it('возврат к ролику из плейлиста сходится с каноническим адресом', () => {
+  it('normalizes a return from a playlist to the canonical URL', () => {
     expect(normalizeUrl(`${bare}&list=PLxyz&index=7&start=120&time_continue=15`)).toBe(
       normalizeUrl(bare),
     )
   })
 
-  it('приход по кампании и с чужого сайта сходится с каноническим адресом', () => {
+  it('normalizes campaign and referrer traffic to the canonical URL', () => {
     expect(
       normalizeUrl(
         `${bare}&utm_source=newsletter&utm_medium=email&utm_campaign=august&utm_content=hero` +
@@ -124,13 +123,13 @@ describe('normalizeUrl: служебные параметры', () => {
     ).toBe(normalizeUrl(bare))
   })
 
-  it('два разных захода к одному ролику дают один адрес', () => {
+  it('normalizes two different routes to one video to the same URL', () => {
     expect(normalizeUrl(`${bare}&t=42s&si=Kx9pQ&ref=twitter`)).toBe(
       normalizeUrl(`${bare}&t=903s&list=PLxyz&index=2&utm_source=newsletter`),
     )
   })
 
-  it('utm_ — это префикс, а не список из четырёх известных имён', () => {
+  it('treats utm_ as a prefix rather than a list of four known names', () => {
     expect(normalizeUrl(`${bare}&utm_id=7&utm_term=clip&utm_whatever=1`)).toBe(normalizeUrl(bare))
   })
 
@@ -138,36 +137,36 @@ describe('normalizeUrl: служебные параметры', () => {
 
   for (const key of meaningful) {
     const path = 'https://site.example/v/1'
-    it(`сохраняет «${key}»`, () => {
+    it(`preserves "${key}"`, () => {
       expect(normalizeUrl(`${path}?${key}=abc`)).not.toBe(normalizeUrl(path))
       expect(normalizeUrl(`${path}?${key}=abc`)).not.toBe(normalizeUrl(`${path}?${key}=xyz`))
     })
   }
 
-  it('порядок значимых параметров не влияет', () => {
+  it('ignores the order of meaningful parameters', () => {
     expect(normalizeUrl(`${bare}&quality=hd`)).toBe(
       normalizeUrl('https://site.example/watch?quality=hd&v=abc'),
     )
   })
 
-  it('служебный параметр посреди значимых не сдвигает результат', () => {
+  it('ignores an auxiliary parameter between meaningful parameters', () => {
     expect(normalizeUrl(`${bare}&t=42&quality=hd`)).toBe(
       normalizeUrl('https://site.example/watch?quality=hd&v=abc'),
     )
   })
 
-  it('адрес из одних служебных параметров сходится с голым адресом', () => {
+  it('normalizes a URL with only auxiliary parameters to the bare URL', () => {
     expect(normalizeUrl('https://site.example/v/1?t=42&utm_source=x')).toBe(
       normalizeUrl('https://site.example/v/1'),
     )
   })
 })
 
-describe('normalizeUrl: имя, начинающееся со служебного, служебным не считается', () => {
+describe('normalizeUrl: a name starting with an auxiliary name is not auxiliary', () => {
   const bare = 'https://site.example/v/1'
 
-  // Каждая пара: имя значимого параметра и два его разных значения. Все имена начинаются
-  // с имени служебного параметра — «title» с «t», «sig» с «si», «source_id» с «source».
+  // Each tuple has a meaningful parameter name and two different values. Every name starts with
+  // an auxiliary parameter name: title with t, sig with si, and source_id with source.
   const meaningful: Array<[string, string, string]> = [
     ['title', 'ep1', 'ep2'],
     ['token', 'A', 'B'],
@@ -178,46 +177,46 @@ describe('normalizeUrl: имя, начинающееся со служебног
   ]
 
   for (const [key, one, two] of meaningful) {
-    it(`сохраняет «${key}»`, () => {
+    it(`preserves "${key}"`, () => {
       expect(normalizeUrl(`${bare}?${key}=${one}`)).not.toBe(normalizeUrl(bare))
       expect(normalizeUrl(`${bare}?${key}=${one}`)).not.toBe(normalizeUrl(`${bare}?${key}=${two}`))
     })
   }
 
-  it('два ролика, различимые только по title, не сливаются в одну сессию', () => {
+  it('does not merge videos distinguished only by title into one session', () => {
     const base = { codecs: ['avc1'], durationSeconds: 600 }
     expect(sessionKey({ ...base, url: `${bare}?title=ep1` })).not.toBe(
       sessionKey({ ...base, url: `${bare}?title=ep2` }),
     )
   })
 
-  it('подписанные ссылки с разными token не сливаются в одну сессию', () => {
+  it('does not merge signed URLs with different tokens into one session', () => {
     const base = { codecs: ['avc1'], durationSeconds: 600 }
     expect(sessionKey({ ...base, url: `${bare}?token=A` })).not.toBe(
       sessionKey({ ...base, url: `${bare}?token=B` }),
     )
   })
 
-  it('utm_ срезается только в начале имени', () => {
+  it('removes utm_ only at the start of a name', () => {
     expect(normalizeUrl(`${bare}?x_utm_id=1`)).not.toBe(normalizeUrl(bare))
     expect(normalizeUrl(`${bare}?x_utm_id=1`)).not.toBe(normalizeUrl(`${bare}?x_utm_id=2`))
   })
 
-  it('имя, лишь начинающееся с букв utm, сохраняется', () => {
+  it('preserves a name that merely starts with the letters utm', () => {
     expect(normalizeUrl(`${bare}?utmost=1`)).not.toBe(normalizeUrl(bare))
     expect(normalizeUrl(`${bare}?utmost=1`)).not.toBe(normalizeUrl(`${bare}?utmost=2`))
   })
 })
 
-describe('normalizeUrl: язык', () => {
+describe('normalizeUrl: language', () => {
   const bare = 'https://site.example/watch?v=abc'
 
-  it('lang сохраняется — на части сайтов он выбирает звуковую дорожку, а не подписи', () => {
+  it('preserves lang because some sites use it to select an audio track', () => {
     expect(normalizeUrl(`${bare}&lang=ru`)).not.toBe(normalizeUrl(`${bare}&lang=en`))
     expect(normalizeUrl(`${bare}&lang=ru`)).not.toBe(normalizeUrl(bare))
   })
 
-  it('дубляжи одного ролика не сливаются в одну сессию', () => {
+  it('does not merge dubbed versions of one video into a single session', () => {
     const base = { codecs: ['avc1', 'mp4a'], durationSeconds: 1800 }
     expect(sessionKey({ ...base, url: `${bare}&lang=ru` })).not.toBe(
       sessionKey({ ...base, url: `${bare}&lang=en` }),
@@ -225,41 +224,41 @@ describe('normalizeUrl: язык', () => {
   })
 })
 
-describe('normalizeUrl: что схлопывается, а что нет', () => {
+describe('normalizeUrl: what is normalized and what is not', () => {
   const bare = 'https://site.example/v/1'
 
-  it('регистр имени не спасает служебный параметр от среза', () => {
+  it('removes an auxiliary parameter regardless of name casing', () => {
     expect(normalizeUrl(`${bare}?v=abc&T=42`)).toBe(normalizeUrl(`${bare}?v=abc`))
     expect(normalizeUrl(`${bare}?v=abc&UTM_Source=x`)).toBe(normalizeUrl(`${bare}?v=abc`))
   })
 
-  it('регистр имени значимого параметра сохраняется — за сайт мы их не схлопываем', () => {
+  it('preserves meaningful parameter name casing rather than normalizing it for the site', () => {
     expect(normalizeUrl(`${bare}?V=abc`)).not.toBe(normalizeUrl(`${bare}?v=abc`))
   })
 
-  it('регистр значения служебного параметра ни на что не влияет', () => {
+  it('ignores the value casing of an auxiliary parameter', () => {
     expect(normalizeUrl(`${bare}?v=abc&t=42S`)).toBe(normalizeUrl(`${bare}?v=abc`))
   })
 
-  it('завершающий слэш даёт другой адрес — путь принадлежит сайту', () => {
+  it('treats a trailing slash as a different URL because the path belongs to the site', () => {
     expect(normalizeUrl(`${bare}/`)).not.toBe(normalizeUrl(bare))
   })
 
-  it('http и https — разные адреса', () => {
+  it('treats http and https as different URLs', () => {
     expect(normalizeUrl('http://site.example/v/1')).not.toBe(normalizeUrl('https://site.example/v/1'))
   })
 
-  it('регистр хоста снимает сам разбор адреса', () => {
+  it('relies on URL parsing to normalize host casing', () => {
     expect(normalizeUrl('https://SITE.example/v/1')).toBe(normalizeUrl('https://site.example/v/1'))
   })
 
-  it('регистр пути сохраняется', () => {
+  it('preserves path casing', () => {
     expect(normalizeUrl('https://site.example/V/1')).not.toBe(normalizeUrl('https://site.example/v/1'))
   })
 })
 
-describe('normalizeUrl: адреса не из http', () => {
-  it('blob-адрес доживает до ключа и различает источники', () => {
+describe('normalizeUrl: non-HTTP URLs', () => {
+  it('preserves a blob URL through keying and distinguishes sources', () => {
     expect(normalizeUrl('blob:https://site.example/uuid-1')).toBe(
       'blob:https://site.example/uuid-1',
     )
@@ -269,40 +268,40 @@ describe('normalizeUrl: адреса не из http', () => {
   })
 })
 
-describe('sessionKey: длительность', () => {
+describe('sessionKey: duration', () => {
   const input = { url: 'https://site.example/watch?v=abc', codecs: ['avc1'], durationSeconds: 600 }
 
-  it('неизвестная длительность считается прямым эфиром, а не отдельным роликом', () => {
+  it('treats an unknown duration as a live stream rather than a separate video', () => {
     expect(sessionKey({ ...input, durationSeconds: NaN })).toBe(
       sessionKey({ ...input, durationSeconds: Infinity }),
     )
   })
 
-  it('прямой эфир не сливается с роликом известной длины', () => {
+  it('does not merge a live stream with a video of known duration', () => {
     expect(sessionKey({ ...input, durationSeconds: Infinity })).not.toBe(sessionKey(input))
   })
 
-  it('появление настоящей длительности меняет ключ — считать его до loadedmetadata нельзя', () => {
+  it('changes the key when a real duration appears after loadedmetadata', () => {
     expect(sessionKey({ ...input, durationSeconds: NaN })).not.toBe(
       sessionKey({ ...input, durationSeconds: 600 }),
     )
   })
 
-  it('дробная разница через границу секунды не расщепляет сессию', () => {
+  it('does not split a session over a fractional difference across a second boundary', () => {
     expect(sessionKey({ ...input, durationSeconds: 600.9 })).toBe(
       sessionKey({ ...input, durationSeconds: 601.1 }),
     )
   })
 
-  it('состав кодеков входит в ключ', () => {
+  it('includes the codec set in the key', () => {
     expect(sessionKey({ ...input, codecs: ['avc1'] })).not.toBe(
       sessionKey({ ...input, codecs: ['avc1', 'mp4a'] }),
     )
   })
 })
 
-describe('sessionKey: компоненты ключа не перетекают друг в друга', () => {
-  it('сдвиг границы между адресом и кодеками не даёт двум сессиям общий ключ', () => {
+describe('sessionKey: key components do not bleed into each other', () => {
+  it('keeps a shifted URL-codec boundary from giving two sessions one key', () => {
     expect(
       sessionKey({ url: 'https://site.example/v/1', codecs: ['avc1'], durationSeconds: 600 }),
     ).not.toBe(
@@ -310,18 +309,17 @@ describe('sessionKey: компоненты ключа не перетекают 
     )
   })
 
-  it('сдвиг границы между кодеками и длительностью не даёт двум сессиям общий ключ', () => {
+  it('keeps a shifted codec-duration boundary from giving two sessions one key', () => {
     const url = 'https://site.example/v/1'
     expect(sessionKey({ url, codecs: ['avc1'], durationSeconds: 12 })).not.toBe(
       sessionKey({ url, codecs: ['avc11'], durationSeconds: 2 }),
     )
   })
 
-  // Запятая — легальный символ пути и разделитель внутри списка кодеков, поэтому граница
-  // «адрес | кодеки» обязана держаться на символе, которого в адресе быть не может.
-  // Иначе `…/v/1` + [avc1, mp4a] и `…/v/1,avc1` + [mp4a] дают один ключ, и фрагменты
-  // двух разных роликов лягут в одну карту.
-  it('запятая в адресе не съедает границу между адресом и кодеками', () => {
+  // A comma is valid in a path and also separates codecs, so the URL-codec boundary must use a
+  // character that cannot occur in a URL. Otherwise `…/v/1` + [avc1, mp4a] and `…/v/1,avc1` +
+  // [mp4a] produce one key, putting fragments from two videos in one map.
+  it('keeps a comma in the URL from consuming the URL-codec boundary', () => {
     expect(
       sessionKey({ url: 'https://cdn.example/v/1', codecs: ['avc1', 'mp4a'], durationSeconds: 600 }),
     ).not.toBe(
@@ -329,7 +327,7 @@ describe('sessionKey: компоненты ключа не перетекают 
     )
   })
 
-  it('запятая в адресе доживает до ключа и различает два адреса', () => {
+  it('preserves a comma through keying and distinguishes two URLs', () => {
     const base = { codecs: ['avc1'], durationSeconds: 600 }
     expect(sessionKey({ ...base, url: 'https://cdn.example/v/1,avc1' })).not.toBe(
       sessionKey({ ...base, url: 'https://cdn.example/v/1' }),
@@ -339,8 +337,8 @@ describe('sessionKey: компоненты ключа не перетекают 
     )
   })
 
-  // Граница между кодеками внутри списка: склейка без разделителя стирает её, и два разных
-  // набора дорожек становятся одной сессией.
+  // Codec boundaries inside the list matter. Joining without a separator erases them and turns
+  // two different track sets into one session.
   const glued: Array<[string[], string[]]> = [
     [['avc1', 'mp4a'], ['avc1m', 'p4a']],
     [['a', 'bc'], ['ab', 'c']],
@@ -351,7 +349,7 @@ describe('sessionKey: компоненты ключа не перетекают 
   ]
 
   for (const [one, two] of glued) {
-    it(`разные списки кодеков с одинаковой склейкой дают разные ключи: ${one.join('+')} и ${two.join('+')}`, () => {
+    it(`gives different keys to codec lists with the same concatenation: ${one.join('+')} and ${two.join('+')}`, () => {
       expect(one.join('')).toBe(two.join(''))
       const base = { url: 'https://site.example/v/1', durationSeconds: 600 }
       expect(sessionKey({ ...base, codecs: one })).not.toBe(sessionKey({ ...base, codecs: two }))
@@ -359,8 +357,8 @@ describe('sessionKey: компоненты ключа не перетекают 
   }
 })
 
-describe('sessionKey: вход остаётся нетронутым', () => {
-  it('не переставляет кодеки в массиве вызывающей стороны', () => {
+describe('sessionKey: input remains unchanged', () => {
+  it('does not reorder codecs in the caller\'s array', () => {
     const codecs = ['mp4a', 'avc1']
     sessionKey({ url: 'https://site.example/v/1', codecs, durationSeconds: 600 })
     expect(codecs).toEqual(['mp4a', 'avc1'])

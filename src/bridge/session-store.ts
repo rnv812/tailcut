@@ -36,7 +36,7 @@ import type { Chunk, InitInfo, TrackKind } from '../shared/types'
  * and then one header carries both kinds — the segments of such a buffer are shared by them
  * anyway.
  *
- * A header is also a representation in the sense of the design (§6.2): a new init on the same
+ * A header is also a representation: a new init on the same
  * buffer with different codecs or a different frame size opens one of its own instead of
  * spoiling the material already collected under the previous one.
  *
@@ -69,7 +69,7 @@ export interface Track extends TrackHeader {
 }
 
 /**
- * One video from one media source. Tracks live inside it; merging by key (§6.1) makes a reload,
+ * One video from one media source. Tracks live inside it; merging by key makes a reload,
  * a second tab and a return to the same video a day later fill in one session rather than breed
  * duplicates.
  */
@@ -90,7 +90,7 @@ export interface Session {
   /**
    * Largest player this session was ever watched in, in CSS pixels; 0 — never measured.
    *
-   * A value signal of §7.3 and nothing else: nothing about a file depends on it. The largest and
+   * A value signal and nothing else: nothing about a file depends on it. The largest and
    * not the latest, because a video that was watched full-screen and then put back into a corner
    * was watched full-screen — the corner says nothing about what it was worth.
    */
@@ -102,7 +102,7 @@ export interface Session {
    * holds its material as `tracks`, segment by segment, because the bytes went past once and
    * would never come again; an ordinary file was never intercepted at all — the browser fetched
    * it and the extension saw nothing — so what is held is an index of it and the reader that
-   * fetches by that index (§5.6, src/core/export/plain.ts).
+   * fetches by that index (src/core/export/plain.ts).
    *
    * Everything else about the session is the same thing: the same registry, the same merge key,
    * the same triage, the same eviction, the same summary in the popup and the same button. What
@@ -196,7 +196,7 @@ interface SourceState {
  * The material of a source whose rejection has not been settled yet: taken out of the registry
  * and kept out of sight, and given back whole the moment the verdict turns.
  *
- * This is the probation buffer of the design (§5.4). A rejection of a source that has not earned
+ * This is the probation buffer. A rejection of a source that has not earned
  * its life yet is a doubt and not a freeze: what is at stake is the whole recording, because the
  * verdict may be the misreading of a single moment — the player element standing above the
  * viewport for one poll while the page lays itself out. Erasing on the spot answers a doubt with
@@ -204,7 +204,7 @@ interface SourceState {
  * every save, until triage says which it was.
  *
  * A confirmed session is a different matter and does not come here: it has nothing to lose, and
- * a rejection of it is the freeze of §5.5 — a pause, a hidden tab, an element off the screen are
+ * a rejection of it is a freeze: a pause, a hidden tab, and an off-screen element are
  * not recorded at all.
  */
 interface Probation {
@@ -335,7 +335,7 @@ function intersectSpans(a: Span[], b: Span[]): Span[] {
 /**
  * One track per media kind — the one holding the most of it.
  *
- * A switch of quality opens a second representation of the same kind (§6.2), and both of them in
+ * A switch of quality opens a second representation of the same kind, and both of them in
  * one file would give it two video streams of different frame size where a player expects one.
  * Which of them to take is a question for the editor, where the zones are drawn on the timeline
  * and the user is asked; the button that saves everything answers it by weight of material.
@@ -612,13 +612,13 @@ function planCapturedSave(session: Session): SavePlan {
       // switch the moment it happens.
       rendition: session.tracks.some((t) => !chosen.includes(t) && t.map.duration() > 0),
       // Nothing captured is an alternate. A stream out of MediaSource is opened by an init, and a
-      // second init of a kind on one page is the page switching quality (§6.2) — two languages
+      // second init of a kind on one page is the page switching quality; two languages
       // would be two sessions, because the codecs are part of the merge key.
       alternate: false,
       stretches: stretches.length,
     }),
     // A capture holds the page's own tracks and never borrows one from an element beside it: the
-    // pairing is a property of material that was never intercepted (§5.6).
+    // pairing is a property of material that was never intercepted.
     pairedSound: false,
   }
 }
@@ -752,8 +752,8 @@ interface SoundState {
   /**
    * The page has played this track at some point, whether or not it is playing now.
    *
-   * The pairing is decided on this and not on `playing`, for the reason §5.5 gives about
-   * everything else: a pause freezes and does not erase. A viewer watches a looping picture under
+   * The pairing is decided on this and not on `playing` because a pause freezes state rather than
+   * erasing it. A viewer watches a looping picture under
    * a track, pauses it and opens the popup — and read live, the page is silent at that moment and
    * the clip would come out without the sound the viewer had been listening to.
    */
@@ -792,7 +792,7 @@ export interface PlainInput {
 export type PlainOpener = (url: string) => Promise<OpenedFile | null>
 
 /**
- * Reads the head of a soundtrack playing beside a picture that has none (§5.6).
+ * Reads the head of a soundtrack playing beside a picture that has none.
  *
  * `seconds` is the length of that picture and bounds both what is indexed and what is fetched:
  * a clip cannot outrun the material of its picture, so the rest of the track is never read. See
@@ -811,11 +811,11 @@ export type SoundOpener = (url: string, seconds: number) => Promise<OpenedSound 
  * keeping one.
  *
  * A chunk the map refused is not reported at all. A second viewing of the same stretch produces a
- * matching interval (§6.3), the map drops it, and reporting it would put a copy of the same bytes
+ * matching interval, the map drops it, and reporting it would put a copy of the same bytes
  * on disk and count it twice in the length of the session.
  */
 export interface ChunkStored {
-  /** Merge key of the session (§6.1): what the index finds a session on disk by. */
+  /** Merge key by which the index finds a session on disk. */
   key: string
   page: { url: string; title: string; createdAt: number; lastSeenAt: number }
   track: {
@@ -831,7 +831,7 @@ export interface ChunkStored {
 }
 
 /**
- * A session is known under a new merge key from now on (§6.1).
+ * A session is known under a new merge key from now on.
  *
  * Said in three places and meaning two different things, which is why it carries both keys and
  * lets the writer decide. Two of them are renames: `followTo` moves the freshest session to the
@@ -951,7 +951,7 @@ export class SessionStore {
   private declaredDurations = new Map<string, number>()
   /** Encrypted media was seen on this page: see refuseEncrypted. Once set, it is never cleared. */
   private encryptedSeen = false
-  /** Nothing is taken in at all: the recording mode of §9.4. See pauseIntake(). */
+  /** Nothing is taken in at all when recording mode disables this page. See pauseIntake(). */
   private paused = false
   /** sourceId → the largest player it has been measured in; see sawPlayer(). */
   private playerWidths = new Map<string, number>()
@@ -1061,7 +1061,7 @@ export class SessionStore {
 
   /**
    * A media element of the page is playing an ordinary file, and this is everything the page can
-   * say about it: where it is, how long it is, and how much of it the browser holds (§5.6).
+   * say about it: where it is, how long it is, and how much of it the browser holds.
    *
    * No material comes with it and none ever will: the browser fetched the file itself and this
    * extension saw not one byte of it. What arrives instead is an address, and what is done with
@@ -1109,7 +1109,7 @@ export class SessionStore {
   }
 
   /**
-   * An `<audio>` of the page is playing a soundtrack of its own (§5.6).
+   * An `<audio>` of the page is playing a soundtrack of its own.
    *
    * It is never a session and never a saved file: a soundtrack alone is not a clip of anything,
    * and offering one would make this a music downloader. What it can be is the sound of a picture
@@ -1267,7 +1267,7 @@ export class SessionStore {
         }
 
         // Protection found in the file's own boxes. It is the page that is refused and not this
-        // source: §5.4 makes encryption a property of the material, and the refusal never turns.
+        // source: encryption is a property of the material, and the refusal never turns.
         if (opened.file.encrypted) {
           this.refuseEncrypted()
           return
@@ -1292,7 +1292,7 @@ export class SessionStore {
    * Puts the file into the registry as a session, or takes it out again.
    *
    * A plain session is a view over what is known about the source, and that is what makes the
-   * probation of §5.4 free here: the captured path has to carry its material out of the registry
+   * probation free here: the captured path has to carry its material out of the registry
    * and back in again, because the bytes exist nowhere else, while this holds an index that never
    * left the source. A rejection removes the session; the verdict turning puts it back whole.
    */
@@ -1314,7 +1314,7 @@ export class SessionStore {
 
     const standing = this.sessions.get(key)
     // A rejection that the session has not outgrown: out of every list and out of every save. A
-    // confirmed session is the freeze of §5.5 instead — it stays exactly as it is, and the
+    // confirmed session is a freeze instead — it stays exactly as it is, and the
     // stretch it offers stops growing because nothing here is updated under a rejection.
     if (this.rejected.has(state.sourceId) && !standing?.confirmed) {
       this.dropPlainSession(state)
@@ -1371,7 +1371,7 @@ export class SessionStore {
     if (!chunk) return
 
     if (this.rejected.has(input.sourceId)) {
-      // A rejection of a confirmed session is a freeze and nothing is recorded under it (§5.5);
+      // A rejection of a confirmed session is a freeze and nothing is recorded under it;
       // a rejection of a source that has not earned its life yet is a doubt, and the material
       // waits for it to be settled instead of being thrown away — see Probation.
       if (!this.sessions.get(source.key)?.confirmed) this.setAside(input, header, chunk)
@@ -1626,12 +1626,12 @@ export class SessionStore {
   }
 
   /**
-   * Trims every session to the buffer length (§7.3).
+   * Trims every session to the configured buffer length.
    *
    * The position each session is measured from is the newest end of its own material, unless a
    * caller states one. Three reasons, and none of them is an approximation. The playhead is known
    * to the watcher and not here, and carrying it over would be a number per element twice a
-   * second. A jump backwards past the window is a re-request (§6.3) — the player downloads the
+   * second. A jump backwards past the window is a re-request: the player downloads the
    * stretch again and the segments land back on the map — so the case this would protect against
    * heals itself. And a session that nothing arrives in stays exactly a buffer long instead of
    * melting away three minutes after the page was paused, which is what a wall clock would do to
@@ -1655,7 +1655,7 @@ export class SessionStore {
       // unit is a sample, so the stretch is cut at the line rather than at the segment before it.
       //
       // Written onto the session as well as onto the source, because eviction reaches a frozen
-      // session too: a rejection stops a recording growing (§5.5), and it does not exempt what
+      // session too: a rejection stops a recording growing, and it does not exempt what
       // was already gathered from the buffer length. Reached through the session rather than by
       // walking the sources, because the position is the session's own end — a file feeding no
       // session has no end of its own to be measured from, and a rejection the session has not
@@ -1686,15 +1686,15 @@ export class SessionStore {
   }
 
   /**
-   * Brings what this frame holds back under the ceiling (§7.2).
+   * Brings what this frame holds back under the memory ceiling.
    *
-   * Whole sessions first, cheapest by §7.3 first, and not the oldest runs of each: the runs are
+   * Whole sessions first, lowest-value first, and not the oldest runs of each: the runs are
    * already trimmed to the buffer length, and taking more off every session would break the
    * promise of the setting evenly across all of them instead of keeping it for the ones worth
    * keeping.
    *
    * Only what holds memory is weighed here at all, because memory is what this ceiling is made
-   * of. An ordinary file (§5.6) keeps an index of material the browser fetched and this frame
+   * of. An ordinary file keeps an index of material the browser fetched and this frame
    * never saw, so it weighs nothing — and weighing nothing, with no tracks to take a length or a
    * soundtrack from either, it used to stand first in the queue by every signal there is. It went
    * first and freed not one byte, and it could not come back afterwards: the watcher speaks about
@@ -1775,9 +1775,9 @@ export class SessionStore {
   }
 
   /**
-   * This page plays encrypted media: nothing of it is kept, and nothing more is taken in. §5.4 of
-   * the design refuses DRM before a single byte is copied, and §2 promises the user that a
-   * protected page is answered plainly instead of half-recorded.
+   * This page plays encrypted media: nothing of it is kept, and nothing more is taken in. DRM is
+   * refused before a single byte is copied, and the user is told plainly instead of receiving a
+   * partial recording.
    *
    * It is not a verdict and does not travel with one. A verdict is about an element — the watcher
    * measures a <video> and speaks about the stream that element is playing — while protection is
@@ -1796,14 +1796,13 @@ export class SessionStore {
    * in the clear is recorded like any other.
    */
   /**
-   * Whether material is taken in at all: the recording mode of §9.4 as the registry sees it.
+   * Whether material is taken in at all, as determined by the recording mode.
    *
    * Belt and braces beside the hook, which is where the switch actually saves anything — but the
    * hook of a page loaded before the extension was updated, or a worker wrapped in a realm of its
    * own, can still be sending. And the hook is not on every road: an ordinary file never passes
-   * through it at all, so the two doors of §5.6 are shut here as well. What the registry already
-   * holds is not touched: switching recording off is not an erasure, and §7.2 promises exactly
-   * that.
+   * through it at all, so ordinary-file and split-sound intake stop here as well. What the registry
+   * already holds is not touched: switching recording off stops intake without erasing material.
    */
   pauseIntake(paused: boolean): void {
     if (this.paused === paused) return
@@ -1813,7 +1812,7 @@ export class SessionStore {
     // stream and not a list of segments, so a reader that kept the half of a segment it had would
     // splice it onto bytes from minutes later and read the join as a header. A fresh reader finds
     // the next header and starts there, and the material in between is a gap — which is what it
-    // is, and what §6.3 keeps honestly.
+    // is, and what the timeline keeps honestly.
     if (!paused) this.streams.clear()
   }
 
@@ -1839,7 +1838,7 @@ export class SessionStore {
   /**
    * The page has stated how long what this source plays actually is.
    *
-   * This is the third component of the merge key (§6.1), and the registry used to leave it unsaid:
+   * This is the third component of the merge key, and the registry used to leave it unsaid:
    * every session was keyed as if the length were unknown, so two videos were told apart by their
    * address and their codecs alone. On a feed the address does not change from one video to the
    * next and the codecs are the codecs of the feed — measured on tiktok.com/foryou, where seven

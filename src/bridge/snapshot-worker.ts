@@ -1,7 +1,7 @@
 import { writeSealed } from './sync-write'
 
 /**
- * The writer of one snapshot: the freeze of §9.2 made into a file.
+ * The writer of one snapshot: the popup's point-in-time freeze made into a file.
  *
  * It writes the same way the history does — see sync-write.ts, which holds the one call to
  * createSyncAccessHandle in the extension — and differs from it in life span alone. This worker

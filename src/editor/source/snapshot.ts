@@ -63,10 +63,9 @@ async function loadHistory(id: string): Promise<LoadedSnapshot> {
   const material = materialOf(reader.index)
   if (!material.video && !material.audio) return { ok: false, reason: 'empty' }
 
-  // Opening the editor over a recording is the user saying "this one" out loud, and §7.3 puts
+  // Opening the editor over a recording is the user saying "this one" out loud, which puts
   // such a session second only to what is pinned. It is also what keeps the sweeper from taking
-  // the material out from under an editing session — not a lock, and said as such in the closing
-  // section of the plan.
+  // the material out from under an editing session. It is a value signal, not a lock.
   void setUsed(id, Date.now()).catch(() => undefined)
 
   return { ok: true, reader, material }

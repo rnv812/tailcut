@@ -18,7 +18,7 @@ import type { SourceTrack } from '../../src/core/export/plan'
 const read = (path: string): Uint8Array => new Uint8Array(readFileSync(`tests/fixtures/${path}`))
 
 /**
- * The shape of page this whole module exists for (§5.6), as two files of the repository.
+ * The split picture-and-sound page shape this module handles, represented by two fixture files.
  *
  * `loop.mp4` is the picture: three and a half seconds of H.264 with no sound track in it at all.
  * `track.mp3` is the soundtrack playing underneath it: twenty-four and a half seconds of MPEG-1

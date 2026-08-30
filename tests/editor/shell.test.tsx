@@ -265,7 +265,7 @@ const previewOf = (frameSize = { width: 1280, height: 720 }): Preview => ({
   bytes: 10,
   // The size of the picture the shell would be playing. Nothing on this screen draws a rectangle
   // over it yet; it is here because `Preview` promises it, and a cast that let it be missing is
-  // how a zero would reach the crop without a word (§8.5).
+  // how a zero would reach crop geometry without a word.
   frameSize,
   frames: FrameTable.of(
     Array.from({ length: 5 }, (_, at) => ({
@@ -762,11 +762,11 @@ describe('the editor shell', () => {
   })
 
   it('names a new clip by the Export group the tab was opened with', async () => {
-    // The wire held here is the group itself. `main.tsx` reads §9.4 once, the shell carries it,
+    // The wire held here is the group itself. `main.tsx` reads settings once, the shell carries them,
     // and the workbench hands it whole to `deriveMaterial`; two of its fields reach the model —
     // the template a clip is named by, and the format a clip is born in — and only the first of
-    // the two shows on a screen this stage draws. So the format rides here: cut the argument in
-    // `workbench.tsx` and this name falls back to the one stage 2 built, taking the format with
+    // the two is visible on this screen. So the format rides here: cut the argument in
+    // `workbench.tsx` and this name falls back to the default, taking the format with
     // it in silence. That the group's format then reaches a new clip is held next door, in
     // `tests/editor/store.test.ts`. Measured before it was written: with the format passed as an
     // argument of its own, dropping it left all 2787 tests green.
@@ -785,7 +785,7 @@ describe('the editor shell', () => {
     )
   })
 
-  it('names it the way stage 2 did when the tab read no settings at all', async () => {
+  it('uses the default name when the tab read no settings at all', async () => {
     // The other end of the same wire, so that the test above cannot be satisfied by a template
     // baked in anywhere: no Export group, and the name is the page title and the timecode.
     await mount({ ...(await ready()), preview: previewOf() })

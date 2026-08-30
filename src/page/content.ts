@@ -378,7 +378,7 @@ startWatching(
     await ensureBridge()
     tellBridge({ type: 'tc:encrypted' })
   },
-  // A media element of this page is playing an ordinary file (§5.6). There is no material to
+  // A media element of this page is playing an ordinary file. There is no material to
   // carry — the browser fetched the file itself and the hook in the MAIN world never saw it — so
   // what goes across is the address, the length and the stretch the element holds. The frame it
   // goes to is the one that can act on it: the bridge stands on the extension origin, which is
@@ -387,7 +387,7 @@ startWatching(
     await ensureBridge()
     tellBridge({ type: 'tc:plain', ...source })
   },
-  // An <audio> of this page is playing a soundtrack of its own (§5.6). It is not a recording and
+  // An <audio> of this page is playing a soundtrack of its own. It is not a recording and
   // never becomes one: what it can be is the sound of a picture on the same page that has none,
   // and the registry decides that. Like a plain source it carries no material — the browser
   // fetched the track itself — so what crosses is the address and what the element knows of it.
@@ -395,7 +395,7 @@ startWatching(
     await ensureBridge()
     tellBridge({ type: 'tc:sound', ...source })
   },
-  // The size of the player one of these streams is being watched in. §7.3 counts a big player as
+  // The size of the player one of these streams is being watched in. A large player is
   // a sign that a recording is worth keeping, and triage is the only thing on the page that ever
   // measures one. Said on its own and not on the verdict, which is spoken only when it changes:
   // by the time the first verdict about an ordinary player is spoken — six seconds in — a page

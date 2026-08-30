@@ -383,7 +383,7 @@ describe('buildFragment: sync sample information', () => {
 describe('the bytes of the init segments', () => {
   it('are what they were before the movie boxes moved into boxes.ts', () => {
     // A characterisation test, not a specification: it exists so that a refactoring which was
-    // supposed to change nothing is caught the moment it changes something. If a later task has
+    // supposed to change nothing is caught the moment it changes something. If a later change has
     // a reason to write these boxes differently, this is the test that has to be updated by
     // hand, deliberately, with the new bytes measured.
     const audio = buildAudioInit({ trackId: TRACK_ID, timescale: TIMESCALE, sampleEntry })

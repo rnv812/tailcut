@@ -97,7 +97,7 @@ describe('TimecodeField', () => {
 
   it('gives the focus back on Enter, because the next key belongs to the editor', async () => {
     // The editor's layout is off while a field is focused. A box that kept the focus after Enter
-    // would swallow the I that comes next as a letter (Task 14, Task 18).
+    // would swallow the I that comes next as text instead of an editor command.
     await show(0)
     field().focus()
     await type('1:23')

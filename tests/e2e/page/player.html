@@ -1,10 +1,10 @@
 <!doctype html>
 <meta charset="utf-8" />
 <!--
-  Намеренно строгая политика: frame-src 'none' запрещает странице любые посторонние фреймы —
-  тот самый случай, которого мы опасаемся для моста. media-src blob: и style-src 'unsafe-inline'
-  добавлены только чтобы страница вообще играла: default-src 'self' блокирует и blob-источник
-  MediaSource, и style-атрибут <video>. Запрет фреймов при этом не ослаблен.
+  An intentionally strict policy: frame-src 'none' prevents the page from loading any foreign
+  frames, exactly the case that threatens the bridge. media-src blob: and style-src 'unsafe-inline'
+  only let the page play: default-src 'self' blocks both the MediaSource blob URL and the <video>
+  style attribute. The frame restriction remains unchanged.
 -->
 <meta
   http-equiv="Content-Security-Policy"
@@ -13,18 +13,18 @@
 <title>test player</title>
 <video id="v" controls width="640" style="background:#000"></video>
 <script>
-  // Нарушения политики видны только изнутри страницы. Без этого журнала проверки набора
-  // остались бы зелёными и на странице, где меты выше нет вовсе: негативный контроль в
-  // bridge.spec.ts вставляет обычный фрейм и требует, чтобы политика его запретила.
+  // Policy violations are visible only inside the page. Without this log the suite would also
+  // pass on a page with no meta policy at all. The negative control in bridge.spec.ts inserts an
+  // ordinary frame and requires the policy to block it.
   window.cspViolations = []
   document.addEventListener('securitypolicyviolation', (e) => {
     window.cspViolations.push({ directive: e.effectiveDirective, blockedURI: e.blockedURI })
   })
 
-  // Мост обязан встать на document_start — раньше первого скрипта страницы.
+  // The bridge must appear at document_start, before the page's first script.
   window.bridgeAtScriptStart = !!document.querySelector('iframe[data-tailcut]')
 
-  // Рукопожатие мост шлёт в родительское окно; запоминаем origin отправителей.
+  // The bridge sends its handshake to the parent window; record each sender origin.
   window.bridgeReady = []
   window.addEventListener('message', (e) => {
     if (e.data && e.data.type === 'tc:ready') window.bridgeReady.push(e.origin)
@@ -38,7 +38,7 @@
   ]
   /**
    * The next six seconds, in another representation of the picture: what an ABR player switches
-   * to (§6.2). Another init and a segment that carries on where the three above stop.
+   * to. Another init and a segment that carries on where the three above stop.
    */
   const NEXT_INIT = '/fixtures/minute/init-stream0.m4s'
   const NEXT = '/fixtures/minute/chunk-stream0-00002.m4s'
@@ -85,7 +85,7 @@
 
   /**
    * The same stretch handed over a second time, init and all: a rewatch, a seek back, a player
-   * refilling its buffer (§6.3). Not one byte of it is new material.
+   * refilling its buffer. Not one byte of it is new material.
    */
   window.tcAppendAgain = async () => {
     await append(await fetchBytes(INIT), picture)
@@ -94,7 +94,7 @@
 
   /**
    * Six more seconds of picture, in another representation and long after the first three
-   * segments: the quality switch of §6.2, into the buffer that is already playing.
+   * segments: the quality switch, into the buffer that is already playing.
    *
    * The one thing here that is material the session did not have before, so the only way to ask
    * whether what arrives after a session has been re-keyed lands in the row of what arrived

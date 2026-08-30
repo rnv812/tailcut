@@ -202,7 +202,7 @@ const FAMILIES = [
 /**
  * How many packets of sound the new file may be short of the old one.
  *
- * The clip is measured by the picture (§8.2), so the sound is cut to the picture's span, and the
+ * A clip's duration is measured by its picture, so sound is cut to the picture's span, and the
  * packet that straddles the last frame does not make it in. The old writer copied whole fragments
  * and so kept it. One packet is 21 ms of AAC or 20 of Opus; two is the whole of the slack this
  * allows, and it is a bound rather than a number because it depends on where the two scales fall

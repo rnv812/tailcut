@@ -195,9 +195,8 @@ export interface HistoryRow {
  * What is on disk, newest first.
  *
  * Straight out of the index, from the popup itself: the popup is a document of the extension
- * origin and the index is one IndexedDB read away. Nothing is computed and nothing is walked —
- * §9.2 promises a popup that opens instantly, and this is what keeps that promise true now that
- * there is a disk to be tempted by.
+ * origin and the index is one IndexedDB read away. Nothing is computed and nothing is walked;
+ * that keeps the popup opening instantly now that there is a disk to be tempted by.
  */
 export async function historyRows(limit = 20): Promise<HistoryRow[]> {
   try {
@@ -224,7 +223,7 @@ export const pinHistory = (id: string, pinned: boolean) => setPinned(id, pinned)
 /**
  * Marks a session deleted. The files go with the sweeper, half a minute later.
  *
- * Marked rather than removed, because §9.2 answers a deletion with an undo in a toast instead of
+ * Marked rather than removed because deletion offers undo in a toast instead of
  * a confirmation dialogue: the row has to be out of every list at once and recoverable for as
  * long as the toast can be on screen. Closing the popup settles it — the user deleted it — and
  * the sweeper does the rest.
@@ -233,11 +232,12 @@ export const deleteHistory = (id: string) => setDeleted(id, Date.now())
 export const undoDelete = (id: string) => setDeleted(id, 0)
 
 /**
- * Occupied volume, as the index has it. Never navigator.storage.estimate() — see §7.4.
+ * Occupied volume, as the index has it. Never navigator.storage.estimate(): the index tracks the
+ * extension's own files while the browser estimate covers unrelated origin data.
  *
- * `full` is the other half of the promise §11 makes about a full disk: the browser may refuse a
- * write below our own ceiling, and when it has, the popup says so instead of showing a number
- * that looks like everything is fine while the writer retries every thirty seconds.
+ * `full` distinguishes a browser refusal from reaching the configured limit: the browser may
+ * refuse a write below our own ceiling, and when it has, the popup says so instead of showing a
+ * number that looks like everything is fine while the writer retries every thirty seconds.
  */
 export async function storageInUse(): Promise<{ bytes: number; full: boolean }> {
   try {

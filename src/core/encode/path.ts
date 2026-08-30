@@ -8,7 +8,7 @@ import { geometryOf } from './crop'
 import { planFrames, type FramePlan } from './plan'
 
 /**
- * Which of the two paths of §8.1 a clip takes, and with what.
+ * Whether a clip is copied or encoded, and the resources required by that path.
  *
  * One value, because it decides three things that must agree: the lane of the queue, the unit the
  * progress is counted in, and which half of the io writes the file. Carried on the request as
@@ -24,7 +24,7 @@ export type ClipPath =
 /**
  * Why a clip that needs the encoder is not getting one.
  *
- * `no-encoder` — the ladder came back empty for this picture. That is the answer §8.4 promises,
+ * `no-encoder` means the codec ladder is empty for this picture. It is a normal capability result,
  * not a failure: the inspector names the geometry and offers to drop the crop. `no-material` —
  * there is no picture to decode, or none `decoderConfigOf` can describe. Unreachable for a clip
  * the editor let the user make, and an answer rather than a throw because this is asked while a
@@ -69,7 +69,7 @@ export function pathFor(
   return { kind: 'encode', plan, choice }
 }
 
-/** Which lane of the queue this path belongs in (§8.6): copies three at a time, the rest one. */
+/** Queue lane for this path: up to three copies run together, while encodes run one at a time. */
 export const laneOf = (path: ClipPath): JobKind => (path.kind === 'copy' ? 'copy' : 'encode')
 
 /**

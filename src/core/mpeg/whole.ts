@@ -12,7 +12,7 @@ import type { RangeReader } from '../iso/locate'
  * ever fetched. Measured on the fixture: three and a half seconds of a twenty-four second track
  * at 32 kbit is fourteen kilobytes, which is one request.
  *
- * That is not only a saving. §2 puts downloading somebody's material out of scope, and a
+ * This is not only an optimization. Downloading material the viewer did not watch is out of scope,
  * soundtrack is a music file: an extension that pulled the whole of one down every time it found
  * an `<audio>` beside a video would be a music downloader whatever it did with the bytes
  * afterwards.

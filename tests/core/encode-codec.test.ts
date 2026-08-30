@@ -99,7 +99,7 @@ describe('cacheKeyOf', () => {
   })
 
   it('holds the whole probe question and not one boolean', () => {
-    // Written out in full because this is the shape of the bug §8.4 names: one flag per install
+    // Written out in full because the bug used one support flag per installation
     // answers about a clip and rate-control request nobody asked about.
     expect(cacheKeyOf(config())).toBe(
       'avc1.640028|1920x1080@30|prefer-hardware|default|default',

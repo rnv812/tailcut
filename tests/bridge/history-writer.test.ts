@@ -65,7 +65,7 @@ function fakeIo(overrides: Partial<HistoryIo> = {}) {
   return { io, written, rows, renamed, sweeps, tick: (ms: number) => (clock += ms) }
 }
 
-/** The merge key of the session everything in this set is about (§6.1). */
+/** The merge key of the session covered by this suite. */
 const KEY = 'https://site.example/watch|avc1|live'
 
 /** The picture of that session: the track everything here is written about. */
@@ -99,7 +99,7 @@ const of = (track: ChunkStored['track'], start: number, bytes: number): ChunkSto
 
 const event = (start: number, bytes: number): ChunkStored => of(VIDEO, start, bytes)
 
-/** The same chunk, cut at a moment when the player had already been measured (§7.3). */
+/** The same chunk, cut after the player had already supplied its value signals. */
 const watched = (start: number, bytes: number, widthPx: number): ChunkStored => ({
   ...event(start, bytes),
   widthPx,
@@ -208,7 +208,7 @@ describe('HistoryWriter', () => {
 
   it('keeps the width its chunks carried when the frame has nothing left to say about them', async () => {
     // The other half of the same rule, and an ordinary case rather than a defensive one: the key
-    // of a session moves while it is being recorded (§6.1), the batch gathered under the old one
+    // of a session moves while it is being recorded, the batch gathered under the old one
     // lands after the move, and the event that signs the row keeps the key it was gathered under.
     // Nothing stands under that key any more, so the frame answers nothing — and what the chunks
     // were stamped with is the whole of what is known about the player. It is a real number: a
@@ -396,7 +396,7 @@ describe('HistoryWriter', () => {
 
 describe('HistoryWriter.rekey', () => {
   // What the key becomes when the player states the length: the same address, `live` replaced by
-  // the number (§6.1, and durationToken rounds it to whole seconds).
+  // the number because durationToken rounds the merge-key duration to whole seconds.
   const NEXT = 'https://site.example/watch|avc1|7'
   const moved = { from: KEY, to: NEXT, page: { url: 'https://site.example/watch', title: 'Clip' } }
 
@@ -465,7 +465,7 @@ describe('HistoryWriter.rekey', () => {
 
     // The batch is full, so it goes down on the spot — and the key changes while the index is
     // still being asked who this session is. No `settle` between the two lines, and that is the
-    // whole test: the merge key of §6.1 changes when the player states the length, which is the
+    // whole test: the merge key changes when the player states the length, which is the
     // first second of playback, which is exactly when the first batch is in flight.
     writer.take(event(0, HISTORY_BATCH_BYTES))
     writer.rekey(moved)

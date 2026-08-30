@@ -4,10 +4,10 @@ import type { PlainSource, SoundSource } from '../../src/shared/protocol'
 import { SETTINGS_KEY, type Settings } from '../../src/shared/settings'
 import { writeSettings } from '../../src/shared/settings-store'
 
-/** Шаг опроса наблюдателя: столько модельного времени проходит за один tick(). */
+/** Watcher polling step: the amount of simulated time advanced by one tick(). */
 const POLL_MS = 500
 
-/** Прямоугольник элемента на экране; наблюдатель читает только эти поля. */
+/** On-screen element rectangle; the watcher reads only these fields. */
 type Box = { width: number; height: number; top: number; left: number; bottom: number; right: number }
 
 const box = (width: number, height: number): Box => ({
@@ -31,8 +31,8 @@ function ranges(...pairs: Array<[number, number]>) {
 }
 
 /**
- * Минимальный <video>: наблюдатель читает только перечисленное здесь. Значения по умолчанию —
- * настоящий плеер, который прямо сейчас играет; мусорные раскладки собираются переопределением.
+ * Minimal <video>: the watcher reads only what is listed here. Defaults represent a genuine
+ * player that is currently playing; overrides create unwanted layouts.
  */
 function fakeVideo(overrides: Record<string, unknown> = {}) {
   return {
@@ -74,7 +74,7 @@ function fire(video: FakeVideo, type: string): void {
   for (const handler of video.listeners.get(type) ?? []) handler()
 }
 
-/** Беззвучное зациклённое превью без панели управления — типичный баннер. */
+/** A muted looping preview without controls, representing a typical banner. */
 const bannerVideo = () =>
   fakeVideo({
     src: 'blob:banner',
@@ -135,14 +135,14 @@ function attachClosedShadow(into: FakeRoot = documentRoot): void {
   into.elements.push({ shadowRoot: null })
 }
 
-/** Модельная страница: живой список <video>, видимая вкладка и управляемые часы. */
+/** Simulated page with a live <video> list, a visible tab, and a controllable clock. */
 function installDom(): void {
   now = 0
   documentRoot = fakeRoot()
   videos = documentRoot.videos
 
   vi.useFakeTimers()
-  // Часы наблюдателя стоят отдельно от таймеров: время двигает tick(), а не сама очередь.
+  // The watcher clock is separate from timers: tick() advances time, not the queue itself.
   vi.stubGlobal('performance', { now: () => now })
   vi.stubGlobal('document', {
     visibilityState: 'visible',
@@ -160,7 +160,7 @@ function installDom(): void {
   )
 }
 
-/** Прогоняет указанное число опросов, двигая часы наблюдателя вместе с таймерами. */
+/** Run the requested number of polls, advancing the watcher clock alongside timers. */
 function tick(times = 1): void {
   for (let index = 0; index < times; index++) {
     now += POLL_MS
@@ -213,10 +213,10 @@ function installSettings(stored: unknown): void {
 }
 
 /**
- * Поднимает наблюдателя на чистом модуле и отдаёт его вместе с журналом вердиктов.
+ * Start the watcher from a fresh module and return it with its verdict log.
  *
- * `stored` — то, что уже лежит в chrome.storage под ключом настроек. Не передан вовсе — в реалме
- * нет и самого `chrome`.
+ * `stored` is the value already under the settings key in chrome.storage. If omitted entirely,
+ * the realm has no `chrome` either.
  */
 async function startWatcher(...stored: [unknown?]) {
   installDom()
@@ -226,7 +226,7 @@ async function startWatcher(...stored: [unknown?]) {
   const seen: Reported[] = []
   /**
    * Every player the watcher has measured, in the order the measurements went out. A road of its
-   * own and not part of `seen`: the width is a signal of value (§7.3) and not a verdict, and it
+   * own and not part of `seen`: width is a value signal rather than a verdict, and it
    * has to travel when the verdict does not.
    */
   const players: Player[] = []
@@ -292,7 +292,7 @@ async function startWatcher(...stored: [unknown?]) {
 const handleVideo = (overrides: Record<string, unknown> = {}) =>
   fakeVideo({ src: '', currentSrc: '', ...overrides })
 
-/** Ставит на страницу элемент и связывает его поток с адресом, как это делает хук. */
+/** Place an element on the page and associate its stream with a URL as the hook does. */
 function place(
   watcher: { registerSource: (sourceId: string, objectUrl: string) => void },
   element: FakeVideo,
@@ -309,8 +309,8 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe('наблюдатель: адресность вердикта', () => {
-  it('отказ уходит с идентификатором того потока, чей элемент его получил', async () => {
+describe('watcher: verdict addressing', () => {
+  it('sends rejection with the identifier of the stream whose element received it', async () => {
     const watcher = await startWatcher()
     place(watcher, bannerVideo(), 's-banner')
 
@@ -319,87 +319,87 @@ describe('наблюдатель: адресность вердикта', () => 
     expect(watcher.seen).toEqual([{ sourceId: 's-banner', verdict: 'reject' }])
   })
 
-  it('отказ по баннеру не мешает соседнему плееру дожить до повышения', async () => {
+  it('keeps a banner rejection from preventing a neighboring player from promotion', async () => {
     const watcher = await startWatcher()
     place(watcher, bannerVideo(), 's-banner')
     place(watcher, fakeVideo(), 's-player')
 
     tick(13)
 
-    // Два элемента на одной странице: у каждого свой поток и свой вердикт. Вердикт без
-    // адреса убил бы запись обоих — по первому же баннеру.
+    // Two elements on one page each have their own stream and verdict. An unaddressed verdict would
+    // stop both recordings as soon as the first banner was found.
     expect(watcher.seen).toEqual([
       { sourceId: 's-banner', verdict: 'reject' },
       { sourceId: 's-player', verdict: 'promote' },
     ])
   })
 
-  it('элемент с незнакомым адресом молчит, пока его поток не назвали', async () => {
+  it('keeps an element with an unknown URL silent until its stream is identified', async () => {
     const watcher = await startWatcher()
     videos.push(bannerVideo())
 
-    // Адрес из createObjectURL мог ещё не дойти до изолированного мира: сообщение хука
-    // и опрос наблюдателя ничем не связаны.
+    // The createObjectURL result may not have reached the isolated world yet. The hook message and
+    // watcher poll are not synchronized.
     tick(4)
-    expect(watcher.seen, 'вердикт без адресата отправлять некому').toEqual([])
+    expect(watcher.seen, 'there is no recipient for an unaddressed verdict').toEqual([])
 
     watcher.registerSource('s-banner', 'blob:banner')
     tick()
 
-    // Вердикт с тех пор не менялся, но адресат наконец известен: промолчи наблюдатель
-    // и здесь — мусорный поток остался бы в реестре навсегда.
+    // The verdict has not changed, but its recipient is now known. If the watcher stayed silent,
+    // the unwanted stream would remain in the registry forever.
     expect(watcher.seen).toEqual([{ sourceId: 's-banner', verdict: 'reject' }])
   })
 })
 
-describe('наблюдатель: испытательный срок', () => {
-  it('повышение приходит не раньше порога сыгранного времени', async () => {
+describe('watcher: grace period', () => {
+  it('does not promote before the played-time threshold', async () => {
     const watcher = await startWatcher()
     place(watcher, fakeVideo(), 's1')
 
-    // Порог сбалансированного пресета — шесть секунд; отсчёт идёт с первого опроса,
-    // на котором элемент найден.
+    // The balanced preset threshold is six seconds, counted from the first poll that finds the
+    // element.
     tick(12)
-    expect(watcher.seen, 'до порога плеер остаётся в ожидании').toEqual([])
+    expect(watcher.seen, 'the player remains on hold before the threshold').toEqual([])
 
     tick()
     expect(watcher.seen).toEqual([{ sourceId: 's1', verdict: 'promote' }])
   })
 
-  it('на паузе время не копится', async () => {
+  it('does not accumulate time while paused', async () => {
     const watcher = await startWatcher()
     const video = place(watcher, fakeVideo({ paused: true }), 's1')
 
     tick(40)
-    expect(watcher.seen, 'пауза не должна приближать повышение').toEqual([])
+    expect(watcher.seen, 'a pause must not advance promotion').toEqual([])
 
     video.paused = false
     tick(11)
-    expect(watcher.seen, 'после паузы отсчёт продолжается, а не начинается заново').toEqual([])
+    expect(watcher.seen, 'counting resumes after a pause rather than restarting').toEqual([])
 
     tick()
     expect(watcher.seen).toEqual([{ sourceId: 's1', verdict: 'promote' }])
   })
 
-  it('пока вкладка скрыта, запись отклоняется и время не копится', async () => {
+  it('rejects recording and stops accumulating time while the tab is hidden', async () => {
     const watcher = await startWatcher()
     place(watcher, fakeVideo(), 's1')
     ;(document as unknown as { visibilityState: string }).visibilityState = 'hidden'
 
     tick(40)
 
-    // Скрытая вкладка — отказ, и сыгранное в ней не идёт в зачёт: десять открытых вкладок
-    // с видео не должны превращаться в десять пишущих буферов.
+    // A hidden tab is rejected and its playback time does not count. Ten open tabs with video must
+    // not become ten recording buffers.
     expect(watcher.seen).toEqual([{ sourceId: 's1', verdict: 'reject' }])
     ;(document as unknown as { visibilityState: string }).visibilityState = 'visible'
     tick(11)
-    expect(watcher.seen.at(-1), 'время скрытой вкладки зачлось в испытательный срок').toEqual({
+    expect(watcher.seen.at(-1), 'hidden-tab time counted toward the grace period').toEqual({
       sourceId: 's1',
       verdict: 'hold',
     })
   })
 
-  it('элемент вне видимой области получает отказ', async () => {
+  it('rejects an element outside the viewport', async () => {
     const watcher = await startWatcher()
     const offscreen = { width: 640, height: 360, top: 900, left: 0, bottom: 1260, right: 640 }
     place(watcher, fakeVideo({ box: offscreen }), 's1')
@@ -410,24 +410,24 @@ describe('наблюдатель: испытательный срок', () => {
   })
 })
 
-describe('наблюдатель: что уходит мосту', () => {
-  it('один и тот же вердикт не повторяется', async () => {
+describe('watcher: messages sent to the bridge', () => {
+  it('does not repeat the same verdict', async () => {
     const watcher = await startWatcher()
     place(watcher, bannerVideo(), 's1')
 
     tick(40)
 
-    // Опрос идёт дважды в секунду; повторный вердикт на каждом такте залил бы мост
-    // сообщениями, а на стороне реестра ничего бы не изменил.
+    // Polling runs twice per second. Repeating the verdict on every tick would flood the bridge
+    // with messages without changing registry state.
     expect(watcher.seen).toEqual([{ sourceId: 's1', verdict: 'reject' }])
   })
 
-  it('смена вердикта уходит мосту в обе стороны', async () => {
+  it('sends verdict changes in both directions to the bridge', async () => {
     const watcher = await startWatcher()
     const video = place(watcher, fakeVideo(), 's1')
 
     tick(13)
-    // Плеер увели с экрана: накопленное остаётся, но писать дальше незачем.
+    // The player moved offscreen. Accumulated material remains, but there is no reason to continue.
     video.box = { width: 640, height: 360, top: -700, left: 0, bottom: -340, right: 640 }
     tick()
     video.box = box(640, 360)
@@ -440,15 +440,15 @@ describe('наблюдатель: что уходит мосту', () => {
     ])
   })
 
-  it('новый поток у того же элемента получает вердикт заново', async () => {
+  it('sends a fresh verdict for a new stream on the same element', async () => {
     const watcher = await startWatcher()
     const video = place(watcher, fakeVideo(), 's1')
 
     tick(13)
 
-    // Смена качества: плеер отдаёт элементу новый MediaSource, и это новый поток со своей
-    // сессией в реестре. Вердикт элемента с тех пор не менялся, но сказан он был про старый
-    // поток — промолчи наблюдатель, и новый остался бы навсегда неподтверждённым.
+    // On a quality change, the player assigns the element a new MediaSource, creating a new stream
+    // with its own registry session. The element's verdict has not changed, but it described the
+    // old stream. If the watcher stayed silent, the new stream would remain unconfirmed forever.
     video.src = 'blob:player-2'
     video.currentSrc = 'blob:player-2'
     watcher.registerSource('s2', 'blob:player-2')
@@ -456,7 +456,7 @@ describe('наблюдатель: что уходит мосту', () => {
 
     // The stream left behind is refused: no element plays it any more, so nothing can be measured
     // about it ever again. What it collected is not lost by that — it had been promoted, and a
-    // rejection of a confirmed session is the freeze of §5.5 and keeps the material.
+    // rejecting a confirmed session freezes it and preserves the material.
     expect(watcher.seen).toEqual([
       { sourceId: 's1', verdict: 'promote' },
       { sourceId: 's2', verdict: 'promote' },
@@ -464,13 +464,13 @@ describe('наблюдатель: что уходит мосту', () => {
     ])
   })
 
-  it('элемент, удалённый со страницы, больше не наблюдается', async () => {
+  it('stops watching an element removed from the page', async () => {
     const watcher = await startWatcher()
     const video = place(watcher, bannerVideo(), 's1')
 
     tick()
-    // Плеер выбросил элемент из документа. Наблюдатель, оставивший его в своём списке,
-    // продолжал бы мерить выброшенный — и рано или поздно выдал бы по нему повышение.
+    // The player removed the element from the document. A watcher that kept it in the list would
+    // continue measuring it and eventually promote it.
     videos.length = 0
     video.isConnected = false
     video.box = box(640, 360)
@@ -481,7 +481,7 @@ describe('наблюдатель: что уходит мосту', () => {
     expect(watcher.seen).toEqual([{ sourceId: 's1', verdict: 'reject' }])
   })
 
-  it('ключи, выданные самому элементу, тоже означают отказ', async () => {
+  it('also rejects keys attached to the element itself', async () => {
     const watcher = await startWatcher()
     place(watcher, fakeVideo({ mediaKeys: {} }), 's1')
 
@@ -994,7 +994,7 @@ describe('the watcher and an ordinary file', () => {
 
     expect(watcher.seen).toEqual([{ sourceId: CLIP_ID, verdict: 'promote' }])
     // And the size that goes out is the player's. One file, one account of it: a width taken from
-    // the banner would describe an element nobody watched (§7.3).
+    // the banner would describe an element nobody watched.
     expect(watcher.players).toEqual([{ sourceId: CLIP_ID, widthPx: 320 }])
   })
 
@@ -1130,8 +1130,8 @@ describe('the watcher and a page that plays its sound apart from its picture', (
     tick(13)
 
     // Muted, looping, no controls: the shape of a banner, and refused as one on every ordinary
-    // page. Here the sound of the page is simply in the other element, and the two together are
-    // the work (§5.6).
+    // page. Here the sound of the page is simply in the other element, and together they make up
+    // the content being watched.
     expect(watcher.seen).toEqual([{ sourceId: CLIP_ID, verdict: 'promote' }])
   })
 
@@ -1144,9 +1144,9 @@ describe('the watcher and a page that plays its sound apart from its picture', (
     sound.paused = true
     tick(4)
 
-    // §5.5: a pause freezes a recording and does not erase one. Read live, a page whose viewer
-    // has just paused it to open the popup is a silent page, the looping picture is a banner
-    // again, and the session goes out from under the popup that was opened to save it.
+    // A pause freezes a recording rather than erasing it. Read live, a page whose viewer has just
+    // paused it to open the popup is silent, the looping picture becomes a banner again, and the
+    // session disappears from the popup that was opened to save it.
     expect(watcher.seen).toEqual([{ sourceId: CLIP_ID, verdict: 'promote' }])
     // And the pause itself is reported, because the registry pairs on what is playing where it
     // can and on what has played where it cannot.
@@ -1227,8 +1227,8 @@ describe('the watcher and the size of the player', () => {
     expect(watcher.players).toEqual([{ sourceId: 's-player', widthPx: 640 }])
 
     // The user opens the video full screen and puts it back into the corner of the page. It was
-    // watched full screen, and the corner says nothing about what it was worth (§7.3) — so the
-    // growth is news and the shrinking is not.
+    // watched full screen, and the corner says nothing about its value, so growth is news and
+    // shrinking is not.
     video.box = box(1920, 1080)
     tick(2)
     video.box = box(320, 180)
@@ -1246,8 +1246,8 @@ describe('the watcher and the size of the player', () => {
 
     tick()
 
-    // A rejection is a freeze and not an erasure (§5.5): the session goes on existing, and how
-    // big the player was is a fact about it whichever way the verdict went.
+    // A rejection freezes rather than erases the session, so it continues to exist. Player size
+    // remains a fact about it regardless of the verdict.
     expect(watcher.players).toEqual([{ sourceId: 's-banner', widthPx: 160 }])
     expect(watcher.seen).toEqual([{ sourceId: 's-banner', verdict: 'reject' }])
   })
@@ -1282,7 +1282,7 @@ describe('the watcher and the size of the player', () => {
   })
 })
 
-describe('the watcher judges by the settings of §9.4', () => {
+describe('the watcher judges by the current detection settings', () => {
   it('watches a page with no extension around it at all', async () => {
     // The isolated world of an ordinary page has chrome.storage; this realm has nothing. A live
     // copy of the settings built beside the module's constants is built in every context that
@@ -1334,8 +1334,8 @@ describe('the watcher judges by the settings of §9.4', () => {
 
     // The user tightens the filter over a page full of banners and expects those banners to stop
     // being recorded now — not after a reload. What has already been promoted is not demoted by
-    // it: the verdict travels, and §5.5 is kept by the registry, which protects a confirmed
-    // session from a later rejection.
+    // it: the verdict travels, and the registry protects a confirmed session from a later
+    // rejection.
     await watcher.setSettings((current) => ({
       ...current,
       detection: { ...current.detection, minWidthPx: 1000 },

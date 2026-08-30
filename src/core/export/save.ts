@@ -29,8 +29,8 @@ function inputsOf(track: MuxTrack, map: ByteMap): SourceTrackInput[] {
 /**
  * Everything the session holds, as an ordinary mp4.
  *
- * The same plan and the same writer the editor exports a clip with (§8.2) and the same it builds
- * its preview with, asked for the whole of the material instead of a piece of it: real sample
+ * Uses the same plan and writer as editor export and preview, asked for all material instead of a
+ * piece of it. Each path therefore sees real sample
  * tables, one edit list of one entry, and the priming of the sound hidden by it rather than left
  * hanging before zero. With this the fragmented writer has no caller left in the program.
  *

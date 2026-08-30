@@ -13,13 +13,13 @@ export interface Clip {
   /** Media time of the session, seconds. Both edges sit on frame boundaries and in < out. */
   in: number
   out: number
-  /** §8.3: a clip lives inside one representation, and this names it. */
+  /** A clip belongs to one representation, named by this field. */
   representation: string
   sound: boolean
-  /** §8.5: the rectangle of the source picture this clip keeps, or the whole of it. */
+  /** Rectangle of the source picture retained by this clip, or the whole picture. */
   crop: Crop | null
   format: ExportFormat
-  /** §8.4: `original` copies the coded frames, `optimize` writes them again, smaller. */
+  /** `original` copies coded frames; `optimize` encodes them again at a smaller target. */
   mode: ClipMode
 }
 
@@ -29,7 +29,7 @@ export interface Clip {
  * Four reasons, and every one of them is a fact about the clip rather than a preference: a crop
  * changes the picture, WebP is not a container the coded frames can be moved into, `optimize` is
  * the request itself, and a start that is not on a sync sample can only be made exact by writing
- * the head again — which the user asks for with `rewriteHead` (§8.2) and gets nowhere else.
+ * the head again, which the user requests with `rewriteHead` and gets nowhere else.
  */
 export function forcesEncoder(clip: Clip, startsOnKeyframe: boolean, rewriteHead: boolean): boolean {
   if (clip.crop !== null) return true
@@ -58,7 +58,7 @@ const clamp = (value: number, low: number, high: number): number =>
  *
  * A zone is a stretch of one quality and nothing else: it is not ended by a hole in the recording
  * (lanes.ts). So the bounds below are the bounds of a **quality**, and a clip is free to run
- * across a gap inside one — which is what §8.2 collapses on the way to the file.
+ * across a gap inside one, which export collapses on the way to the file.
  */
 function homeZone(clip: Clip, ctx: EditContext): Zone | undefined {
   let best: Zone | undefined
@@ -82,7 +82,7 @@ function homeZone(clip: Clip, ctx: EditContext): Zone | undefined {
  *
  * The inspector asks this to know whether it has anything to say, and what it says is one line
  * with no button behind it: the handle stops here and cannot be made to go further, because two
- * resolutions in one track need an encoder (§8.3, stage 4). The zone that comes back is the one
+ * resolutions in one track require an encoder. The returned zone is the one
  * on the other side, and it is there so the line can name the quality instead of gesturing at
  * it. A clip whose edges are nowhere near a boundary gets null and no line.
  */
@@ -109,7 +109,7 @@ export function heldByQuality(clip: Clip, ctx: EditContext): Zone | null {
  * The bounds are the bounds of the **zone**, which is a stretch of one quality and is not ended
  * by a hole: a clip may run across a gap freely, and it is a change of quality — not a pause in
  * the recording — that stops a handle. That stop is final in this stage: a file with two
- * resolutions inside needs an encoder to bring them to one, so §8.3 waits for stage 4 and the
+ * resolutions inside requires an encoder to normalize them, so the boundary remains closed and the
  * inspector explains the wall rather than offering a way through it.
  */
 export function normalizeClip(clip: Clip, ctx: EditContext, moved: 'in' | 'out' = 'out'): Clip {
@@ -176,7 +176,7 @@ export function clipName(input: {
   title: string
   at: number
   taken: Iterable<string>
-  /** The user's template (§9.4); absent — the name stage 2 built, title and timecode. */
+  /** User file-name template; when absent, use the page title and start timecode. */
   template?: string
   /** The end of the clip and where it was watched: fields a template may ask for. */
   to?: number

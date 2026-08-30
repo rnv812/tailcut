@@ -25,7 +25,7 @@ const session = (over: Partial<Valued>): Valued => ({
   ...over,
 })
 
-describe('valueOf — the order of §7.3', () => {
+describe('valueOf — eviction value ordering', () => {
   it('never lets go of what the user pinned', () => {
     const pinned = session({ id: 'pinned', pinned: true, seconds: 1, sound: false, widthPx: 0 })
     expect(valueOf(pinned, NOW)).toBe(Number.POSITIVE_INFINITY)
@@ -38,10 +38,10 @@ describe('valueOf — the order of §7.3', () => {
   })
 
   it('holds it there whatever the two of them have been doing since', () => {
-    // The one rule of §7.3 that a weight must not be able to overturn, stated on the numbers that
+    // Pinning is the one rule a weight must never overturn, stated on the numbers that
     // could overturn it: the used session is a scrap watched silently in a corner and not touched
     // since Sunday, the other is everything watching can be worth and was watched this second.
-    // Six days is the last day the default keeping (§7.4) still holds either of them at all.
+    // Six days is the last day the default retention period still holds either of them at all.
     const used = session({
       id: 'used',
       usedAt: NOW - DAY * 6,
@@ -81,7 +81,7 @@ describe('valueOf — the order of §7.3', () => {
     expect(evictionOrder([big, plain], NOW)[0]!.id).toBe('plain')
     // And the width is a measure below the cap and not a flag: a player half a window wide is
     // worth half of what a window-wide one is, or a thumbnail with a play button would count as
-    // the large player §7.3 speaks of.
+    // the large player that should outrank a thumbnail.
     const half = session({ id: 'half', ...bare, widthPx: WIDTH_CAP_PX / 2 })
     expect(evictionOrder([big, half], NOW)[0]!.id).toBe('half')
     // Above the cap it says nothing more: a player pulled across a second monitor is not three
@@ -91,7 +91,7 @@ describe('valueOf — the order of §7.3', () => {
   })
 
   it('sends the one that barely crossed the threshold out first', () => {
-    // §5.4 promotes at six seconds; a session of seven is a page that was opened and left.
+    // Classification promotes at six seconds; a session of seven is a page that was opened and left.
     const barely = session({ id: 'barely', seconds: 7, sound: false, widthPx: 330 })
     const rest = [session({ id: 'a', seconds: 300 }), session({ id: 'b', seconds: 120 }), barely]
     expect(evictionOrder(rest, NOW)[0]!.id).toBe('barely')
@@ -112,7 +112,7 @@ describe('valueOf — the order of §7.3', () => {
   })
 
   it('lets days of standing still outweigh everything watching alone could earn', () => {
-    // Where §7.3 read on its own would say the opposite, and the numbers say what this program
+    // Where a size-only ranking would say the opposite, and the numbers say what this program
     // does: everything watching can earn comes to 56 (40 + 8 + 8), and a day nobody came back
     // costs 24. So the best recording of Sunday goes before the worst of this minute, and that
     // is meant — the meagre one is what the user has in front of them right now.
@@ -197,7 +197,7 @@ describe('expiredBy', () => {
   })
 
   it('counts the days from when material last arrived, not from when it started', () => {
-    // A video watched over three evenings is one session (§6.1), and its age is the last evening.
+    // A video watched over three evenings merges into one session, whose age is the last evening.
     const rows = [session({ id: 'long-running', lastSeenAt: NOW - DAY * 2 })]
     expect(expiredBy(rows, NOW, 7)).toEqual([])
   })

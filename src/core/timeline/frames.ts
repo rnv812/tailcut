@@ -136,7 +136,7 @@ export function framesOf(input: FrameInput): Frame[] {
  * The same frames, timed as the file an export plan describes will hold them.
  *
  * The preview the editor plays is written by that plan and by the clip writer, so the two clocks
- * part company wherever the plan closed a hole (§8.2) or hid a head. The plan is the only place
+ * part company wherever the plan closes a hole or hides a head. The plan is the only place
  * that knows by how much, and the only place a second is rounded into a tick: this walks the
  * planned samples in decode order, adds their durations up on the timeline the writer will lay
  * down, and hands each frame the second the file will show it at. Nothing here rounds anything.
@@ -214,7 +214,7 @@ export class FrameTable {
     return found
   }
 
-  /** The nearest sync sample at or before the frame: the entry point of an edit list (§8.2). */
+  /** The nearest sync sample at or before the frame: an edit-list entry point. */
   syncBefore(index: number): number {
     for (let at = Math.min(index, this.rows.length - 1); at >= 0; at--) {
       if (this.rows[at]!.sync) return at

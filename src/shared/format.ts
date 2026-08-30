@@ -46,8 +46,8 @@ export function formatSeconds(seconds: number): string {
  * A weight in bytes, in the unit it is said in: kilobytes below a megabyte, megabytes below a
  * gigabyte, gigabytes above.
  *
- * Powers of 1024 and named as such: this is disk, the ceiling of §7.4 is written as 4 GB meaning
- * 4 GiB, and a page that showed 4.29 GB for it would be answering a question nobody asked.
+ * Powers of 1024 and named as such: disk limits use 4 GB to mean 4 GiB, and a page that showed
+ * 4.29 GB for it would be answering a question nobody asked.
  */
 export function formatBytes(bytes: number): string {
   const value = Math.max(0, bytes)
@@ -66,8 +66,8 @@ const DAY_MS = 86_400_000
  * When something happened, as a person says it: "just now", "45 min ago", "3 h ago", "Yesterday",
  * "3 days ago", "22 Aug", "31 Dec 2025".
  *
- * §9.2 asks for the recent sessions with their time, and the reason is the list itself: three rows
- * of a feed are three lengths that look alike, and the moment is what tells this afternoon's
+ * Recent sessions include their time because three rows of a feed are three lengths that look
+ * alike, and the moment is what tells this afternoon's
  * recording from last month's. Elapsed time up to a week, because that is the question near the
  * present — "was this today?" — and a calendar date beyond it, because past a week nobody counts
  * in days.

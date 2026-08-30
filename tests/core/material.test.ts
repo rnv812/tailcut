@@ -86,7 +86,7 @@ describe('materialOf', () => {
 
   it('takes the representation with the most material behind it', () => {
     // A change of quality mid-watch leaves two tracks behind. A clip lives inside one
-    // representation (§8.3), and the editor opens on the one that was watched longest.
+    // representation because one output track cannot span both, and the editor opens on the one watched longest.
     const index = indexOf([
       track('t0', 'video', 'video:avc1:640x480', [[0, 2]]),
       track('t1', 'video', 'video:avc1:1280x720', [

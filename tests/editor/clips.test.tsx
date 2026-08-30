@@ -368,9 +368,10 @@ describe('Clips', () => {
   })
 
   it('says which quality a clip is stopped by, and offers no way past it', async () => {
-    // §8.3. The fixture is 480p to second four and 720p from six, so a clip that ends on the
+    // One output track cannot cross a resolution change without re-encoding. The fixture is 480p
+    // to second four and 720p from six, so a clip that ends on the
     // boundary has a wall in front of it. The panel explains the wall and leaves it standing:
-    // two resolutions in one track need an encoder, which is stage 4.
+    // two resolutions in one track need an encoder.
     const dispatch = await show(docOf([clip({ representation: '480p', in: 1, out: 4 })]))
 
     const note = host.querySelector('[data-testid="held-c1"]')!

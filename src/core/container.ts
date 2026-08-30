@@ -74,8 +74,8 @@ export function parserFor(container: Container): ContainerParser {
  *
  * The one question about DRM the extension answers for itself, out of the bytes it is parsing
  * anyway. It is asked of every unit before anything is read out of it, because a page that plays
- * encrypted media keeps nothing at all (§5.4) — and because the alternative, the page's own talk
- * of key systems, proved to be about intent rather than about the stream: a news article was
+ * encrypted media keeps nothing at all. Trusting the page's own talk of key systems instead
+ * proved to measure intent rather than the stream: a news article was
  * measured probing sixteen key systems, three of them granted, over a video that was in the clear
  * from the first byte to the last.
  *

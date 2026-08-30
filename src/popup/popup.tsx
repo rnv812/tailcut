@@ -39,7 +39,7 @@ const NOTHING = 'Nothing recorded on this page yet.'
  *
  * Said in as many words, and not left as the same emptiness a page with no video shows. The
  * refusal is deliberate and final — encryption was found in the material itself, everything
- * gathered before it was dropped, and nothing more will be taken in (§5.4) — so "nothing recorded
+ * gathered before it was dropped, and nothing more will be taken in, so "nothing recorded
  * yet" would promise a wait that never ends and make a decision look like a defect. The survey
  * found exactly that on every protected page it opened: a refusal indistinguishable from a
  * failure.
@@ -75,7 +75,7 @@ const OMITTED: Record<Omission, string> = {
  *
  * Not a loss, so not an omission — the length above already counts it — but not the video's own
  * sound either, and the difference is worth a line. On such a page the picture and the sound are
- * two files of different lengths looping on cycles of their own (§5.6); what goes into the clip
+ * two files of different lengths looping on cycles of their own; what goes into the clip
  * is the start of the track, which is where the page itself puts the two together when it loads.
  */
 const PAIRED_SOUND = 'Sound here is a separate looping track on this page, taken from its start.'
@@ -184,7 +184,7 @@ function History(props: { rows: HistoryRow[]; hide: Set<string>; onChanged: () =
             <span class="muted" data-testid="history-length">
               {formatDuration(row.seconds)}
             </span>
-            {/* When it was last watched (§9.2). Without it a history of a feed is a column of
+            {/* When it was last watched. Without it a history of a feed is a column of
                 lengths that look alike, and nothing in it says which recording is today's. */}
             <span class="muted" data-testid="history-when">
               {formatWhen(row.lastSeenAt)}
@@ -234,7 +234,7 @@ function History(props: { rows: HistoryRow[]; hide: Set<string>; onChanged: () =
 /**
  * Why the switch for the site is shut.
  *
- * `Off` records nothing anywhere (§9.4), so there is nothing here to switch — and a switch left
+ * `Off` records nothing anywhere, so there is nothing here to switch — and a switch left
  * live over it writes a list nothing reads and comes back unticked, which is a control answering
  * a press by doing nothing and saying nothing. Unticked and quiet it would also be saying "not
  * this site", which is a different statement and a false one. So it is shut, with the reason and
@@ -279,8 +279,8 @@ function Footer(props: {
       </button>
 
       <div class="muted in-use" data-testid="in-use" data-bytes={props.inUse.bytes}>
-        {/* A full disk is a state and not an error: the browser is within its rights to refuse
-            (§7.4), the sweeper has already lowered the ceiling to fit, and what the user needs to
+        {/* A full disk is a state and not an error: the browser is within its rights to refuse.
+            The sweeper has already lowered the ceiling to fit, and what the user needs to
             know is that nothing new is going down until room is made. */}
         {props.inUse.full
           ? `Disk full — ${formatBytes(props.inUse.bytes)} kept`
@@ -317,7 +317,7 @@ function Popup() {
   const [inUse, setInUse] = useState({ bytes: 0, full: false })
   /** Where the tab stands, and what the settings make of it. */
   const [url, setUrl] = useState('')
-  // Recording until the settings say otherwise, which is what §7.4 sets them to and what they
+  // Recording until the settings say otherwise, which is the default and what the settings
   // answer for every site the user has not forbidden. The read that settles it is one turn away.
   const [site, setSite] = useState<SiteSwitch>({ recorded: true, off: false })
   /**

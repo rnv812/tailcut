@@ -2,7 +2,7 @@ import { triage, type TriageVerdict, type VideoSignals } from '../core/triage'
 import { liveSettings } from '../shared/settings-store'
 import type { PlainSource, SoundSource } from '../shared/protocol'
 
-/** Как часто пересматриваются сигналы каждого <video>. */
+/** How often each <video>'s signals are reevaluated. */
 const POLL_INTERVAL_MS = 500
 
 interface Watched {
@@ -12,7 +12,7 @@ interface Watched {
 }
 
 const watched = new Map<HTMLMediaElement, Watched>()
-/** адрес из createObjectURL → идентификатор потока */
+/** createObjectURL address → stream identifier */
 const sourcesByUrl = new Map<string, string>()
 /**
  * Every stream the hook has named, addressed or not.
@@ -253,8 +253,9 @@ export function bindSource(element: object, sourceId: string): void {
 }
 
 /**
- * Поток, чей адрес стоит у элемента. Связь односторонняя: хук в MAIN world знает только
- * адрес из createObjectURL, а какому <video> его присвоили — видно лишь отсюда.
+ * The stream whose address is assigned to the element. The relationship is one-way: the MAIN
+ * world hook knows only the createObjectURL address, while only this context can see which
+ * <video> received it.
  */
 function sourceIdOf(element: HTMLMediaElement): string | null {
   return (
@@ -284,14 +285,13 @@ function signalsOf(state: Watched, soundApart: boolean): VideoSignals {
     visible: onScreen && document.visibilityState === 'visible',
     playing: !element.paused && !element.ended && element.readyState >= 2,
     playedSeconds: state.playedSeconds,
-    // Звук этой страницы играет в другом элементе, и значит беззвучность этого — не отсутствие
-    // звука, а разделение картинки и звука по двум элементам (§5.6). Единственный сигнал,
-    // который не про сам элемент; зачем он нужен — в VideoSignals.soundApart.
+    // This page's sound is playing in another element, so this element is not truly silent; the
+    // page split picture and sound across two elements. This is the only signal not about the
+    // element itself; VideoSignals.soundApart explains why it is needed.
     soundApart,
-    // Ключи, выданные самому элементу: страница присоединила к нему CDM, и что бы он ни играл
-    // дальше, писать это не нужно. Отказ здесь адресный — по элементу, а не по странице; отказ
-    // по всей странице выносится по самому материалу, когда в нём находится шифрование
-    // (см. onEncrypted ниже и src/core/container.ts).
+    // The page attached a CDM to this element, so whatever it plays next should not be recorded.
+    // This rejection applies to the element, not the page. Page-wide refusal comes from encryption
+    // found in the material itself; see onEncrypted below and src/core/container.ts.
     hasDrm: element.mediaKeys != null,
   }
 }
@@ -355,7 +355,7 @@ export function startWatching(
    */
   onPlain: (source: PlainSource) => void = () => {},
   /**
-   * An `<audio>` of this page is playing a soundtrack of its own (§5.6).
+   * An `<audio>` of this page is playing a soundtrack of its own.
    *
    * Said on the same terms as onPlain — when what the element knows changes, never while it does
    * not — and it is never a recording. Triage is not asked about it and cannot be: an `<audio>`
@@ -367,7 +367,7 @@ export function startWatching(
   /**
    * A player of one of the streams has been measured, and it is the largest one so far.
    *
-   * §7.3 counts a big player as a sign that a recording is worth keeping, and triage is the only
+   * A large player is a signal that a recording is worth keeping, and triage is the only
    * thing on the page that measures one — it weighs the width and throws the number away. This
    * carries it out. Last of the callbacks and defaulted, so that a caller with no use for the
    * signal goes on looking exactly as it did.
@@ -375,7 +375,7 @@ export function startWatching(
   onPlayer: Measured = () => {},
 ): void {
   /**
-   * The detection settings, live (§9.4).
+   * The live detection settings.
    *
    * The watcher runs in the isolated world, which has chrome.storage of its own, so it holds its
    * copy directly instead of hearing it from the bridge: one less message, and one less thing to
@@ -390,7 +390,7 @@ export function startWatching(
    * A preset changed while a video is playing applies to the next poll, and that is deliberate:
    * the user who tightens the filter over a page full of banners expects those banners to stop
    * being recorded now, and the one who loosens it expects the player they are watching to be
-   * picked up without a reload. What has already been promoted is not demoted by it — see §5.5.
+   * picked up without a reload. Material already promoted is not demoted by a later setting.
    */
   const detection = liveSettings()
 
@@ -401,9 +401,9 @@ export function startWatching(
   /**
    * Whether anything on this page has been playing sound of its own; see VideoSignals.soundApart.
    *
-   * Remembered and not read afresh each poll, for the reason §5.5 gives about everything else
-   * here: a pause freezes a recording, it does not erase one. The user watches a looping picture
-   * under a track, pauses, and opens the popup — and read live, the page would be silent at that
+   * Remembered rather than read afresh on each poll because a pause freezes a recording instead
+   * of erasing it. The user watches a looping picture under a track, pauses, and opens the popup
+   * — and read live, the page would be silent at that
    * moment, the picture would go back to being a banner, and the session would be dropped from
    * under the popup that was opened to save it.
    *
@@ -434,7 +434,7 @@ export function startWatching(
 
   // `<audio>` as well as `<video>`, and the two are not treated alike past this point: an audio
   // element is never judged, never a session and never a saved file of its own. It is watched
-  // because a page that plays its sound apart from its picture (§5.6) cannot be understood from
+  // because a page that plays its sound apart from its picture cannot be understood from
   // the picture alone — the element beside it is the evidence that the silence is not silence.
   const takeTree = (root: ParentNode) => {
     for (const element of root.querySelectorAll('video,audio')) take(element as HTMLMediaElement)
@@ -458,11 +458,10 @@ export function startWatching(
     takeTree(document)
   }
 
-  // Плееры вставляют <video> когда угодно: по клику на превью, при переходе на следующий
-  // ролик, при смене раскладки. Опрос нашёл бы такой элемент и сам, но на полтакта позже.
-  // Смотрим на то, что действительно добавили, а не пересматриваем страницу целиком: на живой
-  // странице мутации идут пачками десятки раз в секунду, и полный обход на каждую — это цена,
-  // которую расширение по §5.5 платить не должно.
+  // Players insert <video> at any time: after a preview click, when advancing, or when changing
+  // layout. Polling would find it half a cycle later. Inspect only added nodes instead of scanning
+  // the whole page for every mutation; busy pages mutate in batches dozens of times per second,
+  // and recording must not impose a full scan for each batch.
   const observer = new MutationObserver((records) => {
     for (const record of records) {
       for (const node of record.addedNodes) {
@@ -477,8 +476,7 @@ export function startWatching(
 
   /** Says a verdict to the bridge unless the bridge has heard that one already. */
   const tell = (sourceId: string, verdict: TriageVerdict) => {
-    // Пока мосту не сказали иного, он считает поток ожидающим, так что первое «hold» —
-    // не новость.
+    // The bridge assumes a stream is held until told otherwise, so the first `hold` is not news.
     if ((told.get(sourceId) ?? 'hold') === verdict) return
     told.set(sourceId, verdict)
     onVerdict(sourceId, verdict)
@@ -501,7 +499,7 @@ export function startWatching(
 
     // The soundtracks first, because the pictures are read differently in their presence: an
     // `<audio>` playing beside a silent looping `<video>` is what tells the filter that the
-    // silence is not silence but a page keeping its sound in another element (§5.6).
+    // silence is not silence but a page keeping its sound in another element.
     //
     // An `<audio>` is never judged and never claims a stream. One playing a MediaSource is left
     // exactly where it was before this loop existed — unclaimed, and refused for it below —
@@ -534,8 +532,8 @@ export function startWatching(
 
     for (const [element, state] of watched) {
       if (element.localName === 'audio') continue
-      // Элемент, выброшенный со страницы, продолжал бы считаться живым: ссылка на него
-      // держится здесь, и никакой другой уборки у наблюдателя нет.
+      // A removed element would otherwise remain live because this map retains it and the watcher
+      // has no other cleanup path.
       if (!element.isConnected) {
         watched.delete(element)
         continue
@@ -545,9 +543,9 @@ export function startWatching(
       state.lastTick = now
 
       const signals = signalsOf(state, soundHeard)
-      // Сыгранное с прошлого опроса — уже сыгранное, и в вердикт оно идёт сразу: начисли
-      // его после, и порог пересекался бы опросом позже, чем на самом деле. Пауза, скрытая
-      // вкладка и уход с экрана просто останавливают счётчик, не сбрасывая накопленное.
+      // Time since the previous poll has already played, so include it in this verdict. Adding it
+      // afterward would cross the threshold one poll late. A pause, hidden tab, or off-screen
+      // element stops the counter without resetting accumulated time.
       if (signals.playing && signals.visible) {
         state.playedSeconds += elapsed
         signals.playedSeconds = state.playedSeconds

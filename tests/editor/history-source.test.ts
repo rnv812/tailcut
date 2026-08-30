@@ -13,7 +13,7 @@ import type { HistoryTrack } from '../../src/core/history/layout'
 let row: HistorySessionRow | undefined
 let pieces: HistoryPieceRow[] = []
 let indexRefuses = false
-/** What `setUsed` was called with: opening a recording is the user saying "this one" (§7.3). */
+/** What `setUsed` was called with: opening a recording raises its eviction value. */
 const stamped: Array<[string, number]> = []
 /** Identifiers the history index was asked about: the `s` door has no business asking it any. */
 const consulted: string[] = []

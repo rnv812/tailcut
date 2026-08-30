@@ -18,7 +18,7 @@ export interface ClipsProps {
   playhead: number
   fps: number
   /**
-   * What the selected clip costs, worked out by the tab (step 8). Null when nothing is selected.
+   * What the selected clip costs, worked out by the tab. Null when nothing is selected.
    *
    * One estimate and not a map, because there is one to have: the path of a clip runs through
    * `planClip`/`planFrames` and through the probe's answer, and doing that for every row on every
@@ -57,11 +57,11 @@ function NameField({ clip, dispatch }: { clip: Clip; dispatch: (action: SessionA
 }
 
 /**
- * §8.3: the clip has run up against a change of quality and stopped there for good.
+ * The clip has run up against a change of quality and stopped there for good.
  *
  * A sentence, and deliberately nothing else. There is no button because there is nothing a
  * button could do: the two sides of the boundary are two resolutions, one track of an MP4 carries
- * one, and bringing them to one is an encoder's job — stage 4. A handle that stops without a word
+ * one, and bringing them to one is an encoder's job. A handle that stops without a word
  * reads as a bug, which is the whole reason this line exists. A clip nowhere near a boundary
  * gets `null` from `heldByQuality` and no line.
  */
@@ -81,7 +81,7 @@ function qualityNote(clip: Clip, ctx: EditContext) {
  * The rungs, in the words a person reads.
  *
  * Said out loud because this is the only place anybody learns that a crop changed the rung — and
- * with it constant quality (§8.5). Keyed by `EncodingChoice['kind']`, so a fourth rung added to
+ * with it constant quality. Keyed by `EncodingChoice['kind']`, so a fourth rung added to
  * the ladder is a compile error here rather than a blank in a sentence.
  */
 const RUNG_TEXT: Record<EncodingChoice['kind'], string> = {
@@ -91,7 +91,7 @@ const RUNG_TEXT: Record<EncodingChoice['kind'], string> = {
 }
 
 /**
- * The two source codecs §8.4 warns about, in the words a person reads.
+ * The two source codecs that need warnings, in the words a person reads.
  *
  * Two and no more: VP8 and H.264 really are made smaller by being encoded again, and a warning
  * over them would be a warning that means nothing.
@@ -102,13 +102,13 @@ const SOURCE_TEXT: Record<string, string> = { av01: 'AV1', vp09: 'VP9' }
  * What this clip's settings cost, in a sentence, before anything is pressed.
  *
  * Four different sentences for four different truths, and none of them says a number it cannot
- * stand behind. The rung is named because a crop can change it (§8.5): below roughly 130×34 the
+ * stand behind. The rung is named because a crop can change it: below roughly 130×34 the
  * hardware encoders refuse and the software one accepts, and with the rung goes constant quality.
  *
  * **No weight is printed here.** The bytes are the Export panel's line (`weightNote`, queue.tsx),
  * and one number under two headings is two sentences about one clip which are free to drift
  * apart. This one says what the work *is*: the rung, the picture, the kind of quality, the
- * seconds and the two warnings §8.4 asks for.
+ * seconds and the two codec warnings.
  */
 function costNote(clip: Clip, estimate: Estimate, dispatch: (action: SessionAction) => void) {
   if (estimate.kind === 'copy') {
@@ -180,7 +180,7 @@ function costNote(clip: Clip, estimate: Estimate, dispatch: (action: SessionActi
         : `About ${Math.ceil(estimate.seconds)} s.`}{' '}
       The sound is copied, not re-encoded.
       {estimate.inflates && (
-        // §8.4, and said here because after the export it is too late to say it. A recording
+        // This is said here because after the export it is too late to say it. A recording
         // already packed by AV1 or VP9 is not made smaller by being packed again by an older
         // codec — it is made bigger, and it loses detail on the way.
         <span class="tc-clip-warn" data-testid={`inflates-${clip.id}`}>

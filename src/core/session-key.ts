@@ -2,29 +2,28 @@ export interface KeyInput {
   url: string
   codecs: string[]
   /**
-   * Полная длительность ролика в секундах. `Infinity` — прямой эфир.
+   * Full video duration in seconds. `Infinity` means a live stream.
    *
-   * NaN попадает в ту же корзину, что и эфир, и это осознанно: `HTMLMediaElement.duration`
-   * равен NaN до события `loadedmetadata`, и отличить «эфир» от «ещё не знаем» здесь нечем.
-   * Плата за это — ключ, посчитанный слишком рано, совпадёт с ключом настоящего эфира, а с
-   * приходом настоящей длительности сменится, и материал одного ролика разъедется по двум
-   * сессиям. Поэтому вызывающая сторона обязана считать ключ не раньше `loadedmetadata`
-   * (реестр сессий в мосте, Task 10).
+   * NaN is deliberately grouped with live streams: `HTMLMediaElement.duration` is NaN before
+   * `loadedmetadata`, and this layer cannot distinguish "live" from "not known yet". A key
+   * computed too early would first match a live-stream key, then change when the real duration
+   * arrives and split one video's material across two sessions. Callers must therefore wait for
+   * `loadedmetadata` before computing the key.
    */
   durationSeconds: number
 }
 
 /**
- * Параметры, которые меняются от захода к заходу и на само видео не влияют.
+ * Parameters that vary between visits without changing the video itself.
  *
- * Сверка идёт по имени целиком: имя, лишь начинающееся со служебного, служебным не
- * считается. `title`, `token` и `type` не имеют отношения к `t`, `sig` — к `si`,
- * `source_id` — к `source`. Ошибиться здесь дорого: срезанный значимый параметр сливает
- * разные ролики в одну сессию, тогда как лишний оставленный стоит всего одной лишней сессии.
+ * Names are matched in full: a name that merely begins with one of these is not noise. `title`,
+ * `token`, and `type` are unrelated to `t`; `sig` is unrelated to `si`; and `source_id` is
+ * unrelated to `source`. Removing a meaningful parameter would merge different videos into one
+ * session, while retaining an extra parameter costs only one extra session.
  *
- * `lang` в списке сознательно отсутствует: на части сайтов он переключает не язык
- * интерфейса, а звуковую дорожку. Дубляжи одного ролика совпадают и по длительности, и по
- * кодекам, так что общий ключ свёл бы фрагменты двух языков в одну карту.
+ * `lang` is deliberately absent. On some sites it selects an audio track rather than an
+ * interface language. Dubs of the same video share duration and codecs, so removing `lang`
+ * would merge fragments from two languages into one timeline.
  */
 const NOISE_PARAMS = [
   't', 'time_continue', 'start', 'index', 'list', 'si', 'feature', 'pp',
@@ -32,9 +31,9 @@ const NOISE_PARAMS = [
 ]
 
 /**
- * Регистр имени в сверке не участвует: `?T=42` и `?UTM_Source=x` — те же метки, что `?t=42`
- * и `?utm_source=x`. Сам адрес при этом не переписывается, поэтому значимые `?V=abc` и
- * `?v=abc` остаются разными параметрами — за сайт мы их не схлопываем.
+ * Noise matching ignores name case: `?T=42` and `?UTM_Source=x` are the same markers as `?t=42`
+ * and `?utm_source=x`. The URL itself is not rewritten, so meaningful `?V=abc` and `?v=abc`
+ * remain distinct parameters rather than being collapsed on the site's behalf.
  */
 function isNoiseParam(name: string): boolean {
   const key = name.toLowerCase()
@@ -42,13 +41,12 @@ function isNoiseParam(name: string): boolean {
 }
 
 /**
- * Приводит адрес к виду, по которому два захода к одному видео узнаются как одно.
+ * Normalizes a URL so two visits to the same video are recognized as one.
  *
- * Нормализуется то, как до видео дошли: якорь, порядок параметров запроса и служебные
- * параметры. Не трогается то, куда дошли: схема, хост и путь остаются как есть, поэтому
- * `http` и `https`, `/v/1` и `/v/1/` дают разные ключи. Схлопнуть их значило бы решить за
- * сайт, что он отдаёт там то же самое. (Регистр хоста снимает сам разбор адреса, регистр
- * пути — нет.)
+ * It normalizes how the page was reached: the fragment, query-parameter order, and noise
+ * parameters. It does not change where the URL points: scheme, host, and path remain intact, so
+ * `http` and `https`, and `/v/1` and `/v/1/`, produce different keys. Collapsing them would assume
+ * the site serves the same resource there. URL parsing normalizes host case, but not path case.
  */
 export function normalizeUrl(url: string): string {
   let parsed: URL
@@ -71,28 +69,26 @@ export function normalizeUrl(url: string): string {
 }
 
 /**
- * Длительность в том виде, в каком её пишет ключ: целые секунды либо `live`.
+ * Duration in the form stored in the key: whole seconds or `live`.
  *
- * Отдельной функцией, потому что по ней сверяется не только сам ключ: реестр сессий решает,
- * новость ли объявленная страницей длительность, и решать это он обязан ровно с той же
- * точностью — иначе перекладывал бы сессию на каждое уточнение манифеста в миллисекундах.
+ * This is separate because the session registry uses the same representation to decide whether a
+ * duration declared by the page is new. It must use exactly the key's precision or it would move
+ * the session on every millisecond-level manifest update.
  */
 export function durationToken(seconds: number): string {
   return Number.isFinite(seconds) ? Math.round(seconds).toString() : 'live'
 }
 
 export function sessionKey(input: KeyInput): string {
-  // Копия перед сортировкой: массив приходит от вызывающей стороны, порядок кодеков в нём
-  // может быть значим для неё самой.
+  // Copy before sorting because the array belongs to the caller, where codec order may matter.
   const codecs = [...input.codecs].sort().join(',')
   const duration = durationToken(input.durationSeconds)
 
-  // Разделители обязательны: без них компоненты перетекают друг в друга и разные сессии
-  // получают один ключ («…/v/1» + «avc1» и «…/v/1a» + «vc1» дают одну строку).
+  // Separators keep components from flowing into each other and giving different sessions the
+  // same key (".../v/1" + "avc1" and ".../v/1a" + "vc1" otherwise produce one string).
   //
-  // Символ разделителя выбран так, чтобы не встречаться ни в адресе, ни внутри списка
-  // кодеков. Запятая на эту роль не годится дважды: она легальна в пути адреса и ею же
-  // склеен сам список, поэтому на ней «…/v/1» + [avc1, mp4a] и «…/v/1,avc1» + [mp4a] дали
-  // бы один ключ.
+  // The separator is chosen not to occur in a URL or inside the codec list. A comma fails both
+  // tests: it is legal in a URL path and already joins codecs, so ".../v/1" + [avc1, mp4a] and
+  // ".../v/1,avc1" + [mp4a] would produce the same key.
   return `${normalizeUrl(input.url)}|${codecs}|${duration}`
 }

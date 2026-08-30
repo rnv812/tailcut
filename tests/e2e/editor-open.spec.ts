@@ -28,12 +28,12 @@ test('a clip is born by the Export settings the tab read when it opened', async 
   const { context, player, extensionId } = await recordPlayer()
 
   try {
-    // Written before the editor is opened, because the tab reads §9.4 once — see `main.tsx` —
+    // Written before the editor opens because the tab reads settings once in `main.tsx`
     // and a template written afterwards would reach nothing. This is the only test on either
     // side of the browser that walks the whole wire: storage, `readSettings`, `EditorOptions`,
     // `deriveMaterial`, the context, the reducer, the name in the panel. Cut it anywhere and a
-    // clip goes back to being named the way stage 2 named it, taking the format a clip is born
-    // in with it — that one has no pixel on any screen yet (§8.4, and Task 8 draws it).
+    // clip goes back to its default name, taking the format a clip is born in with it. That
+    // choice has no visible output until the export inspector renders it.
     const writer = await openExtensionPage(context, extensionId, 'popup/popup.html')
     await writer.evaluate(async () => {
       const address = '/shared/settings-store.js'

@@ -784,7 +784,7 @@ describe('the history the popup shows', () => {
     const { historyRows } = await importApi()
 
     // Straight out of the index and in the order it answers — newest first, which is the order
-    // the popup lists them in. Nothing is computed here and nothing walks the disk: §9.2 promises
+    // the popup lists them in. Nothing is computed here and nothing walks the disk: the UI expects
     // a popup that opens instantly, and a browser can hold a thousand of these rows.
     expect(await historyRows()).toEqual([
       {
@@ -821,7 +821,7 @@ describe('the history the popup shows', () => {
     const { storageInUse } = await importApi()
 
     // Never navigator.storage.estimate(): with a real ceiling of 200 MB forced on it, that call
-    // went on reporting 10 GiB while the write failed at 128 MB (§7.4). The sum in the index is
+    // went on reporting 10 GiB while the write failed at 128 MB. The sum in the index is
     // the only number that is true.
     expect(await storageInUse()).toEqual({ bytes: 1_610_612_736, full: true })
   })
@@ -834,7 +834,7 @@ describe('the history the popup shows', () => {
     await undoDelete('h1')
     await pinHistory('h1', true)
 
-    // Marked and not removed: §9.2 answers a deletion with an undo in a toast rather than with a
+    // Marked and not removed because deletion offers undo in a toast rather than
     // confirmation, so the row has to be out of every list at once and recoverable while the
     // toast is up. The files are the sweeper's business, half a minute later.
     const [deleted, undone] = stamped

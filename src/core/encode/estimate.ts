@@ -4,7 +4,7 @@ import type { EncodeGeometry, EncodingChoice } from './codec'
 import { secondsFor, type PaceBook } from './pace'
 
 /**
- * Sources a second encoding will not shrink (§8.4).
+ * Sources that a second encode is unlikely to shrink.
  *
  * Material recorded in AV1 or VP9 is already packed by a codec of a generation neither H.264 nor
  * HEVC improves on: measured, HEVC's advantage over H.264 is +0.029 SSIM at 800 kbit/s and
@@ -40,7 +40,7 @@ export type Estimate =
       bytes: number | null
       /** The four letters of the source entry: `avc1`, `vp09`, `av01`. */
       sourceCodec: string
-      /** §8.4: this source is already efficient, and re-encoding it will more likely inflate it. */
+      /** This source is already efficient, so re-encoding is more likely to inflate it. */
       inflates: boolean
       /** The weight of the same material copied, which is the one number always known. */
       sourceBytes: number
@@ -87,7 +87,7 @@ export function estimateFor(input: EstimateInput): Estimate {
   if (path.kind === 'webp') {
     // The rate goes in as well as the rectangle: an animation of a ten-frame-a-second recording
     // runs at ten, and a geometry that said fifteen would be a number the panel could not stand
-    // behind (`webpGeometry`, task 7 step 1).
+    // behind (see `webpGeometry`).
     const geometry = webpGeometry(path.plan.crop ?? path.plan.geometry, path.plan.geometry.framerate)
     const frames = framesOf(path) ?? 0
     return {

@@ -201,8 +201,8 @@ describe('buildPreview', () => {
 
   it('keeps the gap on the session clock and closes it on the clock of the file', async () => {
     // Two segments with the middle one never watched: two seconds of material, then a hole of
-    // two, then two more. This is the shape the whole task turns on, and the only one where the
-    // two clocks disagree — on unbroken material every number below is the same on both.
+    // two, then two more. This is the shape the preview/export path turns on, and the only one
+    // where the two clocks disagree — on unbroken material every number below is the same on both.
     const built = await preview([0, 2])
     const frames = built.frames
 
@@ -298,7 +298,7 @@ describe('buildPreview', () => {
   })
 
   /**
-   * The size of the picture, which is the one thing a crop is a rectangle of (§8.5).
+   * The picture size, which defines the coordinate space for the crop rectangle.
    *
    * It is taken here rather than off the <video> element on purpose: the element reports the size
    * it is laid out at, which is the window's business, and a rectangle of that would be a

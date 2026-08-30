@@ -2,8 +2,8 @@ import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
   test: {
-    // Все модульные наборы: *.test.ts и *.test.tsx в любом каталоге tests/.
-    // Playwright держит свои наборы в *.spec.ts и сюда не попадает.
+    // All unit suites: *.test.ts and *.test.tsx anywhere under tests/.
+    // Playwright uses *.spec.ts, so its suites are excluded here.
     include: ['tests/**/*.test.{ts,tsx}'],
     environment: 'node',
   },

@@ -39,7 +39,7 @@ const percent = (part: number, whole: number): string => `${whole > 0 ? (part / 
  * left to the reducer, because a frame that visibly escapes the player and is silently pulled
  * back on the next render reads as a broken control. `normalizeCrop` still has the last word: it
  * rounds all four numbers down to even, in every format, because what is cut from is a 4:2:0
- * frame and not a container (§8.5). So the rectangle this returns may still move by a pixel, and
+ * frame and not a container. So the rectangle this returns may still move by a pixel, and
  * it is the reducer's copy that the clip keeps.
  */
 function nextCrop(state: Drag, dx: number, dy: number, source: SourceSize): Crop {
@@ -79,7 +79,7 @@ export interface CropBoxProps {
   /** The rectangle, in the source's own pixels; null means the whole picture. */
   crop: Crop | null
   frameSize: SourceSize
-  /** True for every event of a gesture but the last — §8.5: one press of Ctrl+Z per gesture. */
+  /** True for every event of a gesture but the last, giving one Ctrl+Z entry per gesture. */
   onCrop: (crop: Crop, dragging: boolean) => void
 }
 

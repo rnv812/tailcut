@@ -512,7 +512,7 @@ describe('requestsFor', () => {
 
   it('carries the sound switch of every clip into the plan it is written from', async () => {
     // The one setting of a clip that decides what goes into the file, and the estimate is made
-    // of the same plan (Task 8): built with the switch nailed down, the editor writes silent
+    // of the same plan: with the switch fixed, the editor writes silent
     // clips out of a recording that has sound in it and quotes the silent weight for both.
     const reader = await fileSnapshot()
     const source = (await openClipSource(reader, materialOf(reader.index)))!
@@ -974,7 +974,7 @@ describe('downloadIo', () => {
   })
 
   it('leaves the browser to put the file where it always puts it', async () => {
-    // The default of §9.4, and the one a queue of six clips needs: six dialogues for one press of
+    // The default save mode, which a queue of six clips needs: six dialogs for one press of
     // Export is not a setting anybody leaves on. `uniquify` is what keeps the sixth from writing
     // over the first when two clips of one page come out under one name.
     const asked = stubDownloads(11) as unknown as Array<Record<string, unknown>>
@@ -992,7 +992,7 @@ describe('downloadIo', () => {
   })
 
   it('says a clip was written, so that a recording cut from counts as used', async () => {
-    // §7.3 puts a session the user cut from second only to what is pinned, and the editor is the
+    // A session the user cuts from ranks second only to pinned sessions, and the editor is the
     // only place that knows a clip came out of one. Told after the browser took the file and not
     // before: a refused download is not a session anybody got anything out of.
     stubDownloads(11)

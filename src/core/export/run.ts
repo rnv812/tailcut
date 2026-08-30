@@ -10,7 +10,7 @@ import {
   type QueueEvent,
 } from './queue'
 import { framesOf, laneOf, type ClipPath } from '../encode/path'
-// The lookup lives beside the address space it answers about (Task 3): the runner reads slices,
+// The lookup lives beside the address space it answers about: the runner reads slices,
 // the preview reads snapshot ranges, and both ask the same question of the same shape.
 import { bytesFrom } from './source'
 import type { Located } from '../../shared/types'
@@ -61,11 +61,10 @@ export interface ExportRequest {
 /**
  * Everything the runner wants of the world: bytes in, a file out — and frames, when it re-encodes.
  *
- * `encode` is **required**, not optional, and it costs ten literals in the tests: an io without
- * it would take a re-encoding request and answer `undefined`, which the runner would save as a
- * file. The ten are named in **Files** of this task, with the line the compiler gives each of
- * them; `tests` is inside `tsconfig.include`, so they are the difference between a green
- * `npm run typecheck` and a red one.
+ * `encode` is **required**, not optional: an io without it would take a re-encoding request and
+ * answer `undefined`, which the runner would save as a file. Test fakes implement the same
+ * interface and are covered by `tsconfig.include`, so `npm run typecheck` catches an omitted
+ * encoder before the runner can receive one.
  */
 export interface ExportIo {
   read(at: Located): Promise<Uint8Array>
@@ -236,8 +235,8 @@ export function createRunner(io: ExportIo, options: RunnerOptions = {}): ExportR
       const path = request.path
 
       if (path.kind === 'blocked') {
-        // The answer §8.4 promises, arriving as a failed row rather than as an exception: this
-        // clip is the only one that stops, the rest of the queue drives on (§8.6). The inspector
+        // Unsupported encoding arrives as a failed row rather than an exception. Only this clip
+        // stops while the rest of the queue continues. The inspector
         // said the same thing before the button was pressed; this is for the batch that was
         // started anyway.
         throw new Error(path.reason === 'no-encoder' ? NO_ENCODER : NO_MATERIAL)
@@ -268,7 +267,7 @@ export function createRunner(io: ExportIo, options: RunnerOptions = {}): ExportR
       let total = 0
       for (const slice of slices) total += slice.length
 
-      // The check §8.6 asks for, and it looks at the last of the material rather than the first.
+      // Verify completion at the material's tail rather than assuming success from its head.
       // Storage is best-effort: a snapshot the browser has reclaimed, or one whose tail never
       // reached the disk, answers short here — and the job fails now instead of at ninety per
       // cent. The bytes are not wasted: this is the last slice, and it goes into the file.
@@ -314,7 +313,7 @@ export function createRunner(io: ExportIo, options: RunnerOptions = {}): ExportR
       // material and then quietly write the file anyway.
       if (stale()) return
 
-      // One clip failing is one clip failing (§8.6): the row says what happened and offers to try
+      // One failed clip does not stop the queue: its row explains the failure and offers to retry
       // again, and the queue goes on to the next one from the finally below.
       emit({ type: 'fail', id: job.id, error: messageOf(error), now: now() })
     } finally {

@@ -2,10 +2,10 @@
 <meta charset="utf-8" />
 <title>closed shadow player</title>
 <!--
-  Тот же плеер в закрытом shadow root. Ссылку на корень отдаёт только attachShadow, и наружу
-  она не выходит: element.shadowRoot равен null, обойти это нечем. Элемент не измерить — значит,
-  и вердикта по нему не вынести; расширение обязано не записать такой поток, а не записать его
-  без разбора.
+  The same player inside a closed shadow root. Only attachShadow returns a reference to the root,
+  and that reference never escapes: element.shadowRoot is null and cannot be traversed. Because
+  the element cannot be measured, the extension cannot classify it and must not record the stream
+  indiscriminately.
 -->
 <div id="host"></div>
 <script>
@@ -25,8 +25,8 @@
 
   window.appended = 0
   window.playerSrc = video.src
-  // Ролик крутится по кругу: элемент, недостижимый для наблюдателя, играет всё время опыта —
-  // пустой реестр не должен объясняться тем, что видео просто кончилось.
+  // Loop the video so the element hidden from the watcher plays throughout the test. An empty
+  // registry cannot then be explained by the video simply ending.
   video.loop = true
 
   mediaSource.addEventListener('sourceopen', async () => {

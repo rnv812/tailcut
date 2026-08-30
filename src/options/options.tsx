@@ -273,8 +273,8 @@ export function Options() {
       setFull(totals.fullAt > 0)
     })
     void listSessions(50).then((sessions) => setRate(bitsPerSecondOf(sessions)))
-    // Somebody else may write the same key — the popup has quick switches of its own (§9.2) —
-    // and a page showing a stale value would put it back the moment anything here is touched.
+    // The popup has quick switches of its own, so somebody else may write the same key. A stale
+    // value here would put the old setting back the moment anything on this page is touched.
     return watchSettings((next) => setSettings(next))
   }, [])
 
@@ -350,7 +350,7 @@ export function Options() {
   const preset = presetOf(settings.detection)
   /** What one video of this length costs in memory at the rate this user actually records. */
   const expected = memoryFor(settings.recording.bufferSeconds, rate)
-  /** And the most the frame will hold of it, across every session of one document (§7.2). */
+  /** The most the frame will hold across every session in one document. */
   const ceiling = memoryCeilingFor(settings.recording.bufferSeconds)
   /**
    * How much of that length will really be kept, where the ceiling comes first: the setting is
@@ -547,7 +547,7 @@ export function Options() {
           </span>
           {full && (
             // The browser refused a write below the ceiling above, which it is entitled to do:
-            // the storage is best-effort (§7.4). Said here because the alternative is a limit on
+            // the storage is best-effort. Said here because the alternative is a limit on
             // screen that is not the limit in force and a writer retrying in silence.
             <span class="note full" data-testid="disk-full">
               Disk full — keeping what fits

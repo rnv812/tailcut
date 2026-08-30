@@ -146,7 +146,7 @@ describe('the name a clip is born with', () => {
     expect(named(project)).toBe('site.example A page about cats 00.00-00.04')
   })
 
-  it('is the name of stage 2 when there is no template', () => {
+  it('uses the default name when there is no template', () => {
     // The default is a template too ('{title} {in}'), so this is the tab that was opened before
     // the settings came back — not a user who cleared the field.
     expect(named(reduce(newProject(1200, ctx), { type: 'setIn' }, ctx))).toBe(
@@ -193,14 +193,14 @@ describe('clips', () => {
     const stopped = reduce(one, { type: 'trim', id: 'c1', edge: 'out', time: 9 }, ctx)
     expect(stopped.doc.clips[0]!.out).toBe(4)
 
-    // §8.3: the wall stays. Nothing in this stage moves the handle past a change of quality, so
+    // A quality boundary remains a hard wall. Nothing moves the handle past it, so
     // the same trim asked twice gives the same project back by identity.
     expect(reduce(stopped, { type: 'trim', id: 'c1', edge: 'out', time: 9 }, ctx)).toBe(stopped)
   })
 
   it('trim crosses a hole without being asked, because a hole is not a change of quality', () => {
     // The same clip against material recorded at one quality throughout: nothing stops it, and
-    // the export collapses the hole (§8.2).
+    // export collapses the hole in the output timeline.
     expect(reduce(one, { type: 'trim', id: 'c1', edge: 'out', time: 9 }, oneQuality).doc.clips[0]!.out).toBe(9)
   })
 
@@ -579,7 +579,7 @@ describe('undoModeOf', () => {
 })
 
 /**
- * The framing of a clip: a rectangle, a container and a mode (§8.5, §8.4).
+ * The framing of a clip: crop rectangle, output container, and export mode.
  *
  * The rectangle is put right against `ctx.frameSize` — the size of the picture the player is
  * playing — and not against the clip's own idea of anything: a crop is a rectangle of the open

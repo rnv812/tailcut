@@ -13,7 +13,7 @@ import { boxOf } from './iso/writer'
  *
  * Nothing here touches the media data. Fragments move whole, byte for byte, and the work is all
  * on the boxes around them: track numbers, decode times, absolute offsets that stop being true
- * once a fragment moves. That is also why this is the place the edit list (§8.2) will be written
+ * once a fragment moves. This is also where the edit list for frame-accurate entry is written
  * from later — by then the file is already assembled from parts, and `elst` is one more of them.
  */
 

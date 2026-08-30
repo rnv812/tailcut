@@ -46,7 +46,7 @@ async function recorded(context: BrowserContext, extensionId: string, page: Page
  * Bytes of history on the disk, all sessions together.
  *
  * The measure of "is anything still being recorded", and the popup's own clock is not one: what
- * it shows is the longest continuous run of a session (§6.3), so material arriving after a
+ * it shows is the longest continuous run of a session, so material arriving after a
  * silence starts a second run and leaves the number where it was. Bytes in the index only ever
  * grow, and they grow exactly when a piece lands.
  */
@@ -82,7 +82,7 @@ test('the settings page reads and writes what the rest of the extension does', a
 
     // Out of the index and not out of navigator.storage.estimate(). A fresh profile has recorded
     // nothing, and the browser's own estimate never answers zero: it answered 10 GiB with a real
-    // ceiling of 200 MB (§7.4).
+    // configured ceiling of 200 MB.
     await expect(options.getByTestId('volume')).toHaveText('0 KB')
 
     // A number the setting does not take, typed the way a person types it. `min` and `max` on the
@@ -107,7 +107,7 @@ test('the settings page reads and writes what the rest of the extension does', a
     }).toPass({ timeout: 10_000 })
 
     // And a change made somewhere else reaches the page while it stands open: the popup has
-    // quick switches of its own (§9.2) and they write the same key.
+    // quick switches of its own, and they write the same key.
     await setSettings(context, extensionId, {
       history: { toDisk: false, keepDays: 30, ceilingBytes: 4 * 1024 ** 3 },
     })
@@ -144,7 +144,7 @@ test('switching recording off stops the copying, and switching it back on resume
     const quiet = await onDisk(context, extensionId)
     await page.waitForTimeout(8_000)
 
-    // What was recorded is still there — a switch is not an erasure (§7.2) — and nothing was
+    // What was recorded remains because a switch controls future writes and does not erase data.
     // added to it while the switch was off, although the page went on fetching all the while.
     const held = await recorded(context, extensionId, page)
     expect(held).toBe(before)

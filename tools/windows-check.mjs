@@ -780,8 +780,8 @@ const dryRunLines = (args) => {
 
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 
-const defaultWindowsPaths = () => {
-  const user = process.env.USER || 'nikita'
+export const defaultWindowsPaths = () => {
+  const user = process.env.USER || 'user'
   const tempWsl = `/mnt/c/Users/${user}/AppData/Local/Temp`
   const runId = `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`
   return {

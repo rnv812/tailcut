@@ -80,7 +80,7 @@ test('a session is opened once under its key, and a deleted one comes back to li
 
         const first = await openSession('one', { ...input.page, createdAt: 1_000, lastSeenAt: 2_000 })
         // The reload, the second tab and the return to the same video a day later all arrive here
-        // (§6.1): one key, one row, and the material of all of them in it.
+        // by session identity: one key, one row, and all of their material in it.
         const again = await openSession('one', { ...input.page, createdAt: 9_000, lastSeenAt: 9_000 })
         const beforeAnythingLanded = await listSessions()
 
@@ -96,7 +96,7 @@ test('a session is opened once under its key, and a deleted one comes back to li
         // What the sweeper sees and nothing else does. Both kinds of row the default hides are
         // exactly the two it works from: a session whose first piece never landed, which the
         // repair reconciles against the disk, and a deleted one, whose files it takes once the
-        // undo of §9.2 has expired. Hidden from it, neither would ever leave the disk.
+        // deletion undo has expired. Hidden from it, neither would ever leave the disk.
         const empty = await openSession('two', { ...input.page, createdAt: 8_000, lastSeenAt: 8_000 })
         const hidden = await listSessions(Number.MAX_SAFE_INTEGER, true)
 
@@ -197,7 +197,7 @@ test('what a landed piece leaves in the index: bytes summed, seconds joined, one
     expect(got.row!.sound, 'a session with an audio track was written down as silent').toBe(true)
     // The largest player the video was ever watched in and not the one of the piece that landed
     // last: the second tab watched it in a window half the size, and that says nothing about
-    // what the first one was worth (§7.3).
+    // the first session's eviction value.
     expect(got.row!.widthPx).toBe(1_280)
 
     expect(got.pieces.map((one) => one.file).sort()).toEqual([
@@ -222,7 +222,7 @@ test('a session moves to the key it is now known by, and refuses one that is tak
         }: typeof import('../../src/shared/history-db') = await import(address)
 
         const one = await openSession('live', { ...input.page, createdAt: 1_000, lastSeenAt: 2_000 })
-        // The soft navigation of §6.1: the address and the title come with the key.
+        // A soft navigation changes the address and title along with the merge key.
         const moved = await renameSession(one, 'stated', {
           url: 'https://site.example/next',
           title: 'The next one',
@@ -350,7 +350,7 @@ test('pieces and whole sessions go out with the volume they took', async () => {
         const nothing = await dropPieceRows(id, [])
         const unknown = await dropPieceRows(id, ['no-such-file.tcm'])
 
-        // Eviction by the buffer length (§7.3) takes the two pieces holding 0–2 and leaves 10–12.
+        // Eviction by buffer length takes the two pieces holding 0–2 and leaves 10–12.
         const freed = await dropPieceRows(id, [input.first.file, input.second.file])
         const after = await sessionById(id)
         const left = (await piecesOf(id)).map((one) => one.file)

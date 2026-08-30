@@ -44,7 +44,7 @@ const writeHistoryPiece = historyWorker()
 const history = new HistoryWriter({
   write: (path, bytes) => writeHistoryPiece(path, bytes),
   // By merge key, so that a second tab playing the same video fills in the session the first one
-  // opened rather than starting one of its own beside it (§6.1). A refusal — private browsing, a
+  // opened rather than starting one of its own beside it. A refusal — private browsing, a
   // store the browser would not open — is answered with null, and nothing is written at all.
   open: (event) =>
     openSession(event.key, event.page).catch(() => null),
@@ -58,8 +58,8 @@ const history = new HistoryWriter({
       .then(() => undefined)
       .catch(() => undefined),
   sweep: () => {
-    // Storage is full — full below our own ceiling, which is the browser's right (§7.4 is a
-    // ceiling we keep, not a quota we are given). The service worker lowers the effective ceiling
+    // Storage is full below our configured ceiling, which is the browser's right because its quota
+    // is best-effort. The service worker lowers the effective ceiling
     // to below what is occupied and sweeps; without `full` there would be nothing over the
     // ceiling to take, and this would be a nudge that frees nothing, every thirty seconds.
     void chrome.runtime.sendMessage({ type: 'tc:sweep', full: true }).catch(() => undefined)
@@ -75,7 +75,7 @@ const history = new HistoryWriter({
  */
 const store = new SessionStore({
   openPlain: (url) => openPlainFile(url),
-  // The soundtrack of a page that plays its sound apart from its picture (§5.6). Read from here
+  // The soundtrack of a page that plays its sound apart from its picture. Read from here
   // for the same reason the picture is — a ranged fetch of somebody's CDN is refused from the
   // page — and only as far as the picture is long, so the whole of a music file is never fetched.
   openSound: (url, seconds) => openSoundFile(url, seconds),
@@ -84,10 +84,10 @@ const store = new SessionStore({
   // watched to the end and fully downloaded would otherwise be recorded and never counted on the
   // badge — see tellRecording.
   onFileRead: () => tellRecording(),
-  // Everything that lands on a map goes to the disk as well, in batches (§7.1). The registry says
+  // Everything that lands on a map goes to the disk as well, in batches. The registry says
   // it happened; what to do about it is entirely the writer's business.
   onChunk: (event) => history.take(event),
-  // The key of a session changes while it is being recorded (§6.1), and what is on disk is
+  // The key of a session changes while it is being recorded, and what is on disk is
   // addressed by it. Without this the disk would keep the halves apart.
   onRekey: (event) => history.rekey(event),
 })
@@ -96,13 +96,13 @@ const store = new SessionStore({
  * The settings, live, in the frame that records.
  *
  * Everything they change here is applied on the spot: the recording switch reaches the hook, the
- * history writer is turned on or off, and the buffer length is what the next trim will use
- * (Task 9). Nothing waits for a reload — the settings page is a tab of its own, and a user who
+ * history writer is turned on or off, and the buffer length is what the next trim will use.
+ * Nothing waits for a reload: the settings page is a tab of its own, and a user who
  * changes a setting while a video is playing is changing it about that video.
  *
  * `onChange` is called for the first read too, so the stored settings of a returning user are
  * acted on exactly like a change they make now. Until that read lands the copy answers the
- * defaults of §7.4, which is also what the writer is built with.
+ * defaults, which is also what the writer is built with.
  */
 const settings = liveSettings((next) => {
   history.setEnabled(next.history.toDisk)
@@ -130,7 +130,7 @@ let contextKnown = false
  */
 let pausedByHand = false
 
-/** Whether this page is recorded at all: the mode, the two lists (§9.4) and the quick switch. */
+/** Whether this page is recorded at all: the mode, the two site lists, and the quick switch. */
 function recordingHere(): boolean {
   return !pausedByHand && siteAllows(settings.get(), pageContext.url)
 }
@@ -265,8 +265,8 @@ setInterval(announceRecording, ANNOUNCE_INTERVAL_MS)
  */
 const EVICT_INTERVAL_MS = 2_000
 
-// Both halves of §7.2 off one setting, read afresh on every tick: the buffer length each session
-// is trimmed to, and the ceiling the document as a whole is held under — which is that same
+// Both memory and disk retention use one setting, read afresh on every tick: the buffer length
+// each session is trimmed to, and the ceiling the document as a whole is held under — that same
 // length turned into bytes plus room for the other sessions (see `memoryCeilingFor`). A ceiling
 // that did not move with the setting promised a length the frame then refused to keep.
 setInterval(() => {
@@ -489,7 +489,7 @@ function listing(): SessionList {
 /**
  * Freezes the session and writes it out as a snapshot.
  *
- * This is the "freeze on click" of §9.2 made into a file. Recording carries on behind it: the
+ * This is the popup's "freeze on click" made into a file. Recording carries on behind it: the
  * page keeps appending, triage keeps evicting, and the editor works from the file, so the buffer
  * cannot move under the user while they are choosing.
  *
@@ -546,7 +546,7 @@ async function freezeCaptured(session: Session, meta: SnapshotMeta): Promise<Edi
  * The freeze of material that is still on somebody's server.
  *
  * There is nothing here to lay out: the extension never intercepted a byte of this file, and what
- * it holds is an index of it and a reader (§5.6). So the material is fetched — the very clip
+ * it holds is an index of it and a reader. So the material is fetched — the very clip
  * "Save all" would have written, cut over the stretch the element actually held — and the
  * snapshot is that file, whole, with its movie box named inside it. The editor reads the sample
  * tables straight out of it and never goes back to the network.
@@ -622,7 +622,7 @@ function receiveControl(event: MessageEvent): void {
     }
 
     // A media element of the page has fired `encrypted`: the material it is being fed carries
-    // protection, and that is the end of this page — §5.4 refuses encrypted media outright, and the
+    // protection, and that is the end of this page: encrypted media is refused outright, and the
     // refusal is acted on here rather than left to triage. A verdict speaks about an element the
     // watcher has found, and on a page whose <video> lives in a shadow root it never finds one:
     // tv.apple.com reported its DRM four times while no verdict was ever spoken, and the registry
@@ -637,9 +637,9 @@ function receiveControl(event: MessageEvent): void {
     }
 
     // The size of the player a stream is being watched in, measured by the same poll of the same
-    // isolated world that speaks the verdicts. A value signal of §7.3 and nothing else: no file,
+    // isolated world that speaks the verdicts. A value signal and nothing else: no file,
     // list or save depends on it. Kept whatever the verdict says afterwards: a rejection is a
-    // freeze and not an erasure (§5.5).
+    // freeze and not an erasure.
     if (data.type === 'tc:player') {
       store.sawPlayer(data.sourceId, data.widthPx)
       return
@@ -670,7 +670,7 @@ function receiveControl(event: MessageEvent): void {
 /** Takes media facts forwarded by the content script through the same ordered private port. */
 function receivePage(data: PageToBridge): void {
   // The page has stated how long the whole video is. It is the third component of the merge key
-  // (§6.1) and the only one that tells two videos of a feed apart where the address does not
+  // and the only one that tells two videos of a feed apart where the address does not
   // change from one to the next; the registry decides for itself whether it is news.
   if (data.type === 'tc:duration') {
     store.setDuration(data.sourceId, data.seconds)

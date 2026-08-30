@@ -442,7 +442,7 @@ describe('planClip', () => {
     expect(video.skipTicks).toBe(12288)
 
     // And the frame the clip opens on is the frame that was asked for, which is the promise of
-    // §8.2 the whole stage exists for. Entered at the key frame at 24, the earliest composition
+    // Exact entry is the reason the export head may be re-encoded. Entered at key frame 24, the earliest composition
     // in the file lies 1024 ticks past a skip of zero, and this is the frame two later.
     const shown = composedFrames(video)
       .filter((frame) => frame.at >= video.skipTicks)
@@ -603,7 +603,7 @@ describe('planClip', () => {
     // 29.97 does not: the fifteenth frame of 3003 ticks at 90000 stands at 0.5005 s, which
     // measures back as 45044.999999999993 in a double. Truncated, that is one tick before the
     // frame, `shownAt` answers the frame before it, and the clip starts a whole frame early —
-    // the single promise of §8.2 this stage exists for, broken on a few frames in a hundred.
+    // the frame-accurate entry promise, otherwise broken on a few frames in a hundred.
     const video = madeTrack('video', 90_000, 3003, [{ at: 0, count: 60 }])
     const plan = planClip(
       { video },
@@ -669,7 +669,7 @@ describe('planClip', () => {
   it('enters on the frame that is on the screen at the in point, not on the one after it', () => {
     // An in point off the frame grid, which is where a dragged handle lands: 2.02 s sits inside
     // the frame that begins at 2.0000, and the next one begins at 2.0417. The frame on the screen
-    // at that instant is the first of the two, and the clip has to open on it — §8.2 promises the
+    // at that instant is the first of the two, and the clip has to open on it to remain frame-accurate.
     // clip starts at the instant that was asked for, and entering at the frame after it starts
     // the clip 42 ms late instead. Nothing in the file would say so: the edit list dutifully
     // hides the extra frame, the plan agrees with itself, and the material is simply not there.

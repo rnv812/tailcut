@@ -22,8 +22,8 @@ import { clipSourceFrom, movieTracksOf } from './source'
  * The file is whole and reachable, so the material the viewer never watched is reachable too.
  * It is deliberately not offered. Three reasons, in the order they were weighed.
  *
- * The promise. §2 of the design puts "downloading the video over the network" out of scope, and
- * plain delivery is not a corner of the web but the norm — eighteen of the twenty-one live pages
+ * This reader never downloads the whole remote video. Plain delivery is not a corner of the web
+ * but the norm: eighteen of the twenty-one live pages
  * that delivered any video at all. An extension that offered the whole file wherever it found one
  * would be a general-purpose downloader on most of the web, which is a different product with a
  * different standing.
@@ -51,7 +51,7 @@ export interface PlainFile {
   tracks: SourceTrack[]
   /**
    * What it holds, in the names its own container gives them: the second component of the merge
-   * key (§6.1). Four-letter sample entry codes out of an mp4, CodecID strings out of a Matroska —
+   * merge key. Four-letter MP4 sample-entry codes and Matroska CodecID strings are both valid:
    * `avc1` and `mp4a` beside `V_VP8` and `A_VORBIS`. The key only has to tell one file from
    * another under the same address, and either name does that.
    */
@@ -60,7 +60,7 @@ export interface PlainFile {
   durationSeconds: number
   /** A track was declared that could not be indexed: a saved file is short of it. */
   refusedTracks: boolean
-  /** The file carries protected media, and nothing of it may be recorded (§5.4). */
+  /** The file carries protected media, so none of it may be recorded. */
   encrypted: boolean
 }
 
@@ -130,7 +130,7 @@ export interface PlainCut {
   /**
    * The file holds more than one track of a kind, and a clip carries one of each.
    *
-   * An alternate and not a rendition (§6.2): a file on somebody's server states its tracks once
+   * An alternate rather than a rendition: a remote file states its tracks once
    * and for all, and a second one of a kind in it is other material — a dub beside the original,
    * a commentary beside the film — rather than the same material recorded over again at another
    * quality. Measured on w3schools' mov_bbb.mp4: one picture, two soundtracks.
@@ -147,7 +147,7 @@ export interface PlainCut {
  *
  * ## What is being paired, and what a clip means when it is
  *
- * One site of the seven surveyed plays its picture and its sound as two media elements (§5.6):
+ * One surveyed site plays picture and sound through two media elements:
  * `<video src>` of 9.48 s with no audio track in it at all, and `<audio src>` of 66.35 s, both
  * looping, each on its own cycle. There is no single piece of media on that page and there is no
  * single clock: what the viewer gets is the picture at t mod 9.48 over the sound at t mod 66.35,
@@ -155,18 +155,18 @@ export interface PlainCut {
  *
  * So a clip here has to be defined rather than found, and it is defined by three rules.
  *
- * **The picture is the clip, and states its length.** §8.2 already cuts the sound to the picture
+ * **The picture defines the clip and its length.** Sound is cut to picture duration
  * and not the other way round; here that decides the whole question of "which of the two lengths".
  * The extra 56.9 seconds of soundtrack are not clipped and never offered: they are somebody's
  * music track, and a file of a song with a few seconds of picture at the front is not a clip of
- * anything. It would also be the general-purpose downloader §2 puts out of scope.
+ * anything. Doing more would turn this path into a general-purpose downloader.
  *
  * **Both are taken from zero.** The pairing written into the file is the one the page itself
  * makes when it loads, with both elements at the start — and it is the only pairing that can be
- * stated in media time, which is the clock every other part of this program measures on (§6.3).
+ * stated in media time, the clock used throughout capture and export.
  * Taken instead from wherever the sound happened to have got to at the instant of the click, the
  * clip would be a property of that instant: two saves of one session would hold different sound,
- * and §6.1 says two saves of one session are two copies of one video.
+ * because two saves of one merged session must remain two copies of the same video.
  *
  * **There is no loop boundary, because nothing is looped.** The clip cannot outrun the picture's
  * own material, so at most one turn of the picture is ever written, and the sound needed for it

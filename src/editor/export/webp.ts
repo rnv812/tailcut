@@ -6,10 +6,8 @@ import { decodedFrames, type Codecs, type FrameSource } from './frames'
 /**
  * The wrapper `convertToBlob` puts on every still and the animation does not keep: measured.
  *
- * `VP8X` 18 + `ICCP` 464 = 482, and it is 482 in every row of the research artifact rather than a
- * number somebody remembered: `webp/out/w10.json` gives `iccpBytes` 72 300 over 150 frames,
- * 144 600 over 300 and 433 800 over 900. At 640×360 that is 6.8 % of the file, not the 5 % an
- * earlier draft of this plan said.
+ * `VP8X` 18 + `ICCP` 464 = 482, confirmed by totals of 72 300 over 150 frames, 144 600 over 300,
+ * and 433 800 over 900. At 640×360 that is 6.8 % of the file, not an earlier 5 % estimate.
  */
 export const STILL_HEADER_BYTES = 482
 
@@ -48,7 +46,7 @@ export function liveSurface(): Surface {
       canvas.width = width
       canvas.height = height
     },
-    // The frame arrives already cut to the crop (§8.5, `decodedFrames`), so this is a fit and
+    // The frame arrives already cut to the crop (`decodedFrames`), so this is a fit and
     // nothing else: source rectangle to destination rectangle, both whole, aspect ratio kept
     // because `webpGeometry` scaled both sides by one number.
     draw: (frame) => context.drawImage(frame, 0, 0, canvas.width, canvas.height),

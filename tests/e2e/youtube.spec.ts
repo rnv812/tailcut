@@ -14,8 +14,8 @@ import {
  *
  * The assertions are one function called by both, and the offline leg is not a rehearsal of the
  * live one. It asks the same questions of material that cannot change under the test, it needs no
- * network, it is in the default suite — and it is what closes this step. The live leg is an
- * addition: it goes out to somebody else's page, which changes more often than tests do, and a
+ * network, it is in the default suite, and it is the release gate. The live leg is diagnostic:
+ * it goes out to somebody else's page, which changes more often than tests do, and a
  * red build over a redesigned consent dialog tells nobody anything. Before a release:
  *
  *   TAILCUT_LIVE=1 npx playwright test youtube
@@ -75,12 +75,12 @@ const FEEDS = [
 /**
  * The title the shaped page wears, and the name the file has to come out under.
  *
- * Not Latin and not short, because a page title is neither as a rule. Nothing here is forbidden
- * to a file system: what a title does to a file name when it *is* forbidden has its own tests
- * (tests/core/naming.test.ts), and repeating them through a browser would only make this run
+ * It includes non-Latin text, spaces and punctuation common in real page titles. Nothing here is
+ * forbidden to a file system: what a title does to a file name when it *is* forbidden has its own
+ * tests (tests/core/naming.test.ts), and repeating them through a browser would only make this run
  * longer and no more truthful.
  */
-const SHAPED_TITLE = 'Ночной эфир — tailcut'
+const SHAPED_TITLE = '夜の放送 — tailcut'
 
 type PageState = { allAppended?: boolean; failure?: string | null; unsupported?: string | null }
 
@@ -110,7 +110,8 @@ async function cutAndExport(
   const { editor } = await clickEdit(context, player, extensionId)
   await editor.waitForFunction(() => (document.querySelector('video')?.readyState ?? 0) >= 2)
   // The material has been indexed: the line the panel shows while it is still reading is gone
-  // (Task 16). The button itself says nothing yet — with no clips it is disabled either way, and
+  // while the index is loading. The button itself says nothing yet: with no clips it is disabled
+  // either way, and
   // asking it here would be asking about the empty document rather than about the recording.
   await expect(editor.getByTestId('export-note')).toHaveCount(0)
 

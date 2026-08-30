@@ -18,7 +18,7 @@ export const ZOOM_KEY_STEP = 1.4
  *
  * The whole layout is one table, and it is pure: the listener that owns the DOM (state/keys.ts)
  * decides only whether the focus is in a text field, and asks this for the rest. Space belongs to
- * the player and is deliberately left unbound here — the player task takes it.
+ * the player and is deliberately left unbound here — the player component takes it.
  */
 export function actionFor(press: KeyPress): SessionAction | null {
   const key = press.key.length === 1 ? press.key.toLowerCase() : press.key
@@ -31,7 +31,7 @@ export function actionFor(press: KeyPress): SessionAction | null {
     return null
   }
 
-  // Alt is the modifier that frees a handle from snapping while it is dragged (Task 9). It never
+  // Alt frees a dragged handle from snapping. It never
   // starts an action of its own, so that holding it and pressing something is not a command.
   if (press.alt) return null
 

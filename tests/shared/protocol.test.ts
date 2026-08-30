@@ -111,7 +111,7 @@ const rejected: [string, unknown][] = [
   ],
   // The size of the player, measured by the same poll of the same isolated world. It travels the
   // same road as the verdict and for the same reason is none of the page's business: the number
-  // is a signal of value (§7.3), and a page that could state it would be flattering a recording
+  // is a value signal, and allowing a page to state it would let the page inflate a recording
   // of its own at the expense of everybody else's.
   [
     'the size of a player: the content script measures that',

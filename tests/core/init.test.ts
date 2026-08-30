@@ -7,9 +7,9 @@ const vp9 = new Uint8Array(readFileSync('tests/fixtures/vp9/init-stream0.m4s'))
 const media = new Uint8Array(readFileSync('tests/fixtures/h264/chunk-stream0-00001.m4s'))
 
 describe('parseInit', () => {
-  it('читает видеодорожку H.264', () => {
-    // весь разбор целиком: и состав дорожек, и каждое поле — точные значения,
-    // а не «больше нуля»: чужое поле tkhd/mdhd тоже положительно
+  it('reads an H.264 video track', () => {
+    // Assert the complete parse: both track composition and each exact field value. A generic
+    // "greater than zero" check could also pass when reading the wrong tkhd or mdhd field.
     expect(parseInit(h264)).toEqual({
       tracks: [{
         trackId: 1, kind: 'video', timescale: 12288, codec: 'avc1',
@@ -18,14 +18,14 @@ describe('parseInit', () => {
     })
   })
 
-  it('читает видеодорожку VP9 — разбор не заточен под один кодек', () => {
+  it('reads a VP9 video track without assuming one codec', () => {
     const video = parseInit(vp9)!.tracks.find((t) => t.kind === 'video')!
     expect(video.codec).toBe('vp09')
     expect(video.timescale).toBe(12288)
     expect(video.trackId).toBe(1)
   })
 
-  it('читает аудиодорожку', () => {
+  it('reads an audio track', () => {
     const audioInit = new Uint8Array(readFileSync('tests/fixtures/h264/init-stream1.m4s'))
     const audio = parseInit(audioInit)!.tracks.find((t) => t.kind === 'audio')!
     expect(audio.codec).toBe('mp4a')
@@ -33,12 +33,12 @@ describe('parseInit', () => {
     expect(audio.trackId).toBe(1)
   })
 
-  it('возвращает null, если moov отсутствует', () => {
+  it('returns null when moov is absent', () => {
     expect(parseInit(media)).toBeNull()
   })
 })
 
-// --- Синтетические init-сегменты для случаев, которых нет в фикстурах ---
+// --- Synthetic init segments for cases absent from the fixtures ---
 
 const ascii = (s: string): Uint8Array => Uint8Array.from(s, (c) => c.charCodeAt(0))
 const u8 = (n: number): Uint8Array => Uint8Array.of(n)
@@ -50,7 +50,7 @@ function u32(n: number): Uint8Array {
   return out
 }
 
-/** Число с фиксированной точкой 16.16 — так записаны width/height в tkhd. */
+/** A 16.16 fixed-point number, as tkhd stores width and height. */
 function fixed1616(value: number): Uint8Array {
   return u32(Math.round(value * 65536))
 }
@@ -72,21 +72,21 @@ function box(type: string, ...parts: Uint8Array[]): Uint8Array {
 }
 
 interface TrackSpec {
-  /** версия tkhd и mdhd: в v1 времена по 8 байт, поля за ними уезжают вперёд */
+  /** tkhd and mdhd version; v1 uses eight-byte times and shifts later fields forward. */
   version?: 0 | 1
   trackId: number
-  /** handler_type из hdlr: 'vide', 'soun' или любой другой — например 'text' */
+  /** handler_type from hdlr: 'vide', 'soun', or any other value such as 'text'. */
   handler: string
   timescale: number
   width?: number
   height?: number
-  /** null — stsd не класть вовсе: кодек такой дорожки неизвестен */
+  /** null omits stsd entirely, leaving the track codec unknown. */
   codec?: string | null
-  /** готовый stsd вместо собранного по codec — для битых и усечённых боксов */
+  /** A complete stsd override for malformed and truncated boxes. */
   stsd?: Uint8Array
-  /** ещё один mdhd следом за первым: контейнер с двумя одноимёнными боксами */
+  /** An extra mdhd after the first, producing two same-name boxes in one container. */
   extraTimescale?: number
-  /** обязательный бокс, который не класть в дорожку: неполный moov с чужого сайта */
+  /** A required box to omit, modeling an incomplete moov received from a site. */
   omit?: 'tkhd' | 'mdia' | 'mdhd' | 'hdlr' | 'minf' | 'stbl'
 }
 
@@ -140,7 +140,7 @@ function trak(spec: TrackSpec): Uint8Array {
   )
 }
 
-/** moov, как в init-сегменте: mvhd и дорожки. */
+/** A moov shaped like an init segment: mvhd followed by tracks. */
 function moov(...traks: Uint8Array[]): Uint8Array {
   return box('moov', box('mvhd', zeros(100)), ...traks)
 }
@@ -158,7 +158,7 @@ function moovWithMvex(trexes: Uint8Array[], ...traks: Uint8Array[]): Uint8Array 
   return box('moov', box('mvhd', zeros(100)), box('mvex', ...trexes), ...traks)
 }
 
-describe('parseInit на синтетических init-сегментах', () => {
+describe('parseInit on synthetic init segments', () => {
   it('reports the sample duration the movie states for a track in its trex', () => {
     // dzen.ru delivers its picture this way: the trun of every fragment past the first states no
     // durations at all and the tfhd states no default, so this one field of the init segment is
@@ -190,8 +190,8 @@ describe('parseInit на синтетических init-сегментах', ()
     expect(parseInit(init)!.tracks[0]!.defaultSampleDuration).toBe(0)
   })
 
-  it('округляет дробные размеры 16.16 до целых пикселей', () => {
-    // анаморфный кадр: 853.33 в 16.16 — не целое число, .75 обязано уйти вверх
+  it('rounds fractional 16.16 dimensions to whole pixels', () => {
+    // An anamorphic frame: 853.33 in 16.16 is fractional, and .75 must round upward.
     const init = moov(trak({ trackId: 7, handler: 'vide', timescale: 12800, width: 853.33, height: 479.75 }))
     const video = parseInit(init)!.tracks.find((t) => t.kind === 'video')!
     expect(video.width).toBe(853)
@@ -199,10 +199,10 @@ describe('parseInit на синтетических init-сегментах', ()
     expect(video.trackId).toBe(7)
   })
 
-  it('делит 16.16 ровно на 65536: доли по обе стороны от половины пикселя', () => {
-    // 640 + 32767/65536 — на волос ниже половины пикселя, 360 + 32769/65536 — на
-    // волос выше. Делитель 65535 растянул бы ширину через границу округления
-    // (641), делитель 65537 сжал бы высоту обратно (360).
+  it('divides 16.16 by exactly 65536 on both sides of a half-pixel', () => {
+    // 640 + 32767/65536 lies just below half a pixel, while 360 + 32769/65536 lies just above.
+    // Dividing by 65535 would push width across the rounding boundary to 641, while 65537 would
+    // pull height back to 360.
     const init = moov(trak({
       trackId: 5, handler: 'vide', timescale: 12800,
       width: 640 + 32767 / 65536, height: 360 + 32769 / 65536,
@@ -212,9 +212,9 @@ describe('parseInit на синтетических init-сегментах', ()
     expect(video.height).toBe(361)
   })
 
-  it('берёт первый mdhd, когда в mdia их два', () => {
-    // два mdhd в одном контейнере — нарушение спецификации, но байты приходят
-    // со стороннего сайта: выбор обязан быть предсказуемым, а не «победил последний»
+  it('uses the first mdhd when mdia contains two', () => {
+    // Two mdhd boxes in one container violate the format, but bytes come from third-party sites.
+    // Selection must be deterministic instead of allowing the last box to win accidentally.
     const init = moov(trak({
       trackId: 1, handler: 'vide', timescale: 12288, extraTimescale: 90000, width: 320, height: 240,
     }))
@@ -226,7 +226,7 @@ describe('parseInit на синтетических init-сегментах', ()
     })
   })
 
-  it('читает track_ID и timescale по смещениям версии 1', () => {
+  it('reads track_ID and timescale at version 1 offsets', () => {
     const init = moov(trak({
       version: 1, trackId: 42, handler: 'vide', timescale: 90000, width: 640, height: 360,
     }))
@@ -237,8 +237,8 @@ describe('parseInit на синтетических init-сегментах', ()
     expect(video.height).toBe(360)
   })
 
-  it('перечисляет все дорожки муксированного moov, а не только первую', () => {
-    // video и audio в одном moov — так выглядит не-DASH init-сегмент
+  it('lists every track in a muxed moov rather than only the first', () => {
+    // Video and audio in one moov model a non-DASH init segment.
     const init = parseInit(moov(
       trak({ trackId: 1, handler: 'vide', timescale: 12288, width: 320, height: 240 }),
       trak({ trackId: 2, handler: 'soun', timescale: 44100, codec: 'mp4a' }),
@@ -247,7 +247,7 @@ describe('parseInit на синтетических init-сегментах', ()
 
     const video = init.tracks.find((t) => t.kind === 'video')!
     const audio = init.tracks.find((t) => t.kind === 'audio')!
-    // у второй дорожки свои поля, а не скопированные с первой
+    // The second track has its own fields rather than copies of the first track's values.
     expect(video.trackId).toBe(1)
     expect(video.timescale).toBe(12288)
     expect(video.codec).toBe('avc1')
@@ -256,34 +256,33 @@ describe('parseInit на синтетических init-сегментах', ()
     expect(audio.codec).toBe('mp4a')
   })
 
-  it('отбрасывает дорожку с усечённым stsd, а не выдаёт кодек из нулевых байтов', () => {
-    // тело stsd ровно 8 байт: version+flags и entry_count, sample entry обрезан
+  it('drops a track with a truncated stsd instead of producing a codec from zero bytes', () => {
+    // The stsd body is exactly eight bytes: version+flags and entry_count, with no sample entry.
     const truncated = trak({
       trackId: 1, handler: 'vide', timescale: 1000, stsd: box('stsd', zeros(4), u32(1)),
     })
     expect(parseInit(moov(truncated))).toBeNull()
 
-    // контроль: тот же конструктор с целым stsd читает настоящий кодек
+    // Control: the same constructor reads a real codec from a complete stsd.
     const whole = trak({ trackId: 1, handler: 'vide', timescale: 1000, codec: 'avc1' })
     expect(parseInit(moov(whole))!.tracks[0]!.codec).toBe('avc1')
   })
 
-  // Тип sample entry лежит в теле stsd на байтах 12..15. Если тело обрывается
-  // внутри них, недостающие байты читаются как undefined, а
-  // String.fromCharCode(undefined) возвращает '\0' — строку непустую, а значит
-  // истинную: дорожка прошла бы дальше с мусором вместо кодека.
-  it.each([12, 13, 14, 15])('отбрасывает дорожку: тело stsd в %i байт обрывает тип sample entry', (bodyBytes) => {
-    // заголовок sample entry урезан до bodyBytes - 8 байт: size целиком, тип частично
+  // The sample entry type occupies bytes 12..15 of the stsd body. If the body ends inside that
+  // range, missing bytes read as undefined. String.fromCharCode(undefined) returns a non-empty
+  // "\0", so without a length check the track would proceed with garbage in place of a codec.
+  it.each([12, 13, 14, 15])('drops a track when a %i-byte stsd body truncates the sample entry type', (bodyBytes) => {
+    // The sample entry header is cut to bodyBytes - 8 bytes: complete size, partial type.
     const stsd = box('stsd', zeros(4), u32(1), u32(8), ascii('avc1'.slice(0, bodyBytes - 12)))
-    expect(stsd.byteLength - 8).toBe(bodyBytes) // тело именно той длины, ради которой тест
+    expect(stsd.byteLength - 8).toBe(bodyBytes) // Pin the exact body length under test.
 
     const broken = trak({ trackId: 1, handler: 'vide', timescale: 1000, stsd })
     expect(parseInit(moov(broken))).toBeNull()
   })
 
-  it('принимает stsd с телом ровно в 16 байт: тип sample entry прочитан целиком', () => {
-    // законный минимум: version+flags(4) + entry_count(4) + sample entry из
-    // одного заголовка(8). Байты 12..15 — последние в теле, но они на месте.
+  it('accepts an exact 16-byte stsd body with a complete sample entry type', () => {
+    // This is the valid minimum: version+flags(4), entry_count(4), and one eight-byte sample entry
+    // header. Bytes 12..15 are the last body bytes, but all are present.
     const stsd = box('stsd', zeros(4), u32(1), box('avc1'))
     expect(stsd.byteLength - 8).toBe(16)
 
@@ -296,28 +295,27 @@ describe('parseInit на синтетических init-сегментах', ()
     })
   })
 
-  it('возвращает null, когда moov есть, но пригодных дорожек в нём нет', () => {
-    // контроль: тот же конструктор с полноценной дорожкой даёт непустой разбор
+  it('returns null when moov contains no usable tracks', () => {
+    // Control: the same constructor returns a non-empty parse for a complete track.
     const good = trak({ trackId: 1, handler: 'vide', timescale: 1000, width: 320, height: 240 })
     expect(parseInit(moov(good))!.tracks).toHaveLength(1)
 
-    // moov без trak вовсе
+    // A moov with no trak at all.
     expect(parseInit(moov())).toBeNull()
-    // trak без stsd: кодек неизвестен, дорожка отбрасывается — остаётся пустой список
+    // A trak without stsd has an unknown codec and is dropped, leaving an empty list.
     const noCodec = trak({ trackId: 1, handler: 'vide', timescale: 1000, codec: null })
     expect(parseInit(moov(noCodec))).toBeNull()
-    // дорожка с чужим handler'ом: ни видео, ни звук — тоже не в счёт
+    // A track with an unrelated handler is neither video nor audio and does not count.
     const noKind = trak({ trackId: 1, handler: 'text', timescale: 1000 })
     expect(parseInit(moov(noKind))).toBeNull()
   })
 
-  // parseInit кормится произвольными байтами со стороннего сайта: обязательного
-  // бокса может не быть вовсе, и это должно кончаться отброшенной дорожкой,
-  // а не исключением на разборе undefined.
-  describe.each(['tkhd', 'mdia', 'mdhd', 'hdlr', 'minf', 'stbl'] as const)('дорожка без %s', (omit) => {
+  // parseInit receives arbitrary bytes from third-party sites. A required box may be absent, which
+  // must drop the track rather than throw while parsing undefined.
+  describe.each(['tkhd', 'mdia', 'mdhd', 'hdlr', 'minf', 'stbl'] as const)('track without %s', (omit) => {
     const broken = trak({ trackId: 2, handler: 'vide', timescale: 90000, width: 640, height: 360, omit })
 
-    it('отбрасывается, не мешая разбору соседней целой дорожки', () => {
+    it('is dropped without preventing a complete neighboring track from parsing', () => {
       const whole = trak({ trackId: 1, handler: 'vide', timescale: 12288, width: 320, height: 240 })
       expect(parseInit(moov(whole, broken))).toEqual({
         tracks: [{
@@ -327,7 +325,7 @@ describe('parseInit на синтетических init-сегментах', ()
       })
     })
 
-    it('даёт null, когда других дорожек в moov нет', () => {
+    it('returns null when moov contains no other tracks', () => {
       expect(parseInit(moov(broken))).toBeNull()
     })
   })

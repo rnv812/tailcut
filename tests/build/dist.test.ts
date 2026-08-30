@@ -5,8 +5,8 @@ import { Script } from 'node:vm'
 import { BRIDGE_PATH, EDITOR_PATH } from '../../src/shared/protocol'
 
 /**
- * Сборка идёт под собственным таймаутом, заведомо меньшим хукового: тогда и зависшая сборка
- * приходит ловимым исключением, а не срывом хука.
+ * The build has its own timeout, deliberately shorter than the hook timeout, so a hung build
+ * becomes a catchable exception instead of timing out the hook.
  */
 const BUILD_TIMEOUT_MS = 120_000
 
@@ -19,19 +19,18 @@ let buildFailure: Error | undefined
 
 beforeAll(() => {
   try {
-    // Сборка идёт с нуля: на прогретом dist набор проверял бы пересборку поверх готового
-    // дерева и не заметил бы, что на чистом клоне сборка вообще не запускается.
+    // Build from scratch. With a warm dist, the suite would only test rebuilding over an existing
+    // tree and would miss a build that cannot start on a clean clone.
     rmSync('dist', { recursive: true, force: true })
     execFileSync('npm', ['run', 'build'], { stdio: 'pipe', timeout: BUILD_TIMEOUT_MS })
   } catch (cause) {
-    buildFailure = new Error(`сборка не состоялась, проверять нечего:\n${buildFailureText(cause)}`)
+    buildFailure = new Error(`the build failed, so there is nothing to test:\n${buildFailureText(cause)}`)
   }
 }, BUILD_TIMEOUT_MS + 30_000)
 
 /**
- * Несостоявшаяся сборка обязана валить каждый тест. Брошенное прямо из beforeAll исключение
- * увело бы весь набор в skipped: ни одной проверки не выполнено, но и ни одна не красная —
- * покрытие молча вырождается в ноль.
+ * A failed build must fail every test. Throwing directly from beforeAll would mark the entire
+ * suite as skipped: no checks run, none fail, and coverage silently drops to zero.
  */
 beforeEach(() => {
   if (buildFailure) throw buildFailure
@@ -48,9 +47,9 @@ type EntryOptions = {
 }
 
 /**
- * Конфигурация сборки, прочитанная из самого build.mjs: импорт отдаёт только её, собирает
- * скрипт лишь при запуске из командной строки. Спецификатор вычисляемый, потому что build.mjs
- * не типизирован — контракт задан типом EntryOptions выше.
+ * Build configuration read from build.mjs itself. Importing it only returns the configuration;
+ * the script builds only when invoked from the command line. The specifier is computed because
+ * build.mjs is untyped, so EntryOptions above defines the contract.
  */
 const BUILD_SCRIPT = new URL('../../build.mjs', import.meta.url).href
 
@@ -61,11 +60,11 @@ const buildOptions = async (dev: boolean): Promise<EntryOptions[]> => {
 
 const optionsFor = async (entry: string): Promise<EntryOptions> => {
   const found = (await buildOptions(false)).find((o) => entry in o.entryPoints)
-  if (!found) throw new Error(`точка входа ${entry} не собирается`)
+  if (!found) throw new Error(`entry point ${entry} is not built`)
   return found
 }
 
-/** Скрипты, которые сборка обязана положить в dist, — по одному на точку входа. */
+/** Scripts the build must place in dist, one per entry point. */
 const shippedScripts = async (): Promise<string[]> =>
   (await buildOptions(false))
     .flatMap((o) => Object.keys(o.entryPoints).map((entry) => `${entry}.js`))
@@ -82,7 +81,7 @@ type ContentScript = {
 const contentScript = (js: string): ContentScript => {
   const declared: ContentScript[] = manifest().content_scripts
   const found = declared.find((c) => c.js.includes(js))
-  if (!found) throw new Error(`content script ${js} не объявлен в манифесте`)
+  if (!found) throw new Error(`content script ${js} is not declared in the manifest`)
   return found
 }
 
@@ -91,7 +90,7 @@ const distScripts = (): string[] =>
     .filter((rel) => rel.endsWith('.js'))
     .sort()
 
-// Статические import/export … from "…" и side-effect import "…" на верхнем уровне бандла.
+// Static import/export … from "…" and side-effect import "…" at the bundle's top level.
 const STATIC_IMPORT =
   /(?:^|[;}])\s*(?:import|export)\b[^;'"`]*?\bfrom\s*['"]([^'"]+)['"]|(?:^|[;}])\s*import\s*['"]([^'"]+)['"]/g
 
@@ -104,16 +103,16 @@ const importedSpecifiers = (code: string): string[] => {
   return found
 }
 
-// Голый спецификатор — тот, что Chrome не может разрешить без сборщика: не относительный,
-// не абсолютный путь и не URL со схемой.
+// A bare specifier is one Chrome cannot resolve without a bundler: not relative, not an absolute
+// path, and not a URL with a scheme.
 const isBareSpecifier = (spec: string): boolean => !/^(?:\.{1,2}\/|\/|[a-zA-Z][\w+.-]*:)/.test(spec)
 
-// Начало обёртки, в которую esbuild укладывает бандл формата iife.
+// Start of the wrapper esbuild puts around an IIFE bundle.
 const IIFE_WRAPPER_START = /^"use strict";\s*\(\s*\(\s*\)\s*=>\s*\{/
 
 /**
- * Пространства chrome.*, которые MV3 отдаёт только по одноимённому разрешению: без строки
- * в permissions такое пространство в рантайме просто undefined, и вызов падает.
+ * chrome.* namespaces MV3 exposes only with the matching permission. Without the permissions
+ * entry, the namespace is undefined at run time and a call fails.
  */
 const GATED_APIS = new Set([
   'alarms', 'bookmarks', 'contextMenus', 'cookies', 'declarativeNetRequest', 'downloads',
@@ -121,7 +120,7 @@ const GATED_APIS = new Set([
   'tabCapture', 'topSites', 'webNavigation', 'webRequest',
 ])
 
-/** Пространства chrome.*, к которым обращается код расширения. */
+/** chrome.* namespaces used by the extension code. */
 const chromeApisUsedInSrc = (): string[] => {
   const namespaces = new Set<string>()
 
@@ -136,8 +135,8 @@ const chromeApisUsedInSrc = (): string[] => {
 }
 
 /**
- * Файл content-скрипта → мир, в котором он обязан исполняться. Мир задаёт роль: из MAIN виден
- * и подменяем MSE самой страницы, из ISOLATED — только собственные объекты расширения.
+ * Content-script file to the world where it must run. The world defines its role: MAIN can see
+ * and patch the page's MSE, while ISOLATED can see only the extension's own objects.
  */
 const CONTENT_SCRIPT_WORLDS: Record<string, string> = {
   'page/main-hook.js': 'MAIN',
@@ -145,19 +144,19 @@ const CONTENT_SCRIPT_WORLDS: Record<string, string> = {
 }
 
 /**
- * Разрешение → способность, на которой оно держится. Уходит способность — уходит разрешение,
- * и наоборот: без строки в permissions способности в рантайме не существует.
+ * Permission to the capability that depends on it. Removing the capability removes the need for
+ * the permission, and without the permissions entry the capability does not exist at run time.
  */
 const REQUIRED_PERMISSIONS: Record<string, string> = {
-  activeTab: 'попап дотягивается до вкладки, на которой стоит пользователь',
-  alarms: 'бейдж пересчитывается и после того, как service worker уснул',
-  downloads: 'готовый клип сохраняется файлом — то, ради чего расширение и существует',
-  scripting: 'попап и бейдж перечисляют фреймы вкладки, чтобы спросить каждый',
-  storage: 'реестр сессий и правила доменов переживают смерть service worker',
+  activeTab: 'the popup can access the tab the user is viewing',
+  alarms: 'the badge is recalculated even after the service worker goes to sleep',
+  downloads: 'the finished clip is saved as a file, which is the extension\'s purpose',
+  scripting: 'the popup and badge enumerate every frame in the tab to query each one',
+  storage: 'the session registry and domain rules survive service worker termination',
 }
 
-describe('сборка', () => {
-  it('кладёт в dist каждый файл, на который ссылается манифест', () => {
+describe('build', () => {
+  it('puts every file referenced by the manifest in dist', () => {
     const m = manifest()
     const referenced: string[] = [
       m.background.service_worker,
@@ -169,11 +168,11 @@ describe('сборка', () => {
 
     expect(referenced.length).toBeGreaterThan(5)
     for (const rel of referenced) {
-      expect(existsSync(`dist/${rel}`), `dist/${rel} отсутствует`).toBe(true)
+      expect(existsSync(`dist/${rel}`), `dist/${rel} is missing`).toBe(true)
     }
   })
 
-  it('страницы попадают в сборку вместе со своими скриптами', () => {
+  it('includes pages and their scripts in the build', () => {
     expect(existsSync('dist/popup/popup.js')).toBe(true)
     expect(existsSync('dist/bridge/bridge.js')).toBe(true)
   })
@@ -238,7 +237,7 @@ describe('сборка', () => {
     // — it is a settings page that does not exist as far as the browser is concerned.
     const declared = manifest().options_ui
     expect(declared?.page, 'the manifest declares no settings page').toBe('options/options.html')
-    expect(declared.open_in_tab, 'the settings of §9.4 want a tab, not a popup-sized box').toBe(
+    expect(declared.open_in_tab, 'the settings UI needs a tab, not a popup-sized box').toBe(
       true,
     )
 
@@ -253,7 +252,7 @@ describe('сборка', () => {
     )
   })
 
-  it('в собранных скриптах не осталось импортов голых спецификаторов', () => {
+  it('leaves no bare-specifier imports in built scripts', () => {
     const scripts = distScripts()
     expect(scripts).toContain('popup/popup.js')
     expect(scripts).toContain('bridge/bridge.js')
@@ -264,122 +263,122 @@ describe('сборка', () => {
         .map((spec) => `${rel}: import "${spec}"`),
     )
 
-    expect(bare, 'зависимости не вшиты в бандл — Chrome такой файл не загрузит').toEqual([])
+    expect(bare, 'dependencies are not bundled, so Chrome cannot load this file').toEqual([])
   })
 
-  it('content-скрипты собраны классическим скриптом, а не модулем', () => {
+  it('builds content scripts as classic scripts rather than modules', () => {
     for (const rel of ['page/main-hook.js', 'page/content.js']) {
       const code = readFileSync(`dist/${rel}`, 'utf8')
 
-      // Классический скрипт с import/export — SyntaxError уже на разборе.
+      // A classic script with import/export raises a SyntaxError during parsing.
       expect(
         () => new Script(code, { filename: rel }),
-        `${rel}: не разбирается как классический скрипт`,
+        `${rel}: cannot be parsed as a classic script`,
       ).not.toThrow()
 
-      expect(code, `${rel}: нет директивы и обёртки IIFE в начале`).toMatch(IIFE_WRAPPER_START)
-      expect(code.trimEnd(), `${rel}: обёртка IIFE не закрыта`).toMatch(/\}\)\(\);$/)
+      expect(code, `${rel}: no directive and IIFE wrapper at the start`).toMatch(IIFE_WRAPPER_START)
+      expect(code.trimEnd(), `${rel}: the IIFE wrapper is not closed`).toMatch(/\}\)\(\);$/)
     }
   })
 
-  it('service worker собран в той форме, в какой его грузит манифест', async () => {
+  it('builds the service worker in the form loaded by the manifest', async () => {
     const background = manifest().background
     const sw = await optionsFor('sw/service-worker')
     const code = readFileSync(`dist/${background.service_worker}`, 'utf8')
 
-    // MV3: с "type": "module" воркер грузится как ES-модуль, без него — классическим скриптом.
+    // In MV3, "type": "module" loads the worker as an ES module; without it, as a classic script.
     const asModule = background.type === 'module'
     expect(
       sw.format,
-      `манифест грузит воркер как ${asModule ? 'модуль' : 'классический скрипт'}, сборка — иначе`,
+      `the manifest loads the worker as ${asModule ? 'a module' : 'a classic script'}, but the build does not`,
     ).toBe(asModule ? 'esm' : 'iife')
 
-    // Обёртка IIFE у модуля означает, что бандл на деле собран классическим скриптом. Сегодня
-    // это сходит с рук, но первый top-level await в воркере пропадёт молча.
+    // An IIFE wrapper on a module means the bundle was actually built as a classic script. This
+    // currently works, but the first top-level await in the worker would silently disappear.
     expect(
       IIFE_WRAPPER_START.test(code),
       asModule
-        ? 'воркер объявлен модулем, а собран обёрткой IIFE'
-        : 'воркер объявлен классическим скриптом, а собран модулем',
+        ? 'the worker is declared as a module but built with an IIFE wrapper'
+        : 'the worker is declared as a classic script but built as a module',
     ).toBe(!asModule)
   })
 
-  it('в dist лежат ровно скрипты собираемых точек входа, без лишних', async () => {
+  it('puts exactly the built entry-point scripts in dist with no extras', async () => {
     const expected = await shippedScripts()
 
-    expect(expected.length, 'сборка не объявила ни одной точки входа').toBeGreaterThan(4)
-    expect(distScripts(), 'в dist есть .js, которого нет ни в одной точке входа').toEqual(expected)
+    expect(expected.length, 'the build declares no entry points').toBeGreaterThan(4)
+    expect(distScripts(), 'dist contains a .js file that is not an entry point').toEqual(expected)
   })
 
-  it('сборка выметает dist: артефакт прошлой сборки не уезжает в поставку', async () => {
-    // Точка входа, которую «переименовали»: файл остался с прошлой сборки.
+  it('cleans dist so an artifact from an earlier build is not shipped', async () => {
+    // An entry point that was "renamed": the file remains from the previous build.
     const stale = 'dist/page/renamed-entry.js'
     writeFileSync(stale, 'globalThis.__tailcut_stale = true\n')
 
     execFileSync('npm', ['run', 'build'], { stdio: 'pipe' })
 
-    expect(existsSync(stale), `${stale} пережил сборку и уедет в поставку`).toBe(false)
+    expect(existsSync(stale), `${stale} survived the build and will be shipped`).toBe(false)
     expect(distScripts()).toEqual(await shippedScripts())
   })
 
-  it('в поставку уходит минифицированная сборка, в разработку — читаемая', async () => {
+  it('ships a minified build and keeps development builds readable', async () => {
     for (const o of await buildOptions(false)) {
-      expect(o.minify, `${Object.keys(o.entryPoints)}: поставка не минифицируется`).toBe(true)
+      expect(o.minify, `${Object.keys(o.entryPoints)}: the release build is not minified`).toBe(true)
     }
     for (const o of await buildOptions(true)) {
-      expect(o.minify, `${Object.keys(o.entryPoints)}: сборка для разработки минифицируется`).toBe(
+      expect(o.minify, `${Object.keys(o.entryPoints)}: the development build is minified`).toBe(
         false,
       )
     }
 
-    // То же самое видно на артефакте: в неминифицированном выводе esbuild остаются отступы
-    // и комментарии-заголовки исходных файлов.
+    // The artifact shows the same thing: unminified esbuild output retains indentation and source
+    // file header comments.
     const popup = readFileSync('dist/popup/popup.js', 'utf8')
-    expect(popup.length, 'бандл попапа пуст — проверять нечего').toBeGreaterThan(1000)
-    expect(popup, 'в поставке остались отступы: бандл не минифицирован').not.toMatch(/\n[ \t]+\S/)
-    expect(popup, 'в поставке остались комментарии esbuild: бандл не минифицирован').not.toMatch(
+    expect(popup.length, 'the popup bundle is empty, so there is nothing to test').toBeGreaterThan(1000)
+    expect(popup, 'the release contains indentation, so the bundle is not minified').not.toMatch(/\n[ \t]+\S/)
+    expect(popup, 'the release contains esbuild comments, so the bundle is not minified').not.toMatch(
       /^\/\/ /m,
     )
   })
 
-  it('бандлер целится ровно в ту версию Chrome, ниже которой расширение не ставится', async () => {
+  it('targets exactly the oldest Chrome version that can install the extension', async () => {
     const minimum = manifest().minimum_chrome_version
-    expect(minimum, 'манифест не объявляет минимальную версию Chrome').toMatch(/^\d+$/)
+    expect(minimum, 'the manifest does not declare a minimum Chrome version').toMatch(/^\d+$/)
 
-    // Цель выше объявленной — синтаксис, который старый Chrome не разберёт; ниже — расширение
-    // тащит лишние преобразования ради версий, куда его всё равно не поставят.
+    // A higher target allows syntax old Chrome cannot parse; a lower target adds transformations
+    // for versions where the extension cannot be installed anyway.
     for (const dev of [false, true]) {
       for (const o of await buildOptions(dev)) {
         expect(
           o.target,
-          `${Object.keys(o.entryPoints)}: цель сборки разошлась с minimum_chrome_version`,
+          `${Object.keys(o.entryPoints)}: build target differs from minimum_chrome_version`,
         ).toBe(`chrome${minimum}`)
       }
     }
   })
 })
 
-describe('манифест', () => {
-  it('хук объявлен в MAIN world и стартует до скриптов страницы', () => {
+describe('manifest', () => {
+  it('declares the hook in the MAIN world and starts it before page scripts', () => {
     const hook = contentScript('page/main-hook.js')
     expect(hook.world).toBe('MAIN')
     expect(hook.run_at).toBe('document_start')
     expect(hook.all_frames).toBe(true)
   })
 
-  it('наблюдатель живёт в изолированном мире', () => {
+  it('runs the watcher in the isolated world', () => {
     const content = contentScript('page/content.js')
     expect(content.world).toBe('ISOLATED')
     expect(content.run_at).toBe('document_start')
     expect(content.all_frames).toBe(true)
   })
 
-  it('каждый content-скрипт объявлен ровно один раз и ровно в своём мире', () => {
+  it('declares every content script exactly once and in its own world', () => {
     const declared: ContentScript[] = manifest().content_scripts
 
-    // Пары «файл → мир» собираются из всех объявлений разом, а не поиском первого совпадения
-    // и не по индексу: второе объявление того же файла в чужом мире прячется за первым, а
-    // Chrome исполнит его дважды — второй раз не в той роли.
+    // Collect file-to-world pairs from all declarations at once, not by finding the first match
+    // or using an index. A second declaration of the same file in another world hides behind the
+    // first, yet Chrome runs it twice, the second time in the wrong role.
     const injected = declared.flatMap((c) => c.js.map((js) => `${js} → ${c.world}`)).sort()
     const expected = Object.entries(CONTENT_SCRIPT_WORLDS)
       .map(([js, world]) => `${js} → ${world}`)
@@ -387,98 +386,98 @@ describe('манифест', () => {
 
     expect(
       injected,
-      'состав content-скриптов разошёлся с ролями: лишний, потерянный или не в своём мире',
+      'content scripts do not match their roles: one is extra, missing, or in the wrong world',
     ).toEqual(expected)
   })
 
-  it('оба content-скрипта объявлены для всех сайтов, без привязки к домену', () => {
+  it('declares both content scripts for all sites without domain restrictions', () => {
     expect(contentScript('page/main-hook.js').matches).toEqual(['<all_urls>'])
     expect(contentScript('page/content.js').matches).toEqual(['<all_urls>'])
   })
 
-  it('мост доступен со стороны любой страницы', () => {
+  it('makes the bridge available to every page', () => {
     const war = manifest().web_accessible_resources[0]
     expect(war.resources).toContain('bridge/bridge.html')
     expect(war.matches).toContain('<all_urls>')
   })
 
-  it('адрес моста из протокола объявлен в манифесте и лежит в поставке', () => {
-    // Content script вставляет фрейм по BRIDGE_PATH. Опечатка в самой константе не видна
-    // ни сборке, ни манифесту: фрейм просто не грузится, и захват молча выключается.
-    // Проверка сверяет константу с внешним миром, а не с собой же.
+  it('declares the protocol bridge path in the manifest and ships it', () => {
+    // The content script inserts a frame at BRIDGE_PATH. Neither the build nor the manifest can
+    // detect a typo in the constant: the frame simply fails to load and capture silently stops.
+    // This check compares the constant with the outside world rather than with itself.
     expect(
       manifest().web_accessible_resources[0].resources,
-      `${BRIDGE_PATH} не объявлен доступным ресурсом — Chrome такой фрейм не отдаст странице`,
+      `${BRIDGE_PATH} is not declared as an accessible resource, so Chrome will not serve it to the page`,
     ).toContain(BRIDGE_PATH)
-    expect(existsSync(`dist/${BRIDGE_PATH}`), `dist/${BRIDGE_PATH} отсутствует`).toBe(true)
+    expect(existsSync(`dist/${BRIDGE_PATH}`), `dist/${BRIDGE_PATH} is missing`).toBe(true)
   })
 
-  it('манифест объявлен третьей версией — Chrome другую не загрузит', () => {
-    // MV2 в Chrome отключён, а поле world у content-скрипта существует только в MV3:
-    // с любым другим числом манифест ещё и внутренне противоречив.
+  it('declares manifest version three because Chrome will not load another version', () => {
+    // Chrome has disabled MV2, and the content-script world field exists only in MV3, so any
+    // other number would also make the manifest internally inconsistent.
     expect(manifest().manifest_version).toBe(3)
   })
 
-  it('под каждый chrome-API, который зовёт код, в манифесте есть разрешение', () => {
+  it('has a manifest permission for every chrome API used by the code', () => {
     const used = chromeApisUsedInSrc()
     const declared: string[] = manifest().permissions
 
-    // Проверять нечего, если сканер исходников ничего не нашёл.
-    expect(used, 'chrome.* в исходниках не найден — сканер сломан').toContain('runtime')
+    // There is nothing to test if the source scanner finds nothing.
+    expect(used, 'chrome.* was not found in the source, so the scanner is broken').toContain('runtime')
 
     for (const namespace of used) {
       if (!GATED_APIS.has(namespace)) continue
       expect(
         declared,
-        `код зовёт chrome.${namespace}, но разрешения "${namespace}" в манифесте нет`,
+        `the code calls chrome.${namespace}, but the manifest lacks the "${namespace}" permission`,
       ).toContain(namespace)
     }
   })
 
-  it('манифест объявляет ровно те разрешения, на которых держатся способности расширения', () => {
+  it('declares exactly the permissions required by the extension capabilities', () => {
     const declared: string[] = manifest().permissions
 
     for (const [permission, capability] of Object.entries(REQUIRED_PERMISSIONS)) {
-      expect(declared, `нет разрешения "${permission}": ${capability}`).toContain(permission)
+      expect(declared, `missing "${permission}" permission: ${capability}`).toContain(permission)
     }
 
-    // И ничего сверх: лишнее разрешение — лишний экран согласия при установке.
-    expect([...declared].sort(), 'в манифесте есть неоправданное разрешение').toEqual(
+    // No extras: an unnecessary permission adds an unnecessary consent prompt during install.
+    expect([...declared].sort(), 'the manifest contains an unjustified permission').toEqual(
       Object.keys(REQUIRED_PERMISSIONS).sort(),
     )
   })
 
-  it('расширению открыты все сайты: дозапрос сегментов ходит на чужие origin', () => {
-    // matches у content-скрипта права на межсайтовый fetch не даёт — их даёт только
-    // host_permissions, и без него дозапрос умирает в рантайме.
+  it('allows all sites because segment refetches use other origins', () => {
+    // A content script's matches do not permit cross-origin fetches; only host_permissions does,
+    // and without it the refetch fails at run time.
     expect(manifest().host_permissions).toEqual(['<all_urls>'])
   })
 
-  it('у кнопки на панели есть подпись', () => {
-    // default_title — то, что Chrome показывает подсказкой над кнопкой расширения. Пустая
-    // строка оставляет кнопку без подписи: в ряду иконок расширение не опознать.
+  it('gives the toolbar button a label', () => {
+    // default_title is the tooltip Chrome shows over the extension button. An empty string leaves
+    // the button unlabeled, making the extension impossible to identify among a row of icons.
     const title = manifest().action.default_title
 
-    expect(typeof title, 'default_title не объявлен строкой').toBe('string')
-    expect(title.trim(), 'подпись кнопки пуста').not.toBe('')
+    expect(typeof title, 'default_title is not declared as a string').toBe('string')
+    expect(title.trim(), 'the button label is empty').not.toBe('')
   })
 
-  it('имя расширения совпадает с именем пакета', () => {
+  it('matches the extension name to the package name', () => {
     const name = packageJson().name
 
-    expect(typeof name, 'имя пакета не строка').toBe('string')
-    expect(name.trim(), 'имя пакета пусто').not.toBe('')
-    expect(manifest().name, 'манифест и пакет разъехались по имени').toBe(name)
+    expect(typeof name, 'the package name is not a string').toBe('string')
+    expect(name.trim(), 'the package name is empty').not.toBe('')
+    expect(manifest().name, 'the manifest and package names differ').toBe(name)
   })
 
-  it('версия расширения совпадает с версией пакета', () => {
+  it('matches the extension version to the package version', () => {
     const version = packageJson().version
 
-    expect(version, 'версия пакета не похожа на версию').toMatch(/^\d+(\.\d+){1,3}$/)
-    expect(manifest().version, 'манифест и пакет разъехались по версии').toBe(version)
+    expect(version, 'the package version does not look like a version').toMatch(/^\d+(\.\d+){1,3}$/)
+    expect(manifest().version, 'the manifest and package versions differ').toBe(version)
   })
 
-  it('описание совпадает с описанием пакета и не пустое', () => {
+  it('matches the description to the package description and keeps it nonempty', () => {
     const pkg = JSON.parse(readFileSync('package.json', 'utf8'))
 
     expect(typeof pkg.description).toBe('string')

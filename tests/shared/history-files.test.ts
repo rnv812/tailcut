@@ -14,7 +14,7 @@ import { SNAPSHOT_DIR, snapshotFileName, snapshotPath } from '../../src/shared/p
  *
  * The order the pieces are read back in is the order their names sort in — the index walks a
  * directory listing, and a listing comes back sorted as strings. And two tabs on the same video
- * merge into one session (§6.1) and write into one directory, so the name has to say who wrote
+ * merge into one session and write into one directory, so the name has to say who wrote
  * a piece as well as when: a counter apiece and no writer in the name would have the second tab
  * overwriting the first tab's material with no error anywhere.
  */
@@ -66,12 +66,12 @@ describe('history file names', () => {
  * Why the two are load-bearing, in the order the code depends on them. The directory is the only
  * thing that separates two life spans: a snapshot is one temporary file under one edit and is
  * thrown away after it, a session of the history is kept for days and swept by age, size and
- * ceiling (Task 5). The sweeper walks storage and decides what to drop by the directory a file is
+ * ceiling. The sweeper walks storage and decides what to drop by the directory a file is
  * in and by nothing else, so a history inside `snapshots/` would have one of them evicting the
  * other's material with no error anywhere. The extension is what tells the two kinds of file apart
  * once opened: `.tcs` is a sealed snapshot — the whole of a session with an index and a footer
  * over it — and `.tcm` is one batch of raw material with no index at all. The editor is about to
- * grow a second door (Task 4) and open both kinds by name.
+ * open both snapshot and history file kinds by name.
  */
 describe('history storage against snapshot storage', () => {
   it('puts the history in a directory of its own, beside the snapshots and not inside them', () => {

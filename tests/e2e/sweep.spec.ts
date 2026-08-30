@@ -21,7 +21,7 @@ test('a full disk lowers the ceiling, and the sweeper frees room by value', asyn
       const { listSessions, readTotals, setPinned }: typeof import('../../src/shared/history-db') =
         await import(address)
       const sessions = await listSessions()
-      // Pinned is never evicted, whatever it is worth (§7.3) — the one rule of the order that is
+      // Pinned material is never evicted regardless of its computed value, the one ordering rule
       // a rule and not a weight.
       if (sessions[0]) await setPinned(sessions[0].id, true)
       return {
@@ -71,7 +71,7 @@ test('a full disk lowers the ceiling, and the sweeper frees room by value', asyn
     // And the index still agrees with itself: the running total is the sum of the rows.
     expect(after.totals).toBe(after.rowBytes)
     expect(after.totals).toBeLessThan(before.bytes)
-    // The mark the interface is to say "disk full" by (§11): the refusal is written down where it
+    // The interface uses this mark to report a full disk: the refusal is written where it
     // outlives the worker, instead of a retry every thirty seconds that nobody can see. Read out
     // of the index because that is where it lives — the settings page and the popup will show it
     // from there (Tasks 10 and 11).

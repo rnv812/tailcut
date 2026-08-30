@@ -30,7 +30,7 @@ const lanes: Lane[] = [
     // Three zones, and the last of them does not touch the one before it: the recording stopped
     // at 40 and came back at 60 at a third quality, so 720p ends where the material ends and
     // 1080p starts where it resumes. A zone is broken only by a change of the init segment
-    // (lanes.ts, Task 7) — the hole itself splits nothing, which is why 480p→720p at 20 is the
+    // (`cuttingLane` in lanes.ts) — the hole itself splits nothing, which is why 480p→720p at 20 is the
     // one switch here that a line is drawn for and 720p→1080p across the hole is not.
     zones: [
       { start: 0, end: 20, representation: '480p', codec: 'avc1', width: 854, height: 480 },

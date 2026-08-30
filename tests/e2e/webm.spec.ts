@@ -115,7 +115,7 @@ test('a clip whose picture came in WebM saves as one file that plays', async () 
   expect(played.frameColours, 'the browser drew a blank frame').toBeGreaterThan(1)
 
   // MSE is no longer the door this file comes back in through: a byte stream wants an mvex and
-  // moofs, and a progressive file has neither by design (Task 2). What MSE was guarding is
+  // moofs, and a progressive file has neither by design. What MSE was guarding is
   // guarded here directly — the sample entry of each track has to carry the box that describes
   // its codec, which is exactly what a decoder configuration is read out of. The ordinary
   // playback path above reads the frames instead and never notices a description that is missing.

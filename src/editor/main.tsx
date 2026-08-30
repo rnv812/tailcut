@@ -63,7 +63,7 @@ function Editor() {
       const options: EditorOptions = {
         askWhere: settings.export.askWhere,
         export: settings.export,
-        // §7.3: a recording somebody cut a clip out of is a recording they chose, and it is
+        // A recording somebody cut a clip out of is one they chose, and it is
         // kept ahead of one that was only watched. Nothing to say for a snapshot: it is a
         // temporary of this one editing and the sweeper takes it by age.
         onSaved: historyId

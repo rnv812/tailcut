@@ -145,7 +145,7 @@ describe('lanesOf', () => {
 
   it('a hole inside one representation does not split the zone', () => {
     // The one that matters most: a pause in the recording is not a change of quality, and a zone
-    // broken by it would forbid the clip across a gap that §8.2 exists to collapse.
+    // broken by it would forbid a clip across a gap that export is required to collapse.
     const lanes = lanesOf([track({ representation: '480p', chunks: [chunk(0, 2), chunk(4, 6)] })])
 
     expect(lanes[0]!.runs).toEqual([

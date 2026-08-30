@@ -10,13 +10,13 @@ export interface Span {
 }
 
 /**
- * A stretch recorded at one quality (§6.2). A change of representation is a change of the init
+ * A stretch recorded at one quality. A representation change is a change of the init
  * segment, so the picture inside a zone is one codec at one size, and a clip that crosses a
  * boundary crosses into another file's worth of setup — which is why the boundary is drawn.
  *
  * A hole in the recording does not end a zone. Nothing about the setup changed while nothing was
- * being recorded, and a zone cut in two by a pause would forbid the one thing §8.2 is for: a clip
- * that runs across a gap and has the gap collapsed out of it on the way to disk.
+ * being recorded, and a zone cut by a pause would wrongly forbid a clip that runs across a gap
+ * and collapses that gap on the way to disk.
  */
 export interface Zone extends Span {
   representation: string
@@ -133,7 +133,7 @@ function zonesOf(pieces: readonly Piece[]): Zone[] {
 }
 
 // The holes between runs are worked out in exactly one place, and it is not this one: the same
-// question is asked of a snapshot's runs by the editor shell (Task 5). Imported and re-exported
+// question is asked of a snapshot's runs by the editor shell. Imported and re-exported
 // here so that a caller of the timeline layer does not have to know where it lives, and so that
 // the two answers can never differ by a rounding or by an off-by-one at the ends.
 export { gapsBetween }
@@ -161,7 +161,7 @@ export function laneOf(lanes: readonly Lane[], kind: TrackKind): Lane | undefine
  *
  * The picture and the sound stop at slightly different instants, so one break of the recording
  * appears in both lists; adding the lists up tells the user two gaps where there was one. The cut
- * follows the picture — §8.2 pulls both tracks back by the smaller of the two holes, and the
+ * follows the picture: output pulls both tracks back by the smaller of the two holes, and the
  * picture is the finer scale — so the picture is where a hole is counted, and where there is no
  * picture, the one lane there is.
  */
@@ -188,7 +188,7 @@ export function materialSpan(lanes: readonly Lane[]): Span | null {
 /**
  * The holes of every lane, in time order.
  *
- * The picture and the sound do not break in the same places — that is the whole reason §8.2
+ * Picture and sound do not break at the same points, which is why gap collapsing
  * pulls both tracks back by the smaller of the two gaps — so a handle that is to stick to the
  * edge of a hole has to see both lists. For counting holes out loud this is the wrong list and
  * `cuttingLane` is the right one: as targets to stick to, two edges a few milliseconds apart are

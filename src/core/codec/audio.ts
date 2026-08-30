@@ -153,7 +153,7 @@ export function audioDecoderConfig(entry: SampleEntry): AudioDecoderSetup | null
     if (!declared || !(entry.sampleRate > 0)) return null
 
     // MPEG-1 or MPEG-2 audio — an mp3, which is how the soundtrack of a page that plays its sound
-    // apart arrives (§5.6, src/core/mpeg/frames.ts). It is the one codec here with nothing to set
+    // apart arrives; src/core/mpeg/frames.ts joins that split delivery. It is the one codec here
     // up: every field a decoder needs stands in the header of every frame, so the descriptor
     // carries no DecoderSpecificInfo, and the refusal below would throw the track away for the
     // absence of a thing it never has. Chromium names the codec `mp3` and decodes it.

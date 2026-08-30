@@ -126,7 +126,7 @@ export function movieTracksOf(moov: Uint8Array, total: number, at = 0): SourceTr
  * The tracks of a recording as one source to cut from.
  *
  * The leading slot is the picture where there is one: it is the finer scale, and `planClip`
- * measures the clip by whatever stands there (§8.2 — the sound is cut to the picture and not the
+ * measures the clip by whatever stands there: sound is cut to picture duration, not
  * other way round). A recording of sound alone leads with the sound, because it still has to be
  * exportable: the popup has offered to save such a session since the capture stage.
  *

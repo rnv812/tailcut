@@ -29,7 +29,7 @@ export interface HistoryTrack {
    * init down twice.
    *
    * One case is left in which the same init can be placed a second time, and it is written here
-   * rather than assumed away: two merge keys gathering at once and merging into one session (§6.1),
+   * rather than assumed away: two merge keys gathering at once and merging into one session,
    * where each side had already claimed the init of its own tracks. Whoever fills this in keeps the
    * first place an init landed in and ignores every later one — otherwise which of the two the
    * index names would be decided by the order they landed in. The spare copy costs a few hundred

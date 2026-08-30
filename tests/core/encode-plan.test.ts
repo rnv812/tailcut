@@ -20,7 +20,7 @@ import type { Located, TrackKind } from '../../src/shared/types'
  * What the frame path decides about a clip, against what the copy path decides about the same one.
  *
  * Almost nothing here is asserted as a number on its own. The whole of the second half of this
- * task is one equality — what the encoder throws off the head is what the copy path would have
+ * contract is one equality — what the encoder throws off the head is what the copy path would have
  * hidden with an edit list — and an equality is tested by computing both sides, so `planClip`
  * runs beside `planFrames` in nearly every case below.
  */

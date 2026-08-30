@@ -59,7 +59,7 @@ export const ORPHAN_GRACE_MS = 60_000
 /**
  * How long a deleted session stays on disk.
  *
- * §9.2 answers a deletion with an undo in a toast rather than with a confirmation dialogue, so
+ * Deletion offers undo in a toast instead of a confirmation dialog, so
  * the deletion has to be undoable for as long as the toast can be on screen — and it has to
  * survive the popup being closed, because a user who deletes and closes has deleted. The row is
  * marked at once and hidden from every list; the files go when this has passed.
@@ -85,7 +85,7 @@ export interface RepairReport {
  * The ceiling this pass keeps to: the user's, or the one the browser has proved we can have.
  *
  * The setting is a ceiling we impose on ourselves; the quota is the browser's to give, and it may
- * refuse long before four gigabytes — the storage is best-effort, and §7.4 says so. When it has
+ * refuse long before four gigabytes because the storage is best-effort. When it has
  * refused, the writer says `full`, the effective ceiling comes down to below what is occupied
  * (markStorageFull), and from then on this is the number the sweep works to. Without it a refusal
  * below our own ceiling is a sweep that finds nothing over it and a writer retrying for ever.
@@ -158,7 +158,7 @@ export async function sweep(io: SweeperIo): Promise<SweepReport> {
   const all = await io.sessions()
   const gone = new Set<string>()
 
-  // 1. What the user deleted, once the undo of §9.2 is out of reach.
+  // 1. What the user deleted, once the undo period has elapsed.
   for (const row of all) {
     if (!row.deletedAt || now - row.deletedAt < DELETED_GRACE_MS) continue
     if (await takeSession(io, row.id)) {
@@ -170,7 +170,7 @@ export async function sweep(io: SweeperIo): Promise<SweepReport> {
 
   const alive = all.filter((row) => !gone.has(row.id) && !row.deletedAt)
 
-  // 2. What has outlived the keeping (§7.4: seven days by default).
+  // 2. What has outlived the retention period, seven days by default.
   for (const victim of expiredBy(alive.map(valued), now, settings.history.keepDays)) {
     if (await takeSession(io, victim.id)) {
       gone.add(victim.id)
@@ -179,7 +179,7 @@ export async function sweep(io: SweeperIo): Promise<SweepReport> {
     }
   }
 
-  // 3. The buffer length, over every session that is left (§7.3): what lies further back than the
+  // 3. The buffer length, over every session that remains: what lies further back than the
   //    buffer reaches is no longer on offer, and the file holding it is dead.
   for (const row of alive) {
     if (gone.has(row.id)) continue
@@ -247,7 +247,7 @@ export async function sweep(io: SweeperIo): Promise<SweepReport> {
  * `graceMs` is that "old enough", and it is an argument rather than the constant alone for one
  * reason: a test cannot wait a minute for an orphan to ripen, and must not reach into the user's
  * settings to shorten the wait. The end-to-end run makes an orphan and asks for a repair with no
- * grace at all (Task 13, шаг 4). Every caller in the program passes `ORPHAN_GRACE_MS` and says so
+ * grace at all. Every caller in the program passes `ORPHAN_GRACE_MS` and says so
  * in the call, so that the delay is visible where the repair is asked for and not only here.
  */
 export async function repair(io: SweeperIo, graceMs = ORPHAN_GRACE_MS): Promise<RepairReport> {

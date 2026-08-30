@@ -108,7 +108,7 @@ const child = (node, type) => node.children.find((c) => c.type === type)
  *
  * A byte copy of the first with the fields a reader is asked for changed, which is what a real
  * multi-entry stsd holds: the same codec described twice, differing in what the description is
- * for. Every reader in this program takes the first entry and only the first (§ entry.ts), and
+ * for. Every reader in this program takes the first entry and only the first (see entry.ts), and
  * with one entry in the box that contract cannot fail.
  */
 function secondEntry(first, kind) {

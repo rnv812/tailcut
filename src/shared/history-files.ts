@@ -2,7 +2,7 @@
  * Where the history lies in OPFS, how big a piece of it is, and how it is named.
  *
  * A directory per session, a file per batch. The name of a file carries who wrote it and in what
- * order: two tabs playing the same video merge into one session (§6.1) and write into one
+ * order: two tabs playing the same video merge into one session and write into one
  * directory, and a counter of their own apiece would have them overwriting each other's pieces.
  * The sequence number is padded, so that sorting the names by string sorts the pieces by the
  * order they were written — which is the order the index reads them back in.

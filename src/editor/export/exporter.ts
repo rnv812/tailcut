@@ -53,14 +53,14 @@ async function inputOf(
  *
  * The segments are read to be parsed and then let go: what stays is a `Located` per sample, a few
  * thousand numbers against a hundred megabytes of frames. The reading is the same one the preview
- * already does (Task 6) and costs the same tens of milliseconds; reading only the heads of the
+ * already does and costs the same tens of milliseconds; reading only the heads of the
  * segments would be cheaper still, and it would change this function and nothing else.
  */
 export async function openClipSource(
   reader: SnapshotReader,
   material: Material,
 ): Promise<ClipSource | null> {
-  // Material that was never intercepted, held in the snapshot as the file it arrived in (§5.6).
+  // Material that was never intercepted, held in the snapshot as the file it arrived in.
   // There are no fragments to walk: `init` names the movie box inside that range, and the sample
   // tables have been in the snapshot all along. Reading them is one read of a few kilobytes, and
   // the addresses that come back point into the snapshot — the same ones the preview cuts by, so
@@ -125,8 +125,8 @@ export function requestsFor(
 /**
  * The key a probe answer is filed under: the same three numbers `cacheKeyOf` is built from.
  *
- * Written once and exported, because three places ask with it — the effect that fills the map
- * (task 10), the lookup below, and the test that counts how many times the browser was asked.
+ * Written once and exported, because three places ask with it — the effect that fills the map,
+ * the lookup below, and the test that counts how many times the browser was asked.
  */
 export const geometryKey = (g: EncodeGeometry): string => `${g.width}x${g.height}@${g.framerate}`
 
@@ -141,12 +141,12 @@ export function choiceFor(
 
 /** What the settings and the recording have to say about where a clip goes. */
 export interface SaveOptions {
-  /** §9.4: put the browser's own Save dialogue up for every clip. */
+  /** Put the browser's own Save dialog up for every clip. */
   askWhere?: boolean
   /**
    * Called once the browser has taken a file, and not before.
    *
-   * A recording that was cut from is a recording the user chose (§7.3), and the editor is the
+   * A recording that was cut from is a recording the user chose, and the editor is the
    * only place that knows a clip came out of one. A refusal is not a choice, so this is not
    * called on the path that rejects.
    */
@@ -164,9 +164,8 @@ export function downloadIo(reader: SnapshotReader, options: SaveOptions = {}): E
      * This io copies and saves; it does not encode, and it says so rather than answering nothing.
      *
      * `undefined` here would be handed to `io.save` as a file, and a file of no bytes is a
-     * download the browser accepts and the user cannot open. A rejection carrying the sentence
-     * §8.4 promises lands on the row as "Failed" with something to read instead. Task 10 gives
-     * the tab an io that really encodes — `encodeIo` spreads this one and overrides this method.
+     * download the browser accepts and the user cannot open. Rejecting puts "Failed" on the row
+     * with an explanation. `encodeIo` supplies the real encoder by overriding this method.
      */
     encode: () => Promise.reject(new Error(NO_ENCODER)),
 
@@ -183,8 +182,8 @@ export function downloadIo(reader: SnapshotReader, options: SaveOptions = {}): E
             url,
             filename: name,
             conflictAction: 'uniquify',
-            // §9.4: ask where each clip goes. Off by default — a queue of six clips would be six
-            // dialogues — and worth having for the person who files as they cut.
+            // Ask where each clip goes when requested. Off by default because six queued clips
+            // would mean six dialogs, but useful for a person who files clips as they cut.
             saveAs: askWhere,
           },
           (id) => {
@@ -218,8 +217,8 @@ export type PaceReport = (
  *
  * Built on `downloadIo` rather than beside it, because `read` and `save` are the same two things
  * they always were — a queue with two lanes is still one queue, and a copy in it must save the
- * way it saved before. What is added is `encode`, and one callback: `onPace` is how the number
- * §8.6 promises ("time from the speed this machine has shown") ever comes to exist. Without it
+ * way it saved before. What is added is `encode`, and one callback: `onPace` makes the pace
+ * estimate use speed this machine has actually shown. Without it
  * `PaceBook` stays empty for the life of the tab and the panel says "the first clip will show how
  * fast this machine is" for ever, including after the tenth.
  */
@@ -302,7 +301,7 @@ export function encodeIo(
  * frames besides, so it reads what it is about to decode and lets it go: the peak is one sample,
  * eight frames in flight (about twenty-five megabytes at 1080p) and the file being built.
  *
- * No decoder configuration is passed in: it is on the plan (`FramePlan.decoder`, Task 4), beside
+ * No decoder configuration is passed in: it is on `FramePlan.decoder`, beside
  * the material it describes.
  */
 function frameSourceOf(reader: SnapshotReader, stale: () => boolean): FrameSource {

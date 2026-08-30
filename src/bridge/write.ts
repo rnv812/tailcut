@@ -13,7 +13,7 @@ import type { SaveSource } from './session-store'
  * the badge, the frame addressing, the summary — asks neither which it is looking at.
  *
  * One writer for both, and for the clips the editor exports besides: the captured path used to
- * copy its fragments into a fragmented file whole, which no edit list survives (§8.2) and which
+ * copy its fragments into a fragmented file whole, which no edit list survives and which
  * carries no sample tables to seek by. Both roads now end in `buildProgressiveMp4`.
  *
  * Null when nothing could be written. A captured session may hold no material at all, and it may

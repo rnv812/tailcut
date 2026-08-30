@@ -64,7 +64,7 @@ export function decoderConfigOf(sampleEntry: Uint8Array): VideoDecoderConfig | n
   return null
 }
 
-/** The four letters of a sample entry box — `avc1`, `vp09`, `av01`. What §8.4 warns by (Task 8). */
+/** The sample-entry code, such as `avc1`, `vp09`, or `av01`, used for codec warnings. */
 export function sampleEntryFormat(sampleEntry: Uint8Array): string {
   return boxesIn(sampleEntry, 0, sampleEntry.byteLength)[0]?.type ?? ''
 }

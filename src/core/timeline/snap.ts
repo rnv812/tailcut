@@ -6,7 +6,7 @@ export type SnapKind = 'gap' | 'zone' | 'keyframe' | 'marker' | 'clip' | 'playhe
  * Order of preference when two targets are the same distance away.
  *
  * A gap edge and a zone boundary are properties of the material — cut past them and the file is
- * wrong or the quality changes mid-clip (§8.3). A keyframe is a property of the compression: §8.2
+ * wrong or quality changes mid-clip. A keyframe is a compression property, while exact export
  * lets a cut fall anywhere with an edit list, so missing one costs nothing but a few copied
  * frames. The rest is the user's own markup, and the playhead is where they happen to stand.
  */

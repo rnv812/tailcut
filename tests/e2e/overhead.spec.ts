@@ -4,36 +4,35 @@ import { launchWithExtension, launchWithoutExtension, serveLocal } from './helpe
 const PAGE_URL = 'https://tailcut.test/measured'
 
 /**
- * Сколько раз повторяется каждый замер. Разница, которую мы ищем, — десятки микросекунд на
- * вызов, а одиночный срыв планировщика стоит вдвое больше; трёх прогонов хватает, чтобы хотя
- * бы один прошёл без помех.
+ * Number of repetitions per measurement. The difference under test is tens of microseconds per
+ * call, while one scheduler interruption costs twice that. Three runs are enough for at least one
+ * to complete without interference.
  */
 const ROUNDS = 3
 
 /**
- * Потолок накладных расходов, выраженный в копиях сегмента. Обёртка обязана стоить одну копию
- * (`copyOf` в `src/page/main-hook.ts`) плюс постановку в очередь; на машине разработки за
- * двадцать пять прогонов вышло от 1.45 до 2.52 копии (среднее 1.91) — разницу дают выделение
- * памяти под копию, поиск в WeakMap и постановка микрозадачи.
+ * Maximum overhead expressed as segment copies. The wrapper should cost one copy (`copyOf` in
+ * `src/page/main-hook.ts`) plus queueing. Twenty-five runs on the development machine measured
+ * 1.45 to 2.52 copies, averaging 1.91. Allocation, WeakMap lookup, and microtask queueing account
+ * for the difference.
  *
- * Четыре — это запас в 1.6 к худшему из измеренных, и запас нужен настоящий: разброс здесь
- * ±25 %, и берётся он с машины, а не из кода. Порог ловит всё, что дороже нынешнего примерно
- * вдвое с половиной: перекладку через обычный массив (63–69 копий), любое ожидание в
- * синхронном пути. Побайтовое копирование вместо `set` (4.2–5.4) он ловит впритык — на удачной
- * калибровке может и проскочить. Одну лишнюю копию (3.4) не ловит вовсе: она тонет в разбросе,
- * и делать вид, что ловит, значит завести тест, который падает по вторникам.
+ * Four leaves 1.6 times the worst measured result. The observed variance is ±25% and comes from
+ * the machine, not the code. The limit catches work roughly 2.5 times more expensive than today,
+ * including copying through a plain array (63–69 copies) or waiting on the synchronous path.
+ * Byte-by-byte copying instead of `set` (4.2–5.4) is near the limit and can pass with a favorable
+ * calibration. One extra copy (3.4) is below the noise, so this test does not claim to detect it.
  *
- * Порог именно в копиях, а не в миллисекундах: на вдвое более медленной машине растут обе
- * величины, и отношение остаётся тем же.
+ * The threshold uses copies rather than milliseconds. Both values grow on a slower machine, while
+ * their ratio remains comparable.
  */
 const COPY_BUDGET = 4
 
 interface Measurement {
-  /** Суммарное время внутри appendBuffer, мс. */
+  /** Total time spent inside appendBuffer, in milliseconds. */
   appendMs: number
-  /** Сколько замеров в этой сумме. */
+  /** Number of samples included in the total. */
   appends: number
-  /** Цена `copyCount` копий тех же байтов на этой машине, мс. */
+  /** Cost of `copyCount` copies of the same bytes on this machine, in milliseconds. */
   copyMs: number
   copyCount: number
 }
@@ -59,8 +58,8 @@ async function measure(withExtension: boolean): Promise<Measurement> {
     const page = await context.newPage()
     await serveLocal(page, 'measured.html', PAGE_URL)
 
-    // Отказ ждём наравне с успехом: без этого сорвавшаяся страница молчала бы до таймаута,
-    // и падение рассказывало бы про таймаут, а не про причину.
+    // Wait for failure as well as success. Otherwise a failed page stays silent until timeout and
+    // the test reports the timeout instead of its cause.
     await page.waitForFunction(() => window.measured || window.failure !== null, null, {
       timeout: 120_000,
     })
@@ -72,7 +71,7 @@ async function measure(withExtension: boolean): Promise<Measurement> {
       copyCount: window.copyCount,
     }))
 
-    expect(result.failure, 'измеряющая страница не доработала до конца').toBeNull()
+    expect(result.failure, 'the measurement page did not finish').toBeNull()
 
     return {
       appendMs: sum(result.samples),
@@ -85,44 +84,43 @@ async function measure(withExtension: boolean): Promise<Measurement> {
   }
 }
 
-test('обёртки не удорожают синхронный путь appendBuffer', async () => {
-  // Шесть запусков браузера по сотне сегментов каждый: в тридцать секунд по умолчанию не лезет.
+test('the wrappers keep appendBuffer synchronous-path overhead within budget', async () => {
+  // Six browser runs with one hundred segments each exceed the default thirty-second timeout.
   test.setTimeout(300_000)
 
   const clean: Measurement[] = []
   const hooked: Measurement[] = []
 
-  // Режимы чередуются, а не идут блоками: машина за время прогона разгоняется и остывает, и
-  // порядок «сначала все чистые, потом все с расширением» подарил бы этот дрейф целиком одной
-  // стороне.
+  // Alternate modes instead of grouping them. The machine heats up and cools down during the run,
+  // so measuring all clean runs before all extension runs would assign the drift to one side.
   for (let round = 0; round < ROUNDS; round++) {
     clean.push(await measure(false))
     hooked.push(await measure(true))
   }
 
   const appends = clean[0]!.appends
-  expect(appends, 'страница обязана отдать замеры').toBeGreaterThan(0)
+  expect(appends, 'the page must return measurements').toBeGreaterThan(0)
   for (const round of [...clean, ...hooked]) {
-    expect(round.appends, 'все прогоны обязаны быть одинаковой длины').toBe(appends)
+    expect(round.appends, 'all runs must have the same length').toBe(appends)
   }
 
-  // Минимум, а не медиана: прогон, которому меньше всех мешали, и есть настоящая цена вызова.
-  // Всё сверх неё — чужая работа на той же машине, и в обоих режимах она своя. Регрессия
-  // поднимает и минимум тоже, а вот случайная помеха его не трогает.
+  // Use the minimum rather than the median: the least interrupted run best represents call cost.
+  // Extra work elsewhere on the machine is independent in each mode. A regression raises even the
+  // minimum, while random interference does not.
   const perAppendUs = (rounds: Measurement[]): number =>
     (Math.min(...rounds.map((round) => round.appendMs)) / appends) * 1000
 
   const cleanUs = perAppendUs(clean)
   const hookedUs = perAppendUs(hooked)
-  // Цена копии берётся из чистых прогонов: это свойство машины, и мерить его надо там, где
-  // расширение не отнимает у страницы такты.
+  // Derive copy cost from clean runs because it is a machine property and should be measured when
+  // the extension is not competing with the page.
   const copyUs = Math.min(...clean.map((round) => (round.copyMs / round.copyCount) * 1000))
   const copies = (hookedUs - cleanUs) / copyUs
 
-  // Поимённо по прогонам: при падении сразу видно, сорвался один замер или подорожали все.
+  // Print every named run so a failure distinguishes one disrupted sample from a broad slowdown.
   for (const [name, rounds] of [
-    ['без расширения', clean],
-    ['с расширением', hooked],
+    ['without extension', clean],
+    ['with extension', hooked],
   ] as const) {
     const perRound = rounds.map(
       (round) =>
@@ -131,13 +129,13 @@ test('обёртки не удорожают синхронный путь appen
           1000
         ).toFixed(1)}`,
     )
-    console.log(`  ${name} (мкс на вызов / мкс на копию): ${perRound.join('  ')}`)
+    console.log(`  ${name} (µs per call / µs per copy): ${perRound.join('  ')}`)
   }
   console.log(
-    `appendBuffer за ${appends} вызовов: без расширения ${cleanUs.toFixed(1)} мкс/вызов, ` +
-      `с расширением ${hookedUs.toFixed(1)} мкс/вызов; ` +
-      `надбавка ${(hookedUs - cleanUs).toFixed(1)} мкс = ${copies.toFixed(2)} копии сегмента ` +
-      `(копия — ${copyUs.toFixed(1)} мкс)`,
+    `appendBuffer over ${appends} calls: without extension ${cleanUs.toFixed(1)} µs/call, ` +
+      `with extension ${hookedUs.toFixed(1)} µs/call; ` +
+      `overhead ${(hookedUs - cleanUs).toFixed(1)} µs = ${copies.toFixed(2)} segment copies ` +
+      `(one copy is ${copyUs.toFixed(1)} µs)`,
   )
 
   expect(copies).toBeLessThan(COPY_BUDGET)

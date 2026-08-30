@@ -2,11 +2,11 @@
 <meta charset="utf-8" />
 <title>banner and player</title>
 <!--
-  Обе раскладки сразу: рекламный баннер и настоящий плеер на одной странице. Вердикт
-  адресный, поэтому отказ по баннеру не должен трогать материал плеера. Кодеки взяты
-  разные (vp9 и avc1) намеренно: ключ сессии считается по адресу и кодекам, а адрес
-  у обоих один — на одном кодеке сессия оказалась бы общей, и адресность отказа
-  проверить было бы нечем.
+  Both layouts at once: an advertising banner and a real player on one page. Classification is
+  scoped to the element, so rejecting the banner must not affect the player's material. The codecs
+  intentionally differ (vp9 and avc1): the session key uses the URL and codecs, while both elements
+  share the same URL. Using one codec would merge the sessions and make scoped rejection impossible
+  to verify.
 -->
 <video id="banner" muted loop autoplay width="160" height="90" style="background:#333"></video>
 <video id="player" controls loop width="640" style="background:#000"></video>

@@ -162,7 +162,7 @@ test('leaves the keys alone where they belong to something else', async () => {
     // A letter at a time, each one waited for. `pressSequentially` types faster than the name
     // travels to the model and back, and the box — which follows the model — then drops the
     // letter that was typed in between: observed as 'ss' out of 'sos' on a loaded machine. That
-    // is `NameField` (Task 13) and not the keyboard, and it is not what this test is about.
+    // is `NameField`, not the keyboard, and is outside this test's scope.
     await name.press('s')
     await expect(name).toHaveValue('s')
     await name.press('o')
@@ -216,9 +216,8 @@ test('types a timecode into a boundary and moves the playhead by one', async () 
 })
 
 test('the file the tab is playing is the file the writer makes', async () => {
-  // The Export button arrives with the queue, two tasks from here (Task 16), and the editor
-  // would otherwise stand for two tasks with nothing exportable checked. There is something to
-  // check: the preview is assembled by `planPreview` and `assembleMp4` — the same plan and the
+  // Even without pressing Export here, there is meaningful output to check: the preview is
+  // assembled by `planPreview` and `assembleMp4` — the same plan and the
   // same writer the button will use — so a preview a browser plays through to the last frame is
   // the writer's output, verified in the tab. This is the intermediate state's export check, and
   // it is why the state is worth stopping at.
@@ -230,7 +229,7 @@ test('the file the tab is playing is the file the writer makes', async () => {
       return { duration: video.duration, width: video.videoWidth, height: video.videoHeight }
     })
 
-    // Six seconds of fixture at 320×240: the writer's own arithmetic (Task 3 plans the preview
+    // Six seconds of fixture at 320×240: the writer's own arithmetic plans the preview
     // at 73728 ticks of 12288), read back out of the element that has to play it.
     expect(shape.duration).toBeGreaterThan(5.9)
     expect(shape.duration).toBeLessThan(6.1)

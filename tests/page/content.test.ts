@@ -574,7 +574,7 @@ describe('forwarding the hook messages into the bridge', () => {
     const dom = await withBridge()
     const message = { type: 'tc:duration', sourceId: 's1', seconds: 23.581 }
 
-    // The registry keys a session by it (§6.1), and the registry lives in the bridge frame: lost
+    // The registry keys a session by it, and the registry lives in the bridge frame: lost
     // here, two videos of a feed under one address would be one session again.
     await dom.deliverMessage(message)
 
@@ -686,7 +686,7 @@ describe('the page context for the bridge', () => {
   it('reads that name out of the address as a name and not as an address', async () => {
     const dom = installDom({
       title: '',
-      url: 'https://cdn.example/files/%D0%BA%D0%BE%D1%82%20%231.webm?token=abc#t=10',
+      url: 'https://cdn.example/files/%E7%8C%AB%20%231.webm?token=abc#t=10',
       contentType: 'video/webm',
     })
     await importContent()
@@ -694,7 +694,7 @@ describe('the page context for the bridge', () => {
 
     // The query and the fragment belong to the request and not to the name, and what the address
     // spells in percent signs is a name in somebody's language.
-    expect((dom.contexts()[0] as { title: string }).title).toBe('кот #1')
+    expect((dom.contexts()[0] as { title: string }).title).toBe('猫 #1')
   })
 
   it('invents no name for a file whose address ends in nothing', async () => {
@@ -840,7 +840,7 @@ describe('the triage verdict', () => {
         transfer: undefined,
       },
       {
-        // The size of the player, on a road of its own and ahead of the verdict: §7.3 counts a
+        // The size of the player, on a road of its own and ahead of the verdict: capture counts a
         // big player as a sign a recording is worth keeping, and the content script passes the
         // number through exactly as the watcher measured it.
         message: { type: 'tc:player', sourceId: 's1', widthPx: 160 },

@@ -13,7 +13,7 @@ import {
 const LANDSCAPE: SourceSize = { width: 1920, height: 1080 }
 const PORTRAIT: SourceSize = { width: 1080, height: 1920 }
 
-/** Every number of a rectangle has to land on the chroma grid of a 4:2:0 frame (§8.5). */
+/** Every rectangle coordinate must land on the chroma grid of a 4:2:0 frame. */
 const allEven = (crop: Crop): boolean =>
   crop.x % 2 === 0 && crop.y % 2 === 0 && crop.width % 2 === 0 && crop.height % 2 === 0
 
@@ -142,7 +142,7 @@ describe('geometryOf', () => {
 
   it('asks for the size of the rectangle when there is one, at the framerate it was given', () => {
     // The framerate comes from the context — the open representation's own — and not from a
-    // constant: support is a property of the (codec, frame size, framerate) triple (§8.4), and a
+    // constant: support is a property of the codec, frame size, and framerate triple, and a
     // geometry that guessed 30 would have the probe answer about a clip nobody asked about.
     const crop: Crop = { x: 100, y: 6, width: 332, height: 186 }
 

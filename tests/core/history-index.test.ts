@@ -61,8 +61,8 @@ describe('coveredWith', () => {
   })
 
   it('counts a stretch once however many times it was written', () => {
-    // Two tabs playing one video are one session (§6.1) and write the overlap twice; a switch of
-    // quality (§6.2) writes the same seconds under a second representation. Neither is more
+    // Two tabs playing one video merge into one session and write overlap twice; a quality switch
+    // writes the same seconds under a second representation. Neither is more
     // material, and this is the one rule that says so.
     const covered = coveredWith([], pieces[0]!.parts)
     expect(coveredWith(covered, pieces[0]!.parts)).toEqual([{ start: 0, end: 4 }])
@@ -127,7 +127,7 @@ describe('historyIndexOf', () => {
   })
 
   it('drops the repeat when two writers wrote the same stretch', () => {
-    // Two tabs playing one video merge into one session (§6.1) and write into one directory. The
+    // Two tabs playing one video merge by identity and write into one directory. The
     // maps that fed them are separate, so each of them wrote its own copy of the overlap, and one
     // clip cannot be cut from a timeline where the same second is there twice.
     const twice: HistoryPiece[] = [

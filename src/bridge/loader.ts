@@ -235,7 +235,7 @@ export interface OpenedSound {
 }
 
 /**
- * Opens the soundtrack a page is playing beside a picture that has none (§5.6, `SoundApart`).
+ * Opens the soundtrack a page is playing beside a picture that has none (`SoundApart`).
  *
  * `seconds` is how much of it can ever be used — the length of the picture it will be laid
  * against — and it is the bound on what is read as well as on what is indexed. The whole of

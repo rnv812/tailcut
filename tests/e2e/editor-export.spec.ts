@@ -57,11 +57,11 @@ test('cuts two clips, one of them across a hole, and writes both to disk', async
     const { editor } = await clickEdit(context, player, extensionId)
 
     // What the editor made of the recording: two runs of picture with one hole between them.
-    // One hole, not two — both tracks stopped for it, and it is counted on the picture (Task 7).
+    // One hole, not two: both tracks stopped for it, and gaps are counted on the picture.
     await expect(editor.getByTestId('gaps')).toHaveText('1 gap')
     await expect(editor.getByTestId('frame-count')).toHaveText('96')
     await editor.waitForFunction(() => (document.querySelector('video')?.readyState ?? 0) >= 2)
-    // Nothing to export yet, and the button says so rather than writing an empty file (Task 16).
+    // Nothing to export yet, so the button is disabled instead of writing an empty file.
     await expect(editor.getByTestId('export')).toBeDisabled()
 
     // One clip from half a second to four and a half — across the hole — and then a cut through
@@ -70,12 +70,12 @@ test('cuts two clips, one of them across a hole, and writes both to disk', async
     await typeInto(editor, 'playhead-field', '00:00:00:12')
     await editor.keyboard.press('i')
     await expect(editor.getByTestId('clip')).toHaveCount(1)
-    // There is something to write now, and the material has been indexed (Task 16).
+    // There is something to write now, and the material has finished indexing.
     await expect(editor.getByTestId('export')).toBeEnabled()
 
     // Out at four and a half — on the far side of the hole. The handle goes there because the
-    // quality never changed: a hole breaks a run and not a zone (Task 7, Task 10), and §8.2
-    // collapses it out of the file. Were it a change of quality instead, the box would stop at
+    // quality never changed: a hole breaks a run but not a quality zone, and export collapses it
+    // out of the file. Were it a quality change instead, the box would stop at
     // the boundary and stay there, with the inspector saying which quality is on the other side.
     await typeInto(editor, 'out-c1', '00:00:04:12')
     await expect(editor.getByTestId('out-c1')).toHaveValue('00:00:04:12')
@@ -94,13 +94,13 @@ test('cuts two clips, one of them across a hole, and writes both to disk', async
     await expect(editor.getByTestId('job-state').last()).toHaveText('Saved')
 
     expect(files.map((one) => one.name.endsWith('.mp4'))).toEqual([true, true])
-    // Named from the page title and the timecode of the start (Task 10, Task 16), and the two names differ.
+    // Each name combines the page title with its clip's start timecode, so the names differ.
     expect(new Set(files.map((one) => one.name)).size).toBe(2)
     for (const one of files) expect(one.name).toContain('test player with a hole')
 
     // Sorted by name, not taken in the order they landed: both clips are exported at once
-    // (PARALLEL is 3, Task 16) and nothing orders the two downloads. The name carries the
-    // timecode of the clip's start (Task 10, Task 16) — the left half keeps «… 00.00», the right
+    // (`PARALLEL` is 3) and nothing orders the two downloads. Each name carries the clip's start
+    // timecode: the left half keeps «… 00.00», the right
     // half is named at the cut and gets «… 00.01» — so sorting by name puts the clip that lies
     // inside the run first, which is what the two lines below assume.
     const [inside, across] = [...files].sort((a, b) => a.name.localeCompare(b.name)).map((one) => one.file)
@@ -113,7 +113,7 @@ test('cuts two clips, one of them across a hole, and writes both to disk', async
      * number**, because a second is not a way to name a frame to ffmpeg. `frameByPlaying(source,
      * at)` answers a different question — what is on screen at that instant — and at a frame
      * boundary the two answers differ by a whole frame. Half a frame is for `currentTime` and
-     * for nothing else (Task 6); here the second is turned into a frame number and that is that.
+     * for nothing else; here the second is converted directly to a frame number.
      */
     const sourceFrame = (at: number): Buffer => frameByIndex(source, Math.round(at * FPS))
 
@@ -121,10 +121,10 @@ test('cuts two clips, one of them across a hole, and writes both to disk', async
     // first frame is the frame the user pointed at and not the key frame before it.
     //
     // Twenty-five frames, not twenty-four, and the number is **arithmetic and not a
-    // measurement** — the plan of Task 3 run over the samples of this fixture keeps 37 of them,
+    // measurement**: the export plan over this fixture keeps 37 samples,
     // hides 7168 ticks behind the edit list and leaves 12800, which is 25 frames of 512 and
     // 1.0417 s. The twenty-fifth is the frame past the out point that reordering drags in, the
-    // limit Task 3 writes down instead of papering over. If a later stage stops dragging it in,
+    // known reordering limit rather than an unexplained surplus. If export stops dragging it in,
     // this number becomes 24 and the two lines under it stay true: the file is as long as the
     // frames in it, and its first frame is the frame that was asked for.
     const first = probeFile(inside!)
@@ -146,7 +146,7 @@ test('cuts two clips, one of them across a hole, and writes both to disk', async
     // The clip across the hole: twelve frames from before it, fourteen from after, and no two
     // seconds of hole between them. The two tracks were pulled back by the smaller of the two
     // holes (1.9969 against 2.000), so the seam frame lasts 38 ticks — three milliseconds —
-    // longer than the rest, which is the residue §8.2 accepts and is well under a frame.
+    // longer than the rest, an accepted seam residue well under one frame.
     //
     // Arithmetic again: 38 samples, 13862 ticks, 26 frames, 1.1281 s. Two frames past the second
     // that was asked for, and both are accounted for — the frame *at* the out point, which decode
@@ -218,7 +218,7 @@ test('takes a clip back and puts it back with the keyboard alone', async () => {
     await expect(editor.getByTestId('clip')).toHaveCount(2)
 
     // Three edits, three presses, back to the empty timeline — through the real store, the real
-    // keyboard and the real components, which is the one thing the unit tests of Task 15 cannot do.
+    // keyboard and real components, which reducer unit tests cannot cover.
     await editor.keyboard.press('Control+z')
     await expect(editor.getByTestId('clip')).toHaveCount(1)
     await expect(editor.getByTestId('out-c1')).toHaveValue('00:00:04:12')

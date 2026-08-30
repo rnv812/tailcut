@@ -1,17 +1,17 @@
 /**
- * The order §7.3 states in words, made into a total order over sessions.
+ * The documented eviction priorities, made into a total order over sessions.
  *
  * Words are enough to say which of two obvious cases goes first; they are not enough to answer
  * "which of these forty" without a number, and two places need that answer: the sweeper decides
- * by it what leaves the disk, and the frame decides by it what leaves the memory when the ceiling
- * of §7.2 is reached. One function, so that the two cannot come to disagree about what a
+ * by it what leaves the disk, and the frame decides by it what leaves memory when its ceiling is
+ * reached. One function keeps those decisions aligned about what a
  * recording is worth.
  *
  * Everything here is a weight rather than a rule, with two exceptions that are rules: a pinned
  * session is never evicted, and one the user has taken into the editor outranks anything that
  * was only watched.
  * The weights are not tuned against a corpus — there is none — and they are not meant to be: what
- * they have to get right is the order of §7.3, and the tests state that order case by case.
+ * they have to get right is the eviction order, which tests state case by case.
  */
 
 export interface Valued {
@@ -128,10 +128,10 @@ export function victimsFor(
 }
 
 /**
- * The sessions that have outlived the keeping (§7.4: seven days by default).
+ * Sessions that have outlived the retention period, seven days by default.
  *
  * Counted from when material last arrived and not from when the session opened: a video watched
- * over three evenings is one session (§6.1), and it is two days old on the third evening rather
+ * over three evenings merges into one session, and is two days old on the third evening rather
  * than nearly a week.
  */
 export function expiredBy(

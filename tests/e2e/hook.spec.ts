@@ -4,12 +4,12 @@ import path from 'node:path'
 import { launchWithExtension, serveLocal } from './helpers'
 
 const PAGE_URL = 'https://tailcut.test/player'
-/** Страница без строгой политики: на ней проверяется, что чужие вызовы API не сломаны. */
+/** A page without a strict policy, used to prove that wrapping APIs does not break callers. */
 const PLAIN_URL = 'https://tailcut.test/plain'
-/** Обычный http: расширение объявлено на <all_urls>, а контекст здесь незащищённый. */
+/** Plain HTTP: the extension covers <all_urls>, but this context is not secure. */
 const INSECURE_URL = 'http://insecure.test/plain'
 
-/** Сегменты в том порядке, в каком их дописывает tests/e2e/page/player.html. */
+/** Segments in the order appended by tests/e2e/page/player.html. */
 const APPENDED = [
   'h264/init-stream0.m4s',
   'h264/chunk-stream0-00001.m4s',
@@ -18,18 +18,18 @@ const APPENDED = [
 ]
 
 const MIME = 'video/mp4; codecs="avc1.4d401e"'
-/** Звуковая дорожка того же потока: tests/fixtures/h264/*-stream1.m4s — mp4a/soun. */
+/** The same stream's audio track: tests/fixtures/h264/*-stream1.m4s is mp4a/soun. */
 const AUDIO_MIME = 'audio/mp4; codecs="mp4a.40.2"'
 
-/** Двухдорожечный поток так и раскладывается: один MediaSource, свой SourceBuffer на дорожку. */
+/** A two-track stream uses one MediaSource and one SourceBuffer per track. */
 const TRACKS = {
   video: { mime: MIME, files: ['h264/init-stream0.m4s', 'h264/chunk-stream0-00001.m4s'] },
   audio: { mime: AUDIO_MIME, files: ['h264/init-stream1.m4s', 'h264/chunk-stream1-00001.m4s'] },
 }
 
 /**
- * FNV-1a, 32 бита. Тот же алгоритм считается в браузере: сравниваются не длины, а содержимое —
- * иначе обёртка, отдающая соседний кусок памяти той же длины, прошла бы проверку.
+ * FNV-1a, 32-bit. The browser computes the same digest so this compares content, not lengths.
+ * Otherwise a wrapper returning an adjacent memory region of the same length would pass.
  */
 function digest(bytes: Uint8Array): string {
   let hash = 0x811c9dc5
@@ -47,7 +47,7 @@ async function fixtureDigests(list: string[] = APPENDED): Promise<string[]> {
 type SeenAppend = { sourceId: string; bufferId: string; mime: string; digest: string }
 type SeenSource = { sourceId: string; objectUrl: string }
 
-/** Что собрал слушатель, поставленный тестом в каждом документе страницы. */
+/** What the listener installed by the test in every page document collected. */
 type Probe = {
   tcAppend: SeenAppend[]
   tcSource: SeenSource[]
@@ -59,9 +59,9 @@ type Probe = {
 type PlayerState = { appended: number; allAppended?: boolean }
 
 /**
- * Открывает страницу с расширением и слушателем сообщений хука, поставленным до любого
- * скрипта страницы: иначе первые сообщения пройдут мимо и тест окажется ложноотрицательным.
- * Слушатель ставится во всех документах страницы, включая фрейм моста, — так виден весь путь.
+ * Opens a page with the extension and installs the hook-message listener before any page script.
+ * Otherwise the first messages would be missed and the test could report a false negative.
+ * The listener runs in every document, including the bridge frame, exposing the full path.
  */
 async function open(url: string, html?: string) {
   const { context, extensionId } = await launchWithExtension()
@@ -142,45 +142,47 @@ async function open(url: string, html?: string) {
     context,
     page,
     extensionId,
-    log: () => consoleLog.join(' | ') || '(пусто)',
+    log: () => consoleLog.join(' | ') || '(empty)',
   }
 }
 
 const openPlayer = () => open(PAGE_URL)
 
-/** Ждёт, пока плеер допишет все свои сегменты. */
+/** Waits until the player has appended all its segments. */
 const playerDone = (page: Page) =>
   page.waitForFunction(() => (window as unknown as PlayerState).allAppended === true, undefined, {
     timeout: 15_000,
   })
 
-/** Отдаёт документ моста; тест ставит в него тот же слушатель, что и в страницу. */
+/** Returns the bridge document so the test can install the same listener used in the page. */
 async function bridgeFrame(page: Page, extensionId: string, log: () => string): Promise<Frame> {
   const deadline = Date.now() + 5_000
   for (;;) {
     const frame = page.frames().find((candidate) => candidate.url().includes(extensionId))
     if (frame) return frame
-    expect(Date.now(), `фрейм моста не появился; консоль страницы: ${log()}`).toBeLessThan(deadline)
+    expect(Date.now(), `the bridge frame did not appear; page console: ${log()}`).toBeLessThan(
+      deadline,
+    )
     await page.waitForTimeout(50)
   }
 }
 
 const close = (context: BrowserContext) => context.close()
 
-test('хук видит каждый appendBuffer и не мешает плееру', async () => {
+test('the hook sees every appendBuffer call without disrupting the player', async () => {
   const { context, page, log } = await openPlayer()
   await playerDone(page)
 
   const seen = await page.evaluate(() => (window as unknown as Probe).tcAppend)
   const appended = await page.evaluate(() => (window as unknown as PlayerState).appended)
 
-  expect(seen.length, `хук пропустил вызовы appendBuffer; консоль страницы: ${log()}`).toBe(
+  expect(seen.length, `the hook missed appendBuffer calls; page console: ${log()}`).toBe(
     appended,
   )
-  // Содержимое, а не только число сообщений: копия обязана нести те же байты и в том же порядке.
+  // Check content, not only message count: each copy must carry the same bytes in the same order.
   expect(seen.map((item) => item.digest)).toEqual(await fixtureDigests())
 
-  // Один MediaSource и один SourceBuffer: без общего идентификатора мост не соберёт дорожку.
+  // One MediaSource and one SourceBuffer: without shared IDs the bridge cannot assemble the track.
   expect(new Set(seen.map((item) => item.sourceId)).size).toBe(1)
   expect(new Set(seen.map((item) => item.bufferId)).size).toBe(1)
   expect(new Set(seen.map((item) => item.mime))).toEqual(new Set([MIME]))
@@ -189,12 +191,12 @@ test('хук видит каждый appendBuffer и не мешает плее�
     const video = document.querySelector('video')!
     return video.error ? video.error.code : null
   })
-  expect(error, 'плеер не должен получить ошибку из-за обёрток').toBeNull()
+  expect(error, 'the wrappers must not make the player fail').toBeNull()
 
   await close(context)
 })
 
-test('источник связан с адресом, попавшим в video.src', async () => {
+test('the source is associated with the URL assigned to video.src', async () => {
   const { context, page, log } = await openPlayer()
   await playerDone(page)
 
@@ -207,9 +209,9 @@ test('источник связан с адресом, попавшим в video
     }
   })
 
-  // Ровно один источник, и его адрес — тот самый, что плеер поставил элементу: по нему
-  // наблюдатель в изолированном мире находит, какому <video> принадлежит поток.
-  expect(observed.sources, `консоль страницы: ${log()}`).toEqual([
+  // There is exactly one source with the URL assigned by the player. The isolated-world watcher
+  // uses that URL to identify which <video> owns the stream.
+  expect(observed.sources, `page console: ${log()}`).toEqual([
     { sourceId: observed.appendSourceId, objectUrl: observed.videoSrc },
   ])
   expect(observed.videoSrc.startsWith('blob:')).toBe(true)
@@ -217,13 +219,13 @@ test('источник связан с адресом, попавшим в video
   await close(context)
 })
 
-test('копия снимается синхронно, до возврата из appendBuffer', async () => {
+test('the hook copies synchronously before appendBuffer returns', async () => {
   const { context, page, log } = await openPlayer()
   await playerDone(page)
 
-  // Отдельный MediaSource: сегмент дописывается видом с ненулевым смещением, а сразу после
-  // возврата из appendBuffer исходный буфер затирается. Плеер вправе так делать — MSE копирует
-  // данные синхронно. Если обёртка отложит копирование до микрозадачи, до моста доедет мусор.
+  // This MediaSource appends a view at a non-zero offset, then overwrites the source buffer as soon
+  // as appendBuffer returns. Players may do that because MSE copies synchronously. If the wrapper
+  // delays its copy until a microtask, the bridge receives overwritten bytes.
   const scribbled = await page.evaluate(async (mime) => {
     const seen = window as unknown as Probe
     const before = seen.tcAppend.length
@@ -238,7 +240,7 @@ test('копия снимается синхронно, до возврата и
     const segment = new Uint8Array(
       await (await fetch('/fixtures/h264/init-stream0.m4s')).arrayBuffer(),
     )
-    // Смещение и хвост вокруг сегмента: обёртка обязана взять именно его окно в буфере.
+    // The prefix and suffix prove that the wrapper copies the view's exact buffer window.
     const padded = new Uint8Array(segment.byteLength + 11)
     padded.set(segment, 7)
     const view = new Uint8Array(padded.buffer, 7, segment.byteLength)
@@ -259,20 +261,19 @@ test('копия снимается синхронно, до возврата и
     return { expected, captured: seen.tcAppend.slice(before).map((item) => item.digest) }
   }, MIME)
 
-  expect(scribbled.captured, `консоль страницы: ${log()}`).toEqual([scribbled.expected])
+  expect(scribbled.captured, `page console: ${log()}`).toEqual([scribbled.expected])
 
   await close(context)
 })
 
-test('буфер страницы переживает отправку: тот же ArrayBuffer дописывается повторно', async () => {
+test('sending preserves the page buffer so the same ArrayBuffer can be appended again', async () => {
   const { context, page, log } = await openPlayer()
   await playerDone(page)
 
-  // Плееры дописывают голый ArrayBuffer из (await fetch(...)).arrayBuffer(), и тот же буфер идёт
-  // в дело второй раз, когда кеш сегментов дописывает его после перемотки. Отдай обёртка наружу
-  // сам буфер страницы, transferable-отправка отсоединила бы его. Это отказ хуже исключения:
-  // повторный appendBuffer отсоединённого буфера штатно резолвит updateend, ничего не дописав, —
-  // плеер молча встаёт без ошибки.
+  // Players append a bare ArrayBuffer returned by fetch, then reuse it when a segment cache fills
+  // the buffer after a seek. If the wrapper transferred the page's own buffer, postMessage would
+  // detach it. This is worse than an exception: appending the detached buffer completes updateend
+  // without adding data, so the player silently stalls.
   const replay = await page.evaluate(async (mime) => {
     const seen = window as unknown as Probe
     const before = seen.tcAppend.length
@@ -309,11 +310,11 @@ test('буфер страницы переживает отправку: тот 
     await update(() => sourceBuffer.appendBuffer(chunk))
     const firstPass = bufferedEnd()
 
-    // Отсоединение случилось бы именно на отправке: ждём, пока хук отдаст оба сегмента.
+    // Detachment would happen during delivery, so wait until the hook has sent both segments.
     await settle(2)
     const sizeAfterSend = chunk.byteLength
 
-    // Перемотка: плеер выкидывает накопленное и дописывает тот же кусок заново из своего кеша.
+    // Simulate a seek: discard buffered data and append the same cached segment again.
     await update(() => sourceBuffer.remove(0, Infinity))
     const cleared = sourceBuffer.buffered.length
     await update(() => sourceBuffer.appendBuffer(chunk))
@@ -332,21 +333,24 @@ test('буфер страницы переживает отправку: тот 
     }
   }, MIME)
 
-  expect(replay.sizeAfterSend, `отправка мосту отсоединила буфер страницы; консоль: ${log()}`).toBe(
+  expect(replay.sizeAfterSend, `sending to the bridge detached the page buffer; console: ${log()}`).toBe(
     replay.size,
   )
-  expect(replay.cleared, 'подготовка: перед повтором буфер должен был опустеть').toBe(0)
-  expect(replay.firstPass, 'подготовка: первый проход ничего не набрал').toBeGreaterThan(0)
-  expect(replay.secondPass, 'повторный appendBuffer не дописал ничего — плеер встал молча').toBe(
+  expect(replay.cleared, 'setup: the buffer must be empty before the replay').toBe(0)
+  expect(replay.firstPass, 'setup: the first pass buffered no data').toBeGreaterThan(0)
+  expect(replay.secondPass, 'the repeated appendBuffer added nothing, so the player stalled').toBe(
     replay.firstPass,
   )
-  expect(replay.digests, 'мосту доехали не те байты').toEqual([replay.expected, replay.expected])
-  expect(replay.error, 'плеер не должен получить ошибку из-за обёрток').toBeNull()
+  expect(replay.digests, 'the bridge received the wrong bytes').toEqual([
+    replay.expected,
+    replay.expected,
+  ])
+  expect(replay.error, 'the wrappers must not make the player fail').toBeNull()
 
   await close(context)
 })
 
-test('сегменты доезжают до фрейма моста', async () => {
+test('segments reach the bridge frame', async () => {
   const { context, page, extensionId, log } = await openPlayer()
   await playerDone(page)
 
@@ -360,14 +364,14 @@ test('сегменты доезжают до фрейма моста', async () 
   const delivered = await bridge.evaluate(() =>
     (window as unknown as Probe).tcAppend.map((item) => item.digest),
   )
-  expect(delivered, `мост не получил сегменты; консоль страницы: ${log()}`).toEqual(
+  expect(delivered, `the bridge did not receive the segments; page console: ${log()}`).toEqual(
     await fixtureDigests(),
   )
 
   await close(context)
 })
 
-test('createObjectURL остаётся рабочим для обычных Blob', async () => {
+test('createObjectURL keeps working for ordinary Blobs', async () => {
   const { context, page, log } = await open(
     PLAIN_URL,
     '<!doctype html><meta charset="utf-8"><title>plain</title>',
@@ -380,15 +384,15 @@ test('createObjectURL остаётся рабочим для обычных Blob
     return { url, text, sources: (window as unknown as Probe).tcSource.length }
   })
 
-  expect(result.text, `blob-адрес перестал читаться; консоль страницы: ${log()}`).toBe('tailcut')
+  expect(result.text, `the blob URL became unreadable; page console: ${log()}`).toBe('tailcut')
   expect(result.url.startsWith('blob:')).toBe(true)
-  // Blob — не MediaSource: сессии на нём заводиться не должно.
+  // A Blob is not a MediaSource, so it must not create a session.
   expect(result.sources).toBe(0)
 
   await close(context)
 })
 
-test('обращение к DRM хук не трогает вовсе', async () => {
+test('the hook leaves DRM access untouched', async () => {
   const { context, page, log } = await openPlayer()
 
   const original = await page.evaluate(
@@ -406,18 +410,18 @@ test('обращение к DRM хук не трогает вовсе', async ()
     }
   }, MIME)
 
-  // Пусть все отложенные сообщения хука дойдут: сегменты он отправляет микрозадачей.
+  // Let all deferred hook messages arrive because segments are sent in a microtask.
   await page.waitForTimeout(300)
 
-  // Метод страницы остался родным. Раньше он подменялся, и любое обращение — включая
-  // отклонённый зонд возможностей — снимало запись со всей страницы: на статье edition.cnn.com
-  // шестнадцать зондов отняли настоящее видео, шедшее без единого бокса шифрования.
-  expect(original, `хук всё ещё подменяет requestMediaKeySystemAccess; ${log()}`).toBe(true)
+  // The page method remains native. An earlier wrapper treated every call, including a rejected
+  // capability probe, as DRM for the entire page. On edition.cnn.com, sixteen probes discarded an
+  // unencrypted video that contained no encryption boxes.
+  expect(original, `the hook still wraps requestMediaKeySystemAccess; ${log()}`).toBe(true)
   expect(
     await page.evaluate(() => (window as unknown as Probe).tcTypes),
-    'хуку нечего сказать о запросе ключевой системы',
+    'the hook must emit nothing about a key-system request',
   ).not.toContain('tc:drm')
-  expect(access, 'выдача ключей не должна страдать от расширения').toEqual({
+  expect(access, 'the extension must not interfere with key-system access').toEqual({
     keySystem: 'org.w3.clearkey',
     failed: '',
   })
@@ -425,7 +429,7 @@ test('обращение к DRM хук не трогает вовсе', async ()
   await close(context)
 })
 
-test('на http-странице EME не выдумывается', async () => {
+test('the hook does not invent EME on an HTTP page', async () => {
   const { context, page, log } = await open(
     INSECURE_URL,
     '<!doctype html><meta charset="utf-8"><title>insecure</title>',
@@ -433,36 +437,35 @@ test('на http-странице EME не выдумывается', async () =>
 
   const observed = await page.evaluate(async () => {
     const seen = window as unknown as Probe
-    // Сперва — доказательство, что хук на этой странице вообще стоит: иначе проверка ниже
-    // прошла бы и на странице без расширения, то есть не значила бы ничего.
+    // First prove that the hook is installed here. Otherwise the check below would also pass on a
+    // page without the extension and would prove nothing.
     URL.createObjectURL(new MediaSource())
     await new Promise((resolve) => setTimeout(resolve, 100))
 
     return {
       hooked: seen.tcSource.length,
-      // Ровно та последовательность, что делают shaka, dash.js и hls.js: проверили наличие
-      // метода — и только потом зовут.
+      // This is the sequence used by shaka, dash.js, and hls.js: test for the method, then call it.
       eme: typeof navigator.requestMediaKeySystemAccess,
       secure: window.isSecureContext,
     }
   })
 
-  expect(observed.hooked, `хук не встал на http-страницу; консоль страницы: ${log()}`).toBe(1)
-  expect(observed.secure, 'подготовка: страница должна быть незащищённым контекстом').toBe(false)
-  // Вне защищённого контекста Chrome не отдаёт requestMediaKeySystemAccess вовсе. Обёртка,
-  // поставленная поверх пустого места, выдумала бы возможность, которой у браузера нет:
-  // проверка наличия прошла бы, а вызов упал бы уже внутри обёртки.
-  expect(observed.eme, 'хук объявил EME там, где браузер его не даёт').toBe('undefined')
+  expect(observed.hooked, `the hook was not installed on the HTTP page; page console: ${log()}`).toBe(1)
+  expect(observed.secure, 'setup: the page must be an insecure context').toBe(false)
+  // Outside a secure context Chrome omits requestMediaKeySystemAccess. Wrapping a missing method
+  // would invent a capability the browser does not provide: the presence check would pass and the
+  // call would fail only inside the wrapper.
+  expect(observed.eme, 'the hook exposed EME where the browser does not').toBe('undefined')
 
   await close(context)
 })
 
-test('дорожки одного MediaSource различаются bufferId', async () => {
+test('tracks in one MediaSource have distinct bufferIds', async () => {
   const { context, page, log } = await openPlayer()
   await playerDone(page)
 
-  // Один MediaSource и два SourceBuffer — раскладка любого DASH/HLS-плеера: видео отдельно,
-  // звук отдельно. bufferId существует ровно затем, чтобы мост их различал.
+  // DASH and HLS players use one MediaSource with separate video and audio SourceBuffers.
+  // bufferId exists so the bridge can tell those tracks apart.
   const observed = await page.evaluate(async (tracks) => {
     const seen = window as unknown as Probe
     const before = seen.tcAppend.length
@@ -504,33 +507,32 @@ test('дорожки одного MediaSource различаются bufferId', 
 
   expect(
     video.map((item) => item.digest),
-    `звук или видео не доехали; консоль страницы: ${log()}`,
+    `audio or video did not arrive; page console: ${log()}`,
   ).toEqual(await fixtureDigests(TRACKS.video.files))
   expect(audio.map((item) => item.digest)).toEqual(await fixtureDigests(TRACKS.audio.files))
 
-  // Источник у дорожек общий, а сами дорожки обязаны различаться.
+  // The tracks share one source but must remain distinct.
   expect(new Set(observed.captured.map((item) => item.sourceId)).size).toBe(1)
   expect(
     new Set(video.map((item) => item.bufferId)).size,
-    'сегменты одной дорожки разъехались по bufferId',
+    'segments from one track were split across bufferIds',
   ).toBe(1)
   expect(new Set(audio.map((item) => item.bufferId)).size).toBe(1)
   expect(
     audio[0]!.bufferId,
-    'звук уехал под тем же bufferId, что видео: различать дорожки на мосту нечем',
+    'audio and video used the same bufferId, so the bridge cannot distinguish the tracks',
   ).not.toBe(video[0]!.bufferId)
-  expect(observed.error, 'плеер не должен получить ошибку из-за обёрток').toBeNull()
+  expect(observed.error, 'the wrappers must not make the player fail').toBeNull()
 
   await close(context)
 })
 
-test('два MediaSource на странице не сливаются в один источник', async () => {
+test('two MediaSources on one page remain separate sources', async () => {
   const { context, page, log } = await openPlayer()
   await playerDone(page)
 
-  // Второй MediaSource — штатное дело: плеер пересоздаёт его при смене качества и при
-  // перезапуске, да и двух <video> на странице никто не запрещал. С общим sourceId два
-  // независимых потока сливаются в один.
+  // Players routinely create a second MediaSource after a quality change or restart, and a page
+  // may contain two <video> elements. A shared sourceId would merge independent streams.
   const observed = await page.evaluate(async (mime) => {
     const seen = window as unknown as Probe
     const beforeAppend = seen.tcAppend.length
@@ -575,16 +577,16 @@ test('два MediaSource на странице не сливаются в оди
 
   expect(
     observed.sources.map((item) => item.objectUrl),
-    `подготовка: два источника со своими адресами; консоль страницы: ${log()}`,
+    `setup: two sources must have their own URLs; page console: ${log()}`,
   ).toEqual(observed.urls)
 
   const [first, second] = observed.sources
   expect(
     second!.sourceId,
-    'два независимых потока уехали под одним sourceId: мост сольёт их в один',
+    'two independent streams used one sourceId, so the bridge would merge them',
   ).not.toBe(first!.sourceId)
 
-  // Сегменты разложились по своим источникам, а не свалились в кучу.
+  // Segments are grouped by their own sources instead of being pooled together.
   const digestsOf = (sourceId: string): string[] =>
     observed.captured.filter((item) => item.sourceId === sourceId).map((item) => item.digest)
   expect(digestsOf(first!.sourceId)).toEqual(
@@ -593,20 +595,19 @@ test('два MediaSource на странице не сливаются в оди
   expect(digestsOf(second!.sourceId)).toEqual(
     await fixtureDigests(['h264/init-stream0.m4s', 'h264/chunk-stream0-00002.m4s']),
   )
-  // Дорожки у разных источников тоже свои: иначе в дорожку подмешаются чужие сегменты.
+  // Different sources also have distinct tracks, preventing cross-stream segment mixing.
   expect(new Set(observed.captured.map((item) => item.bufferId)).size).toBe(2)
 
   await close(context)
 })
 
-test('исключение из appendBuffer доходит до плеера', async () => {
+test('appendBuffer exceptions reach the player', async () => {
   const { context, page, log } = await openPlayer()
   await playerDone(page)
 
-  // Исключения из appendBuffer — обычная работа браузерного API: InvalidStateError прилетает
-  // при дописке во время update, QuotaExceededError — когда буфер полон, и именно по ним плеер
-  // чистит buffered-диапазоны и дописывает заново. Съеденное обёрткой исключение оставляет его
-  // без сигнала: он не эвиктит, не повторяет дописку и молча встаёт.
+  // appendBuffer exceptions are part of the browser API: InvalidStateError reports an append
+  // during an update, while QuotaExceededError reports a full buffer. Players use those signals
+  // to evict ranges and retry. If the wrapper swallows one, the player silently stalls.
   const observed = await page.evaluate(async (mime) => {
     const source = new MediaSource()
     const element = document.createElement('video')
@@ -626,16 +627,16 @@ test('исключение из appendBuffer доходит до плеера', 
     const first = settled()
     buffer.appendBuffer(init)
 
-    let thrown = '(обёртка ничего не бросила)'
+    let thrown = '(the wrapper threw nothing)'
     try {
-      // Дописка, пока предыдущая не закончилась: браузер отвечает InvalidStateError.
+      // Appending before the previous update finishes produces InvalidStateError.
       buffer.appendBuffer(chunk)
     } catch (error) {
       thrown = (error as DOMException).name
     }
     await first
 
-    // Ровно то, что делает плеер, получив отказ: повторяет дописку, когда буфер освободился.
+    // Match player recovery: retry the append after the buffer becomes available.
     const retried = settled()
     buffer.appendBuffer(chunk)
     await retried
@@ -647,11 +648,11 @@ test('исключение из appendBuffer доходит до плеера', 
     }
   }, MIME)
 
-  expect(observed.thrown, `обёртка съела исключение appendBuffer; консоль: ${log()}`).toBe(
+  expect(observed.thrown, `the wrapper swallowed the appendBuffer exception; console: ${log()}`).toBe(
     'InvalidStateError',
   )
-  expect(observed.buffered, 'повторная дописка после отказа ничего не набрала').toBeGreaterThan(0)
-  expect(observed.error, 'плеер не должен получить ошибку из-за обёрток').toBeNull()
+  expect(observed.buffered, 'the retry after failure buffered no data').toBeGreaterThan(0)
+  expect(observed.error, 'the wrappers must not make the player fail').toBeNull()
 
   await close(context)
 })

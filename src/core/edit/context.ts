@@ -20,7 +20,7 @@ import type { ViewBounds } from '../timeline/view'
  * The consequences are named rather than discovered. `ctx.duration` can be longer than anything
  * the preview can show. `zoneAt`/`runAt` can answer about a stretch the playhead cannot reach —
  * `seek` quantises onto `frames`, so it never lands there, and `normalizeClip` clamps a clip
- * into its own zone, so a clip cannot be stretched there either (§8.3). `startClip` may take a
+ * into its own zone, so a clip cannot be stretched across it either. `startClip` may take a
  * `run.end` from beyond the open representation; `normalizeClip` pulls it back the same way.
  * Nothing downstream is allowed to assume the two sets agree, and no field is quietly
  * reinterpreted to make them.
@@ -42,11 +42,11 @@ export interface EditContext {
    */
   frameSize: { width: number; height: number }
   /**
-   * The format a clip is born in (§9.4), read once when the tab opened.
+   * Initial clip format, read once when the editor tab opens.
    *
    * Here for the same reason `nameTemplate` is here: a new clip is made by the reducer, which is
    * pure and knows nothing but this context, and a setting that never reaches the reducer is a
-   * setting that does nothing. Absent from the settings — `'mp4'`, the default of §7.4.
+   * setting that does nothing. When absent, it defaults to `'mp4'`.
    */
   newClipFormat: ExportFormat
   /** Continuous stretches of the picture across **all** representations, in time order. */
@@ -58,8 +58,8 @@ export interface EditContext {
   /** Title of the page: clips are named after it. */
   title: string
   /**
-   * The user's file-name template (§9.4), read once when the tab opened; absent — the name stage
-   * 2 built out of the title and the timecode.
+   * The user's file-name template, read once when the tab opens. When absent, naming builds the
+   * file name from the title and timecode.
    *
    * It sits here rather than being read where a clip is named because naming happens in the
    * reducer, which is pure and knows nothing but this context. Absent and empty are two different

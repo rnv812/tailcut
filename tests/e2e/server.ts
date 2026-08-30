@@ -121,7 +121,7 @@ export async function serveMedia(): Promise<Host> {
  * Serves one page, under an origin of its own, with the address of the media written into it.
  *
  * `sound` is for the one page shape that plays two files at once — a picture in a `<video>` and a
- * soundtrack in an `<audio>` beside it (§5.6). Both come off the same media host, which is what
+ * soundtrack in an `<audio>` beside it. Both come from the same media host, which is what
  * the survey found: the two files of coub sit on hosts of their own, and neither is the page's.
  */
 export async function servePage(

@@ -209,7 +209,7 @@ describe('assembleMp4', () => {
 
   it('ends exactly on the frame asked for where nothing is reordered', () => {
     // The same request against material with no B-frames: every cts is zero, decode order is
-    // presentation order, and there is no tail to carry. This is the half of §8.2 that is exact
+    // presentation order, and there is no tail to carry. Tail trimming is exact
     // today, and it is here so the limitation above reads as a property of reordering and not as
     // a property of the cut.
     const vp9 = pictureOnly(

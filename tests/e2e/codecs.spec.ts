@@ -152,7 +152,7 @@ const CODEC_BOX: Record<string, string> = {
  * Every track of the saved file states the box its codec is described by.
  *
  * What Media Source Extensions used to guard here, guarded by reading the file instead: a byte
- * stream wants an mvex and moofs, and a progressive file has neither by design (Task 2). MSE
+ * stream wants an mvex and moofs, and a progressive file has neither by design. MSE
  * refused a vp09 sample entry carrying no vpcC and an mp4a carrying no esds, where the ordinary
  * playback path reads what it needs out of the frames and never notices.
  */

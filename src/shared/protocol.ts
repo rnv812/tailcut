@@ -17,7 +17,7 @@ export function isBridgeCapability(value: unknown): value is string {
 /** Path to the editor page inside the extension package. */
 export const EDITOR_PATH = 'editor/editor.html'
 
-/** Directory of OPFS the snapshots live in. Stage 3 adds `sessions/` beside it. */
+/** Directory of OPFS the snapshots live in; durable recordings use `sessions/` beside it. */
 export const SNAPSHOT_DIR = 'snapshots'
 
 /**
@@ -93,7 +93,7 @@ export type PageToBridge =
   /**
    * How long the whole video is, in seconds, as the page itself stated it on its MediaSource.
    *
-   * The third component of the merge key (§6.1). What the page states out of its manifest, and
+   * The third component of the merge key. What the page states out of its manifest, and
    * never what the browser works out for itself: with the duration left unset MSE grows it to the
    * end of whatever has been buffered, and a number that climbs with every segment would move a
    * session to a new key on every poll.
@@ -194,7 +194,7 @@ export interface PlainSource {
 /**
  * An `<audio>` element playing a soundtrack of its own, beside a picture that has none.
  *
- * The other half of the one page shape tailcut could not deliver (§5.6): the picture in a
+ * The other half of the one page shape tailcut could not deliver: the picture in a
  * `<video src>` with no audio track in it, the sound in a separate `<audio src>` seven times as
  * long, both looping on cycles of their own. Measured on coub, one site of the seven surveyed.
  *
@@ -202,7 +202,7 @@ export interface PlainSource {
  * how long it has been watched, and an `<audio>` has no width at all — so a soundtrack is never a
  * session, never a row in the popup and never a saved file by itself. A file of somebody's music
  * with no picture is not a clip of anything, and offering one would make tailcut a music
- * downloader, which §2 puts out of scope. What it can be is the sound of a picture beside it, and
+ * downloader, which is out of scope. What it can be is the sound of a picture beside it, and
  * that is the whole of what this message is for.
  */
 export interface SoundSource {
@@ -251,14 +251,14 @@ export const SOURCE_EVENT = 'tailcut:source'
  *
  * - `track` — a stream the ingest boundary refused: its container or codec cannot be written
  *   out, nothing of it was ever collected, and the file is short of a whole kind of media.
- * - `sound` — this page plays its sound in an element of its own beside a picture that has none
- *   (§5.6), and that soundtrack could not be used: unreadable, or two of them playing at once
+ * - `sound` — this page plays its sound in an element of its own beside a picture that has none,
+ *   and that soundtrack could not be used: unreadable, or two of them playing at once
  *   with nothing to say which belongs to the picture. The clip is silent, which is the one thing
  *   the popup must not leave the user to discover in a player.
  * - `soundShort` — the same page, paired: the soundtrack was taken and it runs out before the
  *   picture does, so the end of the clip is silent. Nothing is looped round to cover it — the
  *   page played what it played.
- * - `rendition` — the picture or the sound was recorded at more than one quality (§6.2), and
+ * - `rendition` — the picture or the sound was recorded at more than one quality, and
  *   one file carries one of them.
  * - `alternate` — the material holds more than one track of a kind, and one file carries one of
  *   each. Kept apart from `rendition` because the two are different news: a rendition is the
@@ -384,7 +384,7 @@ export interface SessionList {
  * Only one refusal may be sent this way, and it is the protected-media one (see
  * SessionStore.refuseEncrypted): it covers the whole page and it never turns. A triage rejection
  * must not travel here even though it looks alike. A rejection turns — a pause, a hidden tab, an
- * element off the screen are all rejections of §5.5 — and a hook that stopped copying mid-stream
+ * element off the screen are temporary rejections, and a hook that stopped copying mid-stream
  * would leave the reader on this side inside a segment with no way of finding its place again:
  * MSE hands a SourceBuffer a byte stream, not a list of segments, and the init that would explain
  * the next header went past in the first second of playback.
@@ -420,7 +420,7 @@ export interface FrameRecording {
 /**
  * Whether the hook in the MAIN world should copy anything at all.
  *
- * The recording mode of §9.4 (`All sites` / `Allowlist` / `Off`) and the two lists beside it,
+ * The recording mode (`All sites` / `Allowlist` / `Off`) and the two lists beside it,
  * decided by the bridge and carried across as the one bit the hook can act on. Off, the hook
  * stops copying: that is the whole of what turning recording off buys, and it cannot be bought
  * anywhere further downstream — a registry that dropped what it was given would still be paying
@@ -438,7 +438,7 @@ export interface FrameRecording {
  *
  * Unlike the refusal, this one turns: it is said again whenever the settings change, and again
  * to a hook that has just started. What was recorded before it was switched off stays exactly
- * where it was (§7.2); nothing is erased by a switch.
+ * where it was; nothing is erased by a switch.
  */
 export interface RecordingSwitch {
   type: 'tc:record'
@@ -489,7 +489,7 @@ export type ExtensionToTab =
   /**
    * Stop, or start again, recording in this frame — until the page is reloaded.
    *
-   * The quick switch of §9.2, and the one switch in the program that is not a setting: it is
+   * The popup's quick switch, and the one switch in the program that is not a setting: it is
    * about this visit to this page. It reaches the frames rather than storage, and a reload puts
    * the page back under the settings, which is what "quick" is supposed to mean.
    */
@@ -631,11 +631,11 @@ export const isExtensionToTab = guarding<ExtensionToTab>({
  * Deletion has one owner (see src/sw/sweeper.ts), so everything that wants something removed asks
  * rather than removes. `tc:sweep` is a nudge — the writer sends it when storage answered that it
  * is full, and the popup after a deletion whose undo has expired — and `tc:clear` is the button
- * of §9.4 beside the volume indicator.
+ * beside the volume indicator in settings.
  */
 export type ExtensionToWorker =
   /**
-   * `full` — storage refused a write, and it refused below the ceiling of §7.4: the browser is
+   * `full` — storage refused a write below the configured ceiling: the browser is
    * within its rights, the storage is best-effort, and a sweep that only looks at our own ceiling
    * would find nothing to free. Sent by the writer and by nobody else; the popup's nudge after a
    * deletion carries no such claim.

@@ -75,7 +75,7 @@ export interface PlannedTrack {
   samples: PlannedSample[]
   /**
    * Ticks of presentation the edit list hides at the head. There is no counterpart for the tail:
-   * the tail is gone because the samples are gone (§8.2).
+   * the tail is gone because those samples are omitted from the output.
    */
   skipTicks: number
 }

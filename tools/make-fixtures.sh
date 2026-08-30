@@ -397,7 +397,7 @@ ffmpeg -y -f lavfi -i "color=c=#202040:s=256x144:r=10:d=20" \
        -shortest "$out/plain/watched-vp8.webm"
 
 # The page that keeps its sound in an element of its own: a picture with no audio track at all,
-# and a soundtrack seven times as long playing underneath it (§5.6).
+# and a soundtrack seven times as long playing underneath it.
 #
 # Measured on coub, one site of the seven surveyed: <video src> of 9.48 s carrying H.264 and no
 # sound, <audio src> of 66.35 s carrying mp3 at 44.1 kHz in stereo, both with loop set and each

@@ -28,7 +28,7 @@ export interface Job {
  * machine: there is one hardware encoder, two sessions on it halve each other's speed and double
  * the memory, and the decoder-encoder pair holds frames on top of that. So copies go three at a
  * time and re-encodes go one at a time — and a copy never waits behind a re-encode, which is what
- * §8.6 means by "instantly".
+ * the UI means when it says a copy can start immediately.
  */
 export const PARALLEL: Record<JobKind, number> = { copy: 3, encode: 1 }
 
@@ -157,7 +157,7 @@ export function startable(queue: Queue): Job[] {
 }
 
 /**
- * Seconds left, worked out from the speed this job has actually shown (§8.6), and null while any
+ * Seconds left, derived from this job's observed speed, and null while any
  * answer would be a guess: before it starts, and before it has read anything.
  */
 export function etaOf(job: Job, now: number): number | null {

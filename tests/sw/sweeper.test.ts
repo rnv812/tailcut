@@ -149,7 +149,7 @@ describe('sweep', () => {
     })
     await sweep(io)
     // A hundred and fifty megabytes over: the cheapest alone does not cover it, so the second
-    // cheapest goes with it — and the one the user took into the editor outranks both (§7.3).
+    // cheapest goes with it, while the session opened in the editor outranks both.
     expect(removed).toEqual(['meagre/*', 'watched/*'])
   })
 
@@ -232,7 +232,7 @@ describe('repair', () => {
 
   it('takes a file of any age when the caller gives it no grace', async () => {
     // The grace is an argument, and this is what having it buys: an end-to-end run makes an
-    // orphan and repairs a second later (Task 13) instead of sleeping a minute or writing into
+    // orphan and repairs a second later instead of sleeping a minute or writing into
     // somebody's settings to avoid it.
     const { io, removed } = fakeIo({
       sessions: [row({ id: 'a' })],

@@ -119,7 +119,7 @@ const FILE_TYPES: Record<ExportFormat, { extension: string; mime: string }> = {
   webp: { extension: '.webp', mime: 'image/webp' },
 }
 
-/** The file one clip is written to. The name was made of the page title and the timecode (Task 10). */
+/** The output file for one clip, named from the page title and start timecode. */
 export function fileNameOf(clip: Clip): string {
   return `${sanitizeFileName(clip.name)}${FILE_TYPES[clip.format].extension}`
 }

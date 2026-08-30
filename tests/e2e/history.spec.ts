@@ -138,7 +138,7 @@ test('a piece is written sealed, read back whole, and leaves no lock behind', as
 /**
  * Every request is answered, the impossible one included.
  *
- * The writer that Task 3 puts in front of this worker sends one batch at a time and waits for the
+ * The writer in front of this worker sends one batch at a time and waits for the
  * answer by number, so a request that produces no answer at all does not cost one batch: it costs
  * every batch of every session for the life of the frame, silently, on a page that goes on
  * playing. There is no consumer yet to notice, which is exactly why it is pinned now.
@@ -313,14 +313,14 @@ test('what a tab recorded is in the index after that tab is gone', async () => {
     expect(listed.sessions[0]!.bytes).toBeGreaterThan(0)
     expect(listed.sessions[0]!.tracks.length).toBeGreaterThan(0)
     // The size of the player, measured by triage on the page and carried down the whole road —
-    // watcher, content script, bridge, registry, batch, row. §7.3 counts it as a sign that a
+    // watcher, content script, bridge, registry, batch, row. Opening it is a value signal that a
     // recording is worth keeping, and the fixture states it: <video width="640">.
     expect(listed.sessions[0]!.widthPx).toBe(640)
     expect(listed.totals.bytes).toBe(listed.sessions[0]!.bytes)
 
     await page.close()
 
-    // The same video in a second tab is the same session (§6.1): one row, one directory, and the
+    // The same video in a second tab merges into the same session: one row, one directory, and the
     // material of both tabs in it.
     const again = await context.newPage()
     await watchOn(again, 'player.html', 'https://one.test/watch', 12)
@@ -342,7 +342,7 @@ test('what a tab recorded is in the index after that tab is gone', async () => {
 })
 
 /**
- * §6.3 on the whole road, and not on the map alone.
+ * This holds discontinuous-media behavior across the whole path, not only in the map.
  *
  * A page hands the same stretch over twice as a matter of course — a rewatch, a seek back, a
  * player refilling a buffer it had let go of — and the fixture does it on demand: the same init
@@ -389,12 +389,12 @@ test('a stretch handed over a second time is not written down a second time', as
 
 /**
  * The key of this session changes while it is being recorded: the page states the length of the
- * video a moment after the first segments have gone down (§6.1, and it is what a player does).
+ * video shortly after the first segments are stored, as a real player does.
  * One video, one row — the halves must not end up apart.
  *
  * So the page is made to have two halves. It states the length long after its picture has landed,
  * and then goes on delivering: six more seconds in another representation, which is the quality
- * switch of §6.2 and the ordinary thing for a player to do a moment after it has read its
+ * quality switch and the ordinary thing for a player to do after reading its
  * manifest. Without that second half there is nothing here that could come apart — the picture is
  * on disk before the move and stays there whatever the row is called afterwards, and the test
  * would be saying only that a rename renames.
@@ -443,7 +443,7 @@ test('a session whose key changes on the fly stays one row', async () => {
 })
 
 /**
- * The whole of §9.2 that this stage adds, in a browser: a recording of a tab that is gone, listed
+ * The complete persisted-history path in a browser: a recording from a closed tab, listed
  * in a popup opened over a page that never played anything, pinned, deleted, put back — and the
  * quick switch beside it.
  *

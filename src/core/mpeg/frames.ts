@@ -10,7 +10,7 @@ import type { Located } from '../../shared/types'
  * one of them is described by the four bytes at its front and by nothing else. Reading it means
  * walking it.
  *
- * It is here because of one shape of page (§5.6): a picture in a `<video src>` with no sound of
+ * It handles a split-media page shape: picture in `<video src>` with no sound of
  * its own and the sound in a separate `<audio src>` beside it, which on the site the survey found
  * it on is an mp3. Nothing else in the program reads a bare elementary stream, and nothing else
  * needs to — a file with a container around it comes in through the mp4 or the Matroska road.

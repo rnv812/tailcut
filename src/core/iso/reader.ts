@@ -1,14 +1,14 @@
 export interface Box {
   type: string
-  /** смещение начала бокса в буфере */
+  /** Offset of the box start within the buffer. */
   start: number
-  /** полный размер бокса вместе с заголовком */
+  /** Full box size, including its header. */
   size: number
-  /** 8 для обычного заголовка, 16 для 64-битного */
+  /** 8 for a regular header, 16 for a 64-bit header. */
   headerSize: number
 }
 
-/** Боксы-контейнеры, у которых сразу за заголовком идут дочерние боксы. */
+/** Container boxes whose child boxes begin immediately after the header. */
 const CONTAINERS = new Set([
   'moov', 'trak', 'mdia', 'minf', 'stbl', 'moof', 'traf', 'mvex', 'edts', 'dinf',
 ])
@@ -42,10 +42,10 @@ export function boxesIn(data: Uint8Array, from: number, to: number): Box[] {
       size = to - offset
     }
 
-    // size < headerSize — тело отрицательной длины; next > to — бокс не влезает
-    // в разбираемый диапазон (тело родителя, а не конец буфера).
-    // Первая проверка попутно гарантирует size >= headerSize >= 8, то есть
-    // offset на каждой итерации строго растёт и цикл не может зациклиться.
+    // size < headerSize means a negative-length body; next > to means the box does not fit in
+    // the range being parsed, which is the parent body rather than necessarily the buffer end.
+    // The first check also guarantees size >= headerSize >= 8, so offset strictly increases on
+    // every iteration and the loop cannot stall.
     const next = offset + size
     if (size < headerSize || next > to) break
 
@@ -78,7 +78,7 @@ export function findBox(data: Uint8Array, path: string[]): Box | null {
   return found
 }
 
-/** Содержимое бокса без заголовка. */
+/** Box contents without the header. */
 export function boxBody(data: Uint8Array, box: Box): Uint8Array {
   return data.subarray(box.start + box.headerSize, box.start + box.size)
 }

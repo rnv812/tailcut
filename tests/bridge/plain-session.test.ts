@@ -186,7 +186,7 @@ describe('an ordinary file in the registry', () => {
 
   it('is not recorded at all on a page the settings forbid', async () => {
     // The hook does not stand on this road: nothing of an ordinary file passes through the MAIN
-    // world, so the switch of §9.4 reaches a plain source only at the registry's own door.
+    // world, so the recording switch reaches a plain source only at the registry's own door.
     // Without that door a denied host playing a <video src="…mp4"> would go on being recorded,
     // fetched from the extension origin and offered for saving.
     const page = registry()
@@ -201,7 +201,7 @@ describe('an ordinary file in the registry', () => {
   })
 
   it('is keyed by the address of the file, so two of them on one page are two sessions', async () => {
-    // The same three components as any other session (§6.1) — an address, the codecs, the length
+    // The same three merge-key components as any other session: address, codecs, and length.
     // — with the address being the address of the material. For a stream out of MediaSource there
     // is none and the page stands in for it; for a file there is one, and it is the better answer:
     // two clips on one page share every other component and would otherwise share a session.
@@ -304,7 +304,7 @@ describe('an ordinary file in the registry', () => {
 
 describe('an ordinary file under the same triage as any other source', () => {
   it('does not become a session when the verdict turns against it mid-read, and does when it turns back', async () => {
-    // Probation (§5.4), and what is left of it here. The captured path has to carry its material
+    // Classification probation leaves material pending. The captured path has to carry its material
     // out of the registry and back in again, because the bytes went past once and exist nowhere
     // else; a file never moved, so a rejection has only to leave it unlisted. The one moment the
     // two paths can differ is this one — the tables are being read when the verdict turns — and
@@ -348,7 +348,7 @@ describe('an ordinary file under the same triage as any other source', () => {
   })
 
   it('is refused with the whole page when the file itself carries protection', async () => {
-    // The evidence is the boxes and not anything the page said (§5.4). An encrypted file reaching
+    // Encryption is decided from container boxes, not page claims. An encrypted file reaching
     // the registry refuses the page, and there is no later moment that turns it.
     const page = registry({ [CLIP]: withPssh(whole) })
     page.says()
@@ -372,7 +372,7 @@ describe('what an ordinary file promises, and what it delivers', () => {
     const summary = summarize(session)
 
     // The file is six seconds long and whole and reachable. What is offered is what passed
-    // through the player, which is the promise §2 makes about every other source too.
+    // through the player, preserving the rule that only already-watched material may be saved.
     expect(summary.duration).toBeGreaterThan(2.4)
     expect(summary.duration).toBeLessThan(2.6)
 
@@ -441,7 +441,7 @@ describe('what an ordinary file promises, and what it delivers', () => {
     const session = page.store.list()[0]!
     const summary = summarize(session)
 
-    // Something really is dropped, so a word is owed. But `rendition` is the word for §6.2 — the
+    // Something really is dropped, so a word is owed. But `rendition` means a quality variant,
     // same material recorded over again at another quality — and over this file it told the user
     // their video had been "recorded at more than one quality" when what it holds is a second
     // language.
@@ -531,7 +531,7 @@ describe('what an ordinary file promises, and what it delivers', () => {
     page.store.dropOverCeiling(bytes - 1, 2_000)
 
     // Weighed by its tracks, of which it has none, the file stood first in the queue by every
-    // signal §7.3 has — no length, no sound, no weight. It went first, freed not one byte, and
+    // value signal available: no length, no sound, and no weight. It went first, freed no bytes, and
     // the shortfall then took the captured session with it. Nor could it come back: the watcher
     // speaks about a file only when what it says changes, so the popup lost a video that was
     // still playing and would not hear of it again.

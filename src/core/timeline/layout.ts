@@ -168,7 +168,7 @@ export function firstVisible(spans: readonly Span[], time: number): number {
 }
 
 /**
- * Which row each clip is drawn on. Ranges are allowed to overlap (§9.3), and two clips on one row
+ * Which row each clip is drawn on. Ranges may overlap, and two clips on one row
  * would draw over each other; the first free row is picked greedily in time order.
  */
 export function packRows(clips: readonly ClipBand[]): Map<string, number> {

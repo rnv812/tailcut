@@ -128,7 +128,7 @@ afterEach(() => {
 })
 
 describe('the settings page', () => {
-  it('shows the four groups of §9.4 in the order of a recording', async () => {
+  it('shows the four settings groups in recording order', async () => {
     await draw()
     const titles = [...document.querySelectorAll('[data-testid="group-title"]')].map(
       (node) => node.textContent,
@@ -159,7 +159,7 @@ describe('the settings page', () => {
   it('says what a buffer of this length will cost in memory, at the rate this user records', async () => {
     await draw()
     // 300 seconds of recorded material weighed 450 MB — 12 Mbit/s — so the three minutes of the
-    // default buffer are 270 million bytes, which is 257.5 MB in the binary units of §7.4.
+    // default buffer are 270 million bytes, which is 257.5 MB in the displayed binary units.
     expect(textAt('buffer-cost')).toContain('257.5 MB')
   })
 
@@ -398,7 +398,7 @@ describe('the settings page', () => {
 
   it('shows the occupied volume out of the index and not out of the browser', async () => {
     // navigator.storage.estimate() showed 10 GiB with a real ceiling of 200 MB, and a walk of
-    // OPFS costs a second (§7.4). The index knows, in one row.
+    // Reading every OPFS file is expensive. The index already knows the total in one row.
     await draw()
 
     expect(textAt('volume')).toContain('2.00 GB')
@@ -408,7 +408,7 @@ describe('the settings page', () => {
   it('says when the browser refused, instead of leaving the ceiling looking kept', async () => {
     // The disk said no below the ceiling this page is showing. Without a word here, the writer
     // retries every thirty seconds for ever and the page goes on showing a limit of four
-    // gigabytes as though it were being kept (§11).
+    // gigabytes as though failed writes were still retained.
     totals = { ...totals, cappedBytes: 1_800_000_000, fullAt: Date.now() }
     await draw()
 
@@ -505,9 +505,9 @@ describe('the settings page', () => {
 
   it('shows the exact stored values and offers no format the build cannot write', async () => {
     // A <select> whose value is none of its options shows the first one instead, and says
-    // nothing about it. The codec of §7.4 is `auto`, and while the list ran HEVC / H.264 the
-    // page answered "HEVC, falling back to H.264" about a setting that means H.264 — the very
-    // promise §8.4 was rewritten to withdraw. Disabled is not a licence to say something else.
+    // nothing about it. The default codec is `auto`; an earlier HEVC / H.264 list incorrectly
+    // displayed "HEVC, falling back to H.264" even when the runtime would choose H.264.
+    // Disabled is not a licence to say something else.
     await draw()
 
     expect(field('format').value).toBe(DEFAULTS.export.format)
@@ -596,7 +596,7 @@ describe('the settings page', () => {
     expect(written.at(-1)!.recording.mode).toBe('off')
   })
 
-  it('puts everything back to §7.4, on screen as well as in storage', async () => {
+  it('restores every documented default on screen and in storage', async () => {
     stored = { ...DEFAULTS, history: { ...DEFAULTS.history, keepDays: 30 } }
     await draw()
     expect(field('keep-days').value).toBe('30')
@@ -608,7 +608,7 @@ describe('the settings page', () => {
   })
 
   it('follows a change made somewhere else without being told twice', async () => {
-    // The popup has quick switches of its own (§9.2) and they write the same key. A page showing
+    // The popup has quick switches of its own and they write the same key. A page showing
     // the old value would be a page that undoes the change the moment anything else is touched.
     await draw()
     expect(field('to-disk').checked).toBe(true)

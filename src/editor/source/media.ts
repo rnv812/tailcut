@@ -35,12 +35,12 @@ export interface EditorMaterial {
  * into every step of the history, and a hundred steps of undo would hold a hundred copies of a
  * grid of tens of thousands of numbers.
  *
- * The Export group of §9.4 arrives whole, as the one thing the tab read it as, rather than field
+ * The Export settings arrive as one snapshot read by the tab, rather than field
  * by field. Two of its fields reach the model — the template a clip is named by and the format a
  * clip is born in — and a caller passing them one at a time is a caller that can drop one of them
  * without dropping the other: the name is visible on the screen and the format is not, so the
  * dropped one would be the format, and nothing would go red. Absent altogether means a tab that
- * read no settings: no template, and the format of §7.4.
+ * read no settings: no template and the default format.
  */
 export function deriveMaterial(
   index: SnapshotIndex,

@@ -764,13 +764,13 @@ export async function playInBrowser(file: string): Promise<Playback> {
  * The turn of the event loop between the filling and the Enter is not decoration. The Enter
  * handler on the node is the one the last render put there and it closes over the text of that
  * render; filled and pressed inside one turn it commits the text from before the fill — observed
- * committing nothing at all under four workers (Task 14, and `enter` in editor-keys.spec.ts says
+ * committing nothing at all under four workers; `enter` in editor-keys.spec.ts covers
  * the same thing about the same field).
  *
  * The focus at the end matters as much as the Enter. The editor turns its whole keyboard off
- * while a text field has the focus (Task 14) — otherwise `s` in a clip's name would split the
+ * while a text field has focus, otherwise `s` in a clip's name would split the
  * clip — so a press of `i` straight after typing would arrive in the box as a letter and mark
- * nothing. The field gives the focus back on Enter by itself (Task 13), and this insists on it
+ * nothing. The field gives focus back on Enter, and this helper verifies it
  * rather than trusting it: blurring the box from here instead would make it let go whether the
  * field did or not, and the regression would surface lines later as a wrong clip count with the
  * reader sent looking at the reducer. Measured — take the blur out of the field's Enter handler
@@ -794,7 +794,7 @@ export async function typeInto(editor: Page, testid: string, text: string): Prom
  * **not earlier** than `at` — the frame *on screen* at that instant, which is a different
  * question with a different right answer at every boundary. Ask it for a frame boundary and a
  * float a hair over the boundary takes the next frame; nudge it half a frame the way a seek in
- * the browser is nudged (`FrameTable.seekTimeOf`, Task 6) and it takes the next frame every
+ * the browser is nudged by `FrameTable.seekTimeOf` and it takes the next frame every
  * time, on every frame, silently. Half a frame belongs to `currentTime` and to nothing else.
  *
  * A second of the session is turned into a frame number by multiplying by the frame rate, which
@@ -823,7 +823,7 @@ export function frameByIndex(file: string, index: number): Buffer {
  *
  * The action is passed in rather than done by the caller afterwards, because two things have to
  * be in place before it runs and one of them is not a listener: three clips are written at once
- * (§8.6), so a `waitForEvent` per file would miss the ones that arrive while it is being set up
+ * because exports run in parallel, so a `waitForEvent` per file would miss arrivals during setup
  * again — and the name has to be caught on its way past.
  *
  * The name needs catching because it does not survive the download. Under Playwright every

@@ -33,7 +33,7 @@ describe('formatSeconds', () => {
     // Minutes are rounded and not truncated: 100 seconds is nearer two minutes than one, and a
     // control that said "1 min" for it would be describing a different setting.
     [100, '2 min'],
-    // The buffer of §7.4 by default, and the label beside its slider.
+    // The default buffer size and the label beside its slider.
     [180, '3 min'],
     [1_800, '30 min'],
     [3_540, '59 min'],
@@ -53,7 +53,7 @@ describe('formatBytes', () => {
     [1024 ** 3 - 1, '1024.0 MB'],
     [1024 ** 3, '1.00 GB'],
     [2 * 1024 ** 3, '2.00 GB'],
-    // The ceiling of §7.4, written there as 4 GB. Shown as 4.29 GB it would be answering a
+    // The 4 GB storage ceiling. Showing 4.29 GB would answer a
     // question nobody asked.
     [4 * 1024 ** 3, '4.00 GB'],
     [64 * 1024 ** 3, '64.00 GB'],

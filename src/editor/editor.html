@@ -2,7 +2,7 @@
 <meta charset="utf-8" />
 <title>tailcut editor</title>
 <style>
-  /* The layout of §9.3: the player on top, the inspector down the right, the timeline below.
+  /* The editor layout: player on top, inspector on the right, and timeline below.
      One grid rather than nested boxes — the timeline has to keep its height while the player
      takes what is left, and that is what a row of 1fr and a row of pixels says. */
   body { margin: 0; height: 100vh; background: #101215; color: #e8eaed;
@@ -60,7 +60,7 @@
   .tc-clip-options { display: flex; gap: 10px; align-items: center; margin-top: 6px; }
   .tc-clip-options button { padding: 2px 8px; border: 1px solid #3a3f47; border-radius: 5px;
                             background: none; color: #e8eaed; font: inherit; cursor: pointer; }
-  /* §8.3: a line where the eye already is, saying why the handle stopped. Amber because it is a
+  /* A line where the eye already is explains why the handle stopped. Amber because it is a
      boundary and not a failure — nothing has gone wrong, and there is nothing to press. */
   .tc-clip-note { margin: 6px 0 0; color: #e0a33c; font-size: 11px; }
 

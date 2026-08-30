@@ -194,7 +194,7 @@ describe('decoderConfigOf: material nobody here can describe', () => {
 })
 
 describe('sampleEntryFormat', () => {
-  it('gives the four letters §8.4 decides by', () => {
+  it('gives the four codec families used by the export decision', () => {
     expect(sampleEntryFormat(isoEntry(H264).bytes)).toBe('avc1')
     expect(sampleEntryFormat(isoEntry(VP9).bytes)).toBe('vp09')
     expect(sampleEntryFormat(isoEntry(AV1).bytes)).toBe('av01')

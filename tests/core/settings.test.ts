@@ -24,7 +24,7 @@ describe('DEFAULTS', () => {
     expect(DEFAULTS.export.format).toBe('mp4')
     expect(DEFAULTS.export.codec).toBe('auto')
     // The quality is a row of that table too, and it has to be: `auto` is H.264 everywhere
-    // except at the low quality (§8.4), so "the codec defaults to Auto" says nothing about
+    // except at low quality, so "the codec defaults to Auto" says nothing about
     // which codec a fresh installation actually reaches for until this line says `high`.
     expect(DEFAULTS.export.quality).toBe('high')
     expect(DEFAULTS.export.rewriteHead).toBe(false)
@@ -124,7 +124,7 @@ describe('merge', () => {
   })
 
   it('turns a stored webm into mp4, and needs not one line of migration to do it', () => {
-    // §8.4 knows two formats and this build writes one container: a clip is assembled by the MP4
+    // The product knows two formats and this build writes one container: a clip is assembled by the MP4
     // writer, and there is nothing here that could write a WebM. A profile that stored `webm`
     // under an earlier build is read by `asOneOf`, which does not know the word and hands back
     // the default — which is why the union losing a member costs no migration at all.
@@ -177,14 +177,14 @@ describe('merge', () => {
   })
 
   it('stores a bare internationalized hostname as ASCII', () => {
-    const merged = merge({ recording: { deny: ['пример.рф'] } })
+    const merged = merge({ recording: { deny: ['münich.example'] } })
 
-    expect(merged.recording.deny).toEqual(['xn--e1afmkfd.xn--p1ai'])
+    expect(merged.recording.deny).toEqual(['xn--mnich-kva.example'])
   })
 })
 
 describe('presetOf', () => {
-  it('names the three of §7.4 and calls anything else custom', () => {
+  it('names the three presets and calls anything else custom', () => {
     expect(presetOf(BALANCED)).toBe('balanced')
     expect(presetOf(LOOSE)).toBe('loose')
     expect(presetOf(STRICT)).toBe('strict')
@@ -267,7 +267,7 @@ describe('memoryCeilingFor', () => {
     }
   })
 
-  it('is what stood in the frame before it, at the default of §7.4', () => {
+  it('is what stood in the frame before it at the default settings', () => {
     // The number it replaces was 512 MiB, chosen as room for three default buffers and a little.
     // The default has to stay where it was: this is a ceiling that follows the setting, not a
     // ceiling raised for everybody.

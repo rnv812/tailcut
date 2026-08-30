@@ -111,7 +111,7 @@ export async function* decodedFrames(
           return
         }
 
-        // §8.5, and the one place in the program a picture is made smaller than it was recorded.
+        // This is the one place in the program a picture is made smaller than it was recorded.
         // It has to happen here because `VideoEncoder` does not crop: handed the whole frame with
         // a config the size of the rectangle, it *scales* — a squashed clip of exactly the size
         // that was asked for, which is the shape a wrong answer takes here. `plan.crop` is in the

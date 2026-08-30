@@ -1,7 +1,7 @@
 import type { ExportCodec, ExportQuality } from '../../shared/settings'
 
 /**
- * The picture the encoder is asked for: what comes out of the crop, already rounded (§8.5).
+ * The encoder's input picture after crop geometry has been rounded to the codec grid.
  *
  * All three numbers are part of the question. Support is not a property of the machine but of
  * the triple: hardware HEVC answers yes at 3840×2160@30 and no at the same frame at 60, and
@@ -155,7 +155,7 @@ export const QUANTIZERS: Record<ExportQuality, number> = { high: 22, medium: 27,
  * What the measurement does earn is a word: on this rung the panel says "no smaller than" rather
  * than "about", because the encoder may write more than it was asked for and never less. If a
  * second geometry ever shows a floor that is *not* proportional to the pixel rate — that is the
- * manual measurement of Task 12, point 9 — then the floor comes back, as a number that fires.
+ * hardware measurement shows a repeatable minimum, then the floor returns as an enforced number.
  */
 export const BITS_PER_PIXEL: Record<ExportQuality, number> = { high: 0.1, medium: 0.07, low: 0.045 }
 

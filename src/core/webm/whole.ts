@@ -53,7 +53,7 @@ export const INDEX_WINDOW_BYTES = 1024 * 1024
 /**
  * How much material this reader will read to index one file.
  *
- * The line where the price of an index becomes a download. §2 of the design puts downloading the
+ * The line where the price of an index becomes a download. Fetching the
  * video out of scope, and a Matroska has to be read to be indexed — so the two meet, and the
  * meeting point is stated as a number rather than discovered by a user on a metered connection.
  * Sixty-four megabytes covers what the web actually serves as a plain Matroska: imageboards cap

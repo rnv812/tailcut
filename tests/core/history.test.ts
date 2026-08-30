@@ -36,7 +36,7 @@ describe('history', () => {
   })
 
   it('has nothing to put back until something has been taken back', () => {
-    // canRedo is what greys the Redo button out (Task 14), and a button that is never grey is a
+    // canRedo controls whether the Redo button is disabled, and a button that is never disabled is a
     // button that lies. Fresh, after an edit, and after the one redo there was has been used up.
     const one = commit(history('a'), 'b', step)
 

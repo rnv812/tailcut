@@ -183,7 +183,7 @@ describe('matroskaFileOf', () => {
   })
 
   it('refuses the whole of a file whose tracks are protected', async () => {
-    // ContentEncryption inside a TrackEntry: §5.4 makes protection a property of the material,
+    // ContentEncryption inside a TrackEntry makes protection a property of the material,
     // and nothing of such a page is kept — not the picture, not the sound, not the length.
     const head = headWith(
       element(

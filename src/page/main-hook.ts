@@ -17,7 +17,7 @@ const nextId = (prefix: string): string => `${prefix}${++counter}`
  * The registry has refused this page for good, so there is nothing here worth copying.
  *
  * Set by the bridge and never cleared, because the refusal behind it is never cleared either: it
- * is the protected-media one of §5.4, it covers the whole page, and no later moment turns it (see
+ * is the protected-media refusal, it covers the whole page, and no later moment turns it (see
  * `PageRefused` in the protocol for why a triage rejection may not arrive here). Until this word
  * comes the hook copies everything and asks nothing — it stands on a player's synchronous path,
  * and a hook that reasoned about material would be a hook that costs more than it is allowed to.
@@ -31,8 +31,8 @@ const nextId = (prefix: string): string => `${prefix}${++counter}`
 let refused = false
 
 /**
- * Recording is switched off for this page: the mode of §9.4, or a list that does not have this
- * site on it. Nothing is copied while it stands.
+ * Recording is switched off for this page by the recording mode or a site list that excludes it.
+ * Nothing is copied while it stands.
  *
  * Unlike `refused`, this one turns — the user may switch recording back on without reloading the
  * page — and what comes back after it is the middle of somebody's byte stream. That is handled on
@@ -61,23 +61,21 @@ function send(message: PageToBridge, transfer: Transferable[] = []): void {
 }
 
 function copyOf(data: BufferSource): ArrayBuffer {
-  // Именно копия, а не сам буфер страницы: наружу он уходит передачей и у страницы
-  // отсоединяется. Плеер, который дописывает свой сегмент повторно (кеш после перемотки),
-  // получил бы тогда отсоединённый буфер, а это отказ хуже исключения — appendBuffer штатно
-  // резолвит updateend, не дописав ничего, и воспроизведение молча встаёт.
+  // Copy rather than transfer the page's own buffer, because transfer would detach it. A player
+  // that appends a cached segment again after a seek would then receive a detached buffer, and
+  // appendBuffer can complete updateend without appending anything, silently stalling playback.
   if (data instanceof ArrayBuffer) return data.slice(0)
 
-  // Только окно вида, а не весь буфер под ним. Копия делается в свой ArrayBuffer, а не срезом
-  // исходного: у SharedArrayBuffer срез остаётся общим и transferable-передачу не переживёт.
+  // Copy only the view window, not its entire backing buffer. Use a fresh ArrayBuffer rather than
+  // a slice because a SharedArrayBuffer slice remains shared and cannot be transferred.
   const view = data as ArrayBufferView
   const copy = new ArrayBuffer(view.byteLength)
   new Uint8Array(copy).set(new Uint8Array(view.buffer, view.byteOffset, view.byteLength))
   return copy
 }
 
-// Перехват нужен, чтобы связать MediaSource с конкретным <video>:
-// адрес из createObjectURL попадает в video.src, и по нему наблюдатель
-// в изолированном мире находит, какому элементу принадлежит поток.
+// This hook links a MediaSource to its <video>. The URL from createObjectURL enters video.src, so
+// the isolated-world watcher can use it to identify which element owns the stream.
 const originalCreateObjectURL = URL.createObjectURL
 URL.createObjectURL = function (object: Blob | MediaSource): string {
   const url = originalCreateObjectURL.call(URL, object as Blob)
@@ -97,14 +95,12 @@ MediaSource.prototype.addSourceBuffer = function (mime: string): SourceBuffer {
 
   let sourceId = sourceIds.get(this)
   if (!sourceId) {
-    // MediaSource, не проходивший через обёрнутый createObjectURL: адреса у него нет.
-    // В этом реалме такого не бывает и тестом не воспроизводится: srcObject для MediaSource
-    // здесь не работает (MediaSource.prototype.handle отсутствует, а video.srcObject =
-    // mediaSource бросает TypeError), addSourceBuffer на неприсоединённом MediaSource бросает
-    // InvalidStateError — значит, всё дошедшее сюда уже получило адрес. Ветка держится для
-    // объектов из чужого реалма (кадр about:blank, куда хук не попал) и для браузеров, где
-    // srcObject у MediaSource заработает: без адреса наблюдатель не свяжет поток с <video>,
-    // но байты продолжат доезжать до моста.
+    // A MediaSource that did not pass through the wrapped createObjectURL has no address. This
+    // cannot happen in this realm today: MediaSource has no usable srcObject path here, and
+    // addSourceBuffer throws on an unattached source. Keep the branch for objects from another
+    // realm, such as an unhooked about:blank frame, and for browsers that later support MediaSource
+    // through srcObject. The watcher cannot bind an addressless stream to a <video>, but its bytes
+    // can still reach the bridge.
     sourceId = nextId('s')
     sourceIds.set(this, sourceId)
     send({ type: 'tc:source', sourceId, objectUrl: '' })
@@ -115,7 +111,7 @@ MediaSource.prototype.addSourceBuffer = function (mime: string): SourceBuffer {
 }
 
 // The length of the whole video, as the page states it on its MediaSource once it has read its
-// manifest. It is the third component of the merge key (§6.1) and the one thing that tells two
+// manifest. It is the third component of the merge key and the one thing that tells two
 // videos of a feed apart where the address cannot: measured on tiktok.com/foryou, whose address
 // stays «https://www.tiktok.com/foryou» through a whole scroll — seven clips, a MediaSource each,
 // came out as one session and one file that Chromium stopped playing at 2.28 seconds.
@@ -161,18 +157,16 @@ const originalAppendBuffer = SourceBuffer.prototype.appendBuffer
 SourceBuffer.prototype.appendBuffer = function (data: BufferSource): void {
   const tracked = buffers.get(this)
 
-  // Записи нет только у SourceBuffer из чужого реалма — например, если страница дёрнет этот
-  // appendBuffer на объекте из кадра about:blank, куда хук не попал: свои приходят из
-  // обёрнутого addSourceBuffer. Без охраны такой вызов сыпал бы TypeError из микрозадачи —
-  // необъяснимой ошибкой в консоли на каждый сегмент.
+  // Only a SourceBuffer from another realm can be untracked, for example if the page invokes this
+  // wrapper on an object from an unhooked about:blank frame. Local buffers pass through the
+  // wrapped addSourceBuffer. The guard prevents an unexplained microtask TypeError per segment.
   //
-  // `refused` рядом — это отказ страницы (см. выше): копию делать незачем, её на той стороне
-  // выбросят. Проверка стоит булева чтения при уже сделанном поиске в WeakMap, а экономит
-  // копию сегмента на каждый вызов. `paused` — то же самое по настройке §9.4: выключенная
-  // запись обязана не стоить странице копии сегмента, иначе выключать было бы нечего.
+  // `refused` means the far side will discard the copy, so making one is pointless. `paused`
+  // applies the same rule to user settings: disabled recording must not make the page pay for a
+  // segment copy. These are boolean reads beside a WeakMap lookup already performed.
   if (tracked && !refused && !paused) {
     const bytes = copyOf(data)
-    // Отправляем в микрозадаче: синхронный путь плеера остаётся пустым.
+    // Send from a microtask so the player's synchronous path stays empty.
     queueMicrotask(() => {
       send(
         {
@@ -182,7 +176,7 @@ SourceBuffer.prototype.appendBuffer = function (data: BufferSource): void {
           mime: tracked.mime,
           bytes,
         },
-        // Список передачи: копия принадлежит нам, и лишний проход по каждому сегменту не нужен.
+        // Transfer the copy we own to avoid another pass over every segment.
         [bytes],
       )
     })

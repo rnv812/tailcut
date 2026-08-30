@@ -101,7 +101,7 @@ export function Player({
     let stopped = false
 
     // The number under the player follows the picture, and nothing here jumps anywhere: the file
-    // was written by the export plan, which closed the holes in the decode timeline (§8.2). Where
+    // was written by the exporter, which closed the holes in the decode timeline. Where
     // a hole could not be closed the frame in front of the seam simply lasts longer, and skipping
     // over it would run away from the sound that never stopped.
     const follow = (mediaTime: number): void => {

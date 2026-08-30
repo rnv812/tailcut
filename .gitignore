@@ -149,11 +149,18 @@ dist/
 node_modules/
 test-results/
 
-# Промежуточные артефакты ffmpeg: в фикстурах нужны только сегменты .m4s,
-# исходные mp4 и манифесты DASH тесты не читают (tools/make-fixtures.sh)
+# Intermediate ffmpeg artifacts: fixtures need only the .m4s segments;
+# tests do not read the source MP4 files or DASH manifests (tools/make-fixtures.sh).
 tests/fixtures/**/*.mp4
 tests/fixtures/**/*.mpd
-# Кроме набора plain: там сам файл целиком и есть фикстура — обычный mp4,
-# каким его отдаёт сайт, а не промежуточный продукт ffmpeg
+# The plain set is the exception: the complete ordinary MP4 is the fixture,
+# exactly as a site serves it rather than as an intermediate ffmpeg product.
 !tests/fixtures/plain/*.mp4
 tests/tmp/
+
+# Private development notes are kept outside the public repository.
+AGENTS.md
+docs/handoff/
+docs/open-notes.md
+docs/superpowers/
+docs/manual-checks-windows.md

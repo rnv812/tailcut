@@ -157,14 +157,14 @@ test('storage partitioning really is in force', async () => {
 /**
  * Every request to the snapshot worker is answered, the impossible one included.
  *
- * The history worker was given this shape in Task 2, шаг 12, and the snapshot worker kept the hole
- * it was given at birth: the buffer is taken out of the request before `writeSealed` is entered,
+ * Both writer workers once shared the same failure hole: the buffer is taken out of the request
+ * before `writeSealed` is entered,
  * and the `close()` in its `finally` — the call that lets go of the lock — sits outside the `try`
  * that turns a failure into an answer. A throw from either rejected the promise, the `.then` that
  * posts the answer never ran, and nothing else was listening.
  *
  * What that costs is not symmetrical between the two workers. The history writer waits for the
- * answer by number and Task 3 gives it a timeout; the snapshot has one already, and it is
+ * answer by number and applies a timeout; the snapshot has one already, and it is
  * `WRITE_TIMEOUT_MS` = 60 000 in src/bridge/snapshot-writer.ts. So a request the worker cannot
  * carry out is a minute of a click on `Edit` sitting there before the popup is allowed to refuse —
  * a minute of the user's, spent to learn something the worker knew in a microsecond.

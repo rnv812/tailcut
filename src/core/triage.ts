@@ -1,27 +1,24 @@
 export interface VideoSignals {
-  /** ширина элемента на экране в CSS-пикселях */
+  /** Element width on screen in CSS pixels. */
   widthPx: number
   muted: boolean
   loop: boolean
   controls: boolean
-  /** элемент в видимой области и вкладка не скрыта */
+  /** The element is on screen and its tab is visible. */
   visible: boolean
   /**
-   * Видео воспроизводится прямо сейчас.
+   * Whether the video is playing now.
    *
-   * `triage` это поле сознательно не читает, и это не упущение. По §5.5 спеки
-   * пауза замораживает накопление времени, а не вердикт: наблюдатель
-   * (`src/page/watcher.ts`) начисляет `playedSeconds` только пока видео играет
-   * и видно, поэтому на паузе счётчик просто перестаёт расти. Если бы вердикт
-   * зависел ещё и от `playing`, пауза после порога отзывала бы уже заработанное
-   * повышение и убивала живую сессию, а пауза до порога отменяла бы мгновенный
-   * отказ, который по §5.4 должен срабатывать всегда.
+   * `triage` deliberately does not read this field. The watcher increments `playedSeconds` only
+   * while a video is playing and visible, so pausing already freezes elapsed-time accumulation.
+   * Making the verdict depend on `playing` as well would revoke a promotion when a qualified
+   * video is paused, and would suppress immediate rejection before the grace period.
    *
-   * Поле живёт в сигналах, потому что его читает наблюдатель: он собирает
-   * `VideoSignals` целиком и по этому же полю решает, начислять ли время.
+   * The field remains part of the signals because the watcher gathers `VideoSignals` as a unit
+   * and uses this value to decide whether to increment elapsed time.
    */
   playing: boolean
-  /** сколько секунд элемент реально воспроизводился */
+  /** Seconds for which the element has actually played. */
   playedSeconds: number
   /**
    * Something else on this page is playing the sound for this element.
@@ -29,7 +26,7 @@ export interface VideoSignals {
    * The one signal here that is not about the element itself, and it is here because the banner
    * rule below cannot be right without it. That rule reads "muted, looping, no controls" as
    * decoration, and it is correct about nearly everything on the web — but it is exactly the
-   * shape of one half of a work whose other half is an `<audio>` playing beside it (§5.6): a
+   * shape of one half of a work whose other half is an `<audio>` playing beside it: a
    * short silent loop of picture under a long soundtrack, which is what one site of the seven
    * surveyed is made of. Such a picture is not silent at all; the sound is simply in another
    * element, and the page is playing it.
@@ -40,17 +37,17 @@ export interface VideoSignals {
    */
   soundApart: boolean
   /**
-   * К элементу присоединён CDM: страница вызвала `setMediaKeys` с настоящими ключами.
+   * A CDM is attached to this element: the page called `setMediaKeys` with actual keys.
    *
-   * Признак адресный — про этот элемент и ничего больше. Отказ по всей странице выносится не
-   * здесь: защита — свойство материала, и находят её в самих байтах (`src/core/container.ts`) или
-   * слышат от элемента событием `encrypted` (`src/page/watcher.ts`). Оба сильнее вердикта и
-   * стирают всю страницу целиком.
+   * This signal applies only to this element. Page-wide refusal is separate because protection is
+   * a property of the material. It is detected in the bytes (`src/core/container.ts`) or through
+   * the element's `encrypted` event (`src/page/watcher.ts`); either result overrides triage and
+   * discards the entire page.
    *
-   * Вопрос страницы браузеру о системе ключей сюда не входит вовсе: на статье edition.cnn.com
-   * замерены шестнадцать таких зондов над потоком, который шёл в открытую, — намерение спросить
-   * не делает материал защищённым. А вот присоединённый к элементу CDM — это уже приготовление
-   * играть защищённое именно здесь, и писать такой элемент незачем.
+   * A page merely asking the browser about a key system does not count. One measured CNN page
+   * made sixteen such probes over an unencrypted stream; asking does not make the material
+   * protected. An attached CDM, however, means this element is preparing to play protected media
+   * and should not be recorded.
    */
   hasDrm: boolean
 }
@@ -83,21 +80,21 @@ export type TriageVerdict = 'reject' | 'hold' | 'promote'
 
 export function triage(signals: VideoSignals, config: TriageConfig): TriageVerdict {
   if (signals.hasDrm) return 'reject'
-  // NaN означает, что ширину ещё не измерили: элемент не попал в раскладку и
-  // getBoundingClientRect отдал не число. Неподтверждённый минимум — это отказ,
-  // иначе неизмеренный элемент проскочил бы фильтр ширины целиком. Сравнение
-  // идёт с дробным значением как есть: 319.6 пикселя ниже порога в 320.
+  // NaN means the width has not been measured: the element has no layout box and
+  // getBoundingClientRect returned no usable number. An unverified minimum is a rejection, or an
+  // unmeasured element would bypass the width filter. Fractional values are compared as-is, so
+  // 319.6 pixels remains below a 320-pixel threshold.
   if (Number.isNaN(signals.widthPx) || signals.widthPx < config.minWidthPx) return 'reject'
   if (!signals.visible) return 'reject'
 
-  // Беззвучное, зациклённое и без панели управления — это баннер, а не видео. Если только звук
-  // не играет рядом: тогда беззвучность элемента — это не отсутствие звука на странице, а
-  // разделение картинки и звука по двум элементам, и перед нами половина работы, а не украшение.
+  // A muted loop without controls is a banner rather than a video unless its sound is playing in
+  // another element. In that case the page has split picture and sound, so this is half of the
+  // work rather than decoration.
   if (signals.muted && signals.loop && !signals.controls && !signals.soundApart) return 'reject'
   if (signals.muted && !config.recordMuted) return 'reject'
 
-  // Только накопленное время. Пауза уже учтена тем, что на ней playedSeconds
-  // не растёт — см. комментарий к VideoSignals.playing.
+  // Use accumulated time alone. A pause is already represented by playedSeconds not increasing;
+  // see VideoSignals.playing.
   if (signals.playedSeconds >= config.gracePeriodSeconds) return 'promote'
 
   return 'hold'

@@ -6,18 +6,18 @@ function view(data: Uint8Array, box: Box): DataView {
   return new DataView(body.buffer, body.byteOffset, body.byteLength)
 }
 
-/** tkhd: version(1) flags(3) [времена] track_id ... width/height в конце. */
+/** tkhd: version(1) flags(3) [timestamps] track_id ... width/height at the end. */
 function parseTkhd(data: Uint8Array, tkhd: Box): { trackId: number; width: number; height: number } {
   const v = view(data, tkhd)
   const version = v.getUint8(0)
   const trackId = version === 1 ? v.getUint32(20) : v.getUint32(12)
-  // width и height — последние два поля, 16.16 с фиксированной точкой
+  // Width and height are the final two fields, stored as 16.16 fixed-point values.
   const width = v.getUint32(v.byteLength - 8) / 65536
   const height = v.getUint32(v.byteLength - 4) / 65536
   return { trackId, width: Math.round(width), height: Math.round(height) }
 }
 
-/** mdhd: version(1) flags(3) [времена] timescale ... */
+/** mdhd: version(1) flags(3) [timestamps] timescale ... */
 function parseTimescale(data: Uint8Array, mdhd: Box): number {
   const v = view(data, mdhd)
   const version = v.getUint8(0)
@@ -33,7 +33,7 @@ function parseHandler(data: Uint8Array, hdlr: Box): TrackKind | null {
   return null
 }
 
-/** stsd: version(1) flags(3) entry_count(4), затем sample entry — его тип и есть кодек. */
+/** stsd: version(1) flags(3) entry_count(4), followed by a sample entry whose type is the codec. */
 function parseCodec(data: Uint8Array, stsd: Box): string | null {
   const body = boxBody(data, stsd)
   if (body.byteLength < 16) return null
@@ -43,7 +43,7 @@ function parseCodec(data: Uint8Array, stsd: Box): string | null {
 /**
  * Sample duration each track's `trex` states, by track_ID; empty when the movie has no `mvex`.
  *
- * The last of the three places a packager may say how long a sample lasts (14496-12 §8.8.3), and
+ * The last of the three places a packager may say how long a sample lasts (ISO 14496-12, 8.8.3), and
  * on some sites the only one: dzen.ru writes its picture with no durations in the `trun` and no
  * default in the `tfhd`, so a fragment of it can be measured by nothing else. It is read here,
  * once per init segment, and travels on the track — a media segment carries no `moov` to look it

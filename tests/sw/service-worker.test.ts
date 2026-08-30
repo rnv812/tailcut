@@ -66,7 +66,7 @@ function installChrome(
      * missing altogether.
      */
     url?: string | null
-    /** What is stored under the settings key; nothing — the defaults of §7.4. */
+    /** What is stored under the settings key; nothing means documented defaults. */
     settings?: unknown
   } = {},
 ) {
@@ -357,7 +357,7 @@ describe('installation', () => {
 
     chrome.install()
 
-    // The keeping and the ceiling of §7.4 must not depend on whether a tab is open, and the
+    // Retention and the storage ceiling must not depend on whether a tab is open, and the
     // sweeper is the one context that exists when none is. Without an alarm of its own it would
     // run only when something nudged it — that is, only while somebody was recording.
     const sweeping = chrome.alarms.find((alarm) => alarm.name === SWEEP_ALARM)
@@ -448,7 +448,7 @@ describe('sweeping', () => {
 
     // The order is the whole of it. A refusal below our own ceiling leaves `bytes - ceiling`
     // negative, so a sweep started first finds nothing to take and the writer is refused again in
-    // thirty seconds — for ever, and without a word in the interface (§11).
+    // thirty seconds forever, without surfacing the failure in the interface.
     expect(asked.log).toEqual(['full:true', 'sweep'])
     // Nothing is answered, and the channel must not be held: a listener returning true would
     // leave the writer waiting on a reply that never comes.
@@ -485,7 +485,7 @@ describe('sweeping', () => {
       'drop-snapshot:snap',
       'clear-full',
     ])
-    // The button of §9.4 waits on this: without the channel held open the popup would be told
+    // The settings button waits on this: without the channel held open the popup would be told
     // the port closed under it.
     expect(held).toBe(true)
     expect(answer).toEqual({ ok: true })
@@ -557,7 +557,7 @@ describe('recounting the badge', () => {
 
     await chrome.fire()
 
-    // §9.1 asks for this, and it is not decoration: over a denied host an empty badge and a badge
+    // The badge must distinguish a denied host from an idle host; an empty badge and a badge
     // over a page with no video on it look exactly the same, and the first of them is a decision
     // the user made and can unmake.
     expect(chrome.badgeText).toEqual([{ tabId: 7, text: 'off' }])
@@ -570,7 +570,7 @@ describe('recounting the badge', () => {
     await chrome.fire()
 
     // The frame answers six seconds — a page loaded before the switch was thrown still holds what
-    // it gathered, because switching recording off is not an erasure (§7.2). What the badge says
+    // it gathered, because switching recording off is not erasure. What the badge says
     // is about the switch, and the popup is where the six seconds are still offered.
     expect(chrome.badgeText).toEqual([{ tabId: 7, text: 'off' }])
   })

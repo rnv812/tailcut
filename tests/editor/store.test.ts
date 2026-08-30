@@ -32,7 +32,7 @@ const info = (kind: 'video' | 'audio'): { tracks: TrackInfo[] } => ({
  *
  * The two holes are the same break of the recording and they are not the same numbers: the sound
  * stopped a little later and came back a little sooner. Counted lane by lane that is two gaps;
- * counted the way the cut counts them it is one (`cuttingLane`, Task 7).
+ * counted the way the cut counts them it is one (`cuttingLane` joins across the gap).
  */
 const source: SnapshotSource = {
   page: { sessionKey: 'k', url: 'https://site.example/w', title: 'Talk', createdAt: 1, lastSeenAt: 2, refusedTracks: false },
@@ -105,7 +105,7 @@ const preview: Preview = {
   release: () => {},
 }
 
-/** The Export group of §9.4 as a tab reads it, with whatever this test cares about changed. */
+/** The Export settings as a tab reads them, with the value under test changed. */
 const exported = (over: Partial<ExportSettings> = {}): ExportSettings => ({
   ...DEFAULTS.export,
   ...over,
@@ -133,7 +133,7 @@ describe('deriveMaterial', () => {
   })
 
   it('carries the name template and the host of the page into the context', () => {
-    // §9.4: the setting is read once when the tab opens and reaches the model this way and no
+    // The setting is read once when the tab opens and reaches the model this way and no
     // other. The host comes with it because it has nowhere else to come from — `{host}` is one
     // of the five fields the settings page offers, the recording knows the address it was
     // watched at, and the reducer that names a clip knows nothing but the context.
@@ -144,13 +144,13 @@ describe('deriveMaterial', () => {
   })
 
   it('leaves the template out when the tab was opened without one', () => {
-    // Which is what `clipName` reads as "the name stage 2 built": title and timecode. An empty
+    // Which is what `clipName` reads as the default name: title and timecode. An empty
     // string here instead of nothing would be a template that resolves to an empty name.
     expect(deriveMaterial(index, preview).ctx.nameTemplate).toBeUndefined()
   })
 
   it('takes the runs and the zones from the picture, which is the lane the cut follows', () => {
-    // Both come from the whole recording (§ EditContext) and both are read off one lane, so a
+    // Both come from the whole recording (see EditContext) and both are read off one lane, so a
     // derivation that reached for the audio lane — or for whichever lane came first — would put
     // the sound's own edges on the timeline the picture is cut against.
     const { ctx } = deriveMaterial(index, preview)
@@ -187,7 +187,7 @@ describe('deriveMaterial', () => {
 
   it('hands that size on to whoever asks what is being encoded', () => {
     // The number reaching the field is not the same as the number reaching the encoder. This is
-    // the question the probe and the ladder are asked (§8.4), built out of the context alone.
+    // the question the codec probe and ladder are asked, built from the context alone.
     const { ctx } = deriveMaterial(index, preview)
 
     expect(geometryOf(null, ctx.frameSize, ctx.fps)).toEqual({
@@ -204,7 +204,7 @@ describe('deriveMaterial', () => {
   })
 
   it('carries the format a new clip is born in out of the settings and into the reducer', () => {
-    // §9.4 reaches the model this way and no other: the clip is made by `reduce`, which is pure
+    // Settings reach the model this way and no other: the clip is made by `reduce`, which is pure
     // and knows nothing but the context it is handed. What carries the group this far is held
     // by `tests/editor/shell.test.tsx` — see the note on `deriveMaterial`.
     const born = (format?: ExportFormat): string => {
@@ -215,7 +215,7 @@ describe('deriveMaterial', () => {
     }
 
     expect(born('webp')).toBe('webp')
-    // Absent from the settings is the default of §7.4, and not whatever the last tab used.
+    // A missing setting uses the documented default, not whatever the last tab used.
     expect(born(undefined)).toBe('mp4')
     expect(DEFAULTS.export.format).toBe('mp4')
   })

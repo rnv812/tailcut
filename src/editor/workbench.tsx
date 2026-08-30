@@ -49,7 +49,7 @@ export interface WorkbenchProps {
   material: Material
   /** `null` means no picture; `failed` means picture exists but no preview could be assembled. */
   preview: PreviewState
-  /** §9.4 as the tab read it when it opened: how a clip is named and where it goes. */
+  /** Export settings as read when the tab opened: how a clip is named and where it goes. */
   options: EditorOptions
 }
 
@@ -227,9 +227,9 @@ function OpenWorkbench({
   // browser cannot be taken back, so Ctrl+Z has no business touching this.
   const [queue, setQueue] = useState<Queue>(EMPTY_QUEUE)
   const [source, setSource] = useState<ClipSource | null>(null)
-  /** The ladder's answer per geometry. Filled by the probe effect below (task 10); read here. */
+  /** The ladder's answer per geometry. Filled by the probe effect below; read here. */
   const [choices, setChoices] = useState<ReadonlyMap<string, Choice>>(new Map())
-  /** How fast this machine has actually encoded. Empty until it has (§8.6). `onPace` notes into it. */
+  /** How fast this machine has actually encoded. Empty until the first completed encode. */
   const [pace, setPace] = useState<PaceBook>(EMPTY_PACE)
   /**
    * `probeKey → bytes` a WebP animation of that clip would weigh, measured on three real frames.
@@ -460,7 +460,7 @@ function OpenWorkbench({
             {formatBytes(material.bytes)}
           </span>
           {/* The holes of the lane the cut follows, not of both lanes added up: one break of
-              the recording is one gap, however many tracks stopped for it (Task 7). */}
+              the recording is one gap, however many tracks stopped for it. */}
           <span class="muted" data-testid="gaps">
             {derived.gaps.length === 1 ? '1 gap' : `${derived.gaps.length} gaps`}
           </span>

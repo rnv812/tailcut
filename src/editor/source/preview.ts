@@ -20,7 +20,7 @@ export interface Preview {
   url: string
   bytes: number
   /**
-   * Coded size of the picture this file holds: what a crop is a rectangle of (§8.5).
+   * Coded size of the picture this file holds: the coordinate space of a crop rectangle.
    *
    * Off the plan's own video track rather than off the `<video>` element, and the difference
    * matters: the element reports the size it is laid out at, which is the window's business, and

@@ -19,7 +19,7 @@ import { clipById, selectedClip, type Doc, type Project, type Ui } from './proje
  *
  * One union for the keyboard, the mouse and the inspector: a clip trimmed by dragging and a clip
  * trimmed by typing a timecode are the same action, so they cannot disagree. The first five
- * members are the shapes `TimelineGesture` produces (Task 8, Task 9), field for field.
+ * members match the shapes `TimelineGesture` produces, field for field.
  */
 export type Action =
   | { type: 'seek'; time: number }
@@ -90,7 +90,7 @@ function trimTo(project: Project, clip: Clip, edge: 'in' | 'out', time: number, 
 /**
  * A clip begun from the playhead: I runs it to the end of the current run, O back to the start of
  * it. The run and not the material, because a clip born across a gap nobody chose is a clip whose
- * length lies. Reaching across a gap on purpose is a trim away, and §8.2 collapses it then.
+ * length lies. Reaching across a gap deliberately trims across it, and export collapses the gap.
  */
 function startClip(project: Project, edge: 'in' | 'out', ctx: EditContext): Project {
   const at = project.ui.playhead
@@ -332,7 +332,7 @@ export function reduce(project: Project, action: Action, ctx: EditContext): Proj
       return withUi(project, { view: zoomAt(project.ui.view, action.atPx, action.factor, viewBounds(ctx)) })
 
     case 'zoomStep':
-      // The keyboard has no pointer, so the playhead is the anchor (Task 8).
+      // The keyboard has no pointer, so the playhead is the anchor.
       return withUi(project, {
         view: zoomToward(project.ui.view, project.ui.playhead, action.factor, viewBounds(ctx)),
       })

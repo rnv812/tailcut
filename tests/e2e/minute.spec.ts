@@ -6,7 +6,7 @@ const PLAYER_URL = 'https://tailcut.test/minute'
 /**
  * A minute of the fixture: ten segments of picture of six seconds each and twelve of sound of
  * 5.016. The sound runs 46 milliseconds past the picture, and the clip is measured by the picture
- * (§8.2), so the file lasts a round minute.
+ * on the output timeline, so the file lasts a round minute.
  *
  * One packet of sound short of the 1293 that arrived: the first of them is the priming of the
  * encoder, and the edit list the writer states hides it. Before the move to that writer the file

@@ -2,7 +2,7 @@ import { BALANCED, LOOSE, STRICT, type TriageConfig } from '../core/triage'
 
 /**
  * Everything the user can decide, as data. No chrome.*, no effects, no defaults hidden anywhere
- * else: §7.4 is written out once, here, and everything that reads a setting reads this shape.
+ * else: defaults are written once here, and everything that reads a setting reads this shape.
  *
  * One key holds all of it in chrome.storage.local (see settings-store.ts). Not `sync`: an item
  * there is capped at 8192 bytes, which a list of domains outgrows, and ninety quick writes in a
@@ -20,7 +20,7 @@ export type DetectionPreset = 'loose' | 'balanced' | 'strict' | 'custom'
 
 export interface RecordingSettings {
   mode: RecordingMode
-  /** How far back a session may be rewound, in media seconds. The promise of §7.1. */
+  /** How far back a session may be rewound, in media seconds. */
   bufferSeconds: number
   /** Hosts recorded in `allowlist` mode; a host stands for itself and its subdomains. */
   allow: string[]
@@ -29,7 +29,7 @@ export interface RecordingSettings {
 }
 
 export interface HistorySettings {
-  /** `Save recordings to disk` (§7.2). Off: nothing is written, and what is written stays. */
+  /** `Save recordings to disk`. Off means nothing new is written; existing history stays. */
   toDisk: boolean
   keepDays: number
   ceilingBytes: number
@@ -57,11 +57,11 @@ export interface Settings {
 }
 
 /**
- * The settings-side defaults, including the adjustable entries of §7.4. A gigabyte there is
- * 1024³ bytes, here and everywhere else in this program (see `formatBytes`, Task 10).
+ * The settings-side defaults. A gigabyte is 1024³ bytes here and everywhere else in this
+ * program; see `formatBytes`.
  *
  * The table also says a new clip starts in `Original`. That is an edit-model default rather than
- * a setting: `startClip` writes it into `Clip.mode`, and the inspector edits it per clip (§8.4).
+ * a setting: `startClip` writes it into `Clip.mode`, and the inspector edits it per clip.
  */
 export const DEFAULTS: Settings = {
   recording: { mode: 'all', bufferSeconds: 180, allow: [], deny: [] },
@@ -71,8 +71,8 @@ export const DEFAULTS: Settings = {
     format: 'mp4',
     codec: 'auto',
     rewriteHead: false,
-    // The name a clip gets by default is the one stage 2 built by hand: the page title and the
-    // timecode it starts at. Written as a template so that the setting has something to change.
+    // The default clip name combines the page title with its starting timecode. Written as a
+    // template so that the setting has something to change.
     nameTemplate: '{title} {in}',
     askWhere: false,
     quality: 'high',
@@ -130,12 +130,11 @@ export const SPARE_MEMORY_BYTES = 384 * 1024 ** 2
  * measure itself to know, and a ceiling that moved with the material it is meant to bound would
  * be arguing with itself. A stream above the reference rate is answered further down instead —
  * `SessionStore.dropOverCeiling` shortens the one session that is over the ceiling by itself
- * rather than throwing it away, and the settings page says what will be kept (§9.4).
+ * rather than throwing it away, and the settings page says what will be kept.
  *
- * It is not a setting of its own. §9.4 has no field for it, and asking a user to tune a number
- * they cannot see would be worse than deriving one from the number they can. It is per document,
- * because a registry lives in a frame and a frame can see neither its neighbours nor other tabs
- * (§7.2).
+ * It is not a setting of its own. Asking a user to tune a number they cannot see would be worse
+ * than deriving one from the number they can. It is per document
+ * because a registry lives in a frame and can see neither its neighbours nor other tabs.
  */
 export function memoryCeilingFor(bufferSeconds: number): number {
   return (Math.max(0, bufferSeconds) * REFERENCE_BITS_PER_SECOND) / 8 + SPARE_MEMORY_BYTES
@@ -280,7 +279,7 @@ export function presetOf(detection: TriageConfig): DetectionPreset {
   return found?.name ?? 'custom'
 }
 
-/** The values of a named preset; `custom` has none, and the balanced one is what §7.4 asks for. */
+/** The values of a named preset; `custom` has none, and balanced is the default. */
 export function presetNamed(name: DetectionPreset): TriageConfig {
   return { ...(PRESETS.find((preset) => preset.name === name)?.config ?? BALANCED) }
 }

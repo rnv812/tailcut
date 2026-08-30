@@ -33,7 +33,7 @@ export function isoEncrypted(data: Uint8Array): boolean {
   return false
 }
 
-/** Sample entry types Common Encryption puts in place of the codec's own (23001-7 §4.1). */
+/** Common Encryption substitutes these sample entries for codecs (ISO/IEC 23001-7, clause 4.1). */
 const PROTECTED_ENTRIES = new Set(['encv', 'enca', 'encs', 'enct', 'encm'])
 
 /**

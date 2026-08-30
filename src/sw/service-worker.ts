@@ -21,22 +21,22 @@ import {
 } from './sweeper'
 
 /**
- * Как часто пересчитывается бейдж активной вкладки. Через будильник, а не через setInterval:
- * service worker засыпает через полминуты бездействия, и таймер вместе с ним.
+ * How often the active tab's badge is recounted. Use an alarm rather than setInterval because the
+ * service worker sleeps after about thirty seconds of inactivity and takes its timer with it.
  *
- * Упакованному расширению Chrome реже 30 секунд будить себя не даёт и период молча
- * поднимает; распакованному отдаёт запрошенный.
+ * Chrome silently raises periods shorter than 30 seconds for packed extensions, while unpacked
+ * extensions receive the requested period.
  */
 const POLL_INTERVAL_MINUTES = 1 / 6
 
 const BADGE_ALARM = 'tc:badge'
 
 /**
- * Подпись бейджа. На кнопке помещается четыре знака, поэтому единица счёта растёт вместе
- * с записанным: секунды, минуты, часы.
+ * Badge label. Four characters fit on the button, so the unit scales with recorded duration from
+ * seconds to minutes to hours.
  */
 export function formatBadge(seconds: number): string {
-  // Меньше секунды — записывать ещё нечего, и «0s» на кнопке обещал бы обратное.
+  // Under one second there is nothing to save yet, and `0s` would imply otherwise.
   if (!(seconds >= 1)) return ''
 
   const total = Math.round(seconds)
@@ -100,7 +100,7 @@ function remember(tabId: number, sessions: readonly FramedSession[]): void {
 /**
  * The badge of one tab: how many seconds are on offer, or that nothing is being recorded here.
  *
- * §9.1 asks for both, and the second is not decoration: with the mode set to `Off`, or this host
+ * Both states matter: with the mode set to `Off`, or this host
  * on the deny list, an empty badge and a badge over a page with no video on it look exactly the
  * same — and the first of them is a decision the user made and can unmake, while the second is
  * a page with nothing on it.
@@ -138,8 +138,8 @@ async function badgeTextFor(tabId: number): Promise<string> {
 async function recount(tabId: number): Promise<void> {
   const text = await badgeTextFor(tabId)
 
-  // Бейдж адресный: на других вкладках у расширения своя запись или её нет вовсе. Вкладка
-  // к тому же успевает закрыться, пока идёт опрос, — ставить бейдж тогда некому.
+  // A badge belongs to one tab; other tabs have their own recording or none. The tab may also
+  // close while the query is running, leaving nowhere to set the badge.
   await chrome.action.setBadgeText({ tabId, text }).catch(() => undefined)
 }
 
@@ -214,7 +214,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // A refusal by the browser comes first and separately: it lowers the effective ceiling to
       // below what is occupied, so that the sweep below has something to take, and it writes the
       // refusal into the index — the one place that outlives this worker. That mark is what the
-      // settings page and the popup will say "disk full" by (§11, Tasks 10 and 11); until they
+      // settings page and popup use to say "disk full"; until they
       // read it, a refusal is recorded rather than shown, which is still not the silent retry
       // every thirty seconds.
       void (message.full ? markStorageFull(Date.now()) : Promise.resolve())

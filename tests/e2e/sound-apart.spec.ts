@@ -3,7 +3,7 @@ import { launchWithExtension, openPopupOn, playInBrowser, probeFile, saveAll } f
 import { serveMedia, servePage, type Host } from './server'
 
 /**
- * The last shape of delivery, end to end in a real browser (§5.6).
+ * Split picture-and-sound delivery, end to end in a real browser.
  *
  * A page whose picture and sound are two media elements: `<video src>` of 3.5 s with no audio
  * track in it, `<audio src>` of 24.5 s beside it, both looping, each turning on a cycle of its
@@ -92,7 +92,7 @@ test('a page that plays its sound apart is saved with both tracks', async () => 
     // The length promised is the picture's, not the soundtrack's: three and a half seconds, which
     // the popup rounds to four. Twenty-one seconds of somebody's music are on the page and none
     // of them past the picture are taken — a file of a song with a loop at the front is not a
-    // clip of anything, and offering one would be the downloader §2 puts out of scope.
+    // clip of anything, and offering one would download material the viewer never watched.
     await expect(popup.getByTestId('duration')).toHaveText('0:04')
 
     const file = await saveAll(page, popup)
@@ -115,7 +115,7 @@ test('a page that plays its sound apart is saved with both tracks', async () => 
 
     // Both files were read, each from the host it lives on, and only the head of the soundtrack:
     // the whole track is 98 kB and a clip of three and a half seconds can use fourteen of them.
-    // Everything above that would be downloading somebody's music, which §2 puts out of scope.
+    // Everything above that would download somebody's music beyond what the viewer watched.
     expect(media.asked.length).toBeGreaterThan(2)
   } finally {
     await popup.close().catch(() => {})

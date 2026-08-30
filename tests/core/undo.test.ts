@@ -89,7 +89,7 @@ const SAMPLES: Record<Action['type'], Sample> = {
     action: { type: 'trim', id: 'c1', edge: 'out', time: 2 },
   },
 
-  // The six of stage 4. Every one of them edits the document, so every one of them owes the
+  // These six crop and export actions all edit the document, so every one of them owes the
   // history a step — which is the law the census below holds them to.
   setCrop: {
     before: [seek(1), { type: 'setIn' }],
@@ -147,7 +147,7 @@ describe('the census of commands', () => {
       const after = reduce(before, sample.action, ctx)
       if (after.doc === before.doc) continue
 
-      // The law this whole task exists for: an edit the history does not know about is an edit
+      // The law this census exists for: an edit the history does not know about is an edit
       // Ctrl+Z cannot take back, and nothing else in the program would ever say so.
       expect(undoModeOf(sample.action).kind, `${name} edits the document silently`).not.toBe('skip')
     }
@@ -305,7 +305,7 @@ describe('a whole sitting', () => {
     expect(canUndo(session.history)).toBe(false)
     expect(session.project.doc.clips).toEqual([])
     // The selection cannot point at a clip that is not in the document any more; it is the one
-    // part of the interface a change of document is allowed to touch (withDoc, Task 10).
+    // part of the interface a document change is allowed to touch (`withDoc`).
     expect(session.project.ui.selectedClipId).toBeNull()
 
     for (let at = 1; at < marks.length; at++) {

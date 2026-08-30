@@ -6,8 +6,8 @@ import { timeToX, wheelPixels, xToTime, zoomFactorOf, type Viewport } from './vi
 /**
  * What a movement of the mouse asks the editor to do.
  *
- * The shapes are the shapes of the matching members of `Action` (Task 10): the field names and the
- * tag are the same, so a gesture is dispatched as it stands and no translation layer sits between
+ * The shapes match the corresponding `Action` members: field names and tags are identical, so a
+ * gesture is dispatched as it stands and no translation layer sits between
  * the pointer and the reducer. If the two ever drift apart, it is the component that stops
  * compiling — which is the right place to find out.
  */

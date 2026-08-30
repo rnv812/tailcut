@@ -20,6 +20,7 @@ const {
   completedDownload,
   countBFrames,
   createMediaServer,
+  defaultWindowsPaths,
   downloadBehavior,
   decodeWebp,
   driveWatchedMedia,
@@ -110,19 +111,38 @@ const mp4Probe = (over: Partial<Mp4Probe> = {}): Mp4Probe => ({
 })
 
 describe('Windows and working paths', () => {
+  it('uses a generic Windows account placeholder when USER is unavailable', () => {
+    vi.stubEnv('USER', '')
+
+    try {
+      const defaults = defaultWindowsPaths()
+
+      expect(defaults.tempWsl).toBe('/mnt/c/Users/user/AppData/Local/Temp')
+      expect(defaults.windowsTemp).toBe('C:\\Users\\user\\AppData\\Local\\Temp')
+      expect(defaults.chrome).toBe(
+        '/mnt/c/Users/user/AppData/Local/Temp/tailcut-probe/cft/chrome-win64/chrome.exe',
+      )
+      expect(defaults.workRoot).toMatch(
+        /^\/mnt\/c\/Users\/user\/AppData\/Local\/Temp\/tailcut\/[^/]+$/,
+      )
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
   it('translates only a mounted drive path into a native Windows path', () => {
-    expect(toWindowsPath('/mnt/c/Users/user/AppData/Local/Temp/tailcut/run-42/downloads')).toBe(
-      'C:\\Users\\user\\AppData\\Local\\Temp\\tailcut\\run-42\\downloads',
+    expect(toWindowsPath('/mnt/c/Users/alice/AppData/Local/Temp/tailcut/run-42/downloads')).toBe(
+      'C:\\Users\\alice\\AppData\\Local\\Temp\\tailcut\\run-42\\downloads',
     )
     expect(toWindowsPath('/mnt/d/video/source.mp4')).toBe('D:\\video\\source.mp4')
 
-    expect(() => toWindowsPath('/home/user/source.mp4')).toThrow(/\/mnt\/<drive>/i)
+    expect(() => toWindowsPath('/home/alice/source.mp4')).toThrow(/\/mnt\/<drive>/i)
     expect(() => toWindowsPath('\\\\wsl.localhost\\Ubuntu\\tmp\\source.mp4')).toThrow(/UNC/i)
     expect(() => toWindowsPath('/mnt/cc/source.mp4')).toThrow(/\/mnt\/<drive>/i)
   })
 
   it('accepts one unique run below Temp and rejects broad roots', () => {
-    const temp = 'C:\\Users\\user\\AppData\\Local\\Temp'
+    const temp = 'C:\\Users\\alice\\AppData\\Local\\Temp'
     expect(() =>
       assertSafeRunRoot(`${temp}\\tailcut\\20260830-7f34`, temp),
     ).not.toThrow()
@@ -131,7 +151,7 @@ describe('Windows and working paths', () => {
       'C:\\',
       temp,
       `${temp}\\tailcut`,
-      'C:\\Users\\user',
+      'C:\\Users\\alice',
       'D:\\work\\tailcut\\run-1',
     ]) {
       expect(() => assertSafeRunRoot(broad, temp), broad).toThrow(/run|root|Temp/i)
@@ -1355,9 +1375,9 @@ describe('live Windows run', () => {
     '--media-4k',
     '/mnt/c/media/4k.mp4',
     '--work-root',
-    '/mnt/c/Users/user/AppData/Local/Temp/tailcut/20260830-golden',
+    '/mnt/c/Users/alice/AppData/Local/Temp/tailcut/20260830-golden',
     '--windows-temp',
-    'C:\\Users\\user\\AppData\\Local\\Temp',
+    'C:\\Users\\alice\\AppData\\Local\\Temp',
     '--port',
     '9222',
   ]
@@ -1451,6 +1471,13 @@ describe('live Windows run', () => {
       server,
       session,
       dependencies: {
+        defaultPaths: () => ({
+          chrome: '/mnt/c/Chrome/chrome.exe',
+          dist: '/repo/dist',
+          tempWsl: '/mnt/c/Users/alice/AppData/Local/Temp',
+          windowsTemp: 'C:\\Users\\alice\\AppData\\Local\\Temp',
+          workRoot: '/mnt/c/Users/alice/AppData/Local/Temp/tailcut/unused-default',
+        }),
         nonce: (): string => nonce,
         probeInput: async (kind: '1080' | '4k', input: string): Promise<InputProbe> => {
           log.push(`input:${kind}:probe`)
@@ -1514,7 +1541,7 @@ describe('live Windows run', () => {
         enableDownloads: async (downloadPath: string): Promise<void> => {
           log.push('downloads:enable-cdp')
           expect(downloadPath).toBe(
-            'C:\\Users\\user\\AppData\\Local\\Temp\\tailcut\\20260830-golden\\downloads',
+            'C:\\Users\\alice\\AppData\\Local\\Temp\\tailcut\\20260830-golden\\downloads',
           )
         },
         configureExport: async (item: { id: string }): Promise<void> => {
@@ -1723,14 +1750,14 @@ describe('live Windows run', () => {
 
   it('uses deterministic defaults and generates the minute before a no-argument probe', async () => {
     const harness = liveHarness()
-    const defaultRoot = '/mnt/c/Users/user/AppData/Local/Temp/tailcut/20260830-default'
+    const defaultRoot = '/mnt/c/Users/alice/AppData/Local/Temp/tailcut/20260830-default'
     const generated = `${defaultRoot}/media/minute.mp4`
     const order: string[] = []
     const defaultPaths = vi.fn(() => ({
       chrome: '/mnt/c/Chrome/chrome.exe',
       dist: '/repo/dist',
-      tempWsl: '/mnt/c/Users/user/AppData/Local/Temp',
-      windowsTemp: 'C:\\Users\\user\\AppData\\Local\\Temp',
+      tempWsl: '/mnt/c/Users/alice/AppData/Local/Temp',
+      windowsTemp: 'C:\\Users\\alice\\AppData\\Local\\Temp',
       workRoot: defaultRoot,
     }))
     const dependencies = {
@@ -1773,7 +1800,7 @@ describe('live Windows run', () => {
       },
       enableDownloads: async (downloadPath: string): Promise<void> => {
         expect(downloadPath).toBe(
-          'C:\\Users\\user\\AppData\\Local\\Temp\\tailcut\\20260830-default\\downloads',
+          'C:\\Users\\alice\\AppData\\Local\\Temp\\tailcut\\20260830-default\\downloads',
         )
       },
     }
@@ -1799,9 +1826,9 @@ describe('live Windows run', () => {
     const defaultPaths = vi.fn(() => ({
       chrome: '/mnt/c/Chrome/chrome.exe',
       dist: '/repo/dist',
-      tempWsl: '/mnt/c/Users/user/AppData/Local/Temp',
-      windowsTemp: 'C:\\Users\\user\\AppData\\Local\\Temp',
-      workRoot: '/mnt/c/Users/user/AppData/Local/Temp/tailcut/trusted-run',
+      tempWsl: '/mnt/c/Users/alice/AppData/Local/Temp',
+      windowsTemp: 'C:\\Users\\alice\\AppData\\Local\\Temp',
+      workRoot: '/mnt/c/Users/alice/AppData/Local/Temp/tailcut/trusted-run',
     }))
 
     const result = await runWindowsCheck(

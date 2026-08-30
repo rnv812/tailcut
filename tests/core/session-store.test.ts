@@ -455,7 +455,7 @@ describe('SessionStore: what ends up in a session', () => {
 })
 
 /**
- * The third component of the merge key (§6.1), and the one the registry used to leave unsaid.
+ * The merge key's third component, which the registry once left unspecified.
  *
  * The address and the codecs alone tell two videos apart only where the address changes from one
  * to the next. On a feed it does not: measured on tiktok.com/foryou, where location.href stays
@@ -1066,7 +1066,7 @@ describe('SessionStore: session lifetime', () => {
     store.append({ ...abrPage, bytes: moof(1, 0, 1, 2000) })
 
     // ABR steps up: the codec stays what it was and only the frame size changes. Identify a
-    // rendition by the codec alone (§6.2) and this init lands on the previous track — its own
+    // rendition by codec alone, and this init lands on the previous track instead of its own
     // init is dropped, the fragments that follow are read against the timescale of the old one,
     // and a clip spanning the switch announces one resolution while carrying frames of another.
     store.append({ ...abrPage, bytes: hdInit })
@@ -1506,7 +1506,7 @@ describe('SessionStore: a page whose stream is encrypted', () => {
     expect(store.list(), 'setup: the material has to be in the registry first').toHaveLength(1)
 
     // The shape of a site that plays a free preview and then the licensed material: the second
-    // player of the page opens a protected stream, and the page as a whole is refused. §2 owes
+    // player on the page opens a protected stream, and the page as a whole is refused. Refusal must
     // the user a plain refusal, and a session left in the list is an offer to save it.
     store.append({ ...page, sourceId: 's2', bytes: cencInit })
 
@@ -1957,7 +1957,7 @@ describe('selectMaterial', () => {
     const store = new SessionStore()
     store.append({ ...videoBuffer, bytes: init })
     for (const bytes of videoSegs) store.append({ ...videoBuffer, bytes })
-    // A switch of quality opens a second representation of the same kind (§6.2). Both in one
+    // A quality switch opens a second representation of the same kind. Both in one
     // file would give it two video streams of different frame size where a player expects one.
     store.append({ ...videoBuffer, bytes: vp9Init })
     store.append({ ...videoBuffer, bytes: vp9Seg })
@@ -2474,7 +2474,7 @@ describe('a session whose key changes', () => {
     store.append({ ...page, bytes: videoSegs[0]! })
     const before = store.list()[0]!.key
 
-    // The soft navigation of §6.1: the page caught up with itself, and the recording it was
+    // During soft navigation the page catches up with itself, and the recording it was
     // feeding belongs to the address it moved to (followTo). The first of the three places a key
     // changes, and the disk has to move with it there as much as anywhere else.
     store.pageIsAt('https://site.example/watch?v=next', 'The next one')
@@ -2552,7 +2552,7 @@ describe('the size of the player a session was watched in', () => {
     store.sawPlayer('s1', 320)
 
     // The user opened the video full screen and put it back into the corner of the page. It was
-    // watched full screen, and the corner says nothing about what it was worth (§7.3).
+    // watched full screen, and the corner element says nothing about the recording's value.
     expect(store.list()[0]!.widthPx).toBe(1920)
   })
 
@@ -2661,7 +2661,7 @@ describe('the size of the player a session was watched in', () => {
 
     store.promotePending('s1')
 
-    // A doubt is not an erasure (§5.4): the session that comes back is the session that went
+    // Classification doubt freezes rather than erases: the returning session is the one that went
     // away, and it was watched in the player it was watched in. The session object itself does
     // not survive the doubt — what does is the measurement, kept on the source and put back on
     // whatever session that source starts feeding (see join). Without it the width would reset to
@@ -2680,7 +2680,7 @@ describe('the size of the player a session was watched in', () => {
     store.sawPlayer('s2', 640)
     expect(store.list()).toHaveLength(2)
 
-    // Two sessions of one page become one (§6.1, absorb). The one that is poured in is the one
+    // Two sessions of one page merge through `absorb`. The one poured in is the one
     // that was watched full screen, and the measurement comes with the source that moves rather
     // than with the session — or the surviving row would look like the smaller of the two windows
     // this video was really watched in.
@@ -2720,7 +2720,7 @@ describe('SessionStore: intake switched off and on', () => {
     store.pauseIntake(true)
     store.append({ ...page, bytes: seg2 })
 
-    // §7.2 promises exactly this: the switch is about writing, never about erasing. The user who
+    // The recording switch controls future writes and never erases existing material. The user who
     // turns recording off over a video they have been watching still has that video to save.
     expect(store.list()).toHaveLength(1)
     expect(chunksOf(store)).toEqual(before)
@@ -2741,7 +2741,7 @@ describe('SessionStore: intake switched off and on', () => {
     // Kept, the half would be spliced onto bytes from minutes later and the join read as a
     // header: a chunk carrying the timing of the first segment and the material of the second.
     // A fresh reader finds the next header and starts there, and the silence is a gap — which is
-    // what it is, and what §6.3 keeps honestly.
+    // what it is, while preserving its actual discontinuous timeline.
     const control = new SessionStore()
     control.append({ ...page, bytes: init })
     control.append({ ...page, bytes: seg2 })
@@ -2830,7 +2830,7 @@ describe('trimming and the memory ceiling', () => {
   it('drops whole sessions, cheapest first, until the frame is under the ceiling', () => {
     const store = new SessionStore()
     // The cheap one stands last in the alphabet and the valuable one first, so that the order
-    // below is the order of §7.3 and not the tie-break underneath it: evictionOrder falls back to
+    // below tests value ordering rather than its tie-break: evictionOrder falls back to
     // the key when two sessions are worth the same, and the keys begin with these addresses.
     const meagre = watch(store, { sourceId: 's1', url: 'https://z.example/x' }, 4)
     const watched = watch(store, { sourceId: 's2', url: 'https://a.example/y' }, 60)
@@ -2876,7 +2876,7 @@ describe('trimming and the memory ceiling', () => {
     const silent = watch(store, { sourceId: 's1', url: 'https://z.example/x' }, 10)
     const heard = watch(store, { sourceId: 's2', url: 'https://a.example/y' }, 10)
     // A second buffer of that session, carrying the soundtrack: the one thing that tells the two
-    // of them apart. Sound is the difference between a video and a decoration (§7.3).
+    // them apart. Sound is a value signal that distinguishes video from decoration.
     const sound = { ...page, sourceId: 's2', url: 'https://a.example/y', bufferId: 'b2' }
     store.append({ ...sound, bytes: audioInit })
     store.append({ ...sound, bytes: audioSegs[0]! })
@@ -2891,7 +2891,7 @@ describe('trimming and the memory ceiling', () => {
     const store = new SessionStore()
     const corner = watch(store, { sourceId: 's1', url: 'https://z.example/x' }, 10)
     const big = watch(store, { sourceId: 's2', url: 'https://a.example/y' }, 10)
-    // The width the watcher measured, carried in by tc:player (Task 5). Everything else about
+    // The width measured by the watcher and carried in by tc:player. Everything else about
     // these two is the same, so this is the whole of what decides.
     store.sawPlayer('s2', WIDTH_CAP_PX)
 
@@ -2926,7 +2926,7 @@ describe('trimming and the memory ceiling', () => {
     const kept = store.get(watched.key)!.tracks[0]!.map.totalBytes()
 
     // Below what the valuable one holds on its own: the cheap one goes first — that is the order
-    // of §7.3 — and the shortfall that is left cannot be covered by dropping anything at all.
+    // the value order, and the remaining shortfall cannot be covered by dropping anything.
     store.dropOverCeiling(kept / 2, page.now)
 
     expect(store.get(meagre.key)).toBeUndefined()

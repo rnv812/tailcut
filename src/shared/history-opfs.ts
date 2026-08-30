@@ -5,9 +5,9 @@ import { SNAPSHOT_DIR, snapshotFileName } from './protocol'
  * What is actually on the disk, as opposed to what the index says is there.
  *
  * Asked in exactly two places: by the repair at start-up, which is where the two are reconciled,
- * and by removal, which is the sweeper's. Nothing else walks OPFS — the occupied volume is a
- * running sum in the index, because a walk of 300 directories and 1800 files costs 685–1086 ms
- * and §9.2 promises a popup that computes nothing.
+ * and by removal, which is the sweeper's. Nothing else walks OPFS: a walk of 300 directories and
+ * 1800 files costs 685–1086 ms, so the occupied volume is kept as a running sum in the index and
+ * the popup performs no computation.
  */
 export interface PieceFile {
   name: string
@@ -109,7 +109,7 @@ export async function removeSnapshotFile(id: string): Promise<boolean> {
   }
 }
 
-/** Everything, gone: the `Clear` of §9.4, next to the volume it clears. */
+/** Everything, gone: the settings-page `Clear` beside the volume it clears. */
 export async function clearStorage(): Promise<void> {
   const root = await navigator.storage.getDirectory().catch(() => null)
   if (!root) return

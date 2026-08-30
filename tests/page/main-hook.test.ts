@@ -1,20 +1,20 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 
-/** Origin моста: страницы расширения стоят на нём, а документ сайта — никогда. */
+/** Bridge origin: extension pages use it, while a site document never can. */
 const EXTENSION_ORIGIN = 'chrome-extension://abcdefghijklmnopabcdefghijklmnop'
 
 const MIME = 'video/mp4; codecs="avc1.4d401e"'
-/** Звуковая дорожка: у любого DASH/HLS-потока она живёт своим SourceBuffer на том же MediaSource. */
+/** Audio track: every DASH/HLS stream gives it a separate SourceBuffer on the same MediaSource. */
 const AUDIO_MIME = 'audio/mp4; codecs="mp4a.40.2"'
 
-/** FNV-1a, 32 бита: сравниваем содержимое, а не длину — кусок памяти той же длины не пройдёт. */
+/** 32-bit FNV-1a: compare contents, not length, so another memory region of equal size fails. */
 function digest(bytes: Uint8Array): string {
   let hash = 0x811c9dc5
   for (const byte of bytes) hash = Math.imul(hash ^ byte, 0x01000193) >>> 0
   return `${bytes.byteLength}:${hash}`
 }
 
-/** Узнаваемый узор вместо настоящего сегмента: разбором здесь никто не занимается. */
+/** A recognizable pattern in place of a real segment, since nothing here parses it. */
 function pattern(length: number): Uint8Array {
   const bytes = new Uint8Array(length)
   for (let index = 0; index < length; index++) bytes[index] = (index * 31 + 7) & 0xff
@@ -27,7 +27,7 @@ function segment(length: number): ArrayBuffer {
   return buffer
 }
 
-/** Снимок данных в момент вызова: после отсоединения буфера прочитать их уже не выйдет. */
+/** Snapshot data at call time because it cannot be read after the buffer is detached. */
 function snapshot(data: BufferSource): { byteLength: number; digest: string } {
   const bytes = ArrayBuffer.isView(data)
     ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength).slice()
@@ -36,23 +36,24 @@ function snapshot(data: BufferSource): { byteLength: number; digest: string } {
 }
 
 type Posted = {
-  /** Сообщение в том виде, в каком его получил бы адресат. */
+  /** Message exactly as the recipient would receive it. */
   message: Record<string, unknown>
-  /** Сколько объектов ушло списком передачи. */
+  /** Number of objects sent in the transfer list. */
   transferred: number
-  /** Был ли в списке передачи сам буфер сегмента: без него на каждый сегмент ложится копия. */
+  /** Whether the segment buffer itself was transferred; otherwise every segment is copied. */
   transfersBytes: boolean
 }
 
-/** Что откатить после теста помимо подменённых глобалей. */
+/** State to restore after a test in addition to stubbed globals. */
 const cleanups: Array<() => void> = []
 
 /**
- * Поддельный реалм страницы: окно, URL, MediaSource, SourceBuffer и navigator. Хук правит
- * прототипы на верхнем уровне модуля, поэтому классы заводятся заново на каждую установку —
- * иначе следующий импорт обернул бы уже обёрнутое.
+ * Fake page realm: window, URL, MediaSource, SourceBuffer, and navigator. The hook patches
+ * prototypes at module top level, so every installation creates new classes. Otherwise the next
+ * import would wrap an already wrapped prototype.
  *
- * `eme: false` — страница без EME: на http Chrome не отдаёт navigator.requestMediaKeySystemAccess.
+ * `eme: false` represents a page without EME: Chrome does not expose
+ * navigator.requestMediaKeySystemAccess on HTTP.
  */
 function installPage(options: { eme?: boolean } = {}) {
   const posted: Posted[] = []
@@ -61,9 +62,9 @@ function installPage(options: { eme?: boolean } = {}) {
   class FakeSourceBuffer {
     readonly appended: Array<{ byteLength: number; digest: string }> = []
     /**
-     * Чем браузер ответит на дописку вместо неё самой. Исключения из appendBuffer — штатная
-     * работа MSE: QuotaExceededError на полном буфере, InvalidStateError на дописке во время
-     * update. Настоящий appendBuffer бросает до того, как что-либо примет.
+     * What the browser throws instead of appending. appendBuffer exceptions are normal MSE
+     * behavior: QuotaExceededError for a full buffer and InvalidStateError when appending during
+     * an update. The real appendBuffer throws before accepting anything.
      */
     failWith: unknown = null
     constructor(readonly mime: string) {}
@@ -76,14 +77,13 @@ function installPage(options: { eme?: boolean } = {}) {
   class FakeMediaSource {
     readonly buffers: FakeSourceBuffer[] = []
     /**
-     * Длительность в том виде, в каком её держит браузер: аксессор на прототипе, до присваивания
-     * — NaN. Плеер ставит её, прочитав манифест; MSE с этого момента отдаёт её элементу.
+     * Duration as stored by the browser: a prototype accessor that is NaN before assignment. The
+     * player sets it after reading the manifest, and MSE then exposes it to the element.
      */
     stored = NaN
     /**
-     * Чем браузер ответит на присваивание вместо него самого. Настоящий сеттер бросает
-     * InvalidStateError на неоткрытом источнике и на буфере в процессе обновления — и бросает
-     * до того, как что-либо изменит.
+     * What the browser throws instead of assigning. The real setter throws InvalidStateError for
+     * an unopened source or while a buffer is updating, before changing anything.
      */
     failDurationWith: unknown = null
     get duration(): number {
@@ -102,7 +102,7 @@ function installPage(options: { eme?: boolean } = {}) {
 
   let urlCounter = 0
 
-  /** Слушатели окна: через них до хука доходит слово моста. */
+  /** Window listeners through which bridge messages reach the hook. */
   const listeners: Array<(event: MessageEvent) => void> = []
 
   vi.stubGlobal('window', {
@@ -114,14 +114,14 @@ function installPage(options: { eme?: boolean } = {}) {
       posted.push({
         transferred: transfer.length,
         transfersBytes: transfer.length === 1 && transfer[0] === bytes,
-        // Настоящая семантика передачи: перечисленные буферы у отправителя отсоединяются.
+        // Real transfer semantics detach the listed buffers from the sender.
         message: structuredClone(message, { transfer }) as Record<string, unknown>,
       })
     },
   })
 
-  // URL целиком подменять нельзя: он нужен самому окружению как конструктор. Меняется только
-  // createObjectURL — то, что оборачивает хук; пришедший до подмены вид восстанавливается после.
+  // URL cannot be replaced wholesale because the environment needs it as a constructor. Replace
+  // only createObjectURL, which the hook wraps, and restore its original descriptor afterward.
   const pristine = Object.getOwnPropertyDescriptor(URL, 'createObjectURL')
   Object.defineProperty(URL, 'createObjectURL', {
     configurable: true,
@@ -154,11 +154,11 @@ function installPage(options: { eme?: boolean } = {}) {
     emeCalls,
     MediaSource: FakeMediaSource,
     SourceBuffer: FakeSourceBuffer,
-    /** Сообщения одного типа в порядке отправки. */
+    /** Messages of one type in send order. */
     of: (type: string): Posted[] => posted.filter((item) => item.message.type === type),
     /**
-     * Сообщение в окно страницы. Origin называется явно: хук слушает только своё расширение, а
-     * то же самое сообщение с origin страницы обязан пропускать мимо ушей.
+     * Deliver a message to the page window. The origin is explicit because the hook listens only
+     * to its extension and must ignore the same message from the page origin.
      */
     deliver(data: unknown, origin = EXTENSION_ORIGIN): void {
       for (const listener of listeners) {
@@ -168,18 +168,18 @@ function installPage(options: { eme?: boolean } = {}) {
   }
 }
 
-/** Импорт сам ставит обёртки: в модуле только код верхнего уровня. */
+/** Importing installs the wrappers because the module contains only top-level code. */
 async function importHook(): Promise<void> {
   vi.resetModules()
   await import('../../src/page/main-hook')
 }
 
-/** Хук отправляет из микрозадачи; даём очереди разобраться. */
+/** The hook sends from a microtask, so let the queue drain. */
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
 
 /**
- * Ловит то, что обёртка бросила из микрозадачи: туда вызывающий не заглядывает, и без ловушки
- * такая поломка выглядела бы просто ошибкой в консоли страницы.
+ * Catch errors the wrapper throws from a microtask. The caller cannot observe them, and without
+ * the trap this failure would look like an ordinary error in the page console.
  */
 async function trapAsyncErrors(body: () => Promise<void>): Promise<unknown[]> {
   const errors: unknown[] = []
@@ -195,14 +195,14 @@ async function trapAsyncErrors(body: () => Promise<void>): Promise<unknown[]> {
   return errors
 }
 
-/** Заводит источник как плеер: адрес из createObjectURL уходит в video.src. */
+/** Open a source like a player: assign the createObjectURL result to video.src. */
 function openSource(page: ReturnType<typeof installPage>) {
   const mediaSource = new page.MediaSource()
   const objectUrl = URL.createObjectURL(mediaSource as unknown as MediaSource)
   return { mediaSource, objectUrl, sourceBuffer: mediaSource.addSourceBuffer(MIME) }
 }
 
-/** Идентификаторы, с которыми сообщение ушло наружу: ими мост различает потоки и дорожки. */
+/** Outbound message identifiers used by the bridge to distinguish streams and tracks. */
 const labelsOf = (item: Posted) => ({
   sourceId: String(item.message.sourceId),
   bufferId: String(item.message.bufferId),
@@ -214,28 +214,28 @@ afterEach(() => {
   while (cleanups.length) cleanups.pop()!()
 })
 
-describe('копия сегмента', () => {
-  it('не отсоединяет буфер страницы: голый ArrayBuffer дописывается повторно', async () => {
+describe('segment copy', () => {
+  it('does not detach the page buffer so a bare ArrayBuffer can be appended again', async () => {
     const page = installPage()
     await importHook()
     const { sourceBuffer } = openSource(page)
 
-    // Плееры дописывают именно голый ArrayBuffer (`(await fetch(url)).arrayBuffer()`), и тот же
-    // буфер идёт в дело второй раз, когда кеш сегментов дописывает его после перемотки. Отдай
-    // обёртка наружу сам буфер страницы, передача мосту отсоединила бы его: повторный
-    // appendBuffer штатно резолвит updateend, не дописав ничего, и плеер молча встаёт.
+    // Players append a bare ArrayBuffer from `(await fetch(url)).arrayBuffer()`, then reuse the same
+    // buffer when the segment cache appends it after a seek. If the wrapper sent the page's buffer,
+    // transferring it to the bridge would detach it. A second appendBuffer would fire updateend
+    // without appending anything, silently stalling the player.
     const buffer = segment(829)
     const expected = digest(new Uint8Array(buffer))
 
     sourceBuffer.appendBuffer(buffer)
     await flush()
 
-    expect(buffer.byteLength, 'буфер страницы отсоединён отправкой мосту').toBe(829)
+    expect(buffer.byteLength, 'sending to the bridge detached the page buffer').toBe(829)
 
     sourceBuffer.appendBuffer(buffer)
     await flush()
 
-    // Оба раза плеер получил свои байты целиком, и оба раза мост получил их копию.
+    // Both times the player receives all its bytes and the bridge receives a copy.
     expect(sourceBuffer.appended).toEqual([
       { byteLength: 829, digest: expected },
       { byteLength: 829, digest: expected },
@@ -245,7 +245,7 @@ describe('копия сегмента', () => {
     ).toEqual([expected, expected])
   })
 
-  it('снимается по окну вида, а не по всему буферу под ним', async () => {
+  it('copies the view window rather than its entire backing buffer', async () => {
     const page = installPage()
     await importHook()
     const { sourceBuffer } = openSource(page)
@@ -256,26 +256,26 @@ describe('копия сегмента', () => {
     const expected = digest(pattern(64))
 
     sourceBuffer.appendBuffer(view)
-    // MSE копирует данные синхронно, и плеер вправе сразу пустить свой буфер в переработку.
-    // Отложи обёртка копирование до микрозадачи — до моста доехал бы мусор.
+    // MSE copies data synchronously, so the player may immediately reuse its buffer. If the wrapper
+    // delayed copying until a microtask, the bridge would receive garbage.
     padded.fill(0xff)
     await flush()
 
     expect(
       page.of('tc:append').map((item) => digest(new Uint8Array(item.message.bytes as ArrayBuffer))),
     ).toEqual([expected])
-    expect(padded.byteLength, 'буфер под видом отсоединён отправкой мосту').toBe(75)
+    expect(padded.byteLength, 'sending to the bridge detached the backing buffer').toBe(75)
   })
 
-  it('снимается из DataView: appendBuffer принимает любой ArrayBufferView', async () => {
+  it('copies from DataView because appendBuffer accepts any ArrayBufferView', async () => {
     const page = installPage()
     await importHook()
     const { sourceBuffer } = openSource(page)
 
-    // appendBuffer по спецификации принимает BufferSource, то есть любой ArrayBufferView, а не
-    // только Uint8Array. DataView — самый опасный из них: свойства length у него нет вовсе,
-    // и копирование через `.set(data)` перенесло бы ноль байтов. Мост получил бы буфер нужной
-    // длины из одних нулей — молча, без единой ошибки, и разбор боксов увидел бы пустоту.
+    // appendBuffer accepts BufferSource, meaning any ArrayBufferView, not just Uint8Array. DataView
+    // is the riskiest because it has no length property, so `.set(data)` would copy zero bytes. The
+    // bridge would silently receive a correctly sized all-zero buffer and box parsing would see
+    // nothing.
     const padded = new Uint8Array(64 + 11)
     padded.set(pattern(64), 7)
     const view = new DataView(padded.buffer, 7, 64)
@@ -289,32 +289,32 @@ describe('копия сегмента', () => {
     ).toEqual([expected])
   })
 
-  it('снимается из типизированного массива шире байта побайтово, а не поэлементно', async () => {
+  it('copies a typed array wider than one byte as bytes rather than elements', async () => {
     const page = installPage()
     await importHook()
     const { sourceBuffer } = openSource(page)
 
-    // Int16Array — тот же законный BufferSource. Здесь ошибочное `.set(data)` не промолчит,
-    // а исказит: Uint8Array.set копирует элементы источника, то есть 16-битные значения
-    // усечёт до байта и заполнит только половину копии. Сегмент нужен побайтово — как он
-    // лежит в памяти, а не как его разметил вызывающий.
+    // Int16Array is also a valid BufferSource. Here an incorrect `.set(data)` corrupts rather than
+    // silently dropping data: Uint8Array.set copies source elements, truncating 16-bit values to a
+    // byte and filling only half the copy. The segment must be copied byte for byte as stored in
+    // memory, regardless of the caller's view type.
     const bytes = pattern(64)
     const holder = new Uint8Array(8 + 64)
     holder.set(bytes, 8)
-    // Смещение кратно размеру элемента: иначе конструктор Int16Array бросит RangeError.
+    // The offset is aligned to the element size or the Int16Array constructor throws RangeError.
     const view = new Int16Array(holder.buffer, 8, 32)
     const expected = digest(bytes)
 
     sourceBuffer.appendBuffer(view)
     await flush()
 
-    expect(view.byteLength, 'подготовка: вид должен покрывать все 64 байта').toBe(64)
+    expect(view.byteLength, 'setup: the view must cover all 64 bytes').toBe(64)
     expect(
       page.of('tc:append').map((item) => digest(new Uint8Array(item.message.bytes as ArrayBuffer))),
     ).toEqual([expected])
   })
 
-  it('уходит мосту списком передачи, а не копией', async () => {
+  it('sends to the bridge with a transfer list rather than another copy', async () => {
     const page = installPage()
     await importHook()
     const { sourceBuffer } = openSource(page)
@@ -322,7 +322,7 @@ describe('копия сегмента', () => {
     sourceBuffer.appendBuffer(segment(128))
     await flush()
 
-    // Копия на этом участке стоила бы лишнего прохода по каждому сегменту.
+    // Copying here would add another pass over every segment.
     const append = page.of('tc:append')
     expect(append).toHaveLength(1)
     expect({
@@ -332,13 +332,13 @@ describe('копия сегмента', () => {
   })
 })
 
-describe('чужой SourceBuffer', () => {
-  it('проходит насквозь, не роняя обёртку', async () => {
+describe('foreign SourceBuffer', () => {
+  it('passes through without breaking the wrapper', async () => {
     const page = installPage()
     await importHook()
 
-    // Так выглядит вызов из другого реалма: объект есть, а записи о нём в этом реалме нет —
-    // например, SourceBuffer из кадра about:blank, куда хук не попал.
+    // This resembles a call from another realm: the object exists, but this realm has no record of
+    // it, as with a SourceBuffer from an about:blank frame the hook did not reach.
     const foreign = new page.SourceBuffer(MIME)
     const buffer = segment(32)
 
@@ -347,8 +347,8 @@ describe('чужой SourceBuffer', () => {
       await flush()
     })
 
-    expect(errors, 'обёртка бросила на SourceBuffer без записи').toEqual([])
-    expect(page.posted, 'о чужом буфере отправлять нечего: ни источника, ни дорожки').toEqual([])
+    expect(errors, 'the wrapper threw for an unregistered SourceBuffer').toEqual([])
+    expect(page.posted, 'a foreign buffer has no source or track to report').toEqual([])
     expect(foreign.appended).toEqual([snapshot(buffer)])
   })
 })
@@ -356,7 +356,7 @@ describe('чужой SourceBuffer', () => {
 describe('EME', () => {
   const config = { initDataTypes: ['keyids'], videoCapabilities: [{ contentType: MIME }] }
 
-  it('не трогает запрос ключевой системы вовсе', async () => {
+  it('does not touch the key-system request', async () => {
     const page = installPage()
     const original = navigator.requestMediaKeySystemAccess
     await importHook()
@@ -365,48 +365,48 @@ describe('EME', () => {
       config as MediaKeySystemConfiguration,
     ])
 
-    // Раньше хук оборачивал этот метод, и любое обращение к нему — включая отклонённый зонд
-    // возможностей — снимало запись со всей страницы. На статье edition.cnn.com таких зондов
-    // было шестнадцать на полутора секундах, поток при этом шёл без единого бокса шифрования, и
-    // настоящее видео 367x648, которое смотрели сорок секунд, терялось целиком.
+    // The hook used to wrap this method, so every call, including a rejected capability probe,
+    // disabled recording for the entire page. One edition.cnn.com article made 16 probes in 1.5
+    // seconds while the stream contained no encryption boxes, causing a genuine 367x648 video
+    // watched for 40 seconds to be lost entirely.
     //
-    // Обращение к EME — это намерение, а не материал. Защиту расширение читает в самих байтах
-    // (src/core/container.ts) и слышит от элемента событием `encrypted`; спрашивать браузера
-    // страница вольна сколько угодно.
+    // Calling EME expresses intent, not protected media. The extension detects protection in the
+    // bytes themselves (src/core/container.ts) and through the element's `encrypted` event; the
+    // page may query the browser as often as it wants.
     expect(
       navigator.requestMediaKeySystemAccess,
-      'хук всё ещё подменяет метод страницы',
+      'the hook still replaces the page method',
     ).toBe(original)
-    expect(page.posted, 'о запросе ключевой системы отправлять нечего').toEqual([])
+    expect(page.posted, 'a key-system request provides nothing to report').toEqual([])
     expect(page.emeCalls).toEqual([
       { keySystem: 'org.w3.clearkey', configs: [config], thisArg: navigator },
     ])
     expect(access.keySystem).toBe('org.w3.clearkey')
   })
 
-  it('на странице без EME не подсовывает метод, которого у браузера нет', async () => {
+  it('does not add a method the browser lacks on a page without EME', async () => {
     const page = installPage({ eme: false })
     await importHook()
 
-    // Расширение объявлено на <all_urls>, а на http-странице Chrome не отдаёт этот метод.
-    // Плееры (shaka, dash.js, hls.js) сперва проверяют наличие, потом зовут: подсунутая обёртка
-    // выдумала бы возможность, которой у браузера нет, и вызов упал бы уже внутри неё.
+    // The extension runs on <all_urls>, but Chrome does not expose this method on an HTTP page.
+    // Players such as shaka, dash.js, and hls.js check for it before calling it. Adding a wrapper
+    // would invent a browser capability and make the eventual call fail inside the wrapper.
     expect(
       typeof navigator.requestMediaKeySystemAccess,
-      'хук объявил EME там, где браузер его не даёт',
+      'the hook exposed EME where the browser does not',
     ).toBe('undefined')
     expect(page.posted).toEqual([])
   })
 })
 
-describe('идентификаторы', () => {
-  it('видео и звук одного MediaSource различаются bufferId', async () => {
+describe('identifiers', () => {
+  it('distinguishes video and audio from one MediaSource by bufferId', async () => {
     const page = installPage()
     await importHook()
 
-    // Ровно то, что делает любой DASH/HLS-плеер: один MediaSource, два SourceBuffer — дорожка
-    // видео и дорожка звука. bufferId существует ровно затем, чтобы мост их различал: с общим
-    // значением обе дорожки уезжают мосту как одна и склеиваются в кашу.
+    // This is what every DASH/HLS player does: one MediaSource with two SourceBuffers, one for video
+    // and one for audio. bufferId lets the bridge distinguish them. If shared, both tracks reach
+    // the bridge as one and are interleaved into unusable data.
     const { mediaSource, sourceBuffer: video } = openSource(page)
     const audio = mediaSource.addSourceBuffer(AUDIO_MIME)
 
@@ -419,23 +419,23 @@ describe('идентификаторы', () => {
     expect(seen.map((item) => item.mime)).toEqual([MIME, AUDIO_MIME, MIME])
     expect(
       new Set(seen.map((item) => item.sourceId)).size,
-      'дорожки одного MediaSource — один источник',
+      'tracks from one MediaSource must share one source',
     ).toBe(1)
-    expect(seen[2]!.bufferId, 'сегменты одной дорожки разъехались по bufferId').toBe(
+    expect(seen[2]!.bufferId, 'segments from one track received different bufferIds').toBe(
       seen[0]!.bufferId,
     )
     expect(
       seen[1]!.bufferId,
-      'звук уехал под тем же bufferId, что видео: различать дорожки на мосту нечем',
+      'audio and video received the same bufferId, so the bridge cannot distinguish tracks',
     ).not.toBe(seen[0]!.bufferId)
   })
 
-  it('два MediaSource страницы различаются sourceId', async () => {
+  it('distinguishes two page MediaSources by sourceId', async () => {
     const page = installPage()
     await importHook()
 
-    // Второй MediaSource на странице — штатное дело: плеер пересоздаёт его при смене качества
-    // и при перезапуске, да и двух <video> на странице никто не запрещал.
+    // A second MediaSource is normal. A player recreates one when changing quality or restarting,
+    // and a page may also contain two video elements.
     const first = openSource(page)
     const second = openSource(page)
 
@@ -449,11 +449,11 @@ describe('идентификаторы', () => {
     }))
     expect(
       sources.map((item) => item.objectUrl),
-      'подготовка: у источников должны быть разные адреса',
+      'setup: sources must have different URLs',
     ).toEqual([first.objectUrl, second.objectUrl])
     expect(
       sources[1]!.sourceId,
-      'два независимых потока уехали под одним sourceId: мост сольёт их в один',
+      'two independent streams received one sourceId, so the bridge will merge them',
     ).not.toBe(sources[0]!.sourceId)
 
     const seen = page.of('tc:append').map(labelsOf)
@@ -461,25 +461,25 @@ describe('идентификаторы', () => {
       sources[0]!.sourceId,
       sources[1]!.sourceId,
     ])
-    expect(seen[1]!.bufferId, 'дорожки разных источников уехали под одним bufferId').not.toBe(
+    expect(seen[1]!.bufferId, 'tracks from different sources received one bufferId').not.toBe(
       seen[0]!.bufferId,
     )
   })
 })
 
-describe('прозрачность appendBuffer', () => {
-  it('исключение от браузера доходит до плеера, а не съедается обёрткой', async () => {
+describe('appendBuffer transparency', () => {
+  it('passes a browser exception to the player instead of swallowing it', async () => {
     const page = installPage()
     await importHook()
     const { sourceBuffer } = openSource(page)
 
-    // QuotaExceededError — обычная работа MSE, а не экзотика: именно по нему плеер чистит
-    // buffered-диапазоны и дописывает сегмент заново. Съеденное обёрткой исключение оставляет
-    // его без сигнала — он не эвиктит и молча встаёт.
+    // QuotaExceededError is normal MSE behavior. It tells the player to clear buffered ranges and
+    // append the segment again. If the wrapper swallows it, the player receives no signal, does not
+    // evict, and silently stalls.
     const quota = new DOMException('buffer full', 'QuotaExceededError')
     sourceBuffer.failWith = quota
 
-    let thrown: unknown = '(обёртка ничего не бросила)'
+    let thrown: unknown = '(the wrapper threw nothing)'
     try {
       sourceBuffer.appendBuffer(segment(64))
     } catch (error) {
@@ -487,41 +487,41 @@ describe('прозрачность appendBuffer', () => {
     }
     await flush()
 
-    expect(thrown, 'обёртка съела исключение appendBuffer').toBe(quota)
+    expect(thrown, 'the wrapper swallowed the appendBuffer exception').toBe(quota)
   })
 })
 
-describe('синхронный путь плеера', () => {
-  it('отправка уходит в микрозадачу, а не в вызов appendBuffer', async () => {
+describe('player synchronous path', () => {
+  it('sends in a microtask rather than inside appendBuffer', async () => {
     const page = installPage()
     await importHook()
     const { sourceBuffer } = openSource(page)
 
     sourceBuffer.appendBuffer(segment(256))
 
-    // Structured clone и отсоединение буфера — не работа синхронного пути: позови обёртка send
-    // прямо здесь, они легли бы в вызов плеера на каждый сегмент.
-    expect(page.of('tc:append'), 'обёртка отправила сообщение прямо в вызове плеера').toEqual([])
-    expect(sourceBuffer.appended, 'подготовка: плеер получает свои байты сразу').toHaveLength(1)
+    // Structured cloning and buffer detachment do not belong on the synchronous path. Calling send
+    // here would add both to the player's call for every segment.
+    expect(page.of('tc:append'), 'the wrapper sent during the player call').toEqual([])
+    expect(sourceBuffer.appended, 'setup: the player receives its bytes immediately').toHaveLength(1)
 
-    // Микрозадача, а не таймер: очередь разбирается до возврата в цикл событий, и мост получает
-    // сегмент в том же тике.
+    // Use a microtask rather than a timer so the queue drains before returning to the event loop and
+    // the bridge receives the segment in the same tick.
     await Promise.resolve()
     await Promise.resolve()
 
-    expect(page.of('tc:append'), 'отправка отложена дальше микрозадачи').toHaveLength(1)
+    expect(page.of('tc:append'), 'sending was delayed beyond a microtask').toHaveLength(1)
   })
 })
 
 /**
- * Длительность, объявленная страницей на MediaSource: третья составляющая ключа слияния (§6.1).
+ * Duration declared by the page on MediaSource, the third component of the merge key.
  *
- * Берётся именно объявление страницы, а не то, что выводит браузер. Оставь плеер длительность
- * несказанной — MSE наращивает её до конца забуференного, и число, растущее с каждым сегментом,
- * перекладывало бы сессию на новый ключ на каждом опросе.
+ * Use the page's declaration rather than the browser's inferred value. If the player leaves the
+ * duration unset, MSE extends it to the end of buffered data. That number grows with every segment
+ * and would move the session to a new key on every poll.
  */
-describe('объявленная длительность', () => {
-  it('уходит мосту с идентификатором потока', async () => {
+describe('declared duration', () => {
+  it('sends the stream identifier to the bridge', async () => {
     const page = installPage()
     await importHook()
     const { mediaSource } = openSource(page)
@@ -533,20 +533,20 @@ describe('объявленная длительность', () => {
     ])
   })
 
-  it('не мешает странице поставить её: значение доходит до браузера', async () => {
+  it('lets the page set it so the value reaches the browser', async () => {
     const page = installPage()
     await importHook()
     const { mediaSource } = openSource(page)
 
     mediaSource.duration = 42
 
-    // Обёртка стоит на пути присваивания, которым плеер объявляет длину ролика элементу: съешь
-    // она его, видео перестало бы перематываться дальше забуференного.
+    // The wrapper intercepts the assignment a player uses to declare the video length to the
+    // element. Swallowing it would prevent seeking beyond buffered data.
     expect(mediaSource.duration).toBe(42)
     expect(mediaSource.stored).toBe(42)
   })
 
-  it('молчит о прямом эфире и о длительности, которую плеер сбросил', async () => {
+  it('stays silent for live streams and durations reset by the player', async () => {
     const page = installPage()
     await importHook()
     const { mediaSource } = openSource(page)
@@ -555,12 +555,12 @@ describe('объявленная длительность', () => {
     mediaSource.duration = NaN
     mediaSource.duration = 0
 
-    // Ни одно из трёх не описывает ролик: эфир, сброс и ролик нулевой длины говорят реестру
-    // ровно то же, что молчание.
+    // None describes a video. A live stream, a reset, and a zero-length video tell the registry the
+    // same thing as silence.
     expect(page.of('tc:duration')).toEqual([])
   })
 
-  it('пропускает исключение браузера наружу и ничего о нём не рассказывает', async () => {
+  it('passes a browser exception outward without reporting it', async () => {
     const page = installPage()
     await importHook()
     const { mediaSource } = openSource(page)
@@ -568,28 +568,28 @@ describe('объявленная длительность', () => {
     const invalid = new Error('InvalidStateError')
     mediaSource.failDurationWith = invalid
 
-    // Настоящий сеттер бросает на неоткрытом источнике и на буфере в процессе обновления.
-    // Страница обязана почувствовать это ровно так, как без расширения.
+    // The real setter throws for an unopened source and while a buffer is updating. The page must
+    // observe exactly the same behavior as it would without the extension.
     expect(() => {
       mediaSource.duration = 12
     }).toThrow(invalid)
-    expect(page.of('tc:duration'), 'мосту объявили длительность, которой страница не поставила').toEqual([])
+    expect(page.of('tc:duration'), 'the bridge received a duration the page did not set').toEqual([])
   })
 
-  it('говорит о каждом уточнении: сверять их — дело реестра', async () => {
+  it('reports every refinement and leaves comparison to the registry', async () => {
     const page = installPage()
     await importHook()
     const { mediaSource } = openSource(page)
 
-    // dash.js переобъявляет длительность на каждом обновлении манифеста. Точность сверки — в
-    // ключе (целые секунды), и держать её копию здесь значило бы держать две.
+    // dash.js redeclares duration on every manifest update. Comparison precision belongs in the
+    // key at whole seconds; duplicating it here would create two sources of truth.
     mediaSource.duration = 600
     mediaSource.duration = 600.4
 
     expect(page.of('tc:duration').map((item) => item.message.seconds)).toEqual([600, 600.4])
   })
 
-  it('различает два MediaSource одной страницы', async () => {
+  it('distinguishes two MediaSources on one page', async () => {
     const page = installPage()
     await importHook()
     const first = openSource(page)
@@ -598,15 +598,15 @@ describe('объявленная длительность', () => {
     first.mediaSource.duration = 10
     second.mediaSource.duration = 20
 
-    // Лента коротких роликов открывает свой MediaSource на каждый ролик, и длина принадлежит
-    // тому потоку, о котором сказана: перепутай их — и обе сессии получат один ключ.
+    // A short-video feed opens a MediaSource for each video. Duration belongs to the stream it was
+    // declared for; mixing them up would give both sessions one key.
     expect(page.of('tc:duration').map((item) => [item.message.sourceId, item.message.seconds])).toEqual([
       ['s1', 10],
       ['s3', 20],
     ])
   })
 
-  it('уходит без списка передачи', async () => {
+  it('sends without a transfer list', async () => {
     const page = installPage()
     await importHook()
     const { mediaSource } = openSource(page)
@@ -617,23 +617,23 @@ describe('объявленная длительность', () => {
   })
 })
 
-describe('отказ страницы', () => {
+describe('page refusal', () => {
   /**
-   * Хранилище на той стороне отказывает целой странице — по защите материала, и навсегда
-   * (§5.4). Хук об этом не знал и продолжал копировать: на dash.js ClearKey через postMessage
-   * прошло и было выброшено 53 сообщения на 29.7 МБ, на Widevine — 40 на 34.7 МБ за сорок
-   * секунд. Цена отказа равнялась цене записи.
+   * The storage side permanently refuses an entire page when it detects protected media. The hook
+   * used to keep copying anyway: dash.js ClearKey sent and discarded 53 postMessage calls totaling
+   * 29.7 MB, while Widevine sent 40 totaling 34.7 MB in 40 seconds. Refusal cost as much as
+   * recording.
    */
   const REFUSED = { type: 'tc:refused' }
 
-  it('перестаёт копировать сегменты, когда мост объявил страницу отказанной', async () => {
+  it('stops copying segments when the bridge declares the page refused', async () => {
     const page = installPage()
     await importHook()
     const { sourceBuffer } = openSource(page)
 
     sourceBuffer.appendBuffer(segment(512))
     await flush()
-    expect(page.of('tc:append'), 'подготовка: до отказа сегменты уходят мосту').toHaveLength(1)
+    expect(page.of('tc:append'), 'setup: segments reach the bridge before refusal').toHaveLength(1)
 
     page.deliver(REFUSED)
 
@@ -641,10 +641,10 @@ describe('отказ страницы', () => {
     sourceBuffer.appendBuffer(segment(512))
     await flush()
 
-    expect(page.of('tc:append'), 'после отказа хук всё ещё копирует и шлёт').toHaveLength(1)
+    expect(page.of('tc:append'), 'the hook still copies and sends after refusal').toHaveLength(1)
   })
 
-  it('не мешает плееру: страница дописывает свои байты как ни в чём не бывало', async () => {
+  it('does not interfere with the player so the page keeps appending its bytes', async () => {
     const page = installPage()
     await importHook()
     const { sourceBuffer } = openSource(page)
@@ -656,13 +656,13 @@ describe('отказ страницы', () => {
     sourceBuffer.appendBuffer(buffer)
     await flush()
 
-    // Отказ — это про запись, а не про воспроизведение: браузер обязан получить те же байты,
-    // и буфер страницы обязан остаться при ней.
+    // Refusal applies to recording, not playback. The browser must receive the same bytes and the
+    // page must retain its buffer.
     expect(sourceBuffer.appended).toEqual([{ byteLength: 300, digest: expected }])
-    expect(buffer.byteLength, 'буфер страницы отсоединён после отказа').toBe(300)
+    expect(buffer.byteLength, 'the page buffer was detached after refusal').toBe(300)
   })
 
-  it('молчит и обо всём остальном: новых источников, буферов и длин мост уже не ждёт', async () => {
+  it('also stays silent about sources, buffers, and durations the bridge no longer expects', async () => {
     const page = installPage()
     await importHook()
 
@@ -671,16 +671,16 @@ describe('отказ страницы', () => {
     const { mediaSource } = openSource(page)
     mediaSource.duration = 42
 
-    expect(page.posted, 'после отказа мосту ушло что-то ещё').toEqual([])
+    expect(page.posted, 'the bridge received another message after refusal').toEqual([])
   })
 
-  it('слушает только своё расширение: то же сообщение со стороны страницы ничего не меняет', async () => {
+  it('listens only to its extension so the same page message changes nothing', async () => {
     const page = installPage()
     await importHook()
     const { sourceBuffer } = openSource(page)
 
-    // Страница вольна написать что угодно в собственное окно. Прими хук это за слово моста —
-    // и у сайта появился бы выключатель записи; origin расширения документ сайта носить не может.
+    // A page may post anything to its own window. Treating it as the bridge would give the site a
+    // recording switch. A site document cannot carry the extension origin.
     page.deliver(REFUSED, 'https://site.example')
 
     sourceBuffer.appendBuffer(segment(512))
@@ -689,13 +689,13 @@ describe('отказ страницы', () => {
     expect(page.of('tc:append')).toHaveLength(1)
   })
 
-  it('не путается в чужих сообщениях того же окна', async () => {
+  it('does not confuse unrelated messages in the same window', async () => {
     const page = installPage()
     await importHook()
     const { sourceBuffer } = openSource(page)
 
-    // В окно страницы шлют все кому не лень, и хук сам отправляет туда же. Ни одно из этого
-    // отказом не является.
+    // Many senders post to the page window, including the hook itself. None of these messages is a
+    // refusal.
     page.deliver({ type: 'tc:ready' })
     page.deliver(null)
     page.deliver('tc:refused')
@@ -709,9 +709,9 @@ describe('отказ страницы', () => {
 
 describe('the recording switch', () => {
   /**
-   * The one bit of §9.4 the hook is given: copy, or do not. It comes from the bridge, over the
-   * same channel and under the same origin check as the refusal — and unlike the refusal it
-   * turns, because a user may change their mind about a site without reloading it.
+   * The hook receives one recording setting: copy or do not copy. It comes from the bridge over
+   * the same channel and through the same origin check as a refusal. Unlike a refusal, it can
+   * change because a user may change their preference for a site without reloading it.
    */
   const OFF = { type: 'tc:record', on: false }
   const ON = { type: 'tc:record', on: true }
@@ -797,10 +797,9 @@ describe('the recording switch', () => {
     sourceBuffer.appendBuffer(segment(512))
     await flush()
 
-    // The two are different words about different things: §5.4 refuses this page's material for
-    // good, and the recording mode is the user's preference about sites. The looser of the two
-    // must not overrule the other, or a page playing DRM would be recorded by having the setting
-    // changed.
+    // The two messages govern different things: refusal permanently blocks this page's protected
+    // media, while recording mode is the user's site preference. The less restrictive setting
+    // must not override refusal, or changing the setting would record a page playing DRM.
     expect(page.of('tc:append'), 'a switch turned on undid the refusal of a protected page').toHaveLength(
       0,
     )

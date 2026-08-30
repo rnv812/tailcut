@@ -10,25 +10,25 @@
     '/fixtures/h264/chunk-stream0-00003.m4s',
   ]
 
-  // Проходы по одним и тем же сегментам. Один вызов appendBuffer занимает синхронный путь на
-  // десятки микросекунд — меньше зернистости performance.now() (в Chrome это 100 мкс), так что
-  // на единичном замере не видно ничего. На сотнях замеров зернистость усредняется: доля
-  // ненулевых отсчётов пропорциональна настоящей длительности.
+  // Repeated passes over the same segments. One appendBuffer call spends tens of microseconds on
+  // its synchronous path, below performance.now() resolution (100 µs in Chrome), so one sample
+  // reveals nothing. Across hundreds of samples, timer quantization averages out and the share of
+  // non-zero readings tracks the real duration.
   const WARMUP_PASSES = 2
   const MEASURED_PASSES = 100
   const PASS_SECONDS = 6
-  // Калибровка: короткими партиями и помногу. Длинная партия выделяет десятки мегабайт и
-  // гарантированно ловит паузу сборщика, а среди коротких находится хоть одна, прошедшая
-  // между паузами, — она и есть чистая цена копии.
+  // Calibrate with many short batches. A long batch allocates tens of megabytes and inevitably
+  // catches a garbage-collector pause, while at least one short batch runs between pauses and
+  // exposes the clean copy cost.
   const COPY_BATCH_PASSES = 20
   const COPY_RUNS = 25
 
-  // Каждый замер отдельно, а не одной суммой: тесту нужно и число отсчётов (страница
-  // отработала целиком), и возможность посмотреть на распределение при разборе падения.
+  // Keep every sample instead of one total. The test needs both the count, proving that the page
+  // completed, and the distribution for diagnosing a failure.
   window.appendSamples = []
-  // Цена одной копии тех же байтов на этой же машине. Порог теста выражен в этих копиях, а не
-  // в миллисекундах: обёртка обязана стоить одну копию сегмента, и на вдвое более медленной
-  // машине обе величины растут вместе.
+  // Cost of one copy of the same bytes on this machine. The test threshold uses copies rather than
+  // milliseconds because the wrapper should cost one segment copy and both values scale together
+  // on a slower machine.
   window.copyBaselineMs = 0
   window.copyCount = COPY_BATCH_PASSES * SEGMENTS.length
   window.measured = false
@@ -42,8 +42,8 @@
     try {
       const sb = mediaSource.addSourceBuffer('video/mp4; codecs="avc1.4d401e"')
 
-      // Байты забираются один раз: сеть в измерение попадать не должна, а перевыдача фикстур
-      // через маршрутизатор Playwright стоит куда дороже самого appendBuffer.
+      // Fetch bytes once so networking is excluded. Re-serving fixtures through Playwright routing
+      // costs far more than appendBuffer itself.
       const fetchBytes = async (url) => (await fetch(url)).arrayBuffer()
       const initBytes = await fetchBytes(INIT)
       const segmentBytes = await Promise.all(SEGMENTS.map(fetchBytes))
@@ -60,22 +60,21 @@
           if (record) window.appendSamples.push(spent)
         })
 
-      // Фаза 1: время внутри appendBuffer.
+      // Phase 1: time spent inside appendBuffer.
       await append(initBytes, false)
       for (let pass = 0; pass < WARMUP_PASSES + MEASURED_PASSES; pass++) {
-        // Прогрев не считается: на первых проходах заводится декодер и растут внутренние
-        // буферы MSE, и эта разовая цена одинаково искажает оба замера.
+        // Exclude warm-up: the first passes start the decoder and grow MSE's internal buffers,
+        // adding a one-time cost that distorts both modes equally.
         const record = pass >= WARMUP_PASSES
         for (const bytes of segmentBytes) await append(bytes, record)
         sb.timestampOffset += PASS_SECONDS
       }
 
-      // Фаза 2: калибровка — на той же прогретой машине и тех же байтах. Часы читаются один
-      // раз на весь прогон, поэтому зернистость роли не играет. Берётся минимум, а не среднее:
-      // копирование выделяет память, и в среднее попадают паузы сборщика мусора, а минимум —
-      // это чистая цена копии, устойчивая от прогона к прогону. Идёт после замеров: сотни
-      // выделений подряд оставляют после себя работу сборщику мусора, и приходиться эта
-      // работа должна не на измеряемый путь.
+      // Phase 2: calibrate on the same warm machine and bytes. Read the clock once for the whole
+      // run so timer resolution does not matter. Use the minimum rather than the average: copying
+      // allocates memory, averages include garbage-collector pauses, and the minimum exposes a
+      // stable clean copy cost. Calibrate after measurement so the measured path does not inherit
+      // garbage-collection work from hundreds of consecutive allocations.
       const copyOnce = () => {
         const t0 = performance.now()
         for (let pass = 0; pass < COPY_BATCH_PASSES; pass++) {
@@ -90,8 +89,8 @@
 
       window.measured = true
     } catch (error) {
-      // Иначе отказ внутри обработчика утонет в отклонённом промисе, а тест будет ждать
-      // window.measured до самого таймаута и скажет про таймаут, а не про причину.
+      // Otherwise a handler failure disappears into a rejected promise and the test waits for
+      // window.measured until timeout, reporting the timeout instead of the cause.
       window.failure = String(error)
     }
   })

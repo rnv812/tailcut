@@ -44,7 +44,7 @@ export interface SnapshotTrack {
   /**
    * The material is an ordinary complete file, lying whole at this range of the snapshot.
    *
-   * The other way material arrives (§5.6): the browser fetched the file itself and the extension
+   * The alternate delivery shape: the browser fetched the file itself and the extension
    * intercepted nothing, so there is no init segment and there are no fragments — one `moov`
    * describes every sample and one `mdat` holds them. `init` then names that movie box inside
    * this range rather than an init segment of its own, and every chunk points at this same range,

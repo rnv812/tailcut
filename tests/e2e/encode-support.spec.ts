@@ -231,7 +231,7 @@ test('walks the whole ladder down to the software rung, whatever the codec setti
  *  - "the re-encoding path works" has been proven for the software rung and for nothing else;
  *    the hardware rungs and HEVC have never once been executed, only chosen (unit tests) and
  *    refused (here);
- *  - `docs/manual-checks-windows.md` is the list of what only that machine can answer, and it is
+ *  - the Windows hardware checklist records what only that machine can answer, and it is
  *    the thing to work through rather than this file;
  *  - do not relax the expectations below to make this pass. Rewrite them to state what the new
  *    machine actually answers, and say in the commit which machine that was.

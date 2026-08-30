@@ -243,7 +243,7 @@ function installWindow(referrer = REFERRER, stored?: unknown) {
    * chrome.storage.local, which is where the settings live and the only thing in the extension
    * that keeps any.
    *
-   * The frame holds a live copy of them and acts on every change without a reload (§9.4), so the
+   * The frame holds a live copy and acts on every change without a reload, so the
    * set has to be able to move a setting under a page that is already recording — which is the
    * whole shape of the feature and cannot be asked of a constant.
    */
@@ -491,7 +491,7 @@ function installWindow(referrer = REFERRER, stored?: unknown) {
      *
      * The frame hears it over chrome.storage.onChanged and acts on it where it stands — no
      * reload, no navigation, and no message of the protocol involved. That is the promise of
-     * §9.4 and it is what this drives.
+     * Recording settings use this path, and it is what this drives.
      */
     async settings(edit: (current: Settings) => Settings): Promise<void> {
       await writeSettings(edit)
@@ -825,12 +825,12 @@ describe('the bridge puts segments into the session registry', () => {
     win.append(initBytes)
     win.append(seg1Bytes)
 
-    win.context(PAGE_URL, 'Night broadcast')
+    win.context(PAGE_URL, '夜の放送')
     await win.save(keyFor(PAGE_URL))
 
     // The name is read off the session at the moment of saving, and this is the whole point of
     // the title reaching it at all.
-    expect(win.downloads[0]!.filename).toBe('Night broadcast.mp4')
+    expect(win.downloads[0]!.filename).toBe('夜の放送.mp4')
   })
 
   it('ignores a context whose fields are not strings', async () => {
@@ -898,7 +898,7 @@ describe('the bridge puts segments into the session registry', () => {
     win.deliver({ type: 'tc:duration', sourceId: 's1', seconds: 23.581 })
     win.append(initBytes)
 
-    // The length is the third component of the merge key (§6.1). Without it two videos of a feed
+    // The length is the third component of the merge key. Without it two videos of a feed
     // whose address does not change are one session and one unplayable file.
     expect((await win.list()).map((s) => s.key)).toEqual([
       sessionKey({ url: PAGE_URL, codecs: ['avc1'], durationSeconds: 23.581 }),
@@ -1393,14 +1393,14 @@ describe('the bridge saves what it collected as a file', () => {
 
   it('names the file after the page title with an mp4 extension', async () => {
     const win = await loadBridge()
-    win.context(PAGE_URL, 'Ночной эфир')
+    win.context(PAGE_URL, '夜の放送')
     win.append(initBytes)
     win.append(seg1Bytes)
 
     await win.save(keyFor(PAGE_URL))
 
     // A title not in Latin is no reason to hand the user a file made of underscores.
-    expect(win.downloads.map((item) => item.filename)).toEqual(['Ночной эфир.mp4'])
+    expect(win.downloads.map((item) => item.filename)).toEqual(['夜の放送.mp4'])
   })
 
   it('leaves no forbidden characters in the file name', async () => {
@@ -1437,27 +1437,27 @@ describe('the bridge saves what it collected as a file', () => {
 
   it('strips a dot and a space off the tail of the name before the extension', async () => {
     const win = await loadBridge()
-    win.context(PAGE_URL, 'Серия 1.')
+    win.context(PAGE_URL, 'Episode 1.')
     win.append(initBytes)
     win.append(seg1Bytes)
 
     await win.save(keyFor(PAGE_URL))
 
     // The extension is appended right after, and a trailing dot in the title doubles the
-    // separator: «Серия 1..mp4». Windows also cuts dots and spaces off the end of a name itself.
-    expect(win.downloads[0]!.filename).toBe('Серия 1.mp4')
+    // separator: "Episode 1..mp4". Windows also cuts dots and spaces off the end of a name itself.
+    expect(win.downloads[0]!.filename).toBe('Episode 1.mp4')
   })
 
   it('leaves no space before the extension when a long title is cut on one', async () => {
     const win = await loadBridge()
     // The space is the hundredth character: the cut by the length limit falls exactly on it.
-    win.context(PAGE_URL, `${'ц'.repeat(99)} and some more words`)
+    win.context(PAGE_URL, `${'x'.repeat(99)} and some more words`)
     win.append(initBytes)
     win.append(seg1Bytes)
 
     await win.save(keyFor(PAGE_URL))
 
-    expect(win.downloads[0]!.filename).toBe(`${'ц'.repeat(99)}.mp4`)
+    expect(win.downloads[0]!.filename).toBe(`${'x'.repeat(99)}.mp4`)
   })
 
   it('saves a page without a title under the name of the extension', async () => {
@@ -1473,7 +1473,7 @@ describe('the bridge saves what it collected as a file', () => {
 
   it('cuts a long title down to a name the file system will take', async () => {
     const win = await loadBridge()
-    win.context(PAGE_URL, 'ц'.repeat(300))
+    win.context(PAGE_URL, 'x'.repeat(300))
     win.append(initBytes)
     win.append(seg1Bytes)
 
@@ -1508,9 +1508,9 @@ describe('the bridge saves what it collected as a file', () => {
     it('leaves no bidirectional mark in the name', async () => {
       // A title in Arabic or Hebrew carries these by the handful, and a page writes them into a
       // Latin title too — YouTube marks the direction around a channel name.
-      const name = await nameFor('\u200eНовости\u200f — \u202bэфир\u202c')
+      const name = await nameFor('\u200eNews\u200f — \u202bbroadcast\u202c')
 
-      expect(name).toBe('Новости — эфир.mp4')
+      expect(name).toBe('News — broadcast.mp4')
     })
 
     it('leaves no zero-width character in the name', async () => {
@@ -1562,9 +1562,9 @@ describe('the bridge saves what it collected as a file', () => {
     })
 
     it('keeps the emoji that do fit, rather than throwing the title away', async () => {
-      const name = await nameFor('🎬 Ночной эфир')
+      const name = await nameFor('🎬 Night broadcast')
 
-      expect(name).toBe('🎬 Ночной эфир.mp4')
+      expect(name).toBe('🎬 Night broadcast.mp4')
     })
   })
 
@@ -2254,7 +2254,7 @@ describe('the word that this frame is recording', () => {
 
     win.append(cencInitBytes, 's1')
 
-    // Everything gathered is dropped and nothing more is taken in (§5.4): there is no session
+    // Everything gathered is dropped and nothing more is taken in: there is no session
     // here, and a frame the badge asked would answer with the refusal and nothing to count.
     expect(notices(win)).toEqual([])
   })
@@ -2304,7 +2304,7 @@ describe('the word that this frame is recording', () => {
   })
 })
 
-describe('the recording switch of §9.4', () => {
+describe('the recording setting', () => {
   /** The settings as the settings page would store them: one key, the whole of them under it. */
   const denying = (...hosts: string[]) => ({
     recording: { mode: 'all', bufferSeconds: 180, allow: [], deny: hosts },
@@ -2395,7 +2395,7 @@ describe('the recording switch of §9.4', () => {
 
     win.append(seg2Bytes)
 
-    // What was recorded stays exactly where it was (§7.2): a switch is not an erasure, and the
+    // What was recorded stays exactly where it was: a switch is not an erasure, and the
     // user who turns recording off over a video they have been watching still has that video.
     const after = await win.list()
     expect(win.switches()).toEqual([true, false])
@@ -2420,7 +2420,7 @@ describe('the recording switch of §9.4', () => {
 
     // `Save recordings to disk` is about the disk and about nothing else. What the frame is
     // holding stays where it is, what arrives after the switch is still taken in, and the hook is
-    // not told to stop copying — the buffer of §7.2 is the popup's to offer whether or not any of
+    // not told to stop copying: the buffer is the popup's to offer whether or not any of
     // it outlives the tab. What does go is the batch the writer had gathered and not yet written,
     // which is the one thing that would otherwise become a file created after the user said no
     // (see HistoryWriter.setEnabled).
@@ -2486,7 +2486,7 @@ describe('the frame keeps the buffer length and the memory ceiling on its own cl
     // The registry the frame built is an instance of this very class: `loadBridge` resets the
     // module registry and imports the bridge, so an import made after it lands in the same one.
     // Watched from the prototype, because the store itself belongs to the bridge and to nobody
-    // else — what is checked here is that the tick asks for both halves of §7.2 and with what.
+    // else. What is checked here is that the tick asks for both halves of the buffer and with what.
     const { SessionStore } = await import('../../src/bridge/session-store')
     const trims = vi.spyOn(SessionStore.prototype, 'trimToBuffer')
     const drops = vi.spyOn(SessionStore.prototype, 'dropOverCeiling')
@@ -2526,7 +2526,7 @@ describe('the frame keeps the buffer length and the memory ceiling on its own cl
     const drops = vi.spyOn(SessionStore.prototype, 'dropOverCeiling')
 
     win.context()
-    // The longest buffer the setting takes, which the slider of §9.4 offers.
+    // The longest buffer the setting accepts, which is also the slider maximum.
     await win.settings((current) => ({
       ...current,
       recording: { ...current.recording, bufferSeconds: LIMITS.bufferSeconds.max },
@@ -2599,7 +2599,7 @@ describe('a request that came with a port is answered', () => {
 })
 
 /**
- * The quick switch of §9.2: the one switch in the program that is not a setting.
+ * The popup's quick switch: the one switch in the program that is not a setting.
  *
  * It is about this visit to this page — it lives in the frame, never in storage — and a reload
  * puts the page back under the settings, which is what "quick" is supposed to mean.
@@ -2627,7 +2627,7 @@ describe('the quick switch of the popup', () => {
     // Answered with the state and not with "done", because the popup draws a label out of it: a
     // bare acknowledgement would leave the button saying "Pause" over a paused page.
     //
-    // And what was recorded stays exactly where it was (§7.2), as it does under the settings: a
+    // And what was recorded stays exactly where it was, as it does under the settings: a
     // switch is not an erasure, and the hook is told to stop copying at all.
     const after = await win.list()
     expect(win.switches()).toEqual([true, false])

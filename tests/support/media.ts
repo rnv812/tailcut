@@ -111,7 +111,7 @@ export function decodeWarnings(file: string): string {
  * stream and says this when a second arrives; the samples are described by the trun either way,
  * the file decodes from end to end, and every frame comes out. Measured on every rutube save.
  *
- * No file the program writes draws it any more: since Task 17 a save is assembled by the
+ * No file the program writes draws it anymore: saved files are assembled by the
  * progressive writer, which reads the samples out and states tables of its own, and the whole
  * paragraph below about the cost of dropping the box is why that writer exists rather than a
  * surgery on somebody else's fragments. The line stays named here because the fragmented writer

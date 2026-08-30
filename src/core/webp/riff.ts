@@ -1,7 +1,7 @@
 /**
  * Animated WebP, packed by hand.
  *
- * §8.4 asks for "the frames laid into a RIFF container as ANMF chunks", without a dependency and
+ * Animated WebP stores frames as ANMF chunks in a RIFF container, without a dependency and
  * without wasm. The frame bitstreams come from the canvas; this file writes only the container
  * around them, and it is the whole of what the format costs us.
  */

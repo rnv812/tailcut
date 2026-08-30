@@ -11,7 +11,7 @@ export type EditorFailure = SnapshotFailure | 'open-failed' | 'preview-failed'
 export type PreviewState = Preview | 'building' | 'failed' | null
 
 /**
- * What §9.4 has to say to an open editor, read once when the tab opened.
+ * The settings needed by an open editor, read once when the tab opened.
  *
  * It travels with the ready state rather than beside it because it is read before the workbench
  * is shown at all: the template is part of the context every clip is named against, and a context
@@ -19,7 +19,7 @@ export type PreviewState = Preview | 'building' | 'failed' | null
  */
 export interface EditorOptions extends SaveOptions {
   /**
-   * §9.4 as the tab read it when it opened: the whole Export group, and not a field of it.
+   * The whole Export settings group as the tab read it when it opened, not one field at a time.
    *
    * The template a new clip is named by, the format it is born in, the codec the ladder is asked
    * for, the quality it is asked at, and whether a start off a key frame is rewritten. They
@@ -31,7 +31,7 @@ export interface EditorOptions extends SaveOptions {
   export?: ExportSettings
 }
 
-/** §9.4 with nothing to say: every field of it is optional, so absent and empty are one state. */
+/** No settings update: every field is optional, so absent and empty are one state. */
 const NO_OPTIONS: EditorOptions = {}
 
 export type EditorState =

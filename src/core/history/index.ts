@@ -39,9 +39,9 @@ export interface Span {
  *
  * The length of a recording is the time some material of it exists for, and that is a union
  * rather than a sum. A sum is wrong twice over, and both ways are ordinary: a piece carries the
- * picture and the sound of one stretch, and a switch of quality (§6.2) opens a second
+ * picture and sound for one stretch, while a quality switch opens a second
  * representation of the picture over the same seconds — so adding parts up counts a second two
- * and three times. And the same session is written by two tabs (§6.1), whose maps are
+ * and three times. The same session can also be written by two tabs whose maps are
  * independent: the overlap arrives twice, and a session watched once would say it was watched for
  * twice as long.
  *

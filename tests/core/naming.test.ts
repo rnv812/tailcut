@@ -25,7 +25,7 @@ const clip = (name: string, format: Clip['format'] = 'mp4'): Clip => ({
 describe('sanitizeFileName', () => {
   it('leaves a name in any language as it is', () => {
     // A title not in Latin is no reason to hand the user a file made of underscores.
-    expect(sanitizeFileName('Ночной эфир 01.23')).toBe('Ночной эфир 01.23')
+    expect(sanitizeFileName('夜の放送 01.23')).toBe('夜の放送 01.23')
   })
 
   it('takes out everything a file system refuses', () => {
@@ -43,7 +43,7 @@ describe('sanitizeFileName', () => {
     // survived every other step, Chrome refused the name, and the popup blamed the session for
     // being gone. Removed outright rather than turned into a space — they stand inside a word as
     // readily as between two, and a gap where the eye sees none is a name nobody asked for.
-    expect(sanitizeFileName('\u200eНовости\u200f — \u202bэфир\u202c')).toBe('Новости — эфир')
+    expect(sanitizeFileName('\u200eNews\u200f — \u202bbroadcast\u202c')).toBe('News — broadcast')
     expect(sanitizeFileName('A\u200bB\u200cC\u200dD\ufeffE')).toBe('ABCDE')
     expect(sanitizeFileName('\u200e\u200b\u202a\u202c\ufeff')).toBe('tailcut')
   })
@@ -70,12 +70,12 @@ describe('sanitizeFileName', () => {
   })
 
   it('strips a dot and a space off the tail, where the extension is going', () => {
-    expect(sanitizeFileName('Серия 1.')).toBe('Серия 1')
-    expect(sanitizeFileName(`${'ц'.repeat(99)} and some more words`)).toBe('ц'.repeat(99))
+    expect(sanitizeFileName('Episode 1.')).toBe('Episode 1')
+    expect(sanitizeFileName(`${'x'.repeat(99)} and some more words`)).toBe('x'.repeat(99))
   })
 
   it('cuts a long name down to what a file system will take', () => {
-    expect(sanitizeFileName('ц'.repeat(300))).toHaveLength(100)
+    expect(sanitizeFileName('x'.repeat(300))).toHaveLength(100)
   })
 
   it('falls back on the name of the extension when nothing is left', () => {

@@ -54,7 +54,7 @@ export interface FramePlan {
    * else.
    */
   decoder: VideoDecoderConfig
-  /** The four letters of the source sample entry — `avc1`, `vp09`, `av01`. What §8.4 warns by. */
+  /** The source sample-entry code, such as `avc1`, `vp09`, or `av01`, used for codec warnings. */
   sourceFormat: string
   geometry: EncodeGeometry
   /** The sound, exactly as the copy path plans it. Not re-encoded, not re-timed, not touched. */

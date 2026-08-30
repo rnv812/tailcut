@@ -60,7 +60,7 @@ interface Converted {
  *
  * Null when nothing of the file can be offered: no Tracks to read, no track this program can
  * describe, no frame under any of them. Protection is answered before any of that and answered
- * whole (§5.4): an encrypted file comes back as a `PlainFile` carrying the flag and nothing else,
+ * whole: an encrypted file returns as a `PlainFile` carrying the protection flag and nothing else,
  * which is what the mp4 side does with a `pssh`.
  */
 export async function matroskaFileOf(
