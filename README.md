@@ -1,24 +1,55 @@
-<h1 align="center">
-  <img src="assets/tailcut/svg/lockup-dark.svg" alt="tailcut" width="380">
-</h1>
+<p align="center">
+  <img src="assets/tailcut/promo/readme-banner-1280x440.png" alt="tailcut product overview" width="100%">
+</p>
 
-<p align="center"><strong>Turn buffered web video into precise, local clips.</strong></p>
+<p align="center"><sub>The banner illustrates the common clear-media MSE path. Protected and incompatible material is intentionally refused; see <a href="#current-limits">Current limits</a>.</sub></p>
 
-tailcut is a Chrome extension for turning video that has already passed through a web player into a file. Watch normally, open the extension, then save the available material immediately or shape it into frame-accurate clips in the editor.
+<p align="center">
+  <a href="https://github.com/rnv812/tailcut/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/rnv812/tailcut/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="#current-limits"><img alt="Pre-release status" src="https://img.shields.io/badge/status-pre--release-B7F03F?style=flat-square&labelColor=17181F"></a>
+  <a href="#install"><img alt="Chrome 120+" src="https://img.shields.io/badge/Chrome%20%2F%20Chromium-120%2B-F6F5F8?style=flat-square&logo=googlechrome&logoColor=B7F03F&labelColor=17181F"></a>
+  <a href="manifest.json"><img alt="Manifest V3" src="https://img.shields.io/badge/Manifest-V3-F6F5F8?style=flat-square&labelColor=17181F"></a>
+  <a href="PRIVACY.md"><img alt="Local-only data" src="https://img.shields.io/badge/data-local%20only-F6F5F8?style=flat-square&labelColor=17181F"></a>
+  <a href="#development-and-verification"><img alt="TypeScript strict" src="https://img.shields.io/badge/TypeScript-strict-F6F5F8?style=flat-square&logo=typescript&logoColor=B7F03F&labelColor=17181F"></a>
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-B7F03F?style=flat-square&labelColor=17181F"></a>
+</p>
+
+<p align="center">
+  <a href="#highlights">Highlights</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#editor-and-export">Editor</a> ·
+  <a href="#privacy-and-storage">Privacy</a> ·
+  <a href="#install">Install</a>
+</p>
+
+<p align="center">
+  <strong>Turn buffered web video into precise, local clips.</strong><br>
+  Watch normally. Save the part that already happened.
+</p>
+
+tailcut is a Chrome extension for turning video that has already passed through a web player into a file. Open the extension after the moment, save the available material immediately, or shape it into frame-accurate clips in the editor.
 
 It is not a screen recorder and it does not start a second download of a streaming video. tailcut captures the media data the player receives during the viewing session, indexes it by media time, and writes a new container around the selected samples. The default **Original** path does not re-encode the picture.
 
-> **Status:** pre-release, version `0.1.0`. The supported installation path is currently an unpacked Chrome/Chromium extension built from this repository.
+> [!NOTE]
+> **Pre-release, version `0.1.0`.** The supported installation path is currently an unpacked Chrome/Chromium extension built from this repository.
 
 ## Highlights
 
-- **Clip after the moment.** The default rolling window keeps the latest three minutes of active playback, adjustable from 15 seconds to 30 minutes.
-- **Fast, lossless-by-default export.** Original MP4 export copies compressed samples and rebuilds the container instead of decoding and re-encoding every frame.
-- **A real editing timeline.** Create several overlapping clips, step by frame, type timecodes, split, mark, snap, zoom, inspect waveforms and preview frames under the pointer.
-- **Crop and optimize when needed.** Use free crop or 16:9, 9:16, 1:1 and 4:5 frames. Decoded frames are processed only when a crop, optimization, animated WebP or the rewrite-start option requires it. MP4 re-encoding uses WebCodecs; WebP uses the browser's canvas encoder.
-- **Built for the web, not a list of websites.** The capture path handles MediaSource players, worker-owned MediaSource streams and ordinary `<video src>` files without hostname-specific integrations.
-- **History that stays local.** Recordings can survive a tab or browser restart in extension-owned storage, with retention, disk limits, pinning, deletion and undo.
-- **Measured impact on the page.** Parsing and storage stay off the player's synchronous path, and the end-to-end suite enforces a fixed overhead budget.
+<table>
+  <tr>
+    <td width="33%"><strong>Clip after the moment</strong><br><br>The rolling window keeps the latest three minutes of active playback by default, adjustable from 15 seconds to 30 minutes.</td>
+    <td width="33%"><strong>Original means original</strong><br><br>The normal MP4 path copies compressed samples and rebuilds the container. It does not decode and re-encode every frame.</td>
+    <td width="33%"><strong>Frame-accurate editor</strong><br><br>Step by frame, type timecodes, split, mark, snap, zoom, inspect waveforms and preview frames under the pointer.</td>
+  </tr>
+  <tr>
+    <td width="33%"><strong>Built for web players</strong><br><br>Captures MediaSource, worker-owned MediaSource and ordinary <code>&lt;video src&gt;</code> media without hostname-specific integrations.</td>
+    <td width="33%"><strong>Local, durable history</strong><br><br>Recordings can survive tab and browser restarts in extension-owned storage, with pinning, retention, disk limits and undoable deletion.</td>
+    <td width="33%"><strong>Measured page impact</strong><br><br>Parsing and storage stay off the player's synchronous path. Browser tests enforce a fixed overhead budget.</td>
+  </tr>
+</table>
+
+Crop and optimize only when needed. Free crop and 16:9, 9:16, 1:1 and 4:5 frames are available per clip. MP4 re-encoding uses WebCodecs; animated WebP uses the browser's canvas encoder.
 
 ## How it works
 
@@ -65,9 +96,13 @@ Copy jobs can run beside one encoding job in a separate queue lane. Jobs expose 
 
 Binary media follows this path:
 
-```text
-page MAIN world → transferable message → extension bridge → writer worker → OPFS
-                                                        ↘ editor → Downloads
+```mermaid
+flowchart LR
+    player["Web player<br>MAIN world"] -->|transferable buffers| bridge["Extension bridge"]
+    bridge --> writer["Writer worker"]
+    writer --> opfs[("Local OPFS history")]
+    opfs --> editor["Frame-accurate editor"]
+    editor --> output["MP4 or animated WebP"]
 ```
 
 | Context | Responsibility |
@@ -120,7 +155,20 @@ The quiet-tree completion gate measured 24.3 µs, or 1.83 segment copies. A seal
 
 These values describe one machine and browser build. The ratio and enforced budget are the regression signal; raw microseconds will vary by system.
 
-## Install from source
+## Install
+
+### Tagged release builds
+
+Tagged builds appear on [GitHub Releases](https://github.com/rnv812/tailcut/releases) only after the tagged commit passes the complete verification gate. When a build is available:
+
+1. Download `tailcut-v…-chrome.zip` from the version you want.
+2. Extract the ZIP. It contains one ready-to-load `tailcut-v…-chrome` directory.
+3. Open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select that extracted directory.
+4. Pin tailcut to the toolbar.
+
+Chrome loads unpacked extensions from a directory, not directly from a ZIP. The adjacent `.sha256` file lets you verify the downloaded archive before extracting it. Until a tagged build appears on the Releases page, use the source build below.
+
+### Build from source
 
 Prerequisites:
 
@@ -173,20 +221,24 @@ A live-site failure is diagnostic rather than a release gate because the page an
 
 ## Current limits
 
-- **Protected media is refused.** tailcut does not decrypt DRM content or interact with CDM keys. When encrypted material is detected, the whole page session is discarded and the popup explains why.
-- **It is not a general-purpose downloader.** The ordinary-file path exports only media held by the player. It does not fetch an entire file merely because its URL is reachable.
-- **Direct MPEG-TS ingestion is not implemented.** Surveyed HLS players remuxed transport streams to fragmented MP4 before MediaSource, so a TS parser would not have added those sites.
-- **Output is MP4 or animated WebP only.** There is no GIF output. WebP has no sound and often weighs several times as much as the equivalent MP4.
-- **Browser support is Chrome/Chromium only.** Firefox requires a different page-injection compatibility layer and is outside the current scope.
-- **There is no browser-global capture hotkey.** Actions begin at the extension icon. The editor itself has keyboard controls.
-- **One output file uses one continuous rendition and one track of each kind.** A quality switch, alternate track or recording gap is reported rather than silently combining incompatible material. Direct save chooses the longest uninterrupted piece.
-- **WebM ingest is intentionally narrow.** Ordinary VP8/VP9 files with Opus/Vorbis are supported, including multiplexed files. MediaSource WebM capture requires one track per SourceBuffer. AV1-in-WebM is refused, while AV1 inside fragmented MP4 remains available on the Original path.
-- **Encoder support is machine-dependent.** Hardware HEVC/H.264 availability depends on the browser, operating system, driver, geometry and frame rate. tailcut probes each clip and can fall back to software H.264 where supported.
-- **Recent batched data can be lost in a crash.** Storage favors low impact on the playing page: a batch closes at 8 MiB or after two seconds, whichever comes first.
+| Boundary | What it means |
+|---|---|
+| Protected media | DRM content is refused. tailcut does not decrypt media or interact with CDM keys. |
+| Not a general downloader | Ordinary files are limited to media held by the player; a reachable URL does not authorize a whole-file download. |
+| MPEG-TS | Direct MPEG-TS ingestion is not implemented. Surveyed HLS players remuxed it before MediaSource. |
+| Output formats | MP4 and silent animated WebP only. There is no GIF output. |
+| Browser support | Chrome and Chromium only. Firefox needs a different page-injection compatibility layer. |
+| Global hotkeys | Actions begin at the extension icon. The editor has its own keyboard controls. |
+| Renditions and tracks | One output file uses one continuous rendition and one track of each kind. Gaps and incompatible changes are reported instead of silently combined. |
+| WebM ingest | VP8/VP9 with Opus/Vorbis is supported. MediaSource WebM requires one track per SourceBuffer; AV1-in-WebM is refused. |
+| Hardware encoding | HEVC/H.264 support depends on the browser, system, driver and clip geometry. tailcut probes every clip and can fall back to software H.264. |
+| Crash window | A recent storage batch can be lost in a crash. Batches close at 8 MiB or after two seconds to protect page performance. |
 
 ## Feature reference
 
-### Capture controls
+<details>
+<summary><strong>Capture controls</strong></summary>
+
 
 - Global modes: all sites, allowlist or off.
 - Denylist that overrides normal recording.
@@ -196,7 +248,11 @@ A live-site failure is diagnostic rather than a release gate because the page an
 - Separate sessions for multiple players, embeds, feeds, SourceBuffers and representations.
 - Protection, unsupported-track, unreadable-file, gap, rendition, alternate-track and separate-sound explanations in the popup.
 
-### History
+</details>
+
+<details>
+<summary><strong>History</strong></summary>
+
 
 - Disk-backed recordings survive tab closure, browser restarts and extension updates.
 - Recent recordings show title, host, duration, age and disk use.
@@ -205,7 +261,11 @@ A live-site failure is diagnostic rather than a release gate because the page an
 - Optional memory-only mode for sessions that should disappear with the tab.
 - Retention and disk ceilings applied by value so useful, recent recordings are kept ahead of low-value material.
 
-### Editor
+</details>
+
+<details>
+<summary><strong>Editor</strong></summary>
+
 
 - Frame stepping, play/pause and J-K-L shuttle at 1×, 2×, 4×, 8× and 16×.
 - Frame-aware playhead plus directly editable In, Out and playhead timecodes.
@@ -219,7 +279,11 @@ A live-site failure is diagnostic rather than a release gate because the page an
 
 Press `?` in the editor for the complete keyboard map.
 
-### Export
+</details>
+
+<details>
+<summary><strong>Export</strong></summary>
+
 
 - Direct **Save all** from the popup or multi-clip export from the editor.
 - Progressive MP4 output with physical tail trimming and gap-aware timestamps.
@@ -232,6 +296,8 @@ Press `?` in the editor for the complete keyboard map.
 - File-name templates using `{title}`, `{in}`, `{out}`, `{date}` and `{host}`.
 - Optional save-location prompt for every clip.
 - Separate copy and encoding queue lanes with progress, cancellation and retry.
+
+</details>
 
 ## License
 
