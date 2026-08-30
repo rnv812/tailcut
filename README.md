@@ -10,7 +10,8 @@ unchanged. Animated WebP uses the same decoded frames, writes no sound, and runs
 in the encoding lane. The codec is chosen for that clip's geometry, and copy jobs
 run beside one encoding job in a separate queue lane. The editor reports the
 measured pace after a completed encode, and the export settings are live. The
-sandbox end-to-end checks and the Windows hardware checklist are still open.
+sandbox end-to-end checks are complete. Only the Windows hardware checklist
+remains open.
 
 What a tab records is written to disk in
 batches of eight megabytes, in sealed pieces the writer never comes back to, and
@@ -63,14 +64,13 @@ npm run plan:check   # every plan's blocks, code and prose, still match the repo
 
 Load `dist/` through `chrome://extensions` with developer mode on.
 
-The integration tests drive a real Chromium with the real extension loaded, and
-they are split in two by what each one is for rather than by what it costs.
-`e2e:fast` is the working set — the hook, the bridge, triage, the popup and
-every path that ends in a saved file, 136 tests in about three minutes. `e2e` adds
-the sweep on top of it: the codec matrix, a minute of watching, the
-ordinary-file path with its ranged reads, the pages full of frames, and the
-overhead measurement, which runs last and by itself. The reason each file is in
-the set it is in is written next to it in `playwright.config.ts`.
+The integration tests drive a real Chromium with the real extension loaded. They
+are split into a working set, a sweep, and four isolated wall-clock measurements.
+`e2e:fast` is the working set — the hook, the bridge, triage, the popup and every
+path that ends in a saved file, 144 tests in 3.7 minutes. The last full gate ran
+all 171 tests in 43 files in 6.2 minutes: 170 passed and the live YouTube leg was
+skipped. The reason each file belongs to its project is written next to it in
+`playwright.config.ts`.
 
 Both run headless. `HEADED=1 npm run e2e:fast` puts the windows back.
 
@@ -124,8 +124,8 @@ Both numbers are printed on every run, so run it to see where your machine
 stands. A number outside that band is not automatically a regression — it is an
 invitation to look at what changed on the synchronous path.
 
-The quiet-tree Task 10 gate measured 27.3 µs, or 1.64 segment copies. Its sealed
-8 MiB write took 9.5 ms.
+The quiet-tree Task 11 gate measured 24.3 µs, or 1.83 segment copies. Its sealed
+8 MiB write took 9.6 ms.
 
 A page tailcut has refused outright — protected media — costs nothing after the
 refusal: the registry tells the hook, and the copying stops where it starts
