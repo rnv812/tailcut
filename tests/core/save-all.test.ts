@@ -41,7 +41,13 @@ function onDisk(name: string, bytes: Uint8Array): string {
 
 interface Probed {
   format: { duration: string }
-  streams: Array<{ codec_type: string; codec_name: string; nb_read_frames: string; start_time: string }>
+  streams: Array<{
+    codec_type: string
+    codec_name: string
+    nb_read_frames: string
+    nb_read_packets: string
+    start_time: string
+  }>
 }
 
 function probe(file: string): Probed {
@@ -49,8 +55,10 @@ function probe(file: string): Probed {
     'ffprobe',
     [
       '-v', 'error',
+      '-count_packets',
       '-count_frames',
-      '-show_entries', 'format=duration:stream=codec_type,codec_name,nb_read_frames,start_time',
+      '-show_entries',
+      'format=duration:stream=codec_type,codec_name,nb_read_frames,nb_read_packets,start_time',
       '-of', 'json',
       file,
     ],
@@ -215,7 +223,7 @@ describe('Save all, written as an ordinary mp4', () => {
     describe(family.name, () => {
       const material = (): MuxTrack[] => recorded([...family.streams])
 
-      it('holds every stream and every frame the fragmented writer held', () => {
+      it('holds every stream and every sample the fragmented writer held', () => {
         const before = probe(onDisk(`save-${family.name}-old.mp4`, muxFragmentedMp4(material())))
         const after = probe(onDisk(`save-${family.name}.mp4`, saveAllMp4(material())))
 
@@ -227,8 +235,13 @@ describe('Save all, written as an ordinary mp4', () => {
         // the whole promise of the move, and the absolute counts are already pinned by the e2e
         // sets that save these same fixtures through the extension.
         for (const [at, stream] of after.streams.entries()) {
-          const now = Number(stream.nb_read_frames)
-          const was = Number(before.streams[at]!.nb_read_frames)
+          const now = Number(
+            stream.codec_type === 'video' ? stream.nb_read_frames : stream.nb_read_packets,
+          )
+          const previous = before.streams[at]!
+          const was = Number(
+            previous.codec_type === 'video' ? previous.nb_read_frames : previous.nb_read_packets,
+          )
 
           if (stream.codec_type === 'video') {
             expect(now, `${family.name}: frames of the picture`).toBe(was)

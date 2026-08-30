@@ -97,7 +97,7 @@ describe('the fixture itself', () => {
     expect(video!.codec_name).toBe('h264')
     expect(video!.nb_read_frames).toBe('60')
     expect(audio!.codec_name).toBe('aac')
-    expect(audio!.nb_read_frames).toBe('131')
+    expect(audio!.nb_read_packets).toBe('131')
 
     // Not merely readable: read without a word of complaint. A container that addresses its
     // samples an offset out still decodes, and says so only here.
@@ -576,7 +576,7 @@ describe('a recording read out of one muxed buffer', () => {
 
     const [video, audio] = probed.probed!.streams
     expect(video!.nb_read_frames).toBe('60')
-    expect(audio!.nb_read_frames).toBe('131')
+    expect(audio!.nb_read_packets).toBe('131')
 
     // How long the file says it is, which is where two of the muxer's walks show up and nowhere
     // else. The length is the furthest any traf of any fragment reaches: the sound of the last
@@ -607,7 +607,7 @@ describe('a recording read out of one muxed buffer', () => {
 
     const [video, audio] = probed.probed!.streams
     expect(video!.nb_read_frames).toBe('40')
-    expect(audio!.nb_read_frames).toBe('91')
+    expect(audio!.nb_read_packets).toBe('91')
     // 60000 ticks of 30000 less the origin, then the edit list of the trak takes off its 6000.
     expect(Number(video!.start_time)).toBeCloseTo(0.1424, 4)
     expect(Number(audio!.start_time)).toBeCloseTo(-0.0464, 4)
@@ -628,11 +628,11 @@ describe('a recording read out of one muxed buffer', () => {
 
     expect(probed.status).toBe(0)
     expect(decodeWarnings(file)).toBe('')
-    expect(probed.probed!.streams.map((stream) => stream.nb_read_frames)).toEqual([
-      '144',
-      '60',
-      '131',
-    ])
+    expect(
+      probed.probed!.streams.map((stream) =>
+        stream.codec_type === 'audio' ? stream.nb_read_packets : stream.nb_read_frames,
+      ),
+    ).toEqual(['144', '60', '131'])
   })
 })
 

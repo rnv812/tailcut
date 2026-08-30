@@ -72,15 +72,16 @@ interface Probed {
     codec_name: string
     start_time: string
     nb_read_frames: string
+    nb_read_packets: string
   }>
 }
 
 /**
  * Writes the file out and reads it back through ffprobe.
  *
- * -count_frames drives ffprobe through every packet instead of the headers alone: material laid
- * out wrongly inside mdat leaves the boxes intact and shows up only when the frames are actually
- * decoded — as complaints in stderr, with the exit code still zero.
+ * Packet counts pin the material stored in the container. Frame counts drive that material
+ * through the decoder as well. AAC priming makes the decoded count differ between FFmpeg
+ * versions, while the stored packet count remains the container fact.
  */
 function probe(name: string, bytes: Uint8Array): Probed {
   mkdirSync('tests/tmp', { recursive: true })
@@ -91,8 +92,10 @@ function probe(name: string, bytes: Uint8Array): Probed {
     'ffprobe',
     [
       '-v', 'error',
+      '-count_packets',
       '-count_frames',
-      '-show_entries', 'format=duration:stream=codec_type,codec_name,start_time,nb_read_frames',
+      '-show_entries',
+      'format=duration:stream=codec_type,codec_name,start_time,nb_read_frames,nb_read_packets',
       '-of', 'json',
       file,
     ],
@@ -105,6 +108,10 @@ function probe(name: string, bytes: Uint8Array): Probed {
 
   return JSON.parse(probed.stdout) as Probed
 }
+
+/** Decoded pictures, and stored sound packets whose priming policy differs between decoders. */
+const materialCount = (stream: Probed['streams'][number]): number =>
+  Number(stream.codec_type === 'audio' ? stream.nb_read_packets : stream.nb_read_frames)
 
 /** Ticks per second of every track the moov declares, by the track_id the moov gives it. */
 function timescalesOf(file: Uint8Array): Map<number, number> {
@@ -458,7 +465,7 @@ describe('muxFragmentedMp4', () => {
 
     // Six seconds of source: 144 frames of picture at 24 a second, 260 frames of sound of 1024
     // samples each at 44100.
-    expect(probed.streams.map((s) => Number(s.nb_read_frames))).toEqual([
+    expect(probed.streams.map(materialCount)).toEqual([
       VIDEO_FRAMES,
       AUDIO_FRAMES,
     ])
@@ -477,7 +484,7 @@ describe('muxFragmentedMp4', () => {
 
     // Not a frame is lost to the box the packager put there: it is described by the trun as it
     // always was, and the sdtp beside it says nothing that contradicts it.
-    expect(probed.streams.map((s) => Number(s.nb_read_frames))).toEqual([
+    expect(probed.streams.map(materialCount)).toEqual([
       VIDEO_FRAMES,
       AUDIO_FRAMES,
     ])
@@ -521,7 +528,7 @@ describe('muxFragmentedMp4', () => {
     expect(started[0]!).toBeLessThan(offset + 0.01)
 
     // 96 frames of picture and 176 of sound left in the two of them.
-    expect(probed.streams.map((s) => Number(s.nb_read_frames))).toEqual([96, 176])
+    expect(probed.streams.map(materialCount)).toEqual([96, 176])
 
     const seconds = Number(probed.format.duration)
     expect(seconds).toBeGreaterThan(4.0)
@@ -647,7 +654,7 @@ describe('muxFragmentedMp4', () => {
     )
 
     expect(Number(probed.format.duration)).toBeCloseTo(CLIP_SECONDS, 1)
-    expect(probed.streams.map((s) => Number(s.nb_read_frames))).toEqual([
+    expect(probed.streams.map(materialCount)).toEqual([
       VIDEO_FRAMES,
       AUDIO_FRAMES,
     ])
@@ -664,7 +671,7 @@ describe('muxFragmentedMp4', () => {
 
     const probed = probe('mux-version-1.mp4', file)
     expect(Number(probed.format.duration)).toBeCloseTo(CLIP_SECONDS, 1)
-    expect(probed.streams.map((s) => Number(s.nb_read_frames))).toEqual([
+    expect(probed.streams.map(materialCount)).toEqual([
       VIDEO_FRAMES,
       AUDIO_FRAMES,
     ])

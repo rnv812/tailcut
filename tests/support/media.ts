@@ -17,6 +17,7 @@ export interface Probed {
     start_time: string
     duration: string
     nb_read_frames: string
+    nb_read_packets: string
     /** The shape of the picture as the reader worked it out. Absent on a sound track. */
     sample_aspect_ratio?: string
     display_aspect_ratio?: string
@@ -39,19 +40,21 @@ export interface ProbeResult {
 }
 
 /**
- * Reads a file back through ffprobe, frame by frame.
+ * Reads a file back through ffprobe, packet by packet and frame by frame.
  *
- * -count_frames drives it through every packet instead of the headers alone: material laid out
- * wrongly inside mdat leaves the boxes intact and shows up only when the frames are decoded.
+ * Packet counts pin the material stored in the container. Frame counts drive that material
+ * through the decoder as well. AAC priming makes the decoded count differ between FFmpeg
+ * versions, while the stored packet count remains the container fact.
  */
 export function probeFile(file: string): ProbeResult {
   const run = spawnSync(
     'ffprobe',
     [
       '-v', 'error',
+      '-count_packets',
       '-count_frames',
       '-show_entries',
-      'format=duration:stream=codec_type,codec_name,start_time,duration,nb_read_frames,' +
+      'format=duration:stream=codec_type,codec_name,start_time,duration,nb_read_frames,nb_read_packets,' +
         'sample_aspect_ratio,display_aspect_ratio,color_space,color_primaries,color_transfer',
       '-of', 'json',
       file,
