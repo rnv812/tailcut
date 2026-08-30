@@ -146,6 +146,7 @@ vite.config.ts.timestamp-*
 .superpowers/
 
 dist/
+release/
 node_modules/
 test-results/
 
