@@ -1,19 +1,36 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { downloadIo, openClipSource, planOf, requestsFor } from '../../src/editor/export/exporter'
+import {
+  downloadIo,
+  encodeIo,
+  geometryKey,
+  openClipSource,
+  planOf,
+  requestsFor,
+  type PaceReport,
+} from '../../src/editor/export/exporter'
 import { planSnapshot, type SnapshotSource } from '../../src/core/snapshot/build'
 import { SnapshotReader } from '../../src/core/snapshot/read'
 import { materialOf } from '../../src/core/snapshot/material'
 import { concatBytes } from '../../src/core/iso/writer'
 import { topLevelBoxes } from '../../src/core/iso/reader'
 import { parseInit } from '../../src/core/iso/init'
+import { samplesInMovie } from '../../src/core/iso/movie'
+import { videoSampleEntry } from '../../src/core/iso/entry'
 import { assembleMp4 } from '../../src/core/export/assemble'
 import { clipSourceFrom, movieTracksOf } from '../../src/core/export/source'
+import type { ClipSource } from '../../src/core/export/plan'
 import { NO_ENCODER, createRunner } from '../../src/core/export/run'
+import { framesOf, laneOf } from '../../src/core/encode/path'
+import { geometryOf } from '../../src/core/encode/crop'
+import { webpGeometry } from '../../src/core/webp/timing'
 import type { Clip } from '../../src/core/edit/clip'
-import { EMPTY_CONTEXT } from '../../src/core/edit/context'
+import { EMPTY_CONTEXT, type EditContext } from '../../src/core/edit/context'
+import type { EncodeGeometry, EncodingChoice } from '../../src/core/encode/codec'
 import type { ExportRequest } from '../../src/core/export/run'
+import type { Codecs } from '../../src/editor/export/frames'
+import type { Surface } from '../../src/editor/export/webp'
 
 const read = (path: string): Uint8Array => new Uint8Array(readFileSync(`tests/fixtures/${path}`))
 
@@ -167,6 +184,195 @@ const requests = (source: Parameters<typeof requestsFor>[0], clips: readonly Cli
 const copyPlan = (request: ExportRequest) => {
   if (request.path.kind !== 'copy') throw new Error('the fixture did not take the copy path')
   return request.path.plan
+}
+
+const contextOf = (source: ClipSource, fps: number): EditContext => {
+  const shown = source.video.samples
+    .map((sample) => sample.pts / source.video.timescale)
+    .sort((a, b) => a - b)
+  const keyframes = source.video.samples
+    .filter((sample) => sample.sync)
+    .map((sample) => sample.pts / source.video.timescale)
+    .sort((a, b) => a - b)
+  const duration = Math.max(...shown) + 1 / fps
+
+  return {
+    frames: Float64Array.from(shown),
+    keyframes: Float64Array.from(keyframes),
+    fps,
+    frameSize: { width: source.video.width, height: source.video.height },
+    newClipFormat: 'mp4',
+    runs: [{ start: 0, end: duration }],
+    zones: [
+      {
+        start: 0,
+        end: duration,
+        representation: 'fixture',
+        codec: 'avc1',
+        width: source.video.width,
+        height: source.video.height,
+      },
+    ],
+    duration,
+    title: 'Fixture',
+  }
+}
+
+const softwareChoice = (geometry: EncodeGeometry): EncodingChoice => ({
+  kind: 'h264-sw',
+  config: {
+    codec: 'avc1.42001e',
+    width: geometry.width,
+    height: geometry.height,
+    framerate: geometry.framerate,
+    bitrate: 800_000,
+  },
+  control: 'fixed-bitrate',
+  bitrate: 800_000,
+})
+
+type PaceArgs = [
+  kind: 'mp4' | 'webp',
+  geometry: EncodeGeometry,
+  frames: number,
+  ms: number,
+]
+
+const choicesFor = (
+  clips: readonly Clip[],
+  ctx: EditContext,
+): ReadonlyMap<string, EncodingChoice> =>
+  new Map(
+    clips.map((one) => {
+      const geometry = geometryOf(one.crop, ctx.frameSize, ctx.fps)
+      return [geometryKey(geometry), softwareChoice(geometry)] as const
+    }),
+  )
+
+const ascii = (text: string): number[] => [...text].map((character) => character.charCodeAt(0))
+const u32 = (value: number): number[] => [
+  value & 0xff,
+  (value >>> 8) & 0xff,
+  (value >>> 16) & 0xff,
+  (value >>> 24) & 0xff,
+]
+
+/** A minimal lossy still accepted by the RIFF packer. */
+const stillWebp = (width: number, height: number): Uint8Array => {
+  const picture = [
+    0x10,
+    0,
+    0,
+    0x9d,
+    0x01,
+    0x2a,
+    width & 0xff,
+    width >>> 8,
+    height & 0xff,
+    height >>> 8,
+  ]
+  const chunk = [...ascii('VP8 '), ...u32(picture.length), ...picture]
+  return Uint8Array.of(...ascii('RIFF'), ...u32(chunk.length + 4), ...ascii('WEBP'), ...chunk)
+}
+
+interface IntegrationSurface extends Surface {
+  resized: Array<{ width: number; height: number }>
+  drawn: number[]
+  stills: number
+}
+
+const integrationSurface = (): IntegrationSurface => {
+  let width = 1
+  let height = 1
+  const surface: IntegrationSurface = {
+    resized: [],
+    drawn: [],
+    stills: 0,
+    resize(nextWidth, nextHeight) {
+      width = nextWidth
+      height = nextHeight
+      surface.resized.push({ width, height })
+    },
+    draw(frame) {
+      surface.drawn.push(frame.timestamp)
+    },
+    async still() {
+      surface.stills += 1
+      return stillWebp(width, height)
+    },
+  }
+  return surface
+}
+
+interface IntegrationCodecs {
+  codecs: Codecs
+  decoded: number
+  encoded: number
+  closed: number
+}
+
+/** Enough WebCodecs to exercise the exporter seam without constructing a browser object. */
+const integrationCodecs = (): IntegrationCodecs => {
+  const avcC = videoSampleEntry(INIT)!.children.get('avcC')!
+  const fakes: IntegrationCodecs = {
+    codecs: null as unknown as Codecs,
+    decoded: 0,
+    encoded: 0,
+    closed: 0,
+  }
+
+  fakes.codecs = {
+    decoder(_config, on) {
+      return {
+        decode(chunk) {
+          fakes.decoded += 1
+          const frame = {
+            timestamp: chunk.timestamp,
+            duration: chunk.duration,
+            close: () => {
+              fakes.closed += 1
+            },
+          }
+          on.frame(frame as unknown as VideoFrame)
+        },
+        flush: () => Promise.resolve(),
+        close: () => undefined,
+        queued: 0,
+        drainTo: () => Promise.resolve(),
+      }
+    },
+    encoder(_config, on) {
+      let first = true
+      return {
+        encode(frame, options) {
+          fakes.encoded += 1
+          const bytes = Uint8Array.of(0, 0, 0, 1, fakes.encoded & 0xff)
+          on.chunk(
+            {
+              type: options?.keyFrame ? 'key' : 'delta',
+              timestamp: frame.timestamp,
+              byteLength: bytes.byteLength,
+              copyTo: (target: Uint8Array) => target.set(bytes),
+            } as unknown as EncodedVideoChunk,
+            first
+              ? ({ decoderConfig: { codec: 'avc1.42001e', description: avcC } } as EncodedVideoChunkMetadata)
+              : undefined,
+          )
+          first = false
+        },
+        flush: () => Promise.resolve(),
+        close: () => undefined,
+        queued: 0,
+        drainTo: () => Promise.resolve(),
+      }
+    },
+    chunk: (init) => init as unknown as EncodedVideoChunk,
+    cut(frame) {
+      return frame
+    },
+  }
+
+  return fakes
 }
 
 describe('openClipSource', () => {
@@ -339,6 +545,327 @@ describe('requestsFor', () => {
 
     expect(short.duration).toBeLessThan(long.duration)
     expect(short.bytes).toBeLessThan(long.bytes)
+  })
+
+  it('sends every clip down the path it asks for and into that path lane', async () => {
+    const reader = await fileSnapshot()
+    const source = (await openClipSource(reader, materialOf(reader.index)))!
+    const ctx = contextOf(source, 10)
+    const keyframe = ctx.keyframes[0]!
+    const nonKeyframe = [...ctx.frames].find((frame) => !ctx.keyframes.includes(frame))!
+    const crop = {
+      x: 0,
+      y: 0,
+      width: Math.floor(ctx.frameSize.width / 4) * 2,
+      height: Math.floor(ctx.frameSize.height / 4) * 2,
+    }
+    const clips = [
+      clip({ id: 'copy', name: 'Copy', in: keyframe, out: 2 }),
+      clip({ id: 'crop', name: 'Crop', in: keyframe, out: 2, crop }),
+      clip({ id: 'webp', name: 'WebP', in: keyframe, out: 2, format: 'webp' }),
+      clip({ id: 'optimize', name: 'Optimize', in: keyframe, out: 2, mode: 'optimize' }),
+      clip({ id: 'head', name: 'Head', in: nonKeyframe, out: 2 }),
+    ]
+
+    const asked = requestsFor(source, clips, ctx, choicesFor(clips, ctx), true)
+
+    expect(asked.map(({ path }) => path.kind)).toEqual([
+      'copy',
+      'encode',
+      'webp',
+      'encode',
+      'encode',
+    ])
+    expect(asked.map(({ path }) => laneOf(path))).toEqual([
+      'copy',
+      'encode',
+      'encode',
+      'encode',
+      'encode',
+    ])
+  })
+
+  it('uses the encoder answer for each geometry in a batch', async () => {
+    const reader = await fileSnapshot()
+    const source = (await openClipSource(reader, materialOf(reader.index)))!
+    const ctx = contextOf(source, 10)
+    const clips = [
+      clip({ id: 'full', name: 'Full', in: 0, out: 2, mode: 'optimize' }),
+      clip({
+        id: 'half',
+        name: 'Half',
+        in: 0,
+        out: 2,
+        crop: { x: 0, y: 0, width: 128, height: 72 },
+      }),
+      clip({
+        id: 'quarter',
+        name: 'Quarter',
+        in: 0,
+        out: 2,
+        crop: { x: 0, y: 0, width: 64, height: 72 },
+      }),
+    ]
+    const all = choicesFor(clips, ctx)
+    const firstOnly = new Map([[...all][0]!])
+
+    const answered = requestsFor(source, clips, ctx, all, false)
+    const partlyAnswered = requestsFor(source, clips, ctx, firstOnly, false)
+
+    expect(answered.map(({ path }) => path.kind)).toEqual(['encode', 'encode', 'encode'])
+    expect(partlyAnswered.map(({ path }) => path.kind)).toEqual([
+      'encode',
+      'blocked',
+      'blocked',
+    ])
+    expect(partlyAnswered.map(({ path }) => laneOf(path))).toEqual([
+      'encode',
+      'encode',
+      'encode',
+    ])
+  })
+
+  it('keeps MP4 and WebP names separate while uniquifying each format', async () => {
+    const reader = await fileSnapshot()
+    const source = (await openClipSource(reader, materialOf(reader.index)))!
+    const ctx = contextOf(source, 10)
+    const clips = [
+      clip({ id: 'mp4', name: 'Same', in: 0, out: 2 }),
+      clip({ id: 'webp-1', name: 'Same', in: 0, out: 2, format: 'webp' }),
+      clip({ id: 'webp-2', name: 'Same', in: 0, out: 2, format: 'webp' }),
+    ]
+
+    const asked = requestsFor(source, clips, ctx, choicesFor(clips, ctx), false)
+
+    expect(asked.map(({ fileName }) => fileName)).toEqual([
+      'Same.mp4',
+      'Same.webp',
+      'Same (2).webp',
+    ])
+  })
+})
+
+describe('encodeIo', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('inherits WebP content type and save options from the downloader', async () => {
+    const blobs: Blob[] = []
+    const downloads: Array<Record<string, unknown>> = []
+    vi.spyOn(URL, 'createObjectURL').mockImplementation((blob) => {
+      blobs.push(blob as Blob)
+      return 'blob:webp'
+    })
+    vi.stubGlobal('chrome', {
+      downloads: {
+        download: (options: Record<string, unknown>, done: (id: number) => void) => {
+          downloads.push(options)
+          done(7)
+        },
+      },
+      runtime: { lastError: undefined },
+    })
+    const saved: number[] = []
+    const io = encodeIo({} as SnapshotReader, integrationCodecs().codecs, integrationSurface, {
+      askWhere: true,
+      onSaved: () => saved.push(1),
+      onPace: () => undefined,
+    })
+
+    await io.save(new Uint8Array([1, 2, 3]), 'Animation.webp')
+
+    expect(blobs.map(({ type }) => type)).toEqual(['image/webp'])
+    expect(downloads[0]).toMatchObject({ filename: 'Animation.webp', saveAs: true })
+    expect(saved).toEqual([1])
+  })
+
+  it('leaves copy requests to the runner without reading or constructing a surface', async () => {
+    const reader = await fileSnapshot()
+    const source = (await openClipSource(reader, materialOf(reader.index)))!
+    const ctx = contextOf(source, 10)
+    const request = requestsFor(source, [clip({ in: 0, out: 2 })], ctx, new Map(), false)[0]!
+    const read = vi.spyOn(reader, 'bytesOf')
+    const fakes = integrationCodecs()
+    const makeSurface = vi.fn(integrationSurface)
+    const pace: PaceArgs[] = []
+    const onPace: PaceReport = (...report: PaceArgs) => pace.push(report)
+
+    const file = await encodeIo(reader, fakes.codecs, makeSurface, {
+      onPace,
+    }).encode(request, () => undefined, () => false)
+
+    expect(request.path.kind).toBe('copy')
+    expect(file).toBeNull()
+    expect(read).not.toHaveBeenCalled()
+    expect(makeSurface).not.toHaveBeenCalled()
+    expect(fakes.decoded).toBe(0)
+    expect(fakes.encoded).toBe(0)
+    expect(pace).toEqual([])
+  })
+
+  it('reports every MP4 frame, preserves optional audio, and records successful pace', async () => {
+    const reader = await fileSnapshot()
+    const source = (await openClipSource(reader, materialOf(reader.index)))!
+    const ctx = contextOf(source, 10)
+    const clips = [
+      clip({ id: 'loud', name: 'Loud', in: 0, out: 2, mode: 'optimize', sound: true }),
+      clip({ id: 'silent', name: 'Silent', in: 0, out: 2, mode: 'optimize', sound: false }),
+    ]
+    const [loud, silent] = requestsFor(source, clips, ctx, choicesFor(clips, ctx), false)
+    const fakes = integrationCodecs()
+    const makeSurface = vi.fn(integrationSurface)
+    const pace: PaceArgs[] = []
+    const onPace: PaceReport = (...report: PaceArgs) => pace.push(report)
+    vi.spyOn(performance, 'now')
+      .mockReturnValueOnce(100)
+      .mockReturnValueOnce(350)
+      .mockReturnValueOnce(500)
+      .mockReturnValueOnce(800)
+    const io = encodeIo(reader, fakes.codecs, makeSurface, {
+      onPace,
+    })
+    const loudProgress: number[] = []
+    const silentProgress: number[] = []
+
+    const loudFile = await io.encode(
+      loud!,
+      (frames: number) => loudProgress.push(frames),
+      () => false,
+    )
+    const silentFile = await io.encode(
+      silent!,
+      (frames: number) => silentProgress.push(frames),
+      () => false,
+    )
+
+    if (loud!.path.kind !== 'encode' || silent!.path.kind !== 'encode') {
+      throw new Error('the fixtures did not take the encode path')
+    }
+    expect(loudProgress).toEqual(
+      Array.from({ length: framesOf(loud!.path)! }, (_, at) => at + 1),
+    )
+    expect(silentProgress).toEqual(
+      Array.from({ length: framesOf(silent!.path)! }, (_, at) => at + 1),
+    )
+    expect(parseInit(loudFile!)!.tracks.map(({ kind }) => kind)).toEqual(['video', 'audio'])
+    expect(parseInit(silentFile!)!.tracks.map(({ kind }) => kind)).toEqual(['video'])
+    expect(samplesInMovie(loudFile!, loudFile!.byteLength)[1]!.samples).toHaveLength(
+      loud!.path.plan.audio!.samples.length,
+    )
+    expect(makeSurface).not.toHaveBeenCalled()
+    expect(pace).toEqual([
+      ['mp4', loud!.path.plan.geometry, framesOf(loud!.path), 250],
+      ['mp4', silent!.path.plan.geometry, framesOf(silent!.path), 300],
+    ])
+  })
+
+  it('reports every WebP frame without reading the clip sound and records WebP pace', async () => {
+    const reader = await fileSnapshot()
+    const source = (await openClipSource(reader, materialOf(reader.index)))!
+    const ctx = contextOf(source, 10)
+    const request = requestsFor(
+      source,
+      [clip({ in: 0, out: 2, format: 'webp', sound: true })],
+      ctx,
+      new Map(),
+      false,
+    )[0]!
+    if (request.path.kind !== 'webp' || !request.path.plan.audio) {
+      throw new Error('the fixture did not plan a WebP with source audio')
+    }
+    // Make both WebP transformations observable: the animation caps this picture at 640×360
+    // and thins its declared 30 fps to 15. The fixture's native 256×144@10 would let raw geometry
+    // and `plan.kept` survive as accidentally correct answers.
+    request.path.plan.geometry = { width: 1280, height: 720, framerate: 30 }
+    const audio = request.path.plan.audio.samples.map(({ source: at }) => at)
+    const reads: Array<{ at: number; length: number }> = []
+    const tracked = SnapshotReader.over(async (at, length) => {
+      reads.push({ at, length })
+      return reader.bytesOf({ at, length })
+    }, reader.index)
+    const fakes = integrationCodecs()
+    const surface = integrationSurface()
+    const pace: PaceArgs[] = []
+    const onPace: PaceReport = (...report: PaceArgs) => pace.push(report)
+    const progress: number[] = []
+    vi.spyOn(performance, 'now').mockReturnValueOnce(100).mockReturnValueOnce(400)
+
+    const file = await encodeIo(tracked, fakes.codecs, () => surface, {
+      onPace,
+    }).encode(request, (frames: number) => progress.push(frames), () => false)
+
+    const written = framesOf(request.path)!
+    expect(progress).toEqual(Array.from({ length: written }, (_, at) => at + 1))
+    expect(file!.subarray(0, 4)).toEqual(Uint8Array.of(...ascii('RIFF')))
+    expect(surface.stills).toBe(written)
+    expect(
+      reads.some((read) =>
+        audio.some(
+          (sample) =>
+            read.at <= sample.at && read.at + read.length >= sample.at + sample.length,
+        ),
+      ),
+    ).toBe(false)
+    expect(pace).toEqual([
+      [
+        'webp',
+        webpGeometry(
+          request.path.plan.crop ?? request.path.plan.geometry,
+          request.path.plan.geometry.framerate,
+        ),
+        written,
+        300,
+      ],
+    ])
+  })
+
+  it('does not finish or record pace when cancellation arrives during the audio read', async () => {
+    const reader = await fileSnapshot()
+    const source = (await openClipSource(reader, materialOf(reader.index)))!
+    const ctx = contextOf(source, 10)
+    const asked = clip({ in: 0, out: 2, mode: 'optimize', sound: true })
+    const request = requestsFor(source, [asked], ctx, choicesFor([asked], ctx), false)[0]!
+    if (request.path.kind !== 'encode' || !request.path.plan.audio) {
+      throw new Error('the fixture did not plan encoded video with copied audio')
+    }
+    const audio = request.path.plan.audio.samples.map(({ source: at }) => at)
+    let releaseAudio!: () => void
+    const audioReleased = new Promise<void>((resolve) => {
+      releaseAudio = resolve
+    })
+    let announceAudio!: () => void
+    const audioStarted = new Promise<void>((resolve) => {
+      announceAudio = resolve
+    })
+    let announced = false
+    const parked = SnapshotReader.over(async (at, length) => {
+      const isAudio = audio.some(
+        (sample) => at <= sample.at && at + length >= sample.at + sample.length,
+      )
+      if (isAudio) {
+        if (!announced) {
+          announced = true
+          announceAudio()
+        }
+        await audioReleased
+      }
+      return reader.bytesOf({ at, length })
+    }, reader.index)
+    let stale = false
+    const pace: PaceArgs[] = []
+    const onPace: PaceReport = (...report: PaceArgs) => pace.push(report)
+    const result = encodeIo(parked, integrationCodecs().codecs, integrationSurface, {
+      onPace,
+    }).encode(request, () => undefined, () => stale)
+
+    await audioStarted
+    stale = true
+    releaseAudio()
+
+    await expect(result).resolves.toBeNull()
+    expect(pace).toEqual([])
   })
 })
 

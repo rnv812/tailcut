@@ -13,6 +13,91 @@ import { METRICS, rowTop } from '../../src/core/timeline/layout'
 import { concatBytes } from '../../src/core/iso/writer'
 import { parseInit } from '../../src/core/iso/init'
 
+const exportHarness = vi.hoisted(() => ({
+  codecCalls: [] as VideoEncoderConfig[],
+  codecAnswer: false as boolean | 'pending',
+  webpPlans: [] as Array<{ crop: unknown }>,
+  webpBytes: [] as number[],
+  surfaceCalls: 0,
+  encodeIoCalls: 0,
+  encodeRequests: [] as Array<{ path: { kind: string; plan?: { geometry: { width: number; height: number; framerate: number }; kept: number }; choice?: { kind: string; quantizer?: number } } }>,
+  skipSave: false,
+}))
+
+vi.mock('../../src/editor/export/support', async () => {
+  const actual = await vi.importActual<typeof import('../../src/editor/export/support')>(
+    '../../src/editor/export/support',
+  )
+  return {
+    ...actual,
+    liveProbe: () => (config: VideoEncoderConfig) => {
+      exportHarness.codecCalls.push({ ...config })
+      if (exportHarness.codecAnswer === 'pending') return new Promise<boolean>(() => undefined)
+      return Promise.resolve(exportHarness.codecAnswer)
+    },
+  }
+})
+
+vi.mock('../../src/editor/export/webp', async () => {
+  const actual = await vi.importActual<typeof import('../../src/editor/export/webp')>(
+    '../../src/editor/export/webp',
+  )
+  return {
+    ...actual,
+    liveSurface: () => {
+      exportHarness.surfaceCalls += 1
+      return {
+        resize: () => undefined,
+        draw: () => undefined,
+        still: async () => new Uint8Array([1]),
+      }
+    },
+    probeWebpBytes: async (plan: { crop: unknown }) => {
+      exportHarness.webpPlans.push(plan)
+      return exportHarness.webpBytes.shift() ?? null
+    },
+  }
+})
+
+vi.mock('../../src/editor/export/exporter', async () => {
+  const actual = await vi.importActual<typeof import('../../src/editor/export/exporter')>(
+    '../../src/editor/export/exporter',
+  )
+  return {
+    ...actual,
+    encodeIo: (...args: unknown[]) => {
+      exportHarness.encodeIoCalls += 1
+      const reader = args[0] as SnapshotReader
+      const options = args.at(-1) as {
+        askWhere?: boolean
+        onSaved?: () => void
+        onPace: (
+          kind: 'mp4' | 'webp',
+          geometry: { width: number; height: number; framerate: number },
+          frames: number,
+          ms: number,
+        ) => void
+      }
+      const base = actual.downloadIo(reader, options)
+      return {
+        ...base,
+        save: exportHarness.skipSave ? async () => undefined : base.save,
+        encode: async (
+          request: (typeof exportHarness.encodeRequests)[number],
+          report: (frames: number) => void,
+          stale: () => boolean,
+        ) => {
+          exportHarness.encodeRequests.push(request)
+          if (stale() || request.path.kind !== 'encode' || !request.path.plan) return null
+          report(request.path.plan.kept)
+          options.onPace('mp4', request.path.plan.geometry, request.path.plan.kept, 1_200)
+          return new Uint8Array([1, 2, 3])
+        },
+      }
+    },
+  }
+})
+
 const page = {
   sessionKey: 'https://site.example/watch|avc1|inf',
   url: 'https://site.example/watch?v=abc',
@@ -158,6 +243,12 @@ const until = async (ready: () => boolean, what: string): Promise<void> => {
 const button = (testId: string): HTMLButtonElement =>
   document.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`)!
 
+const select = (testId: string, value: string): void => {
+  const field = document.querySelector<HTMLSelectElement>(`[data-testid="${testId}"]`)!
+  field.value = value
+  field.dispatchEvent(new Event('change', { bubbles: true }))
+}
+
 const press = (key: string, init: KeyboardEventInit = {}) =>
   window.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...init }))
 
@@ -182,6 +273,14 @@ const mount = async (state: EditorState) => {
 afterEach(() => {
   render(null, document.body)
   document.body.innerHTML = ''
+  exportHarness.codecCalls.length = 0
+  exportHarness.codecAnswer = false
+  exportHarness.webpPlans.length = 0
+  exportHarness.webpBytes.length = 0
+  exportHarness.surfaceCalls = 0
+  exportHarness.encodeIoCalls = 0
+  exportHarness.encodeRequests.length = 0
+  exportHarness.skipSave = false
 })
 
 describe('the editor shell', () => {
@@ -316,8 +415,8 @@ describe('the editor shell', () => {
       () => text('cost-c1').includes('no encoder for 134 × 240'),
       `the crop verdict never arrived: ${text('cost-c1') || 'no cost line'}`,
     )
-    expect(button('export').disabled).toBe(true)
-    expect(button('export').textContent).toBe('Checking the encoder…')
+    expect(button('export').disabled).toBe(false)
+    expect(button('export').textContent).toBe('Export 1 clip')
 
     button('crop-reset').click()
     await until(
@@ -382,7 +481,98 @@ describe('the editor shell', () => {
     )
   })
 
+  it('builds the encode io without building a canvas for a copy-only editor', async () => {
+    await mount({ ...(await cuttable()), preview: previewOf({ width: 320, height: 240 }) })
+
+    expect(exportHarness.encodeIoCalls).toBe(1)
+    expect(exportHarness.surfaceCalls).toBe(0)
+  })
+
+  it('probes every unique MP4 geometry in the document, including unselected clips', async () => {
+    exportHarness.codecAnswer = true
+    await mount({ ...(await cuttable()), preview: previewOf({ width: 320, height: 240 }) })
+
+    press('i')
+    press('ArrowRight')
+    press('ArrowRight')
+    press('s')
+    await settled()
+
+    select('mode-c1', 'optimize')
+    button('crop-ratio-1:1').click()
+    await until(() => exportHarness.codecCalls.length === 2, 'the document geometries were not probed')
+
+    expect(
+      exportHarness.codecCalls.map(({ width, height, framerate }) => `${width}x${height}@${framerate}`),
+    ).toEqual(['320x240@25', '240x240@25'])
+  })
+
+  it('keeps one pending codec question for the life of the tab', async () => {
+    exportHarness.codecAnswer = 'pending'
+    await mount({ ...(await cuttable()), preview: previewOf({ width: 320, height: 240 }) })
+    press('i')
+    await settled()
+    select('mode-c1', 'optimize')
+    await until(() => exportHarness.codecCalls.length > 0, 'the codec was never asked')
+
+    const sound = document.querySelector<HTMLInputElement>('[data-testid="sound-c1"]')!
+    sound.checked = !sound.checked
+    sound.dispatchEvent(new Event('change', { bubbles: true }))
+    await settled()
+
+    expect(exportHarness.codecCalls).toHaveLength(1)
+  })
+
+  it('weighs only the selected WebP again after its crop moves', async () => {
+    exportHarness.webpBytes.push(1024 ** 2, 512 * 1024)
+    await mount({ ...(await cuttable()), preview: previewOf({ width: 320, height: 240 }) })
+    press('i')
+    await settled()
+    select('format-c1', 'webp')
+
+    await until(() => exportHarness.webpPlans.length === 1, 'the WebP was never weighed')
+    await until(() => text('estimate').includes('1.0 MB'), 'the measured WebP weight was not shown')
+    expect(exportHarness.codecCalls).toEqual([])
+    expect(exportHarness.webpPlans[0]!.crop).toBeNull()
+
+    button('crop-ratio-9:16').click()
+    await until(() => exportHarness.webpPlans.length === 2, 'the moved crop was not weighed again')
+    await until(() => text('estimate').includes('512 KB'), 'the moved crop kept the old weight')
+
+    expect(exportHarness.webpPlans[1]!.crop).not.toBeNull()
+    expect(exportHarness.surfaceCalls).toBe(2)
+  })
+
+  it('passes codec and quality to the path and feeds completed pace back into its estimate', async () => {
+    exportHarness.codecAnswer = true
+    exportHarness.skipSave = true
+    await mount({
+      ...(await cuttable()),
+      preview: previewOf({ width: 320, height: 240 }),
+      options: { export: { ...DEFAULTS.export, codec: 'h264', quality: 'low' } },
+    })
+    press('i')
+    await settled()
+    select('mode-c1', 'optimize')
+    await until(
+      () => exportHarness.codecCalls.length > 0 && text('cost-c1').includes('Re-encoded as'),
+      'the codec answer never reached the selected clip',
+    )
+
+    expect(text('cost-c1')).toContain('The first clip will show how fast this machine is.')
+    button('export').click()
+    await until(() => text('job-state') === 'Saved', 'the controlled encode did not finish')
+    await until(() => text('cost-c1').includes('About 2 s.'), 'the measured pace did not reach the estimate')
+
+    expect(exportHarness.codecCalls[0]!.codec).toMatch(/^avc1/)
+    expect(exportHarness.encodeRequests[0]!.path.choice).toMatchObject({
+      kind: 'h264-hw',
+      quantizer: 33,
+    })
+  })
+
   it('waits for every MP4 geometry but never asks the MP4 ladder about WebP', async () => {
+    exportHarness.codecAnswer = 'pending'
     await mount({ ...(await ready()), preview: previewOf() })
     press('i')
     press('ArrowRight')
@@ -434,8 +624,8 @@ describe('the editor shell', () => {
       `the rewrite verdict never arrived: ${text('cost-c1') || 'no cost line'}`,
     )
 
-    expect(button('export').disabled).toBe(true)
-    expect(button('export').textContent).toBe('Checking the encoder…')
+    expect(button('export').disabled).toBe(false)
+    expect(button('export').textContent).toBe('Export 1 clip')
   })
 
   it('answers the keyboard from the tab and not from the player', async () => {

@@ -98,6 +98,13 @@ const check = (testId: string, on: boolean) => {
   input.dispatchEvent(new Event('change', { bubbles: true }))
 }
 
+/** Selects an option and sends the event the page listens for. */
+const select = (testId: string, value: string) => {
+  const input = field(testId)
+  input.value = value
+  input.dispatchEvent(new Event('change', { bubbles: true }))
+}
+
 const click = async (testId: string) => {
   document.body.querySelector<HTMLElement>(`[data-testid="${testId}"]`)!.click()
   await flush()
@@ -485,17 +492,17 @@ describe('the settings page', () => {
     expect(textAt('buffer-cost'), 'a buffer that fits was called short').not.toContain('will be kept')
   })
 
-  it('shows what waits for the re-encoding path as disabled, with the reason beside it', async () => {
+  it('enables every export setting and describes the formats it can write', async () => {
     await draw()
-    // The format goes with them: everything this stage can put in a file is what was recorded,
-    // so MP4 is not a default among three but the only answer there is (Global Constraints).
+
     for (const id of ['format', 'codec', 'quality', 'rewrite-head']) {
-      expect(field(id).disabled, `${id} is offered though nothing can act on it`).toBe(true)
+      expect(field(id).disabled, `${id} is still waiting for work that now exists`).toBe(false)
     }
-    expect(textAt('export-note')).toContain('re-encoding')
+    expect(textAt('export-note')).not.toContain('have nothing to act on yet')
+    expect(textAt('export-note')).toContain('Animated WebP has no sound')
   })
 
-  it('shows the value it actually holds in each of those, greyed out or not', async () => {
+  it('shows the exact stored values and offers no format the build cannot write', async () => {
     // A <select> whose value is none of its options shows the first one instead, and says
     // nothing about it. The codec of §7.4 is `auto`, and while the list ran HEVC / H.264 the
     // page answered "HEVC, falling back to H.264" about a setting that means H.264 — the very
@@ -518,6 +525,42 @@ describe('the settings page', () => {
         String(DEFAULTS.export[id]),
       )
     }
+  })
+
+  it('stores a changed export format', async () => {
+    await draw()
+    select('format', 'webp')
+    await flush()
+
+    expect(field('format').value).toBe('webp')
+    expect(written.at(-1)!.export.format).toBe('webp')
+  })
+
+  it.each(['auto', 'hevc', 'h264'] as const)('stores the %s codec choice', async (codec) => {
+    await draw()
+    select('codec', codec)
+    await flush()
+
+    expect(field('codec').value).toBe(codec)
+    expect(written.at(-1)!.export.codec).toBe(codec)
+  })
+
+  it('stores whether the clip head is rewritten', async () => {
+    await draw()
+    check('rewrite-head', true)
+    await flush()
+
+    expect(field('rewrite-head').checked).toBe(true)
+    expect(written.at(-1)!.export.rewriteHead).toBe(true)
+  })
+
+  it('stores the quality used for re-encoding', async () => {
+    await draw()
+    select('quality', 'low')
+    await flush()
+
+    expect(field('quality').value).toBe('low')
+    expect(written.at(-1)!.export.quality).toBe('low')
   })
 
   it('lets through the two export settings this stage can keep', async () => {

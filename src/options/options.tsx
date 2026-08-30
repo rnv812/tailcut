@@ -11,6 +11,9 @@ import {
   presetNamed,
   presetOf,
   type DetectionPreset,
+  type ExportCodec,
+  type ExportFormat,
+  type ExportQuality,
   type RecordingMode,
   type Settings,
 } from '../shared/settings'
@@ -585,7 +588,19 @@ export function Options() {
       <Group title="Export">
         <label class="row">
           <span class="label">Format</span>
-          <select data-testid="format" disabled value={settings.export.format}>
+          <select
+            data-testid="format"
+            value={settings.export.format}
+            onChange={(event) =>
+              edit((current) => ({
+                ...current,
+                export: {
+                  ...current.export,
+                  format: (event.target as HTMLSelectElement).value as ExportFormat,
+                },
+              }))
+            }
+          >
             <option value="mp4">MP4</option>
             <option value="webp">Animated WebP</option>
           </select>
@@ -593,7 +608,19 @@ export function Options() {
 
         <label class="row">
           <span class="label">Codec when re-encoding</span>
-          <select data-testid="codec" disabled value={settings.export.codec}>
+          <select
+            data-testid="codec"
+            value={settings.export.codec}
+            onChange={(event) =>
+              edit((current) => ({
+                ...current,
+                export: {
+                  ...current.export,
+                  codec: (event.target as HTMLSelectElement).value as ExportCodec,
+                },
+              }))
+            }
+          >
             <option value="auto">Auto — H.264, or HEVC when the quality is low</option>
             <option value="hevc">HEVC, falling back to H.264</option>
             <option value="h264">H.264</option>
@@ -601,9 +628,11 @@ export function Options() {
         </label>
 
         <p class="note" data-testid="export-note">
-          Clips are copied out of what was recorded, without re-encoding, so the format, the codec,
-          the quality and the rewritten start have nothing to act on yet. They arrive with the
-          re-encoding path, together with cropping and animated WebP.
+          Whether a machine can encode a picture depends on its size and its frame rate, so this is
+          asked afresh for every clip. HEVC makes a smaller file only where the bits are few:
+          measured, it is +0.029 SSIM over H.264 at 800 kbit/s and +0.0003 at 2 Mbit/s, and it
+          costs players that cannot open it. Animated WebP has no sound and weighs several times
+          the same clip as MP4 — it is a picture that loops.
         </p>
 
         <Advanced>
@@ -651,15 +680,35 @@ export function Options() {
             <input
               data-testid="rewrite-head"
               type="checkbox"
-              disabled
               checked={settings.export.rewriteHead}
+              onChange={(event) =>
+                edit((current) => ({
+                  ...current,
+                  export: {
+                    ...current.export,
+                    rewriteHead: (event.target as HTMLInputElement).checked,
+                  },
+                }))
+              }
             />
             <span>Rewrite the start of a clip instead of using an edit list</span>
           </label>
 
           <label class="row">
             <span class="label">Quality when re-encoding</span>
-            <select data-testid="quality" disabled value={settings.export.quality}>
+            <select
+              data-testid="quality"
+              value={settings.export.quality}
+              onChange={(event) =>
+                edit((current) => ({
+                  ...current,
+                  export: {
+                    ...current.export,
+                    quality: (event.target as HTMLSelectElement).value as ExportQuality,
+                  },
+                }))
+              }
+            >
               <option value="high">High</option>
               <option value="medium">Medium</option>
               <option value="low">Low</option>

@@ -2,11 +2,12 @@ import { useEffect, useMemo, useState } from 'preact/hooks'
 import { forcesEncoder, type Clip } from '../core/edit/clip'
 import { newProject } from '../core/edit/project'
 import { newSession } from '../core/edit/session'
-import type { Choice } from '../core/encode/codec'
+import { chooseCodec, type Choice } from '../core/encode/codec'
 import { geometryOf } from '../core/encode/crop'
 import { estimateFor } from '../core/encode/estimate'
-import { EMPTY_PACE, type PaceBook } from '../core/encode/pace'
+import { EMPTY_PACE, notePace, type PaceBook } from '../core/encode/pace'
 import { pathFor } from '../core/encode/path'
+import { planFrames } from '../core/encode/plan'
 import { EMPTY_QUEUE, type Queue } from '../core/export/queue'
 import { createRunner } from '../core/export/run'
 import type { ClipSource } from '../core/export/plan'
@@ -20,12 +21,15 @@ import { formatBytes } from '../shared/format'
 import { HelpSheet } from './help'
 import {
   choiceFor,
-  downloadIo,
+  encodeIo,
   geometryKey,
   openClipSource,
   planOf,
   requestsFor,
 } from './export/exporter'
+import { liveCodecs } from './export/frames'
+import { cachedProbe, liveProbe } from './export/support'
+import { liveSurface, probeWebpBytes } from './export/webp'
 import { Clips } from './inspector/clips'
 import { CropBox, CropControls } from './inspector/crop'
 import { ExportQueue } from './inspector/queue'
@@ -126,18 +130,29 @@ export function Workbench({ reader, material, preview, options }: WorkbenchProps
   const [queue, setQueue] = useState<Queue>(EMPTY_QUEUE)
   const [source, setSource] = useState<ClipSource | null>(null)
   /** The ladder's answer per geometry. Filled by the probe effect below (task 10); read here. */
-  const [choices] = useState<ReadonlyMap<string, Choice>>(new Map())
+  const [choices, setChoices] = useState<ReadonlyMap<string, Choice>>(new Map())
   /** How fast this machine has actually encoded. Empty until it has (§8.6). `onPace` notes into it. */
-  const [pace] = useState<PaceBook>(EMPTY_PACE)
+  const [pace, setPace] = useState<PaceBook>(EMPTY_PACE)
   /**
    * `probeKey → bytes` a WebP animation of that clip would weigh, measured on three real frames.
    *
    * Until it answers the panel writes "weighing a few of its frames…", which is the honest word.
    */
-  const [probed] = useState<ReadonlyMap<string, number>>(new Map())
+  const [probed, setProbed] = useState<ReadonlyMap<string, number>>(new Map())
 
   const rewriteHead = options.export?.rewriteHead ?? false
-  const runner = useMemo(() => createRunner(downloadIo(reader, options)), [reader, options])
+  const runner = useMemo(
+    () =>
+      createRunner(
+        // A surface factory, not a surface: an MP4 copy or encode never constructs a canvas.
+        encodeIo(reader, liveCodecs(), liveSurface, {
+          ...options,
+          onPace: (kind, geometry, frames, ms) =>
+            setPace((book) => notePace(book, kind, geometry, frames, ms)),
+        }),
+      ),
+    [reader, options],
+  )
 
   useEffect(() => runner.subscribe(setQueue), [runner])
 
@@ -178,6 +193,29 @@ export function Workbench({ reader, material, preview, options }: WorkbenchProps
   /** True while any geometry of the document is still unanswered: the Export button waits on it. */
   const probing = [...wanted.keys()].some((key) => !choices.has(key))
 
+  // One cache for the life of the tab. A crop drag changes `wanted` every frame; putting this
+  // inside the effect below would ask the browser the same still-pending question every frame.
+  const codecProbe = useMemo(() => cachedProbe(liveProbe()), [])
+
+  useEffect(() => {
+    let live = true
+
+    void Promise.all(
+      [...wanted].map(async ([key, geometry]) => {
+        if (choices.has(key)) return
+        const choice = await chooseCodec(geometry, codecProbe, {
+          codec: options.export?.codec ?? 'auto',
+          quality: options.export?.quality ?? 'high',
+        })
+        if (live) setChoices((known) => (known.has(key) ? known : new Map(known).set(key, choice)))
+      }),
+    )
+
+    return () => {
+      live = false
+    }
+  }, [wanted, codecProbe, options.export?.codec, options.export?.quality])
+
   const estimate = useMemo(() => {
     if (!selected || !source) return null
     const path = pathFor(selected, source, ctx, choiceFor(selected, ctx, choices), rewriteHead)
@@ -189,6 +227,45 @@ export function Workbench({ reader, material, preview, options }: WorkbenchProps
       probedBytes: selectedProbeKey ? (probed.get(selectedProbeKey) ?? null) : null,
     })
   }, [selected, selectedProbeKey, source, ctx, choices, rewriteHead, pace, probed])
+
+  // Only the selected clip, and only in WebP: the probe decodes three groups of pictures, which
+  // is cheap once and not cheap six times a keystroke. Keyed by `probeKey`, so a frame the user
+  // moves asks again — the old number was measured on a different rectangle.
+  useEffect(() => {
+    if (!selected || !source || selected.format !== 'webp' || !selectedProbeKey) return
+    if (probed.has(selectedProbeKey)) return
+
+    let live = true
+    const plan = planFrames(
+      source,
+      { in: selected.in, out: selected.out, sound: false },
+      selected.crop,
+      ctx.fps,
+    )
+    if (!plan) return
+
+    // `liveSurface` is inside the promise boundary: a browser without a usable 2d canvas still
+    // opens the editor and copies MP4, and a refused WebP surface becomes this probe's refusal.
+    void Promise.resolve()
+      .then(() =>
+        probeWebpBytes(
+          plan,
+          { read: (at) => reader.bytesOf(at), stale: () => !live },
+          liveCodecs(),
+          liveSurface(),
+        ),
+      )
+      .then((bytes) => {
+        if (live && bytes !== null) {
+          setProbed((known) => new Map(known).set(selectedProbeKey, bytes))
+        }
+      })
+      .catch(() => undefined)
+
+    return () => {
+      live = false
+    }
+  }, [selectedProbeKey, selected?.format, source, ctx.fps, reader])
 
   useEffect(() => {
     const job = startWaveform(reader, material, setWave)

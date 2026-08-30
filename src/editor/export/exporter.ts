@@ -1,20 +1,26 @@
 import type { Clip } from '../../core/edit/clip'
 import type { EditContext } from '../../core/edit/context'
+import { assembleEncoded } from '../../core/encode/assemble'
 import type { Choice, EncodeGeometry } from '../../core/encode/codec'
 import { geometryOf } from '../../core/encode/crop'
-import { pathFor } from '../../core/encode/path'
+import { framesOf, pathFor } from '../../core/encode/path'
 import { contentTypeOf, fileNameOf, uniqueNames } from '../../core/export/naming'
 import { planClip, type ClipSource, type ExportPlan } from '../../core/export/plan'
 import {
+  bytesFrom,
   clipSourceFrom,
   clipSourceOf,
   movieTracksOf,
   type SourceTrackInput,
 } from '../../core/export/source'
-import { NO_ENCODER, type ExportIo, type ExportRequest } from '../../core/export/run'
+import { NO_ENCODER, planSlices, type ExportIo, type ExportRequest } from '../../core/export/run'
 import type { Material, MaterialTrack } from '../../core/snapshot/material'
 import type { SnapshotReader } from '../../core/snapshot/read'
+import { webpGeometry } from '../../core/webp/timing'
 import type { TrackKind } from '../../shared/types'
+import { encodeToTrack } from './encoder'
+import type { Codecs, FrameSource } from './frames'
+import { encodeWebp, type Surface } from './webp'
 
 /**
  * How long a blob address lives after a download starts. Chrome does not read it at once, and an
@@ -197,4 +203,108 @@ export function downloadIo(reader: SnapshotReader, options: SaveOptions = {}): E
         )
       }),
   }
+}
+
+/** What a finished job tells the tab about this machine's speed. Fed straight into `notePace`. */
+export type PaceReport = (
+  kind: 'mp4' | 'webp',
+  geometry: EncodeGeometry,
+  frames: number,
+  ms: number,
+) => void
+
+/**
+ * The io the editor runs an export with: reading and saving as before, and re-encoding besides.
+ *
+ * Built on `downloadIo` rather than beside it, because `read` and `save` are the same two things
+ * they always were — a queue with two lanes is still one queue, and a copy in it must save the
+ * way it saved before. What is added is `encode`, and one callback: `onPace` is how the number
+ * §8.6 promises ("time from the speed this machine has shown") ever comes to exist. Without it
+ * `PaceBook` stays empty for the life of the tab and the panel says "the first clip will show how
+ * fast this machine is" for ever, including after the tenth.
+ */
+export function encodeIo(
+  reader: SnapshotReader,
+  codecs: Codecs,
+  surface: () => Surface,
+  options: SaveOptions & { onPace: PaceReport },
+): ExportIo {
+  const { onPace } = options
+
+  return {
+    ...downloadIo(reader, options),
+    async encode(request, report, stale) {
+      const path = request.path
+      const started = performance.now()
+
+      // `blocked` never reaches here: the runner throws on it before calling, so that a clip with
+      // nothing to encode it fails without a decoder ever being built. The branch is a type
+      // narrowing, not a guard.
+      if (path.kind === 'blocked' || path.kind === 'copy') return null
+
+      if (path.kind === 'webp') {
+        const file = await encodeWebp(
+          path.plan,
+          frameSourceOf(reader, stale),
+          codecs,
+          surface(),
+          report,
+        )
+        if (file && !stale()) {
+          onPace(
+            'webp',
+            webpGeometry(path.plan.crop ?? path.plan.geometry, path.plan.geometry.framerate),
+            framesOf(path) ?? 0,
+            performance.now() - started,
+          )
+        }
+        return stale() ? null : file
+      }
+
+      const result = await encodeToTrack(
+        path.plan,
+        path.choice,
+        frameSourceOf(reader, stale),
+        codecs,
+        report,
+      )
+      if (!result) return null
+
+      // Pace is the encoder's pace, not the audio muxer's. It is reported only after the complete
+      // file exists, though: a cancellation or a failed audio read must not teach the tab a speed
+      // from work that did not finish.
+      const elapsed = performance.now() - started
+      const audio = path.plan.audio
+      const slices = audio ? planSlices({ tracks: [audio], duration: 0, bytes: 0 }) : []
+      const buffers: Uint8Array[] = []
+      for (const slice of slices) {
+        if (stale()) return null
+        buffers.push(await reader.bytesOf(slice))
+      }
+      if (stale()) return null
+
+      const file = assembleEncoded(
+        result.video,
+        audio ? { track: audio, bytesOf: bytesFrom(slices, buffers) } : null,
+      )
+      onPace('mp4', path.plan.geometry, result.frames, elapsed)
+      return file
+    },
+  }
+}
+
+/**
+ * The re-encoding half of the io.
+ *
+ * Reads sample by sample rather than in slices, and that is the whole memory story of this path.
+ * The copy path reads every slice and holds them until it assembles; a minute of 1080p is thirty
+ * megabytes of that, which is fine when the job lasts a moment. This job lasts minutes and holds
+ * frames besides, so it reads what it is about to decode and lets it go: the peak is one sample,
+ * eight frames in flight (about twenty-five megabytes at 1080p) and the file being built.
+ *
+ * No decoder configuration is passed in: it is on the plan (`FramePlan.decoder`, Task 4), beside
+ * the material it describes.
+ */
+function frameSourceOf(reader: SnapshotReader, stale: () => boolean): FrameSource {
+  return { read: (at) => reader.bytesOf(at), stale }
 }
