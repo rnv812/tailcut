@@ -26,6 +26,13 @@ export interface FramePlan {
   kept: number
   /** Ticks of presentation dropped from the head; equal to the edit the copy path would write. */
   headTicks: number
+  /**
+   * The entry point in the microseconds WebCodecs counts in.
+   *
+   * Derived here rather than at the decoder so that the only conversion between the file's ticks
+   * and the transport's microseconds happens once, beside the number it is a conversion of.
+   */
+  headUs: number
   timescale: number
   /**
    * The rectangle of the source picture this clip keeps, in the source's own pixels and already
@@ -97,6 +104,8 @@ export function planFrames(
   // on the first sample, plus its composition offset. The entry point sits `skipTicks` into it,
   // by the definition of the edit list — which is what makes the comparison below exact rather
   // than approximate.
+  const headUs = Math.round((video.skipTicks * 1_000_000) / video.timescale)
+
   let dts = 0
   const frames: FrameToKeep[] = video.samples.map((sample) => {
     const pts = dts + sample.cts
@@ -106,7 +115,14 @@ export function planFrames(
       pts,
       duration: sample.duration,
       sync: sample.sync,
-      keep: pts >= video.skipTicks,
+      // In the transport's microseconds, not in the track's ticks, and that is the whole of the
+      // change. `decodedFrames` can only ask a decoded frame for its `timestamp`, which is
+      // microseconds; if this said `pts >= video.skipTicks` the two would be two roundings of one
+      // boundary, agreeing at every timescale anyone has seen and free to disagree at one nobody
+      // has. Disagreement here is not a frame out of place — it is a chunk the encoder returns
+      // that `encodeToTrack` has no ticks for, and the job dies with "The encoder returned a frame
+      // that was never sent to it."
+      keep: Math.round((pts * 1_000_000) / video.timescale) >= headUs,
     }
   })
 
@@ -121,6 +137,7 @@ export function planFrames(
     frames,
     kept,
     headTicks: video.skipTicks,
+    headUs,
     timescale: video.timescale,
     crop: frame,
     decoder,

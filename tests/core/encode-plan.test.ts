@@ -397,3 +397,135 @@ describe('planFrames: material with no frame path at all', () => {
     expect(planFrames(undescribed, request, null, FRAMERATE)).toBeNull()
   })
 })
+
+describe('planFrames: the entry point in the scale the transport counts in', () => {
+  /**
+   * A picture track at a chosen timescale, reordered the way a recorder writes one.
+   *
+   * Four frames a group; the frame decoded first is composed two frames later, which is where
+   * the head is. Built rather than read from a fixture because the whole of this describe is
+   * about what the arithmetic does at timescales the fixtures do not have — and the sample entry
+   * is still the fixture's, because a plan without a decoder configuration is no plan at all.
+   */
+  function reordered(timescale: number, frameTicks: number, groups: number): ClipSource {
+    const samples: SourceTrack['samples'] = []
+
+    for (let group = 0; group < groups; group++) {
+      const base = 4 * group * frameTicks
+      // Decode order across, composition down: the sync sample of a group is composed two frames
+      // after it is decoded, and the two frames before it are decoded after it.
+      for (const [at, shown] of [2, 5, 3, 4].entries()) {
+        samples.push({
+          dts: base + at * frameTicks,
+          pts: base + shown * frameTicks,
+          duration: frameTicks,
+          sync: at === 0,
+          source: { at: 4096 + samples.length * 32, length: 32 },
+        })
+      }
+    }
+
+    return { video: { ...whole.video, timescale, editOffset: 0, samples, dropped: 0 } }
+  }
+
+  /** What `decodedFrames` will ask a decoded frame: its timestamp, in whole microseconds. */
+  const stamp = (ticks: number, timescale: number): number =>
+    Math.round((ticks * 1_000_000) / timescale)
+
+  /**
+   * Three scales, each with a clip that opens in the middle of a group.
+   *
+   * The first two are the ones a recording is written in, chosen so that the head does not land
+   * on a whole microsecond — at 30000 and 90000 the conversion has a remainder of two thirds, and
+   * a truncation instead of a rounding would be a microsecond out. The third is the cruel one:
+   * a tick and a microsecond are the same thing there, so nothing can hide behind a scale factor.
+   */
+  const scales = [
+    { timescale: 30_000, frameTicks: 2_000, exact: false },
+    { timescale: 90_000, frameTicks: 1_500, exact: false },
+    { timescale: 1_000_000, frameTicks: 40_000, exact: true },
+  ]
+
+  it('states the head in microseconds as well as in ticks, and nothing where there is no head', () => {
+    for (const { timescale, frameTicks, exact } of scales) {
+      const source = reordered(timescale, frameTicks, 3)
+      const request: ClipRequest = { in: (8 * frameTicks) / timescale, out: 100, sound: false }
+      const copy = videoOf(planClip(source, request))
+      const plan = planFrames(source, request, null, FRAMERATE)!
+
+      // The premise: this clip has a head at all, and it is the one the copy path would hide.
+      expect(copy.skipTicks, `no head at ${timescale}`).toBe(4 * frameTicks)
+      expect(plan.headTicks).toBe(copy.skipTicks)
+
+      expect(plan.headUs).toBe(stamp(copy.skipTicks, timescale))
+      // And it is a rounding and not a truncation, which is only a claim about something where
+      // the division has a remainder worth a microsecond.
+      expect(plan.headUs !== Math.trunc((copy.skipTicks * 1_000_000) / timescale)).toBe(!exact)
+    }
+
+    // Nothing to hide, nothing to convert. The vp9 fixture opens on a sync sample.
+    const opened = planFrames(nine, { in: 1, out: 3, sound: false }, null, FRAMERATE)!
+    expect(opened.headTicks).toBe(0)
+    expect(opened.headUs).toBe(0)
+  })
+
+  it('keeps exactly the frames the stream will let through, at every scale', () => {
+    for (const { timescale, frameTicks } of scales) {
+      const source = reordered(timescale, frameTicks, 3)
+      const request: ClipRequest = { in: (8 * frameTicks) / timescale, out: 100, sound: false }
+      const plan = planFrames(source, request, null, FRAMERATE)!
+
+      // What `decodedFrames` will do with each frame, worked out the way it works it out: off the
+      // timestamp the decoder hands back, which is microseconds and can be nothing else.
+      const lets = plan.frames.filter((frame) => stamp(frame.pts, timescale) >= plan.headUs)
+      const kept = plan.frames.filter((frame) => frame.keep)
+
+      // The premises: some frames are dropped and some are not, so the two sets below are two
+      // sets and not two names for all of them.
+      expect(kept.length, `nothing kept at ${timescale}`).toBe(6)
+      expect(plan.frames.length - kept.length, `nothing dropped at ${timescale}`).toBe(2)
+      expect(plan.kept).toBe(kept.length)
+
+      expect(lets).toEqual(kept)
+
+      // The frame the clip opens on sits exactly on the boundary, in both scales at once: this is
+      // the one an off-by-one would take out. It is the earliest composed of the kept and not the
+      // first of them — this material is reordered, and on reordered material those differ.
+      const entry = kept.reduce((low, frame) => (frame.pts < low.pts ? frame : low))
+      expect(entry).not.toBe(kept[0])
+      expect(entry.pts).toBe(plan.headTicks)
+      expect(stamp(entry.pts, timescale)).toBe(plan.headUs)
+    }
+  })
+
+  it('answers by the microsecond where the two scales part company', () => {
+    // A timescale nobody has seen, and the material is as absurd as the number: two million ticks
+    // a second with a frame every tick. It is here because it is the only place the two ways of
+    // asking the same question give different answers — anywhere below two million ticks a second
+    // two adjacent frames are a whole microsecond apart and no rounding can bring them together.
+    const timescale = 2_000_000
+    const source = reordered(timescale, 1, 3)
+    const request: ClipRequest = { in: 8 / timescale, out: 100, sound: false }
+    const plan = planFrames(source, request, null, FRAMERATE)!
+
+    expect(plan.headTicks).toBe(4)
+    expect(plan.headUs).toBe(2)
+
+    // The frame composed one tick before the entry point. In ticks it is behind the head; in the
+    // microseconds the decoder counts it is level with it, and the decoder is what hands the
+    // frames back.
+    const edge = plan.frames.find((frame) => frame.pts === 3)!
+    expect(edge, 'the material has no frame on the seam between the two scales').toBeDefined()
+    expect(edge.pts).toBeLessThan(plan.headTicks)
+    expect(stamp(edge.pts, timescale)).toBe(plan.headUs)
+
+    // Kept, because it is the frame the stream will hand out. Said in ticks instead, the plan
+    // would count one frame fewer than the stream produces: an extra sample in the track, paired
+    // with the duration of the one after it, and a progress bar that runs past its own total.
+    expect(edge.keep).toBe(true)
+    expect(plan.frames.filter((frame) => stamp(frame.pts, timescale) >= plan.headUs)).toEqual(
+      plan.frames.filter((frame) => frame.keep),
+    )
+    expect(plan.frames.filter((frame) => frame.pts >= plan.headTicks).length).toBe(plan.kept - 1)
+  })
+})
