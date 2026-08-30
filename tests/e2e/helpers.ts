@@ -332,6 +332,121 @@ export async function exportFirstClip(editor: Page): Promise<string> {
   return saved!.file
 }
 
+export interface ExportClipOptions {
+  clipId?: string
+  mode?: 'original' | 'optimize'
+  format?: 'mp4' | 'webp'
+  crop?: { x: number; y: number; width: number; height: number }
+  timeoutMs?: number
+  /** Inspect the fully configured UI after probes settle, before Export starts the job. */
+  beforeExport?: (editor: Page) => Promise<void>
+}
+
+export interface ExportedClip {
+  file: string
+  name: string
+  /** Every frame-progress string the row showed before Saved replaced it with bytes. */
+  progress: string[]
+}
+
+interface ExportProgressWindow {
+  tcExportProgress?: string[]
+  tcExportObserver?: MutationObserver
+}
+
+/** Places a crop through the same pointer gestures a person uses: resize first, then move. */
+export async function placeCrop(
+  editor: Page,
+  crop: { x: number; y: number; width: number; height: number },
+): Promise<void> {
+  const reset = editor.getByTestId('crop-reset')
+  if (await reset.isEnabled()) await reset.click()
+
+  const text = await editor.getByTestId('crop-geometry').textContent()
+  const matched = text?.match(/(\d+)\s*×\s*(\d+)/)
+  expect(matched, 'the editor did not state the source geometry').not.toBeNull()
+  const sourceWidth = Number(matched![1])
+  const sourceHeight = Number(matched![2])
+
+  const host = await editor.getByTestId('crop-host').boundingBox()
+  const handle = await editor.getByTestId('crop-handle-se').boundingBox()
+  expect(host, 'the crop host has no box to point into').not.toBeNull()
+  expect(handle, 'the southeast crop handle has no box to drag').not.toBeNull()
+
+  const scale = host!.width / sourceWidth
+  const handleX = handle!.x + handle!.width / 2
+  const handleY = handle!.y + handle!.height / 2
+  await editor.mouse.move(handleX, handleY)
+  await editor.mouse.down()
+  await editor.mouse.move(
+    handleX + (crop.width - sourceWidth) * scale,
+    handleY + (crop.height - sourceHeight) * scale,
+  )
+  await editor.mouse.up()
+
+  const box = await editor.getByTestId('crop-box').boundingBox()
+  expect(box, 'the resized crop has no box to move').not.toBeNull()
+  const centerX = box!.x + box!.width / 2
+  const centerY = box!.y + box!.height / 2
+  await editor.mouse.move(centerX, centerY)
+  await editor.mouse.down()
+  await editor.mouse.move(centerX + crop.x * scale, centerY + crop.y * scale)
+  await editor.mouse.up()
+}
+
+/** Configures the selected clip, exports it, and waits through a real re-encode and download. */
+export async function exportClipWith(
+  editor: Page,
+  options: ExportClipOptions = {},
+): Promise<ExportedClip> {
+  const clipId = options.clipId ?? 'c1'
+
+  // Mode first: a crop and WebP both force the frame path and disable this select.
+  if (options.mode) await editor.getByTestId(`mode-${clipId}`).selectOption(options.mode)
+  if (options.crop) await placeCrop(editor, options.crop)
+  if (options.format) await editor.getByTestId(`format-${clipId}`).selectOption(options.format)
+
+  // Every geometry change starts a fresh codec probe. A click during that answer is deliberately
+  // refused by the UI, so wait again after all controls have settled.
+  await expect(editor.getByTestId('export')).toBeEnabled({ timeout: 15_000 })
+  await options.beforeExport?.(editor)
+
+  const before = await editor.getByTestId('job').count()
+  await editor.evaluate(() => {
+    const state = window as unknown as ExportProgressWindow
+    state.tcExportObserver?.disconnect()
+    state.tcExportProgress = []
+    const note = () => {
+      for (const node of document.querySelectorAll<HTMLElement>('.tc-job .muted')) {
+        const value = node.textContent?.trim() ?? ''
+        if (/\d+ of \d+ frames/.test(value)) state.tcExportProgress!.push(value)
+      }
+    }
+    state.tcExportObserver = new MutationObserver(note)
+    state.tcExportObserver.observe(document.querySelector('.tc-jobs')!, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    })
+    note()
+  })
+
+  const [saved] = await collectDownloads(
+    editor,
+    1,
+    () => editor.getByTestId('export').click(),
+    options.timeoutMs ?? 180_000,
+  )
+  await expect(editor.getByTestId('job-state').nth(before)).toHaveText('Saved')
+
+  const progress = await editor.evaluate(() => {
+    const state = window as unknown as ExportProgressWindow
+    state.tcExportObserver?.disconnect()
+    return state.tcExportProgress ?? []
+  })
+  return { ...saved!, progress }
+}
+
 export interface Probed {
   format: { duration: string }
   streams: Array<{

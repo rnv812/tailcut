@@ -45,7 +45,7 @@ const SWEEP_ONLY = [
  * time while the extension writes a hundred and thirty megabytes of its material to disk and
  * counts what the page lost by it.
  *
- * All three are wall-clock measurements of this machine, and a neighbour running a browser on the
+ * All four are wall-clock measurements of this machine, and a neighbour running a browser on the
  * other cores inflates them — unevenly, which is what makes it a problem and not merely noise.
  * Measured on the two that were here first: the verdict of `overhead.spec.ts` fell from 1.82
  * copies to 1.34 under three workers, and a regression of a whole copy would have fitted inside
@@ -60,6 +60,7 @@ const MEASURED = [
   '**/overhead.spec.ts',
   '**/history-write-cost.spec.ts',
   '**/history-cost.spec.ts',
+  '**/encode-cost.spec.ts',
 ]
 
 /**
