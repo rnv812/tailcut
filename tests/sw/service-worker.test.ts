@@ -331,7 +331,9 @@ describe('installation', () => {
 
     chrome.install()
 
-    expect(chrome.badgeColor).toEqual([{ color: '#4c8dff' }])
+    // The badge is part of the toolbar identity, so it uses the lime delivered with the icon
+    // rather than the old unrelated blue accent.
+    expect(chrome.badgeColor).toEqual([{ color: '#b7f03f' }])
     expect(chrome.alarms.map((alarm) => alarm.name)).toContain('tc:badge')
   })
 

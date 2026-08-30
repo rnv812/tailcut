@@ -1,135 +1,276 @@
 <!doctype html>
 <meta charset="utf-8" />
 <title>tailcut editor</title>
+<link rel="stylesheet" href="../shared/theme.css" />
 <style>
-  /* The editor layout: player on top, inspector on the right, and timeline below.
-     One grid rather than nested boxes — the timeline has to keep its height while the player
-     takes what is left, and that is what a row of 1fr and a row of pixels says. */
-  body { margin: 0; height: 100vh; background: #101215; color: #e8eaed;
-         font: 13px/1.45 system-ui, sans-serif; }
-  .editor { display: grid; height: 100vh;
-            grid-template-columns: 1fr 300px;
-            grid-template-rows: auto 1fr 240px;
-            grid-template-areas: "head inspector" "player inspector" "timeline inspector"; }
-  .head { grid-area: head; padding: 10px 14px; border-bottom: 1px solid #22262c; }
-  .player { grid-area: player; display: flex; flex-direction: column; align-items: center;
-            justify-content: center; gap: 10px; min-height: 0; padding: 12px; }
-  .timeline { grid-area: timeline; border-top: 1px solid #22262c; padding: 10px; }
-  .inspector { grid-area: inspector; border-left: 1px solid #22262c; padding: 12px;
-               overflow-y: auto; }
+  body {
+    margin: 0;
+    height: 100vh;
+    overflow: hidden;
+    background: var(--tc-bg);
+    color: var(--tc-text);
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  .editor {
+    display: grid;
+    height: 100vh;
+    min-width: 680px;
+    grid-template-columns: minmax(0, 1fr) clamp(330px, 26vw, 380px);
+    grid-template-rows: auto minmax(0, 1fr) 250px;
+    grid-template-areas: "head inspector" "player inspector" "timeline inspector";
+    background:
+      radial-gradient(circle at 38% -260px, rgba(183, 240, 63, 0.065), transparent 560px),
+      var(--tc-bg);
+  }
+  .head {
+    grid-area: head;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+    min-height: 64px;
+    padding: 11px 18px;
+    border-bottom: 1px solid var(--tc-border);
+    background: rgba(15, 16, 21, 0.74);
+  }
+  .head .tc-brand-mark { width: 32px; height: 32px; }
+  .head-copy { min-width: 0; }
+  .player {
+    grid-area: player;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    min-width: 0;
+    min-height: 0;
+    padding: 16px 20px;
+  }
+  .timeline {
+    grid-area: timeline;
+    position: relative;
+    min-width: 0;
+    overflow: hidden;
+    padding: 12px 14px;
+    border-top: 1px solid var(--tc-border);
+    background: rgba(10, 11, 15, 0.72);
+  }
+  .inspector {
+    grid-area: inspector;
+    min-width: 0;
+    overflow-y: auto;
+    padding: 18px 16px 28px;
+    border-left: 1px solid var(--tc-border);
+    background: rgba(23, 24, 31, 0.94);
+    box-shadow: -16px 0 44px rgba(0, 0, 0, 0.16);
+  }
 
-  .pad { padding: 40px; max-width: 520px; }
-  .muted { color: #9aa0a6; }
-  .failure { color: #ffb3b3; }
-  .title { font-weight: 500; font-size: 15px; }
-  .meta { display: flex; gap: 12px; margin-top: 4px; }
+  .pad { max-width: 560px; padding: 48px; }
+  .muted { color: var(--tc-muted); }
+  .failure { color: var(--tc-danger); }
+  .title { overflow: hidden; color: var(--tc-paper); font-size: 15px; font-weight: 650;
+           text-overflow: ellipsis; white-space: nowrap; }
+  .head > .head-copy > .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .meta { display: flex; gap: 10px; margin-top: 4px; font-size: 12px; }
 
-  .inspector h2 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase;
-                  letter-spacing: 0.06em; color: #9aa0a6; }
+  button,
+  select,
+  input { font: inherit; }
+  button {
+    min-height: 31px;
+    padding: 5px 10px;
+    border: 1px solid var(--tc-border-strong);
+    border-radius: var(--tc-radius-sm);
+    background: var(--tc-surface-raised);
+    color: var(--tc-text);
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: #5a5f6c; background: var(--tc-surface-hover); }
+  button:disabled { opacity: 0.45; }
+  select,
+  input[type='text'] {
+    min-height: 30px;
+    border: 1px solid var(--tc-border-strong);
+    border-radius: var(--tc-radius-sm);
+    background: #111218;
+    color: var(--tc-text);
+  }
+  select { padding: 4px 7px; }
+  input[type='checkbox'] { accent-color: var(--tc-accent); }
+
+  .inspector h2 {
+    margin: 0 0 8px;
+    color: var(--tc-paper);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
   .tracks { margin-bottom: 18px; }
-  .tc-representation { margin-bottom: 10px; }
-  .tc-representation select { min-width: 0; max-width: 220px; background: #0f1114;
-                              color: #e8eaed; border: 1px solid #3a3f47; border-radius: 4px; }
-  .tc-representation p { margin: 4px 0 0; font-size: 11px; }
-  .track { display: flex; gap: 8px; flex-wrap: wrap; padding: 5px 0;
-           border-bottom: 1px solid #1b1f24; }
-  .kind { color: #4c8dff; }
-  .option { display: flex; gap: 7px; align-items: center; margin: 4px 0; color: #9aa0a6; }
+  .tc-representation { margin-bottom: 12px; }
+  .tc-representation select { min-width: 0; max-width: 245px; }
+  .tc-representation p { margin: 5px 0 0; font-size: 11px; }
+  .track {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--tc-border);
+  }
+  .kind { color: var(--tc-accent); font-weight: 650; }
+  .option { display: flex; gap: 7px; align-items: center; margin: 5px 0; color: var(--tc-muted); }
 
-  video { max-width: 100%; max-height: 100%; background: #000; }
+  video {
+    max-width: 100%;
+    max-height: 100%;
+    border-radius: 6px;
+    background: #000;
+    box-shadow: var(--tc-shadow);
+  }
   .transport { display: flex; gap: 8px; align-items: center; }
-  .transport button { padding: 5px 12px; border: 1px solid #3a3f47; border-radius: 6px;
-                      background: none; color: #e8eaed; font: inherit; cursor: pointer; }
-  .transport button:disabled { opacity: 0.5; cursor: default; }
-  .readout { font-variant-numeric: tabular-nums; }
-  /* The picture is behind the request: a held arrow outruns the decoder, and the number below
-     the player is already the frame that was asked for. */
-  .catching-up { color: #d8ab63; }
-  /* The strip is the box the frame under the pointer is positioned against. */
-  .timeline { position: relative; }
+  .transport [data-testid='play'],
+  .tc-export > [data-testid='export'] {
+    border-color: var(--tc-accent);
+    background: var(--tc-accent);
+    color: var(--tc-graphite);
+  }
+  .transport [data-testid='play']:hover:not(:disabled),
+  .tc-export > [data-testid='export']:hover:not(:disabled) {
+    border-color: #c9ff5d;
+    background: #c9ff5d;
+  }
+  .readout { color: var(--tc-muted); font-variant-numeric: tabular-nums; }
+  .catching-up { color: var(--tc-warning); }
 
-  .tc-clips h2 { margin: 16px 0 6px; }
+  .tc-clips,
+  .tc-export {
+    margin-top: 14px;
+    padding-top: 15px;
+    border-top: 1px solid var(--tc-border);
+  }
+  .tc-clips h2,
+  .tc-export h2 { margin: 16px 0 8px; }
+  .tc-clips > h2:first-child,
+  .tc-export > h2:first-child { margin-top: 0; }
   .tc-clip-list { list-style: none; margin: 0; padding: 0; }
-  .tc-clip { padding: 8px; margin-bottom: 6px; border: 1px solid #22262c; border-radius: 6px;
-             cursor: pointer; }
-  .tc-clip.selected { border-color: #e0a33c; }
-  .tc-clip-name { width: 100%; margin-bottom: 6px; background: none; border: none;
-                  color: #e8eaed; font: inherit; }
-  .tc-clip-times { display: flex; gap: 8px; align-items: center; }
-  .tc-clip-length { color: #9aa0a6; font-variant-numeric: tabular-nums; }
-  .tc-clip-options { display: flex; gap: 10px; align-items: center; margin-top: 6px; }
-  .tc-clip-options button { padding: 2px 8px; border: 1px solid #3a3f47; border-radius: 5px;
-                            background: none; color: #e8eaed; font: inherit; cursor: pointer; }
-  /* A line where the eye already is explains why the handle stopped. Amber because it is a
-     boundary and not a failure — nothing has gone wrong, and there is nothing to press. */
-  .tc-clip-note { margin: 6px 0 0; color: #e0a33c; font-size: 11px; }
+  .tc-clip {
+    margin-bottom: 8px;
+    padding: 11px;
+    border: 1px solid var(--tc-border);
+    border-radius: 9px;
+    background: rgba(29, 31, 39, 0.8);
+    cursor: pointer;
+  }
+  .tc-clip:hover { border-color: var(--tc-border-strong); }
+  .tc-clip.selected {
+    border-color: var(--tc-accent);
+    box-shadow: inset 3px 0 0 var(--tc-accent), 0 0 0 1px rgba(183, 240, 63, 0.08);
+  }
+  .tc-clip-name {
+    width: 100%;
+    margin-bottom: 8px;
+    padding: 0 2px 5px;
+    border: 0;
+    border-bottom: 1px solid transparent;
+    border-radius: 0;
+    background: transparent;
+    color: var(--tc-paper);
+    font-weight: 650;
+  }
+  .tc-clip-name:hover,
+  .tc-clip-name:focus { border-bottom-color: var(--tc-border-strong); }
+  .tc-clip-times { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .tc-clip-length { color: var(--tc-muted); font-variant-numeric: tabular-nums; }
+  .tc-clip-options { display: flex; gap: 8px; align-items: center; margin-top: 9px; flex-wrap: wrap; }
+  .tc-clip-options button { min-height: 27px; padding: 3px 8px; }
+  .tc-clip-note { margin: 7px 0 0; color: var(--tc-warning); font-size: 11px; }
 
-  .tc-picture-frame { position: relative; display: flex; min-height: 0;
-    max-width: 100%; max-height: 100%; }
+  .tc-picture-frame { position: relative; display: flex; min-height: 0; max-width: 100%; max-height: 100%; }
   .tc-picture-frame > video { display: block; }
   .tc-crop-host { position: absolute; inset: 0; pointer-events: none; }
-  .tc-crop-box { position: absolute; box-sizing: border-box; border: 1px solid #e0a33c;
-    box-shadow: 0 0 0 100vmax rgba(8, 10, 12, 0.55); pointer-events: auto; cursor: move; }
-  .tc-crop-handle { position: absolute; width: 10px; height: 10px; background: #e0a33c;
-    border-radius: 2px; }
-  .tc-crop-nw { left: -5px; top: -5px; cursor: nwse-resize; }
-  .tc-crop-n { left: calc(50% - 5px); top: -5px; cursor: ns-resize; }
-  .tc-crop-ne { right: -5px; top: -5px; cursor: nesw-resize; }
-  .tc-crop-e { right: -5px; top: calc(50% - 5px); cursor: ew-resize; }
-  .tc-crop-se { right: -5px; bottom: -5px; cursor: nwse-resize; }
-  .tc-crop-s { left: calc(50% - 5px); bottom: -5px; cursor: ns-resize; }
-  .tc-crop-sw { left: -5px; bottom: -5px; cursor: nesw-resize; }
-  .tc-crop-w { left: -5px; top: calc(50% - 5px); cursor: ew-resize; }
-  .tc-crop-controls { display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
-    margin-top: 6px; }
-  .tc-clip-warn { color: #e0a33c; }
+  .tc-crop-box {
+    position: absolute;
+    box-sizing: border-box;
+    border: 2px solid var(--tc-accent);
+    box-shadow: 0 0 0 100vmax rgba(8, 10, 12, 0.58), 0 0 0 1px rgba(0, 0, 0, 0.45);
+    pointer-events: auto;
+    cursor: move;
+  }
+  .tc-crop-handle { position: absolute; width: 10px; height: 10px; border: 1px solid var(--tc-graphite);
+                    border-radius: 2px; background: var(--tc-accent); }
+  .tc-crop-nw { left: -6px; top: -6px; cursor: nwse-resize; }
+  .tc-crop-n { left: calc(50% - 5px); top: -6px; cursor: ns-resize; }
+  .tc-crop-ne { right: -6px; top: -6px; cursor: nesw-resize; }
+  .tc-crop-e { right: -6px; top: calc(50% - 5px); cursor: ew-resize; }
+  .tc-crop-se { right: -6px; bottom: -6px; cursor: nwse-resize; }
+  .tc-crop-s { left: calc(50% - 5px); bottom: -6px; cursor: ns-resize; }
+  .tc-crop-sw { left: -6px; bottom: -6px; cursor: nesw-resize; }
+  .tc-crop-w { left: -6px; top: calc(50% - 5px); cursor: ew-resize; }
+  .tc-crop-controls {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-top: 14px;
+    padding: 12px;
+    border: 1px solid var(--tc-border);
+    border-radius: 9px;
+    background: rgba(29, 31, 39, 0.72);
+    flex-wrap: wrap;
+  }
+  .tc-crop-controls button { min-height: 27px; padding: 3px 8px; }
+  .tc-clip-warn { color: var(--tc-warning); }
 
   .tc-marker-list { list-style: none; margin: 0; padding: 0; }
-  .tc-marker { display: flex; gap: 8px; align-items: center; padding: 2px 0; }
-  .tc-marker button { padding: 1px 6px; border: 1px solid #3a3f47; border-radius: 5px;
-                      background: none; color: #e8eaed; font: inherit; cursor: pointer; }
+  .tc-marker { display: flex; gap: 8px; align-items: center; padding: 3px 0; }
+  .tc-marker button { min-height: 27px; padding: 3px 7px; }
   .tc-marker-go { font-variant-numeric: tabular-nums; }
 
   .tc-field { display: flex; gap: 6px; align-items: center; }
-  .tc-field-label { color: #9aa0a6; font-size: 11px; }
-  .tc-field-input { width: 96px; padding: 2px 4px; border: 1px solid #3a3f47; border-radius: 4px;
-                    background: #0f1114; color: #e8eaed; font: inherit;
-                    font-variant-numeric: tabular-nums; }
-  /* A refused entry keeps its text and says so: retyping it from memory is the worse of two. */
-  .tc-field-input.invalid { border-color: #ff6b6b; color: #ffb3b3; }
+  .tc-field-label { color: var(--tc-muted); font-size: 11px; }
+  .tc-field-input {
+    width: 102px;
+    min-height: 28px;
+    padding: 3px 6px;
+    border: 1px solid var(--tc-border-strong);
+    border-radius: 6px;
+    background: #111218;
+    color: var(--tc-text);
+    font-variant-numeric: tabular-nums;
+  }
+  .tc-field-input.invalid { border-color: var(--tc-danger); color: #ffc0c7; }
 
-  .tc-thumb { background: #0b0d10; border: 1px solid #3a3f47; border-radius: 6px; padding: 4px;
-              z-index: 3; }
-  .tc-thumb-time { text-align: center; font-variant-numeric: tabular-nums; color: #cdd5df; }
+  .tc-thumb { z-index: 3; padding: 5px; border: 1px solid var(--tc-border-strong); border-radius: 8px;
+              background: #0b0c10; box-shadow: var(--tc-shadow); }
+  .tc-thumb-time { color: var(--tc-muted); text-align: center; font-variant-numeric: tabular-nums; }
 
-  .tc-export h2 { margin: 16px 0 6px; }
-  .tc-export > button { padding: 5px 12px; border: 1px solid #3a3f47; border-radius: 6px;
-                        background: none; color: #e8eaed; font: inherit; cursor: pointer; }
-  .tc-export > button:disabled { opacity: 0.5; cursor: default; }
-  .tc-export p { margin: 6px 0 0; font-size: 11px; }
-  .tc-jobs { list-style: none; margin: 8px 0 0; padding: 0; }
-  .tc-job { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 5px 0;
-            border-bottom: 1px solid #1b1f24; }
-  .tc-job-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
-                 white-space: nowrap; }
-  .tc-job-state { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
-                  color: #9aa0a6; }
-  /* Four states and four colours: a row that finished and a row that failed must not be told
-     apart by their text alone, because the text is the thing being skimmed past. */
-  .tc-job.running .tc-job-state { color: #4c8dff; }
-  .tc-job.done .tc-job-state { color: #6fbf73; }
-  .tc-job.failed .tc-job-state { color: #ff6b6b; }
-  .tc-job-error { flex-basis: 100%; color: #ffb3b3; font-size: 11px; }
-  .tc-job button { padding: 1px 6px; border: 1px solid #3a3f47; border-radius: 5px;
-                   background: none; color: #e8eaed; font: inherit; cursor: pointer; }
+  .tc-export p { margin: 7px 0 0; font-size: 11px; }
+  .tc-jobs { list-style: none; margin: 10px 0 0; padding: 0; }
+  .tc-job { display: flex; gap: 8px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--tc-border);
+            flex-wrap: wrap; }
+  .tc-job-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tc-job-state { color: var(--tc-muted); font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+                  text-transform: uppercase; }
+  .tc-job.running .tc-job-state { color: var(--tc-accent); }
+  .tc-job.done .tc-job-state { color: var(--tc-success); }
+  .tc-job.failed .tc-job-state { color: var(--tc-danger); }
+  .tc-job-error { flex-basis: 100%; color: #ffc0c7; font-size: 11px; }
+  .tc-job button { min-height: 27px; padding: 3px 7px; }
 
-  .tc-help { position: fixed; inset: 0; background: rgba(8, 10, 12, 0.72);
-             display: flex; align-items: center; justify-content: center; z-index: 10; }
-  .tc-help-sheet { background: #14161a; border: 1px solid #2b3038; border-radius: 10px;
-                   padding: 20px 24px; max-height: 80vh; overflow-y: auto; }
-  .tc-help-sheet th { text-align: left; padding: 3px 18px 3px 0; white-space: nowrap;
-                      font-weight: 500; color: #e0a33c; }
-  .tc-help-sheet td { padding: 3px 0; color: #cdd5df; }
+  .tc-help { position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center;
+             padding: 24px; background: rgba(8, 9, 12, 0.78); backdrop-filter: blur(5px); }
+  .tc-help-sheet { max-height: 84vh; overflow-y: auto; padding: 22px 26px; border: 1px solid var(--tc-border-strong);
+                   border-radius: var(--tc-radius); background: var(--tc-surface); box-shadow: var(--tc-shadow); }
+  .tc-help-sheet th { padding: 4px 20px 4px 0; color: var(--tc-accent); font-weight: 650; text-align: left;
+                      white-space: nowrap; }
+  .tc-help-sheet td { padding: 4px 0; color: var(--tc-muted); }
+  .tc-help-sheet button { margin-top: 14px; }
+
+  @media (max-width: 980px) {
+    .editor { grid-template-columns: minmax(0, 1fr) 330px; }
+    .player { padding-inline: 12px; }
+  }
 </style>
 <body></body>
 <script type="module" src="main.js"></script>

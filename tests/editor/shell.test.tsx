@@ -348,6 +348,14 @@ describe('the editor shell', () => {
     expect(text('host')).toBe('site.example')
   })
 
+  it('identifies the workbench with the packaged tailcut mark', async () => {
+    show(await ready())
+    const mark = document.querySelector<HTMLImageElement>('[data-testid="brand-mark"]')
+
+    expect(mark?.alt).toBe('tailcut')
+    expect(mark?.getAttribute('src')).toBe('../assets/tailcut/svg/mark-light.svg')
+  })
+
   it('shows the length of the material, not the distance from end to end', async () => {
     // Runs of 0…4 and 8…10: six seconds of material across a span of ten.
     show(await ready())

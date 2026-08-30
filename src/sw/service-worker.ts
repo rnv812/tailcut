@@ -158,7 +158,7 @@ const repairQuietly = (): void => {
 }
 
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.action.setBadgeBackgroundColor({ color: '#4c8dff' })
+  chrome.action.setBadgeBackgroundColor({ color: '#b7f03f' })
   chrome.alarms.create(BADGE_ALARM, { periodInMinutes: POLL_INTERVAL_MINUTES })
   chrome.alarms.create(SWEEP_ALARM, { periodInMinutes: SWEEP_PERIOD_MINUTES })
   // An update is a start like any other: the index may name pieces of a build that wrote them

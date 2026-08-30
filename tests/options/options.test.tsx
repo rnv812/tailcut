@@ -136,6 +136,14 @@ describe('the settings page', () => {
     expect(titles).toEqual(['Recording', 'Video detection', 'History', 'Export'])
   })
 
+  it('identifies the settings page with the packaged tailcut mark', async () => {
+    await draw()
+    const mark = document.querySelector<HTMLImageElement>('[data-testid="brand-mark"]')
+
+    expect(mark?.alt).toBe('tailcut')
+    expect(mark?.getAttribute('src')).toBe('../assets/tailcut/svg/mark-light.svg')
+  })
+
   it('has something to show while the settings are still being read', async () => {
     // The read is one turn of storage, and the page is opened by a click: with nothing here the
     // tab is blank for that turn, which reads as a page that failed to open.

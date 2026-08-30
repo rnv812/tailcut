@@ -35,6 +35,22 @@ const UNTITLED = 'Untitled'
 /** A page with nothing on it worth recording, or with nothing played on it yet. */
 const NOTHING = 'Nothing recorded on this page yet.'
 
+function Header() {
+  return (
+    <header class="top">
+      <div class="tc-brand">
+        <img
+          class="tc-brand-mark"
+          data-testid="brand-mark"
+          src="../assets/tailcut/svg/mark-light.svg"
+          alt="tailcut"
+        />
+        <span class="tc-brand-name">tailcut</span>
+      </div>
+    </header>
+  )
+}
+
 /**
  * A page playing protected video.
  *
@@ -388,9 +404,7 @@ function Popup() {
           : NOTHING
     return (
       <div>
-        <header class="top">
-          <b>tailcut</b>
-        </header>
+        <Header />
         <div class="pad muted" data-testid="nothing">
           {nothing}
         </div>
@@ -456,9 +470,7 @@ function Popup() {
 
   return (
     <div>
-      <header class="top">
-        <b>tailcut</b>
-      </header>
+      <Header />
 
       <div class="pad">
         <div class="title" data-testid="title">

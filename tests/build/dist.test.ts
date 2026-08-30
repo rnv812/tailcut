@@ -179,6 +179,35 @@ describe('build', () => {
     }
   })
 
+  it('ships the branded icons Chrome and the extension pages name', () => {
+    const m = manifest()
+    const expected = {
+      16: 'assets/tailcut/icon/icon-16.png',
+      32: 'assets/tailcut/icon/icon-32.png',
+      48: 'assets/tailcut/icon/icon-48.png',
+      128: 'assets/tailcut/icon/icon-128.png',
+    }
+
+    // Both declarations matter. `icons` identifies tailcut on the extensions page, while the
+    // action icon is the button a person has to find before any recording can be saved.
+    expect(m.icons).toEqual(expected)
+    expect(m.action.default_icon).toEqual(expected)
+
+    for (const rel of [...Object.values(expected), 'assets/tailcut/svg/mark-light.svg']) {
+      expect(existsSync(`dist/${rel}`), `${rel} is declared or drawn but missing from dist`).toBe(true)
+    }
+  })
+
+  it('ships one shared brand theme and loads it in every visible extension page', () => {
+    const theme = 'shared/theme.css'
+    expect(existsSync(`dist/${theme}`), 'the shared theme is missing from dist').toBe(true)
+
+    for (const page of ['popup/popup.html', 'options/options.html', 'editor/editor.html']) {
+      const html = readFileSync(`dist/${page}`, 'utf8')
+      expect(html, `${page} does not load the shared theme`).toContain(`../${theme}`)
+    }
+  })
+
   it('includes pages and their scripts in the build', () => {
     expect(existsSync('dist/popup/popup.js')).toBe(true)
     expect(existsSync('dist/bridge/bridge.js')).toBe(true)

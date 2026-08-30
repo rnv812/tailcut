@@ -313,6 +313,14 @@ afterEach(async () => {
 })
 
 describe('the popup', () => {
+  it('identifies itself with the packaged tailcut mark', async () => {
+    await draw()
+    const mark = document.querySelector<HTMLImageElement>('[data-testid="brand-mark"]')
+
+    expect(mark?.alt).toBe('tailcut')
+    expect(mark?.getAttribute('src')).toBe('../assets/tailcut/svg/mark-light.svg')
+  })
+
   it('waits while the tab has not answered', async () => {
     await mount('silent')
 

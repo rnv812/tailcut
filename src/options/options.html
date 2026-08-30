@@ -1,70 +1,158 @@
 <!doctype html>
 <meta charset="utf-8" />
 <title>tailcut settings</title>
+<link rel="stylesheet" href="../shared/theme.css" />
 <style>
-  /* One column and nothing beside it. The page is opened in a tab of its own (open_in_tab), so
-     there is a whole window to spend; spending it on width would put a slider's label a screen
-     away from the slider. */
-  body { margin: 0; padding: 28px 20px 60px; background: #101215; color: #e8eaed;
-         font: 13px/1.5 system-ui, sans-serif; }
-  main { max-width: 640px; margin: 0 auto; }
-  h1 { margin: 0 0 20px; font-size: 17px; font-weight: 600; letter-spacing: 0.01em; }
-  .loading { max-width: 640px; margin: 0 auto; color: #9aa0a6; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    padding: 40px 24px 72px;
+    background:
+      radial-gradient(circle at 50% -180px, rgba(183, 240, 63, 0.11), transparent 390px),
+      var(--tc-bg);
+    color: var(--tc-text);
+    font-size: 14px;
+    line-height: 1.5;
+  }
 
-  /* A group is a card: four of them follow the order a recording lives through, and the
-     border is what says where one question ends and the next begins. */
-  .group { margin-bottom: 16px; padding: 14px 16px 16px;
-           border: 1px solid #22262c; border-radius: 10px; background: #14171b; }
-  .group h2 { margin: 0 0 12px; font-size: 11px; text-transform: uppercase;
-              letter-spacing: 0.07em; color: #9aa0a6; }
+  main,
+  .loading { max-width: 760px; margin: 0 auto; }
+  .loading { color: var(--tc-muted); }
 
-  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
-         padding: 6px 0; }
-  .row .label { flex: 0 0 130px; color: #9aa0a6; }
-  .row .value { color: #9aa0a6; font-variant-numeric: tabular-nums; }
-  .row.mode { align-items: flex-start; }
-  .row b { font-weight: 500; }
-  .row em { display: block; margin-top: 2px; color: #9aa0a6; font-style: normal; }
+  .page-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 24px;
+    padding: 0 4px;
+  }
+  .page-head .tc-brand-mark { width: 36px; height: 36px; }
+  h1 { margin: 0; font-size: 20px; font-weight: 750; letter-spacing: -0.04em; }
+  .page-head p { margin: 1px 0 0; color: var(--tc-muted); font-size: 12px; }
 
-  .note { margin: 4px 0 10px; color: #9aa0a6; }
-  /* A value the page would not take, said beside the control that would not take it. Warm rather
-     than red: nothing failed, the number was simply held to what the setting allows. */
-  .note.limit { flex-basis: 100%; margin: 0; color: #d8ab63; }
-  .note.full { color: #d8ab63; }
-  /* A wipe that did not happen. The same warm colour as the two above: nothing is broken, and
-     what the row says is simply not what the user asked it to say. */
-  .note.refused { color: #d8ab63; }
+  .group {
+    margin-bottom: 16px;
+    padding: 20px 22px 22px;
+    border: 1px solid var(--tc-border);
+    border-radius: var(--tc-radius);
+    background: rgba(23, 24, 31, 0.92);
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.025);
+  }
+  .group h2 {
+    margin: 0 0 14px;
+    color: var(--tc-paper);
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.035em;
+    text-transform: uppercase;
+  }
 
-  input[type='range'] { flex: 1 1 200px; accent-color: #4c8dff; }
-  input[type='number'], input[type='text'] {
-    padding: 5px 8px; border: 1px solid #3a3f47; border-radius: 6px;
-    background: #0d0f12; color: #e8eaed; font: inherit; }
-  input[type='number'] { width: 84px; }
-  input[type='text'] { flex: 1 1 180px; }
-  input[type='checkbox'], input[type='radio'] { accent-color: #4c8dff; }
-  select { padding: 5px 8px; border: 1px solid #3a3f47; border-radius: 6px;
-           background: #0d0f12; color: #e8eaed; font: inherit; }
-  input:disabled, select:disabled { opacity: 0.5; }
-  button { padding: 5px 12px; border: 1px solid #3a3f47; border-radius: 6px;
-           background: none; color: #e8eaed; font: inherit; cursor: pointer; }
-  button:hover { background: #1e2126; }
-  button.quiet { border-color: transparent; color: #9aa0a6; }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 38px;
+    padding: 7px 0;
+    flex-wrap: wrap;
+  }
+  .row .label { flex: 0 0 150px; color: var(--tc-muted); }
+  .row .value { color: var(--tc-muted); font-variant-numeric: tabular-nums; }
+  .row b { font-weight: 650; }
+  .row em { display: block; margin-top: 3px; color: var(--tc-muted); font-size: 12px; font-style: normal; }
 
-  .hosts { margin-top: 10px; padding-top: 10px; border-top: 1px solid #1b1f24; }
-  .host-add { display: flex; gap: 8px; margin-bottom: 6px; }
-  .host-row { display: flex; gap: 8px; align-items: center; padding: 4px 0; }
+  .row.mode {
+    align-items: flex-start;
+    margin: 6px 0;
+    padding: 11px 12px;
+    border: 1px solid var(--tc-border);
+    border-radius: 9px;
+    background: var(--tc-surface-raised);
+    cursor: pointer;
+  }
+  .row.mode:hover { border-color: var(--tc-border-strong); background: var(--tc-surface-hover); }
+  .row.mode:has(input:checked) {
+    border-color: var(--tc-accent);
+    box-shadow: inset 3px 0 0 var(--tc-accent);
+  }
+  .row.mode input { margin-top: 3px; }
+
+  .note { margin: 5px 0 12px; color: var(--tc-muted); font-size: 12px; }
+  .note.limit { flex-basis: 100%; margin: 0; color: var(--tc-warning); }
+  .note.full,
+  .note.refused { color: var(--tc-warning); }
+
+  input[type='range'] { flex: 1 1 240px; min-width: 180px; accent-color: var(--tc-accent); }
+  input[type='checkbox'],
+  input[type='radio'] { width: 16px; height: 16px; accent-color: var(--tc-accent); }
+  input[type='number'],
+  input[type='text'],
+  select {
+    min-height: 34px;
+    padding: 6px 9px;
+    border: 1px solid var(--tc-border-strong);
+    border-radius: var(--tc-radius-sm);
+    background: #111218;
+    color: var(--tc-text);
+    font: inherit;
+  }
+  input[type='number'] { width: 92px; }
+  input[type='text'] { flex: 1 1 220px; min-width: 0; }
+  input:hover:not(:disabled),
+  select:hover:not(:disabled) { border-color: #5a5f6c; }
+  input:disabled,
+  select:disabled { opacity: 0.48; }
+
+  button {
+    min-height: 34px;
+    padding: 6px 13px;
+    border: 1px solid var(--tc-border-strong);
+    border-radius: var(--tc-radius-sm);
+    background: var(--tc-surface-raised);
+    color: var(--tc-text);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: #5a5f6c; background: var(--tc-surface-hover); }
+  button.quiet { border-color: transparent; background: transparent; color: var(--tc-muted); }
+  button.quiet:hover { color: var(--tc-text); }
+
+  .hosts { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--tc-border); }
+  .host-add { display: flex; gap: 8px; margin-bottom: 8px; }
+  .host-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 42px;
+    padding: 5px 8px;
+    border-radius: 8px;
+  }
+  .host-row:hover { background: rgba(255, 255, 255, 0.025); }
   .host-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .host-row .allowed { color: #7bd88f; }
-  .host-row .denied { color: #ff9f9f; }
+  .host-row .allowed { border-color: rgba(125, 221, 158, 0.38); color: var(--tc-success); }
+  .host-row .denied { border-color: rgba(255, 128, 142, 0.38); color: var(--tc-danger); }
 
-  /* A <details> and not an accordion of our own: it comes with a keyboard, with find-in-page and
-     with a state, none of which we would get right for free. The marker stays — it is the only
-     thing that says the block opens. */
-  .advanced { margin-top: 10px; padding-top: 8px; border-top: 1px solid #1b1f24; }
-  .advanced summary { color: #9aa0a6; cursor: pointer; user-select: none; }
-  .advanced summary:hover { color: #e8eaed; }
+  .advanced { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--tc-border); }
+  .advanced summary {
+    width: fit-content;
+    padding: 4px 0;
+    color: var(--tc-muted);
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+  }
+  .advanced summary:hover { color: var(--tc-accent); }
+  .advanced[open] summary { margin-bottom: 8px; color: var(--tc-paper); }
 
-  .reset { margin-top: 20px; }
+  .reset { margin-top: 24px; text-align: right; }
+  .reset button { color: var(--tc-muted); }
+
+  @media (max-width: 620px) {
+    body { padding: 24px 14px 48px; }
+    .group { padding: 17px 16px 19px; }
+    .row .label { flex-basis: 100%; }
+    .host-add { align-items: stretch; }
+  }
 </style>
 <body></body>
 <script type="module" src="options.js"></script>

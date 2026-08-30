@@ -1,93 +1,218 @@
 <!doctype html>
 <meta charset="utf-8" />
 <title>tailcut</title>
+<link rel="stylesheet" href="../shared/theme.css" />
 <style>
-  /* The height is floored: without it the popup opens as a "Loading…" strip and jumps when the
-     tab's answer arrives. Raised from 118 when the footer went in — a summary, the history and
-     the two switches rest at about 243 px, and the floor is there to open near that rather than
-     at the height of one line. */
-  body { margin: 0; width: 340px; min-height: 180px; background: #15171a; color: #e8eaed;
-         font: 13px/1.4 system-ui, sans-serif; }
-  .top { padding: 10px 12px; border-bottom: 1px solid #26292e; }
-  .pad { padding: 12px; }
-  .muted { color: #9aa0a6; font-size: 11px; }
-  .title { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  body {
+    margin: 0;
+    width: 380px;
+    min-height: 210px;
+    max-height: 600px;
+    overflow-y: auto;
+    background:
+      radial-gradient(circle at 80% -80px, rgba(183, 240, 63, 0.12), transparent 230px),
+      var(--tc-bg);
+    color: var(--tc-text);
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  .top {
+    position: sticky;
+    top: 0;
+    z-index: 4;
+    display: flex;
+    align-items: center;
+    min-height: 52px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--tc-border);
+    background: rgba(15, 16, 21, 0.94);
+    backdrop-filter: blur(8px);
+  }
+  .top .tc-brand-mark { width: 27px; height: 27px; }
+  .top .tc-brand-name { font-size: 17px; }
+
+  .pad {
+    margin: 12px;
+    padding: 14px;
+    border: 1px solid var(--tc-border);
+    border-radius: var(--tc-radius);
+    background: rgba(23, 24, 31, 0.9);
+  }
+  .muted { color: var(--tc-muted); font-size: 11px; }
+  .title { overflow: hidden; color: var(--tc-paper); font-size: 14px; font-weight: 650;
+           text-overflow: ellipsis; white-space: nowrap; }
   .host { margin-top: 2px; }
-  .meta { display: flex; gap: 10px; align-items: baseline; margin: 8px 0 12px; }
-  .primary { width: 100%; padding: 8px 0; border: 0; border-radius: 7px;
-             background: #4c8dff; color: #0b0d10; font-weight: 600; font-size: 12px;
-             cursor: pointer; }
-  .primary:disabled { opacity: 0.6; cursor: default; }
-  .buttons { display: flex; gap: 8px; }
-  .primary { flex: 1; }
-  .secondary { padding: 8px 14px; border: 1px solid #3a3f47; border-radius: 7px;
-               background: none; color: #e8eaed; font-weight: 600; font-size: 12px;
-               cursor: pointer; }
-  .secondary:disabled { opacity: 0.6; cursor: default; }
-  /* What the file will be missing. A caveat and not a failure: the save will go through, and
-     the length above it is already the length of the file. */
-  .omits { margin: -4px 0 10px; font-size: 11px; color: #d8ab63; }
-  .failed { margin-top: 8px; font-size: 11px; color: #ff8f8f; }
-  /* The other sessions of the page. Below the current one and separated from it: the top block
-     is what is being recorded now, and a click down here changes what that block shows. */
-  .recent { padding: 8px 6px 10px; border-top: 1px solid #26292e; }
-  .label { padding: 0 6px 4px; }
-  .row { display: flex; width: 100%; gap: 10px; align-items: baseline;
-         justify-content: space-between; padding: 6px; border: 0; border-radius: 6px;
-         background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-  .row:hover:enabled { background: #1e2126; }
+  .meta { display: flex; align-items: center; gap: 8px; margin: 10px 0 13px; }
+  .meta > span {
+    padding: 3px 7px;
+    border: 1px solid var(--tc-border);
+    border-radius: 999px;
+    background: var(--tc-surface-raised);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+  .buttons { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+  button { font: inherit; cursor: pointer; }
+  .primary,
+  .secondary {
+    min-height: 36px;
+    padding: 7px 14px;
+    border-radius: var(--tc-radius-sm);
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .primary { border: 1px solid var(--tc-accent); background: var(--tc-accent); color: var(--tc-graphite); }
+  .primary:hover:not(:disabled) { border-color: #c9ff5d; background: #c9ff5d; }
+  .secondary { border: 1px solid var(--tc-border-strong); background: var(--tc-surface-raised);
+               color: var(--tc-text); }
+  .secondary:hover:not(:disabled) { border-color: #5a5f6c; background: var(--tc-surface-hover); }
+  .primary:disabled,
+  .secondary:disabled { opacity: 0.5; }
+
+  .omits {
+    margin: -2px 0 11px;
+    padding: 7px 8px;
+    border-left: 2px solid var(--tc-warning);
+    border-radius: 0 6px 6px 0;
+    background: rgba(239, 189, 101, 0.07);
+    color: var(--tc-warning);
+    font-size: 11px;
+  }
+  .failed {
+    margin-top: 9px;
+    padding: 7px 8px;
+    border-left: 2px solid var(--tc-danger);
+    border-radius: 0 6px 6px 0;
+    background: rgba(255, 128, 142, 0.07);
+    color: #ffc0c7;
+    font-size: 11px;
+  }
+
+  .recent,
+  .history {
+    margin: 0 12px 12px;
+    padding: 10px 8px;
+    border: 1px solid var(--tc-border);
+    border-radius: var(--tc-radius);
+    background: rgba(23, 24, 31, 0.78);
+  }
+  .label {
+    padding: 0 7px 6px;
+    color: var(--tc-muted);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .row {
+    display: flex;
+    width: 100%;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 7px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+  }
+  .row:hover:enabled,
+  .history-row:hover { background: var(--tc-surface-hover); }
   .row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* What is on disk, below what the page is doing now and separated from it the way "Recent"
-     is. A row is three things — what it is, how long it is, and what may be done with it — and
-     the length has to stay in one place while the titles beside it vary in width. */
-  .history { padding: 8px 6px 10px; border-top: 1px solid #26292e; }
-  .history-row { gap: 6px; padding: 2px 6px; align-items: center; }
-  .history-row:hover { background: #1e2126; }
-  .history-open { flex: 1; min-width: 0; display: grid; gap: 0 10px; padding: 4px 0;
-                  grid-template-columns: minmax(0, 1fr) auto;
-                  grid-template-areas: "title length" "host when";
-                  border: 0; background: none; color: inherit; font: inherit;
-                  text-align: left; cursor: pointer; }
+
+  .history-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 5px; padding: 3px 5px;
+                 align-items: center; }
+  .history-open {
+    display: grid;
+    min-width: 0;
+    gap: 1px 10px;
+    padding: 5px 2px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "title length" "host when";
+    border: 0;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+  }
   .history-open > :nth-child(1) { grid-area: title; }
-  .history-open > :nth-child(2) { grid-area: host; overflow: hidden;
-                                  text-overflow: ellipsis; white-space: nowrap; }
+  .history-open > :nth-child(2) { grid-area: host; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .history-open > :nth-child(3) { grid-area: length; }
-  /* The right-hand column carries the length over the moment, both against the same edge: what
-     varies between rows is the title, and the two numbers stay where the eye left them. */
-  .history-open > :nth-child(3), .history-open > :nth-child(4) { text-align: right;
-                                                                 white-space: nowrap; }
+  .history-open > :nth-child(3),
+  .history-open > :nth-child(4) { text-align: right; white-space: nowrap; }
   .history-open > :nth-child(4) { grid-area: when; }
-  /* Pin and Delete: quiet enough not to compete with "Save all" above, and a pinned row says so
-     in colour — it is the one state of a recording the user set by hand. */
-  .pin, .quiet { padding: 3px 8px; border: 1px solid #3a3f47; border-radius: 6px;
-                 background: none; color: #9aa0a6; font: inherit; font-size: 11px;
-                 white-space: nowrap; cursor: pointer; }
-  .pin:hover, .quiet:hover { color: #e8eaed; }
-  /* One width for both words: pressing it must not move the row it is in, and "Pinned" is the
-     wider of the two. */
+
+  .pin,
+  .quiet {
+    min-height: 28px;
+    padding: 4px 8px;
+    border: 1px solid var(--tc-border-strong);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--tc-muted);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .pin:hover,
+  .quiet:hover { border-color: #5a5f6c; background: var(--tc-surface-hover); color: var(--tc-text); }
   .pin { min-width: 54px; text-align: center; }
-  .pin.on { border-color: #4c8dff; color: #4c8dff; }
-  /* The undo of a deletion: a strip under the rows rather than a dialog over them. It
-     stands where the row stood and leaves the list where it is. */
-  .toast { display: flex; gap: 8px; align-items: center; justify-content: space-between;
-           margin: 6px 6px 0; padding: 6px 8px; border-radius: 6px; background: #23262b; }
-  .toast span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
-  .toast button { padding: 3px 10px; border: 0; border-radius: 5px; background: #4c8dff;
-                  color: #0b0d10; font: inherit; font-size: 11px; font-weight: 600;
-                  cursor: pointer; }
-  /* Two rows of two: the switch for the site beside the pause for the page, and the volume in
-     use beside the way into the settings. */
-  .footer { display: grid; grid-template-columns: 1fr auto; gap: 8px 10px;
-            align-items: center; padding: 8px 12px 10px; border-top: 1px solid #26292e; }
-  .switch { display: flex; gap: 6px; align-items: center; min-width: 0; cursor: pointer; }
-  .switch input { margin: 0; accent-color: #4c8dff; }
+  .pin.on { border-color: var(--tc-accent); color: var(--tc-accent); }
+
+  .toast {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 7px 5px 0;
+    padding: 8px 9px;
+    border: 1px solid var(--tc-border);
+    border-radius: 8px;
+    background: var(--tc-surface-raised);
+  }
+  .toast span { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+  .toast button { min-height: 27px; padding: 3px 9px; border: 0; border-radius: 6px;
+                  background: var(--tc-accent); color: var(--tc-graphite); font-weight: 700; }
+
+  .footer {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px 12px;
+    align-items: center;
+    margin: 0 12px 12px;
+    padding: 12px;
+    border: 1px solid var(--tc-border);
+    border-radius: var(--tc-radius);
+    background: rgba(23, 24, 31, 0.78);
+  }
+  .switch { display: flex; align-items: center; gap: 8px; min-width: 0; cursor: pointer; }
+  .switch input {
+    position: relative;
+    width: 30px;
+    height: 18px;
+    margin: 0;
+    flex: 0 0 auto;
+    appearance: none;
+    border: 1px solid var(--tc-border-strong);
+    border-radius: 999px;
+    background: #292c34;
+  }
+  .switch input::before {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--tc-muted);
+    content: '';
+    transition: transform 120ms ease, background-color 120ms ease;
+  }
+  .switch input:checked { border-color: var(--tc-accent); background: rgba(183, 240, 63, 0.16); }
+  .switch input:checked::before { transform: translateX(12px); background: var(--tc-accent); }
   .switch span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .switch b { font-weight: 500; }
-  /* A shut switch is shut, and looks it: the label goes with the box it belongs to. */
-  .switch:has(input:disabled) { color: #6f757c; cursor: default; }
+  .switch b { font-weight: 650; }
+  .switch:has(input:disabled) { color: var(--tc-subtle); cursor: default; }
   .footer .quiet { justify-self: end; }
-  /* Why that switch decides nothing, across the whole width and under both its rows: it is a
-     sentence and not a label, and it points at the button standing beside it. */
   .footer .why { grid-column: 1 / -1; }
 </style>
 <body></body>

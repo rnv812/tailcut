@@ -49,6 +49,12 @@ const scene = (overrides: Partial<Scene> = {}): Scene => ({
 })
 
 describe('paintScene', () => {
+  it('uses the delivered brand accent for the selected cut', () => {
+    // Independent of the painter and of the palette table: a colour looked up from the same
+    // table it is testing would stay green if the editor drifted back to its old amber accent.
+    expect(PALETTE.fill['clip-selected']).toBe('#b7f03f')
+  })
+
   it('paints the background and the ruler before anything else', () => {
     const { calls } = paint(scene({ rects: [{ kind: 'gap', x: 0, y: 30, width: 10, height: 10 }] }))
 

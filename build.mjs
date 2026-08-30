@@ -60,6 +60,14 @@ export async function build({ dev = false, watch = false } = {}) {
   await cp('src/popup/popup.html', 'dist/popup/popup.html')
   await cp('src/options/options.html', 'dist/options/options.html')
   await cp('src/editor/editor.html', 'dist/editor/editor.html')
+  await mkdir('dist/assets/tailcut/icon', { recursive: true })
+  await mkdir('dist/assets/tailcut/svg', { recursive: true })
+  await mkdir('dist/shared', { recursive: true })
+  for (const size of [16, 32, 48, 128]) {
+    await cp(`assets/tailcut/icon/icon-${size}.png`, `dist/assets/tailcut/icon/icon-${size}.png`)
+  }
+  await cp('assets/tailcut/svg/mark-light.svg', 'dist/assets/tailcut/svg/mark-light.svg')
+  await cp('src/shared/theme.css', 'dist/shared/theme.css')
 
   if (watch) {
     await Promise.all(contexts.map((c) => c.watch()))

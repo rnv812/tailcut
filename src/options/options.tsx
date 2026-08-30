@@ -366,7 +366,20 @@ export function Options() {
 
   return (
     <main>
-      <h1>tailcut</h1>
+      <header class="page-head">
+        <div class="tc-brand">
+          <img
+            class="tc-brand-mark"
+            data-testid="brand-mark"
+            src="../assets/tailcut/svg/mark-light.svg"
+            alt="tailcut"
+          />
+          <div>
+            <h1>tailcut</h1>
+            <p>Settings</p>
+          </div>
+        </div>
+      </header>
 
       <Group title="Recording">
         {MODES.map((mode) => (

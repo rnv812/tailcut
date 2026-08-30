@@ -448,22 +448,30 @@ function OpenWorkbench({
   return (
     <div class="editor">
       <header class="head">
-        <div class="title" data-testid="title">
-          {page.title || 'Untitled'}
-        </div>
-        <div class="muted" data-testid="host">
-          {HOST(page.url)}
-        </div>
-        <div class="meta">
-          <span data-testid="duration">{duration(material.duration)}</span>
-          <span class="muted" data-testid="bytes">
-            {formatBytes(material.bytes)}
-          </span>
-          {/* The holes of the lane the cut follows, not of both lanes added up: one break of
-              the recording is one gap, however many tracks stopped for it. */}
-          <span class="muted" data-testid="gaps">
-            {derived.gaps.length === 1 ? '1 gap' : `${derived.gaps.length} gaps`}
-          </span>
+        <img
+          class="tc-brand-mark"
+          data-testid="brand-mark"
+          src="../assets/tailcut/svg/mark-light.svg"
+          alt="tailcut"
+        />
+        <div class="head-copy">
+          <div class="title" data-testid="title">
+            {page.title || 'Untitled'}
+          </div>
+          <div class="muted" data-testid="host">
+            {HOST(page.url)}
+          </div>
+          <div class="meta">
+            <span data-testid="duration">{duration(material.duration)}</span>
+            <span class="muted" data-testid="bytes">
+              {formatBytes(material.bytes)}
+            </span>
+            {/* The holes of the lane the cut follows, not of both lanes added up: one break of
+                the recording is one gap, however many tracks stopped for it. */}
+            <span class="muted" data-testid="gaps">
+              {derived.gaps.length === 1 ? '1 gap' : `${derived.gaps.length} gaps`}
+            </span>
+          </div>
         </div>
       </header>
 
