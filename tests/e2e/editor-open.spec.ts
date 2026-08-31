@@ -24,6 +24,7 @@ test('Edit opens an editor tab over the material of the page', async () => {
       const rect = (selector: string) => document.querySelector(selector)!.getBoundingClientRect()
       const row = rect('.transport')
       const play = rect('[data-testid="play"]')
+      const playGlyph = rect('[data-testid="play"] .tc-icon')
       const video = rect('video')
       const controls = [...document.querySelectorAll<HTMLElement>('.transport button, .transport input')]
       const controlCenters = controls.map((control) => {
@@ -33,6 +34,7 @@ test('Edit opens an editor tab over the material of the page', async () => {
       return {
         rowCenter: row.left + row.width / 2,
         playCenter: play.left + play.width / 2,
+        playGlyphOffset: playGlyph.left + playGlyph.width / 2 - (play.left + play.width / 2),
         videoCenter: video.left + video.width / 2,
         controlCenterSpread: Math.max(...controlCenters) - Math.min(...controlCenters),
         controlsFitOneLine: controls.every((control) => {
@@ -44,6 +46,7 @@ test('Edit opens an editor tab over the material of the page', async () => {
     expect(transport.controlsFitOneLine).toBe(true)
     expect(Math.abs(transport.playCenter - transport.rowCenter)).toBeLessThanOrEqual(1)
     expect(Math.abs(transport.playCenter - transport.videoCenter)).toBeLessThanOrEqual(1)
+    expect(transport.playGlyphOffset).toBeCloseTo(-1, 1)
     expect(transport.controlCenterSpread).toBeLessThanOrEqual(1)
 
     await expect(editor.getByTestId('return-source')).toBeVisible()
@@ -138,6 +141,27 @@ test('a clip is born by the Export settings the tab read when it opened', async 
     await editor.keyboard.press('i')
     await expect(editor.getByTestId('clip')).toHaveCount(1)
     await expect(editor.getByTestId('name-c1')).toHaveValue('tailcut.test at 00.00')
+
+    const removeGeometry = await editor.evaluate(() => {
+      const box = (selector: string) => document.querySelector(selector)!.getBoundingClientRect()
+      const button = box('[data-testid="remove-c1"]')
+      const glyph = box('[data-testid="remove-c1"] svg')
+      const name = box('[data-testid="name-c1"]')
+      return {
+        button: { width: button.width, height: button.height },
+        glyph: { width: glyph.width, height: glyph.height },
+        centerOffset: {
+          x: glyph.left + glyph.width / 2 - (button.left + button.width / 2),
+          y: glyph.top + glyph.height / 2 - (button.top + button.height / 2),
+        },
+        nameGap: button.left - name.right,
+      }
+    })
+    expect(removeGeometry.button).toEqual({ width: 32, height: 32 })
+    expect(removeGeometry.glyph).toEqual({ width: 16, height: 16 })
+    expect(Math.abs(removeGeometry.centerOffset.x)).toBeLessThanOrEqual(1)
+    expect(Math.abs(removeGeometry.centerOffset.y)).toBeLessThanOrEqual(1)
+    expect(removeGeometry.nameGap).toBeGreaterThanOrEqual(8)
   } finally {
     await context.close()
   }

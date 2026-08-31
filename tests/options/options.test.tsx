@@ -525,41 +525,24 @@ describe('the settings page', () => {
     expect(textAt('buffer-cost'), 'a buffer that fits was called short').not.toContain('will be kept')
   })
 
-  it('enables every export setting and describes the formats it can write', async () => {
+  it('offers only the output format and keeps encoder internals out of settings', async () => {
     await draw()
-    await openAdvanced('Advanced export settings')
 
-    for (const id of ['format', 'codec', 'quality', 'rewrite-head']) {
-      expect(field(id).disabled, `${id} is still waiting for work that now exists`).toBe(false)
-    }
-    expect(textAt('export-note')).not.toContain('have nothing to act on yet')
-    expect(textAt('export-note')).toContain('Animated WebP has no sound')
+    expect(field('format').disabled).toBe(false)
+    expect(document.querySelector('[data-testid="codec"]')).toBeNull()
+    expect(document.querySelector('[data-testid="quality"]')).toBeNull()
+    expect(document.querySelector('[data-testid="rewrite-head"]')).toBeNull()
+    expect(document.querySelector('[data-testid="export-note"]')).toBeNull()
   })
 
-  it('shows the exact stored values and offers no format the build cannot write', async () => {
-    // A <select> whose value is none of its options shows the first one instead, and says
-    // nothing about it. The default codec is `auto`; an earlier HEVC / H.264 list incorrectly
-    // displayed "HEVC, falling back to H.264" even when the runtime would choose H.264.
-    // Disabled is not a licence to say something else.
+  it('offers exactly MP4 and Animated WebP', async () => {
     await draw()
-    await openAdvanced('Advanced export settings')
 
     expect(field('format').value).toBe(DEFAULTS.export.format)
-    expect(field('codec').value).toBe(DEFAULTS.export.codec)
-    expect(field('quality').value).toBe(DEFAULTS.export.quality)
-
-    // And every option offered is a value this build knows: a list still offering WebM would put
-    // a format into storage that `merge` throws away on the next read.
-    const values = (testId: string): string[] =>
-      [...field(testId).querySelectorAll('option')].map((option) => option.value)
-
-    expect(values('format')).toEqual(['mp4', 'webp'])
-    expect(values('codec')).toEqual(['auto', 'hevc', 'h264'])
-    for (const id of ['format', 'codec', 'quality'] as const) {
-      expect(values(id), `${id} offers something it cannot store`).toContain(
-        String(DEFAULTS.export[id]),
-      )
-    }
+    expect([...field('format').querySelectorAll('option')].map((option) => option.value)).toEqual([
+      'mp4',
+      'webp',
+    ])
   })
 
   it('stores a changed export format', async () => {
@@ -569,35 +552,6 @@ describe('the settings page', () => {
 
     expect(field('format').value).toBe('webp')
     expect(written.at(-1)!.export.format).toBe('webp')
-  })
-
-  it.each(['auto', 'hevc', 'h264'] as const)('stores the %s codec choice', async (codec) => {
-    await draw()
-    select('codec', codec)
-    await flush()
-
-    expect(field('codec').value).toBe(codec)
-    expect(written.at(-1)!.export.codec).toBe(codec)
-  })
-
-  it('stores whether the clip head is rewritten', async () => {
-    await draw()
-    await openAdvanced('Advanced export settings')
-    check('rewrite-head', true)
-    await flush()
-
-    expect(field('rewrite-head').checked).toBe(true)
-    expect(written.at(-1)!.export.rewriteHead).toBe(true)
-  })
-
-  it('stores the quality used for re-encoding', async () => {
-    await draw()
-    await openAdvanced('Advanced export settings')
-    select('quality', 'low')
-    await flush()
-
-    expect(field('quality').value).toBe('low')
-    expect(written.at(-1)!.export.quality).toBe('low')
   })
 
   it('lets through the two export settings this stage can keep', async () => {

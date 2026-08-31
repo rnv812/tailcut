@@ -321,12 +321,14 @@ export async function exportFirstClip(editor: Page): Promise<string> {
   await typeInto(editor, 'playhead-field', '00:00:00:12')
   await editor.keyboard.press('i')
   await expect(editor.getByTestId('clip')).toHaveCount(1)
-  await expect(editor.getByTestId('export')).toBeEnabled()
+  await expect(editor.getByTestId('export-selected')).toBeEnabled()
 
   await typeInto(editor, 'out-c1', '00:00:02:12')
   await expect(editor.getByTestId('out-c1')).toHaveValue('00:00:02:12')
 
-  const [saved] = await collectDownloads(editor, 1, () => editor.getByTestId('export').click())
+  const [saved] = await collectDownloads(editor, 1, () =>
+    editor.getByTestId('export-selected').click(),
+  )
   await expect(editor.getByTestId('job-state').first()).toHaveText('Saved')
 
   return saved!.file
@@ -334,7 +336,8 @@ export async function exportFirstClip(editor: Page): Promise<string> {
 
 export interface ExportClipOptions {
   clipId?: string
-  mode?: 'original' | 'optimize'
+  /** Force the automatic MP4 frame path with a visible full-frame crop. */
+  encode?: boolean
   format?: 'mp4' | 'webp'
   crop?: { x: number; y: number; width: number; height: number }
   timeoutMs?: number
@@ -394,6 +397,20 @@ export async function placeCrop(
   await editor.mouse.up()
 }
 
+/** Forces automatic encoding without changing the visible frame dimensions. */
+export async function placeFullFrameCrop(editor: Page): Promise<void> {
+  const text = await editor.getByTestId('crop-geometry').textContent()
+  const matched = text?.match(/(\d+)\s*×\s*(\d+)/)
+  expect(matched, 'the editor did not state the source geometry').not.toBeNull()
+  await placeCrop(editor, {
+    x: 0,
+    y: 0,
+    width: Number(matched![1]),
+    height: Number(matched![2]),
+  })
+  await expect(editor.getByTestId('crop-reset')).toBeEnabled()
+}
+
 /** Configures the selected clip, exports it, and waits through a real re-encode and download. */
 export async function exportClipWith(
   editor: Page,
@@ -401,14 +418,13 @@ export async function exportClipWith(
 ): Promise<ExportedClip> {
   const clipId = options.clipId ?? 'c1'
 
-  // Mode first: a crop and WebP both force the frame path and disable this select.
-  if (options.mode) await editor.getByTestId(`mode-${clipId}`).selectOption(options.mode)
+  if (options.encode) await placeFullFrameCrop(editor)
   if (options.crop) await placeCrop(editor, options.crop)
   if (options.format) await editor.getByTestId(`format-${clipId}`).selectOption(options.format)
 
   // Every geometry change starts a fresh codec probe. A click during that answer is deliberately
   // refused by the UI, so wait again after all controls have settled.
-  await expect(editor.getByTestId('export')).toBeEnabled({ timeout: 15_000 })
+  await expect(editor.getByTestId('export-selected')).toBeEnabled({ timeout: 15_000 })
   await options.beforeExport?.(editor)
 
   const before = await editor.getByTestId('job').count()
@@ -434,7 +450,7 @@ export async function exportClipWith(
   const [saved] = await collectDownloads(
     editor,
     1,
-    () => editor.getByTestId('export').click(),
+    () => editor.getByTestId('export-selected').click(),
     options.timeoutMs ?? 180_000,
   )
   await expect(editor.getByTestId('job-state').nth(before)).toHaveText('Saved')

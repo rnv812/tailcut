@@ -10,6 +10,7 @@ import {
   exportClipWith,
   launchWithExtension,
   placeCrop,
+  placeFullFrameCrop,
   probeFile,
   routeLocal,
   serveLocal,
@@ -366,7 +367,7 @@ function streamStarts(file: string): Map<TrackKind, number> {
 async function timingOf(from: string, out: string): Promise<{ firstVideoPts: number; skew: number }> {
   const { context, editor } = await openClip(from, out)
   try {
-    const saved = await exportClipWith(editor, { mode: 'optimize' })
+    const saved = await exportClipWith(editor, { encode: true })
     const firstVideoPts = packetPts(saved.file)[0]!
     const starts = streamStarts(saved.file)
     return {
@@ -393,13 +394,13 @@ async function cropShownBy(editor: Page): Promise<{ x: number; y: number; width:
   })
 }
 
-test('sends an uncropped Optimize clip through the frame path', async () => {
+test('copies an uncropped MP4 without entering the frame path', async () => {
   test.setTimeout(180_000)
   const { context, editor } = await openClip('00:00:00:00', '00:00:02:00')
 
   try {
-    const saved = await exportClipWith(editor, { mode: 'optimize' })
-    expect(saved.progress, 'Optimize never reported work in frames').not.toHaveLength(0)
+    const saved = await exportClipWith(editor)
+    expect(saved.progress, 'an uncropped MP4 unexpectedly entered the frame path').toHaveLength(0)
 
     const file = probeFile(saved.file)
     expect(file.streams.map((stream) => [stream.codec_type, stream.codec_name])).toEqual([
@@ -445,7 +446,7 @@ test('decodes AV1 when dependency metadata omits the non-sync bit', async () => 
     await typeInto(editor, 'playhead-field', '00:00:01:05')
     await editor.keyboard.press('i')
 
-    const saved = await exportClipWith(editor, { mode: 'optimize' })
+    const saved = await exportClipWith(editor, { encode: true })
     expect(saved.progress, 'AV1 never reached the decoder and encoder').not.toHaveLength(0)
     expect(probeFile(saved.file).streams[0]!.codec_name).toBe('h264')
   } finally {
@@ -487,7 +488,7 @@ test('decodes VP9 when HLS metadata leaves every sample dependency unknown', asy
     await typeInto(editor, 'playhead-field', '00:00:01:00')
     await editor.keyboard.press('i')
 
-    const saved = await exportClipWith(editor, { mode: 'optimize' })
+    const saved = await exportClipWith(editor, { encode: true })
     expect(saved.progress, 'VP9 never reached the decoder and encoder').not.toHaveLength(0)
     const audit = await editor.evaluate(() =>
       (window as unknown as { tcVp9KeyAudit: { chunks: number; falseKeys: number } }).tcVp9KeyAudit,
@@ -537,10 +538,7 @@ test('encodes a clip entirely inside the retained run after a media gap', async 
     await typeInto(editor, 'out-c1', '00:00:05:12')
 
     const saved = await exportClipWith(editor, {
-      mode: 'optimize',
-      beforeExport: async (page) => {
-        await expect(page.getByTestId('cost-c1')).toContainText('Re-encoded as')
-      },
+      encode: true,
     })
     const audit = await editor.evaluate(() =>
       (window as unknown as {
@@ -577,7 +575,7 @@ test('cuts the selected pixels instead of scaling the whole picture into the cro
   const { context, editor } = await openClip('00:00:02:00', '00:00:04:00')
 
   try {
-    const original = await exportClipWith(editor, { mode: 'original' })
+    const original = await exportClipWith(editor)
     const cropped = await exportClipWith(editor, {
       crop: { x: 48, y: 28, width: 160, height: 90 },
     })
@@ -667,14 +665,15 @@ test('cancels the real encoder after Writing while a copy beside it still saves'
 
   try {
     await splitAt(editor, '00:00:02:00', 2)
-    await editor.getByTestId('mode-c2').selectOption('optimize')
-    await expect(editor.getByTestId('export')).toBeEnabled()
+    await editor.getByTestId('clip-go-c2').click()
+    await placeFullFrameCrop(editor)
+    await expect(editor.getByTestId('export-all')).toBeEnabled()
 
     let downloads = 0
     editor.on('download', () => {
       downloads += 1
     })
-    await editor.getByTestId('export').click()
+    await editor.getByTestId('export-all').click()
 
     const encodeRow = editor.getByTestId('job').nth(1)
     await expect(encodeRow.getByTestId('job-state')).toHaveText('Writing')
@@ -705,15 +704,13 @@ test('runs three copies beside one encode without either lane blocking the other
     await splitAt(editor, '00:00:04:00', 5)
     await splitAt(editor, '00:00:05:00', 6)
     await editor.getByTestId('clip-go-c5').click()
-    await expect(editor.getByTestId('mode-c5')).toBeVisible()
-    await editor.getByTestId('mode-c5').selectOption('optimize')
+    await placeFullFrameCrop(editor)
     await editor.getByTestId('clip-go-c6').click()
-    await expect(editor.getByTestId('mode-c6')).toBeVisible()
-    await editor.getByTestId('mode-c6').selectOption('optimize')
-    await expect(editor.getByTestId('export')).toBeEnabled()
+    await placeFullFrameCrop(editor)
+    await expect(editor.getByTestId('export-all')).toBeEnabled()
 
     await observeLanePeaks(editor)
-    await collectDownloads(editor, 6, () => editor.getByTestId('export').click(), 180_000)
+    await collectDownloads(editor, 6, () => editor.getByTestId('export-all').click(), 180_000)
     await expect(editor.getByTestId('job')).toHaveCount(6)
     await expect(editor.getByTestId('job-state')).toHaveText(Array(6).fill('Saved'))
 
@@ -723,7 +720,7 @@ test('runs three copies beside one encode without either lane blocking the other
   }
 })
 
-test('drops an unsupported crop and copies without asking the encoder again', async () => {
+test('resets an unsupported crop and copies the uncropped MP4', async () => {
   test.setTimeout(180_000)
   const { context, editor } = await openClip(
     '00:00:00:00',
@@ -734,14 +731,10 @@ test('drops an unsupported crop and copies without asking the encoder again', as
   try {
     await placeCrop(editor, { x: 48, y: 28, width: 160, height: 90 })
     await expect(editor.getByTestId('crop-geometry')).toHaveText('160 × 90')
-    await expect(editor.getByTestId('cost-c1')).toContainText(
-      'no encoder for 160 × 90 at 10 fps',
-    )
 
-    await editor.getByTestId('drop-crop-c1').click()
+    await editor.getByTestId('crop-reset').click()
     await expect(editor.getByTestId('crop-geometry')).toHaveText('256 × 144')
-    await expect(editor.getByTestId('mode-c1')).toHaveValue('original')
-    await expect(editor.getByTestId('cost-c1')).toContainText('Copied from the recording as it is')
+    await expect(editor.getByTestId('estimate')).toContainText('copied from the recording')
 
     const saved = await exportClipWith(editor, { timeoutMs: 60_000 })
     expect(probeFile(saved.file).streams.map((stream) => stream.codec_name)).toEqual(['h264', 'aac'])

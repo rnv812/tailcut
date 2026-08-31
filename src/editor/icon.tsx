@@ -80,7 +80,7 @@ export function Icon({ name }: { name: IconName }) {
   })()
 
   return (
-    <svg class="tc-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <svg class="tc-icon" data-icon={name} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
         {drawing}
       </g>

@@ -187,7 +187,7 @@ test('keeps the visible editor painting while real codecs consume a minute', asy
     await typeInto(editor, 'out-c1', '00:00:10:00')
     await resetProbe(editor)
     const tenStarted = Date.now()
-    await exportClipWith(editor, { mode: 'optimize', timeoutMs: 180_000 })
+    await exportClipWith(editor, { encode: true, timeoutMs: 180_000 })
     const ten = await probeIn(editor)
     console.log('encode-cost 10 seconds', { ...ten, elapsedMs: Date.now() - tenStarted })
 
@@ -195,7 +195,7 @@ test('keeps the visible editor painting while real codecs consume a minute', asy
     await resetProbe(editor)
     await startFrames(editor)
     const minuteStarted = Date.now()
-    await exportClipWith(editor, { mode: 'optimize', timeoutMs: 180_000 })
+    await exportClipWith(editor, { encode: true, timeoutMs: 180_000 })
     const minute = await stopFrames(editor)
     console.log('encode-cost 60 seconds', { ...minute, elapsedMs: Date.now() - minuteStarted })
 

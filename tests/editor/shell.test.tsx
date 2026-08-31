@@ -3,13 +3,14 @@ import { describe, it, expect, afterEach, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { render } from 'preact'
 import { Shell, type EditorState } from '../../src/editor/shell'
-import { selectClipFromBin } from '../../src/editor/workbench'
+import { automaticClip, selectClipFromBin } from '../../src/editor/workbench'
 import { planSnapshot, type SnapshotSource } from '../../src/core/snapshot/build'
 import { SnapshotReader } from '../../src/core/snapshot/read'
 import { materialOf } from '../../src/core/snapshot/material'
 import { FrameTable } from '../../src/core/timeline/frames'
 import { buildPreview, type Preview } from '../../src/editor/source/preview'
 import { DEFAULTS } from '../../src/shared/settings'
+import { forcesEncoder } from '../../src/core/edit/clip'
 import { METRICS, rowTop } from '../../src/core/timeline/layout'
 import { concatBytes } from '../../src/core/iso/writer'
 import { parseInit } from '../../src/core/iso/init'
@@ -461,8 +462,8 @@ describe('the editor shell', () => {
       'the visible second-representation zone cannot be cut',
     ).toHaveLength(1)
 
-    await until(() => !button('export').disabled, 'the selected representation was not indexed')
-    button('export').click()
+    await until(() => !button('export-selected').disabled, 'the selected representation was not indexed')
+    button('export-selected').click()
     await until(() => text('job-state') === 'Saved', 'the selected representation could not export')
     expect(exportHarness.openedTracks.at(-1)).toBe('v-short')
   })
@@ -582,7 +583,7 @@ describe('the editor shell', () => {
     expect(document.querySelector('[data-testid="crop-geometry"]')).toBeNull()
   })
 
-  it('names and prices the geometry the crop will actually encode', async () => {
+  it('automatically prepares the geometry a crop will encode', async () => {
     await mount({ ...(await cuttable()), preview: previewOf({ width: 320, height: 240 }) })
     press('i')
     await settled()
@@ -591,20 +592,14 @@ describe('the editor shell', () => {
     await settled()
 
     expect(text('crop-geometry')).toBe('134 × 240')
-    await until(
-      () => text('cost-c1').includes('no encoder for 134 × 240'),
-      `the crop verdict never arrived: ${text('cost-c1') || 'no cost line'}`,
-    )
-    expect(button('export').disabled).toBe(false)
-    expect(button('export').textContent).toBe('Export 1 clip')
+    await until(() => exportHarness.codecCalls.length > 0, 'the crop geometry was never probed')
+    expect(exportHarness.codecCalls[0]).toMatchObject({ width: 134, height: 240, framerate: 25 })
+    expect(button('export-selected').disabled).toBe(false)
 
     button('crop-reset').click()
-    await until(
-      () => text('cost-c1').includes('Copied from the recording'),
-      `the reset verdict never arrived: ${text('cost-c1') || 'no cost line'}`,
-    )
+    await settled()
     expect(text('crop-geometry')).toBe('320 × 240')
-    expect(button('export').textContent).toBe('Export 1 clip')
+    expect(text('estimate')).toContain('copied from the recording')
   })
 
   it('applies the selected crop to every clip through the shared model', async () => {
@@ -622,9 +617,7 @@ describe('the editor shell', () => {
     document.querySelector<HTMLElement>('[data-id="c1"]')!.click()
     await settled()
     expect(text('crop-geometry')).toBe('404 × 720')
-    expect(document.querySelector<HTMLSelectElement>('[data-testid="mode-c1"]')!.disabled).toBe(
-      true,
-    )
+    expect(document.querySelector('[data-testid="mode-c1"]')).toBeNull()
   })
 
   it('keeps a crop dragged over the player in the shared model', async () => {
@@ -668,7 +661,7 @@ describe('the editor shell', () => {
     expect(exportHarness.surfaceCalls).toBe(0)
   })
 
-  it('probes every unique MP4 geometry in the document, including unselected clips', async () => {
+  it('probes the cropped MP4 geometry without an Optimize switch', async () => {
     exportHarness.codecAnswer = true
     await mount({ ...(await cuttable()), preview: previewOf({ width: 320, height: 240 }) })
 
@@ -678,13 +671,12 @@ describe('the editor shell', () => {
     press('s')
     await settled()
 
-    select('mode-c1', 'optimize')
     button('crop-ratio-1:1').click()
-    await until(() => exportHarness.codecCalls.length === 2, 'the document geometries were not probed')
+    await until(() => exportHarness.codecCalls.length === 1, 'the crop geometry was not probed')
 
     expect(
       exportHarness.codecCalls.map(({ width, height, framerate }) => `${width}x${height}@${framerate}`),
-    ).toEqual(['320x240@25', '240x240@25'])
+    ).toEqual(['240x240@25'])
   })
 
   it('keeps one pending codec question for the life of the tab', async () => {
@@ -692,7 +684,7 @@ describe('the editor shell', () => {
     await mount({ ...(await cuttable()), preview: previewOf({ width: 320, height: 240 }) })
     press('i')
     await settled()
-    select('mode-c1', 'optimize')
+    button('crop-ratio-1:1').click()
     await until(() => exportHarness.codecCalls.length > 0, 'the codec was never asked')
 
     const sound = document.querySelector<HTMLInputElement>('[data-testid="sound-c1"]')!
@@ -723,159 +715,58 @@ describe('the editor shell', () => {
     expect(exportHarness.surfaceCalls).toBe(2)
   })
 
-  it('passes codec and quality to the path and feeds completed pace back into its estimate', async () => {
+  it('automatically uses the safe internal encoder for a cropped MP4', async () => {
     exportHarness.codecAnswer = true
     exportHarness.skipSave = true
     await mount({
       ...(await cuttable()),
       preview: previewOf({ width: 320, height: 240 }),
-      options: { export: { ...DEFAULTS.export, codec: 'h264', quality: 'low' } },
+      options: {
+        export: { ...DEFAULTS.export, codec: 'hevc', quality: 'low', rewriteHead: true },
+      },
     })
     press('i')
     await settled()
-    select('mode-c1', 'optimize')
-    await until(
-      () => exportHarness.codecCalls.length > 0 && text('cost-c1').includes('Re-encoded as'),
-      'the codec answer never reached the selected clip',
-    )
+    button('crop-ratio-1:1').click()
+    await until(() => exportHarness.codecCalls.length > 0, 'the crop was not offered to the encoder')
 
-    expect(text('cost-c1')).toContain('The first clip will show how fast this machine is.')
-    button('export').click()
+    button('export-selected').click()
     await until(() => text('job-state') === 'Saved', 'the controlled encode did not finish')
-    await until(() => text('cost-c1').includes('About 2 s.'), 'the measured pace did not reach the estimate')
 
     expect(exportHarness.codecCalls[0]!.codec).toMatch(/^avc1/)
     expect(exportHarness.encodeRequests[0]!.path.choice).toMatchObject({
       kind: 'h264-hw',
-      quantizer: 33,
+      quantizer: 22,
     })
   })
 
-  it('waits for every MP4 geometry but never asks the MP4 ladder about WebP', async () => {
+  it('keeps WebP outside the MP4 codec ladder', async () => {
     exportHarness.codecAnswer = 'pending'
-    await mount({ ...(await ready()), preview: previewOf() })
+    await mount({ ...(await cuttable()), preview: previewOf({ width: 320, height: 240 }) })
     press('i')
-    press('ArrowRight')
-    press('ArrowRight')
-    press('s')
     await settled()
 
-    // Split selects c2. Change the unselected c1 directly: the controls stop their events from
-    // selecting the row, and the batch still has to wait for work outside the selected one.
-    const mode = document.querySelector<HTMLSelectElement>('[data-testid="mode-c1"]')!
-    mode.value = 'optimize'
-    mode.dispatchEvent(new Event('change', { bubbles: true }))
+    select('format-c1', 'webp')
     await settled()
-
-    expect(button('export').textContent).toBe('Checking the encoder…')
-
-    const format = document.querySelector<HTMLSelectElement>('[data-testid="format-c1"]')!
-    format.value = 'webp'
-    format.dispatchEvent(new Event('change', { bubbles: true }))
-    await settled()
-    expect(button('export').textContent).toBe('Export 2 clips')
+    expect(exportHarness.codecCalls).toEqual([])
+    expect(button('export-selected').disabled).toBe(false)
   })
 
-  it('uses rewrite-head for both the selected verdict and the whole batch', async () => {
-    await mount({
-      ...(await cuttable()),
-      preview: previewOf({ width: 320, height: 240 }),
-      options: { export: { ...DEFAULTS.export, rewriteHead: false } },
+  it('normalizes a legacy optimized clip to automatic copy without losing edits', () => {
+    const legacy = automaticClip({
+      id: 'legacy',
+      name: 'Legacy',
+      in: 1,
+      out: 2,
+      representation: 'video:avc1:320x240',
+      sound: false,
+      crop: null,
+      format: 'mp4',
+      mode: 'optimize',
     })
-    press('ArrowRight')
-    press('i')
-    await until(
-      () => text('cost-c1').includes('Copied from the recording'),
-      `the copy verdict never arrived: ${text('cost-c1') || 'no cost line'}`,
-    )
-    expect(button('export').textContent).toBe('Export 1 clip')
 
-    render(null, document.body)
-    document.body.innerHTML = ''
-    await mount({
-      ...(await cuttable()),
-      preview: previewOf({ width: 320, height: 240 }),
-      options: { export: { ...DEFAULTS.export, rewriteHead: true } },
-    })
-    press('ArrowRight')
-    press('i')
-    await until(
-      () => text('cost-c1').includes('no encoder for 320 × 240'),
-      `the rewrite verdict never arrived: ${text('cost-c1') || 'no cost line'}`,
-    )
-
-    expect(button('export').disabled).toBe(false)
-    expect(button('export').textContent).toBe('Export 1 clip')
-  })
-
-  it('applies live rewrite settings without replacing the edit document', async () => {
-    exportHarness.codecAnswer = true
-    const opened = {
-      ...(await cuttable()),
-      preview: previewOf({ width: 320, height: 240 }),
-      options: { export: { ...DEFAULTS.export, rewriteHead: true } },
-    }
-    await mount(opened)
-    press('ArrowRight')
-    press('i')
-    await until(
-      () => text('cost-c1').includes('Re-encoded as'),
-      `the initial rewrite verdict never arrived: ${text('cost-c1') || 'no cost line'}`,
-    )
-
-    show({
-      ...opened,
-      options: { export: { ...DEFAULTS.export, rewriteHead: false } },
-    })
-    await until(
-      () => text('cost-c1').includes('Copied from the recording'),
-      `the live rewrite setting never reached the clip: ${text('cost-c1') || 'no cost line'}`,
-    )
-    button('new-clip').click()
-    await settled()
-
-    expect(document.querySelectorAll('[data-testid="clip"]')).toHaveLength(2)
-    expect(document.querySelector<HTMLInputElement>('[data-testid="in-c1"]')!.value).toBe(
-      '00:00:00:01',
-    )
-  })
-
-  it('re-probes a live codec and quality setting for the existing clip', async () => {
-    exportHarness.codecAnswer = true
-    const opened = {
-      ...(await cuttable()),
-      preview: previewOf({ width: 320, height: 240 }),
-      options: {
-        export: { ...DEFAULTS.export, codec: 'h264' as const, quality: 'high' as const },
-      },
-    }
-    await mount(opened)
-    press('i')
-    await settled()
-    select('mode-c1', 'optimize')
-    await until(() => exportHarness.codecCalls.length > 0, 'the initial codec was never asked')
-    expect(exportHarness.codecCalls[0]!.codec).toMatch(/^avc1/)
-    const before = exportHarness.codecCalls.length
-
-    show({
-      ...opened,
-      options: {
-        export: { ...DEFAULTS.export, codec: 'hevc', quality: 'low' },
-      },
-    })
-    await until(
-      () => exportHarness.codecCalls.length > before,
-      'the changed codec was never asked',
-    )
-
-    expect(exportHarness.encodeIoCalls).toBe(1)
-    expect(exportHarness.codecCalls[before]!.codec).toMatch(/^hev1/)
-    button('export').click()
-    await until(() => exportHarness.encodeRequests.length > 0, 'the changed choice was not exported')
-    expect(exportHarness.encodeRequests[0]!.path.choice).toMatchObject({
-      kind: 'hevc-hw',
-      quantizer: 33,
-    })
+    expect(legacy).toMatchObject({ mode: 'original', in: 1, out: 2, crop: null, sound: false })
+    expect(forcesEncoder(legacy, false, false)).toBe(false)
   })
 
   it('answers the keyboard from the tab and not from the player', async () => {
@@ -1291,7 +1182,8 @@ describe('the editor shell', () => {
       // The panel is up before the recording has been read, and says which of the two it is
       // waiting on: there is no clip yet, and there is nothing indexed to cut one out of.
       expect(document.querySelector('[data-testid="export-panel"]')).not.toBeNull()
-      expect(button('export').disabled).toBe(true)
+      expect(button('export-selected').disabled).toBe(true)
+      expect(button('export-all').disabled).toBe(true)
       expect(text('export-note')).toContain('Reading the recording')
 
       // The note goes when the index is there; the button stays down, because a recording with
@@ -1300,19 +1192,20 @@ describe('the editor shell', () => {
         () => document.querySelector('[data-testid="export-note"]') === null,
         'the recording was never indexed',
       )
-      expect(button('export').textContent).toBe('Export 0 clips')
-      expect(button('export').disabled).toBe(true)
+      expect(button('export-all').textContent).toBe('Export all (0)')
+      expect(button('export-all').disabled).toBe(true)
 
       press('i')
       await settled()
-      expect(button('export').disabled).toBe(false)
+      expect(button('export-selected').disabled).toBe(false)
+      expect(button('export-all').disabled).toBe(false)
 
       // The clip the press made reaches the panel, and its weight is quoted from the same plan
       // the export is about to run.
-      expect(button('export').textContent).toBe('Export 1 clip')
+      expect(button('export-selected').textContent).toBe('Export selected clip')
       expect(text('estimate')).toMatch(/about \d/)
 
-      button('export').click()
+      button('export-selected').click()
       await until(
         () => text('job-state') === 'Saved',
         `the export never finished: ${text('job-state') || 'no row at all'}`,
@@ -1324,6 +1217,31 @@ describe('the editor shell', () => {
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+
+  it('exports only the selection or the complete clip list from the two explicit actions', async () => {
+    exportHarness.skipSave = true
+    await mount({ ...(await cuttable()), preview: previewOf() })
+    press('i')
+    press('ArrowRight')
+    press('ArrowRight')
+    press('s')
+    await settled()
+
+    expect(document.querySelectorAll('[data-testid="clip"]')).toHaveLength(2)
+    await until(() => !button('export-selected').disabled, 'selected export never became ready')
+    button('export-selected').click()
+    await until(
+      () => document.querySelectorAll('[data-testid="job"]').length === 1,
+      'selected export did not enqueue exactly one clip',
+    )
+
+    await until(() => !button('export-all').disabled, 'batch export never became ready')
+    button('export-all').click()
+    await until(
+      () => document.querySelectorAll('[data-testid="job"]').length === 3,
+      'batch export did not enqueue both clips',
+    )
   })
 
   it('leaves a text box its own letters, mounted in the tab as it is', async () => {

@@ -4,7 +4,6 @@ import { render } from 'preact'
 import type { Clip } from '../../src/core/edit/clip'
 import type { EditContext } from '../../src/core/edit/context'
 import type { Doc } from '../../src/core/edit/project'
-import type { Estimate } from '../../src/core/encode/estimate'
 import { Clips } from '../../src/editor/inspector/clips'
 import { ctx } from '../core/edit-fixture'
 
@@ -35,7 +34,6 @@ const show = async (
   doc: Doc,
   selectedId: string | null = 'c1',
   material: EditContext = ctx,
-  estimate: Estimate | null = null,
 ) => {
   const dispatch = vi.fn()
   render(
@@ -45,7 +43,6 @@ const show = async (
       selectedId={selectedId}
       playhead={7}
       fps={25}
-      estimate={estimate}
       dispatch={dispatch}
     />,
     host,
@@ -64,35 +61,6 @@ const at = (id: string): HTMLInputElement => host.querySelector<HTMLInputElement
 
 const selectAt = (id: string): HTMLSelectElement =>
   host.querySelector<HTMLSelectElement>(`[data-testid="${id}"]`)!
-
-const GEOMETRY = { width: 640, height: 360, framerate: 25 }
-
-const encoded = (
-  over: Partial<Extract<Estimate, { kind: 'encode' }>> = {},
-): Extract<Estimate, { kind: 'encode' }> => ({
-  kind: 'encode',
-  rung: 'h264-hw',
-  geometry: GEOMETRY,
-  frames: 100,
-  seconds: 2.1,
-  bytes: null,
-  sourceCodec: 'avc1',
-  inflates: false,
-  sourceBytes: 4_200_000,
-  ...over,
-})
-
-const webp = (
-  over: Partial<Extract<Estimate, { kind: 'webp' }>> = {},
-): Extract<Estimate, { kind: 'webp' }> => ({
-  kind: 'webp',
-  geometry: GEOMETRY,
-  frames: 60,
-  seconds: null,
-  bytes: null,
-  sourceBytes: 4_200_000,
-  ...over,
-})
 
 const type = async (id: string, text: string): Promise<void> => {
   const input = at(id)
@@ -184,8 +152,14 @@ describe('Clips', () => {
 
     const output = card.querySelector('[data-testid="clip-output-c1"]')!
     expect(output.querySelector('[data-testid="format-c1"]')).not.toBeNull()
-    expect(output.querySelector('[data-testid="mode-c1"]')).not.toBeNull()
+    expect(output.querySelector('[data-testid="mode-c1"]')).toBeNull()
     expect(output.querySelector('[data-testid="sound-c1"]')).not.toBeNull()
+    expect(card.querySelector('[data-testid="cost-c1"]')).toBeNull()
+
+    const remove = card.querySelector<HTMLButtonElement>('[data-testid="remove-c1"]')!
+    expect(remove.classList.contains('tc-clip-remove')).toBe(true)
+    expect(remove.querySelector('svg')).not.toBeNull()
+    expect(remove.getAttribute('aria-label')).toBe('Remove clip')
   })
 
   it('renames as the name is typed, and refuses to send an empty one', async () => {
@@ -225,7 +199,7 @@ describe('Clips', () => {
     expect(at('sound-c1').checked).toBe(false)
   })
 
-  it('changes the format and video mode without also selecting the row', async () => {
+  it('changes the format without exposing an encode mode or selecting the row', async () => {
     const dispatch = await show(docOf([clip()]), null)
 
     const format = selectAt('format-c1')
@@ -236,154 +210,23 @@ describe('Clips', () => {
     format.dispatchEvent(new Event('change', { bubbles: true }))
     expect(dispatch).toHaveBeenCalledWith({ type: 'setFormat', id: 'c1', format: 'webp' })
 
-    const mode = selectAt('mode-c1')
-    expect(mode.value).toBe('original')
-    expect([...mode.options].map((option) => option.value)).toEqual(['original', 'optimize'])
-    mode.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-    mode.value = 'optimize'
-    mode.dispatchEvent(new Event('change', { bubbles: true }))
-    expect(dispatch).toHaveBeenCalledWith({ type: 'setMode', id: 'c1', mode: 'optimize' })
+    expect(host.querySelector('[data-testid="mode-c1"]')).toBeNull()
     expect(dispatch).not.toHaveBeenCalledWith({ type: 'selectClip', id: 'c1' })
   })
 
-  it('disables video mode for a crop or WebP, and keeps sound out of WebP', async () => {
+  it('keeps sound available for cropped MP4 and out of WebP', async () => {
     await show(
       docOf([
         clip({ crop: { x: 0, y: 0, width: 640, height: 360 }, mode: 'optimize' }),
       ]),
     )
-    expect(selectAt('mode-c1').disabled).toBe(true)
-    expect(selectAt('mode-c1').value).toBe('optimize')
+    expect(host.querySelector('[data-testid="mode-c1"]')).toBeNull()
     expect(at('sound-c1').disabled).toBe(false)
 
     await show(docOf([clip({ format: 'webp', sound: true })]))
     expect(selectAt('format-c1').value).toBe('webp')
-    expect(selectAt('mode-c1').disabled).toBe(true)
     expect(at('sound-c1').disabled).toBe(true)
     expect(at('sound-c1').checked).toBe(false)
-  })
-
-  it('writes one copy estimate under the selected clip only', async () => {
-    await show(
-      docOf([clip(), clip({ id: 'c2', name: 'Second', in: 10, out: 12 })]),
-      'c2',
-      ctx,
-      { kind: 'copy', bytes: 4_200_000 },
-    )
-
-    expect(host.querySelector('[data-testid="cost-c1"]')).toBeNull()
-    const note = host.querySelector('[data-testid="cost-c2"]')!
-    expect(note.textContent).toContain('Copied from the recording as it is')
-    expect(note.textContent).toContain('picture is untouched')
-    expect(note.textContent).not.toContain('no encoder')
-  })
-
-  it('names an unavailable geometry and drops the crop through two ordinary actions', async () => {
-    const dispatch = await show(docOf([clip()]), 'c1', ctx, {
-      kind: 'none',
-      reason: 'no-encoder',
-      geometry: { width: 126, height: 32, framerate: 29.7 },
-    })
-
-    const note = host.querySelector('[data-testid="cost-c1"]')!
-    expect(note.textContent).toContain('126 × 32 at 30 fps')
-    expect(note.textContent).toContain('Drop the crop')
-
-    host.querySelector<HTMLButtonElement>('[data-testid="drop-crop-c1"]')!.click()
-    expect(dispatch).toHaveBeenNthCalledWith(1, { type: 'clearCrop', id: 'c1' })
-    expect(dispatch).toHaveBeenNthCalledWith(2, { type: 'setMode', id: 'c1', mode: 'original' })
-    expect(dispatch).toHaveBeenCalledTimes(2)
-  })
-
-  it('distinguishes missing picture material from a missing encoder', async () => {
-    await show(docOf([clip()]), 'c1', ctx, {
-      kind: 'none',
-      reason: 'no-material',
-      geometry: GEOMETRY,
-    })
-
-    expect(host.querySelector('[data-testid="cost-c1"]')!.textContent).toContain(
-      'There is no picture in this clip to re-encode.',
-    )
-    expect(host.querySelector('[data-testid="drop-crop-c1"]')).toBeNull()
-  })
-
-  it('describes an animation from its frames, geometry, sound, and measured pace', async () => {
-    await show(docOf([clip({ format: 'webp' })]), 'c1', ctx, webp())
-    const unknown = host.querySelector('[data-testid="cost-c1"]')!.textContent
-    expect(unknown).toContain('60 frames at 640 × 360')
-    expect(unknown).toContain('with no sound')
-    expect(unknown).toContain('picture that loops')
-    expect(unknown).toContain('first one will show how fast')
-
-    await show(docOf([clip({ format: 'webp' })]), 'c1', ctx, webp({ seconds: 2.1 }))
-    expect(host.querySelector('[data-testid="cost-c1"]')!.textContent).toContain('About 3 s.')
-  })
-
-  it('names every encoder rung and the kind of quality it can offer', async () => {
-    await show(
-      docOf([clip({ mode: 'optimize' })]),
-      'c1',
-      ctx,
-      encoded({ rung: 'hevc-hw', seconds: null }),
-    )
-    expect(host.querySelector('[data-testid="cost-c1"]')!.textContent).toContain(
-      'HEVC in hardware',
-    )
-    expect(host.querySelector('[data-testid="cost-c1"]')!.textContent).toContain('constant quality')
-    expect(host.querySelector('[data-testid="cost-c1"]')!.textContent).toContain(
-      'first clip will show how fast',
-    )
-
-    await show(docOf([clip({ mode: 'optimize' })]), 'c1', ctx, encoded({ rung: 'h264-hw' }))
-    expect(host.querySelector('[data-testid="cost-c1"]')!.textContent).toContain(
-      'H.264 in hardware',
-    )
-
-    await show(docOf([clip({ mode: 'optimize' })]), 'c1', ctx, encoded({ rung: 'h264-sw' }))
-    const software = host.querySelector('[data-testid="cost-c1"]')!.textContent
-    expect(software).toContain('H.264 in software')
-    expect(software).toContain('a fixed bitrate')
-    expect(software).not.toContain('with constant quality')
-    expect(software).toContain('100 frames at 640 × 360')
-    expect(software).toContain('About 3 s.')
-    expect(software).toContain('sound is copied')
-  })
-
-  it('warns for efficient source codecs and stays quiet for H.264', async () => {
-    await show(
-      docOf([clip(), clip({ id: 'c2', name: 'Second', in: 10, out: 12 })]),
-      'c1',
-      ctx,
-      encoded({ sourceCodec: 'av01', inflates: true }),
-    )
-    expect(host.querySelector('[data-testid="inflates-c1"]')!.textContent).toContain('already AV1')
-
-    await show(
-      docOf([clip(), clip({ id: 'c2', name: 'Second', in: 10, out: 12 })]),
-      'c2',
-      ctx,
-      encoded({ sourceCodec: 'avc1', inflates: false }),
-    )
-    expect(host.querySelector('[data-testid="inflates-c2"]')).toBeNull()
-
-    await show(docOf([clip()]), 'c1', ctx, encoded({ sourceCodec: 'vp09', inflates: true }))
-    expect(host.querySelector('[data-testid="inflates-c1"]')!.textContent).toContain('already VP9')
-  })
-
-  it('never prints a byte weight under a clip', async () => {
-    const estimates: Estimate[] = [
-      { kind: 'copy', bytes: 4_200_000 },
-      encoded({ bytes: 2_100_000 }),
-      webp({ bytes: 12_000_000 }),
-      { kind: 'none', reason: 'no-material', geometry: GEOMETRY },
-    ]
-
-    for (const estimate of estimates) {
-      await show(docOf([clip()]), 'c1', ctx, estimate)
-      const note = host.querySelector('[data-testid="cost-c1"]')!.textContent
-      expect(note).not.toMatch(/\b(?:MB|KB)\b/)
-    }
   })
 
   it('says which quality a clip is stopped by, and offers no way past it', async () => {

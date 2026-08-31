@@ -62,7 +62,8 @@ test('cuts two clips, one of them across a hole, and writes both to disk', async
     await expect(editor.getByTestId('frame-count')).toHaveText('96')
     await editor.waitForFunction(() => (document.querySelector('video')?.readyState ?? 0) >= 2)
     // Nothing to export yet, so the button is disabled instead of writing an empty file.
-    await expect(editor.getByTestId('export')).toBeDisabled()
+    await expect(editor.getByTestId('export-selected')).toBeDisabled()
+    await expect(editor.getByTestId('export-all')).toBeDisabled()
 
     // One clip from half a second to four and a half — across the hole — and then a cut through
     // it at a second and a half. Two clips, and not a pixel of the timeline touched: the second
@@ -71,7 +72,8 @@ test('cuts two clips, one of them across a hole, and writes both to disk', async
     await editor.keyboard.press('i')
     await expect(editor.getByTestId('clip')).toHaveCount(1)
     // There is something to write now, and the material has finished indexing.
-    await expect(editor.getByTestId('export')).toBeEnabled()
+    await expect(editor.getByTestId('export-selected')).toBeEnabled()
+    await expect(editor.getByTestId('export-all')).toBeEnabled()
 
     // Out at four and a half — on the far side of the hole. The handle goes there because the
     // quality never changed: a hole breaks a run but not a quality zone, and export collapses it
@@ -87,7 +89,7 @@ test('cuts two clips, one of them across a hole, and writes both to disk', async
     await expect(editor.getByTestId('in-c2')).toHaveValue('00:00:01:12')
     await expect(editor.getByTestId('out-c2')).toHaveValue('00:00:04:12')
 
-    const files = await collectDownloads(editor, 2, () => editor.getByTestId('export').click())
+    const files = await collectDownloads(editor, 2, () => editor.getByTestId('export-all').click())
 
     await expect(editor.getByTestId('job')).toHaveCount(2)
     await expect(editor.getByTestId('job-state').first()).toHaveText('Saved')

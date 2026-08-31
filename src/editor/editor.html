@@ -291,7 +291,15 @@
   .transport-playback button { min-width: 30px; border-color: transparent; background: transparent; padding-inline: 6px; }
   .transport-jump button + button,
   .transport-playback button + button { border-left-color: var(--tc-border); border-radius: 0; }
-  .transport-playback [data-testid='play'] { min-width: 40px; border-radius: 6px; }
+  .transport-playback [data-testid='play'] {
+    display: grid;
+    width: 40px;
+    min-width: 40px;
+    padding-inline: 0;
+    place-items: center;
+    border-radius: 6px;
+  }
+  .transport-playback [data-icon='play'] { transform: translateX(-1px); }
   .transport-volume input { width: 70px; accent-color: var(--tc-accent); }
   .transport-end-mode { white-space: nowrap; }
   .transport-edit {
@@ -302,13 +310,13 @@
   .transport-edit .tc-field { margin-left: 2px; }
   .transport-edit .tc-field-input { width: 92px; }
   .transport [data-testid='play'],
-  .tc-export > [data-testid='export'] {
+  .tc-export-primary {
     border-color: var(--tc-accent);
     background: var(--tc-accent);
     color: var(--tc-graphite);
   }
   .transport [data-testid='play']:hover:not(:disabled),
-  .tc-export > [data-testid='export']:hover:not(:disabled) {
+  .tc-export-primary:hover:not(:disabled) {
     border-color: #c9ff5d;
     background: #c9ff5d;
   }
@@ -352,8 +360,10 @@
   }
   .tc-clip-name:hover,
   .tc-clip-name:focus { border-bottom-color: var(--tc-border-strong); }
-  .tc-clip-header { display: flex; align-items: flex-start; gap: 8px; }
-  .tc-clip-remove { flex: 0 0 auto; min-width: 29px; min-height: 29px; padding: 5px; color: var(--tc-muted); }
+  .tc-clip-header { display: flex; align-items: center; gap: 10px; }
+  .tc-clip-remove { display: inline-grid; place-items: center; flex: 0 0 32px; width: 32px;
+                    height: 32px; padding: 0; color: var(--tc-muted); }
+  .tc-clip-remove svg { display: block; width: 16px; height: 16px; }
   .tc-clip-section { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--tc-border); }
   .tc-clip-section h3 { margin: 0; color: var(--tc-muted); font-size: 10px; font-weight: 700;
                         letter-spacing: .08em; text-transform: uppercase; }
@@ -432,6 +442,8 @@
   .tc-thumb-time { color: var(--tc-muted); text-align: center; font-variant-numeric: tabular-nums; }
 
   .tc-export p { margin: 7px 0 0; font-size: 11px; }
+  .tc-export-actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+                       gap: 8px; }
   .tc-jobs { list-style: none; margin: 10px 0 0; padding: 0; }
   .tc-job { display: flex; gap: 8px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--tc-border);
             flex-wrap: wrap; }

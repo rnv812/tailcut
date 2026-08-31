@@ -7,13 +7,9 @@ export interface ExportQueueProps {
   /** The material has been indexed; false while the tab is still reading it. */
   ready: boolean
   clips: number
+  selected: boolean
   /**
    * What the selected clip will weigh, as data; null when nothing is selected.
-   *
-   * The panel prints the **weight** and nothing else about the price. The rung, the frames, the
-   * geometry and the seconds are written under the clip row by `costNote` (clips.tsx), and a
-   * number printed in both places is two sentences about one clip, free to disagree the day one
-   * of them is edited.
    */
   estimate: Estimate | null
   /**
@@ -24,7 +20,9 @@ export interface ExportQueueProps {
    * once — and it is said out loud rather than left as a button that does nothing.
    */
   probing: boolean
-  onExport(): void
+  selectedProbing: boolean
+  onExportSelected(): void
+  onExportAll(): void
   onRetry(id: string): void
   onCancel(id: string): void
 }
@@ -38,8 +36,7 @@ export interface ExportQueueProps {
  * sentence says what is known about the file: it comes out under that. WebP is measured on real
  * frames of this clip and says nothing at all until the probe has answered.
  *
- * `none` is silent on purpose: there is nothing to weigh, and the line under the clip row
- * already says why in full.
+ * `none` is silent on purpose: there is no file to weigh.
  */
 function weightNote(estimate: Estimate): string | null {
   switch (estimate.kind) {
@@ -130,9 +127,12 @@ export function ExportQueue({
   queue,
   ready,
   clips,
+  selected,
   estimate,
   probing,
-  onExport,
+  selectedProbing,
+  onExportSelected,
+  onExportAll,
   onRetry,
   onCancel,
 }: ExportQueueProps) {
@@ -142,17 +142,25 @@ export function ExportQueue({
     <section class="tc-export" data-testid="export-panel">
       <h2>Export</h2>
 
-      {/* Disabled while the ladder is still answering whether there is an encoder for
-          this picture **before** the queue starts, and a press that lands a millisecond early
-          would send every clip of an unasked geometry down `blocked`. */}
-      <button
-        type="button"
-        data-testid="export"
-        disabled={!ready || probing || clips === 0}
-        onClick={onExport}
-      >
-        {probing ? 'Checking the encoder…' : clips === 1 ? 'Export 1 clip' : `Export ${clips} clips`}
-      </button>
+      <div class="tc-export-actions">
+        <button
+          type="button"
+          class="tc-export-primary"
+          data-testid="export-selected"
+          disabled={!ready || !selected || selectedProbing}
+          onClick={onExportSelected}
+        >
+          {selectedProbing ? 'Checking…' : 'Export selected clip'}
+        </button>
+        <button
+          type="button"
+          data-testid="export-all"
+          disabled={!ready || probing || clips === 0}
+          onClick={onExportAll}
+        >
+          {probing ? 'Checking…' : `Export all (${clips})`}
+        </button>
+      </div>
 
       {!ready && (
         <p class="muted" data-testid="export-note">

@@ -15,9 +15,12 @@ const props = (over: Partial<ExportQueueProps> = {}): ExportQueueProps => ({
   queue: EMPTY_QUEUE,
   ready: true,
   clips: 2,
+  selected: true,
   estimate: { kind: 'copy', bytes: 4_200_000 },
   probing: false,
-  onExport: vi.fn(),
+  selectedProbing: false,
+  onExportSelected: vi.fn(),
+  onExportAll: vi.fn(),
   onRetry: vi.fn(),
   onCancel: vi.fn(),
   ...over,
@@ -36,21 +39,36 @@ const ONE_JOB: QueueEvent = {
 }
 
 describe('the export panel', () => {
-  it('offers to export the clips there are and says how big one would be', () => {
+  it('offers distinct selected and batch exports and says how big the selection would be', () => {
     const one = props()
     render(<ExportQueue {...one} />, host)
 
-    expect(at('export').textContent).toContain('Export 2 clips')
+    expect(at('export-selected').textContent).toBe('Export selected clip')
+    expect(at('export-all').textContent).toBe('Export all (2)')
     expect(at('estimate').textContent).toBe(
       'Selected clip: about 4.0 MB, copied from the recording as it is.',
     )
 
-    at('export').click()
-    expect(one.onExport).toHaveBeenCalledTimes(1)
+    at('export-selected').click()
+    expect(one.onExportSelected).toHaveBeenCalledTimes(1)
+    expect(one.onExportAll).not.toHaveBeenCalled()
 
-    // One clip is not "Export 1 clips": the two are different strings and the panel says both.
-    render(<ExportQueue {...props({ clips: 1 })} />, host)
-    expect(at('export').textContent).toBe('Export 1 clip')
+    at('export-all').click()
+    expect(one.onExportAll).toHaveBeenCalledTimes(1)
+  })
+
+  it('disables each export action for the work that action cannot perform', () => {
+    render(<ExportQueue {...props({ selected: false })} />, host)
+    expect(at('export-selected').hasAttribute('disabled')).toBe(true)
+    expect(at('export-all').hasAttribute('disabled')).toBe(false)
+
+    render(<ExportQueue {...props({ selectedProbing: true })} />, host)
+    expect(at('export-selected').hasAttribute('disabled')).toBe(true)
+    expect(at('export-all').hasAttribute('disabled')).toBe(false)
+
+    render(<ExportQueue {...props({ probing: true })} />, host)
+    expect(at('export-selected').hasAttribute('disabled')).toBe(false)
+    expect(at('export-all').hasAttribute('disabled')).toBe(true)
   })
 
   it('uses the recorded weight without inventing a hardware encoded weight', () => {
@@ -139,18 +157,21 @@ describe('the export panel', () => {
   })
 
   it('waits for the encoder probe before allowing export', () => {
-    render(<ExportQueue {...props({ probing: true })} />, host)
+    render(<ExportQueue {...props({ probing: true, selectedProbing: true })} />, host)
 
-    expect(at('export').hasAttribute('disabled')).toBe(true)
-    expect(at('export').textContent).toBe('Checking the encoder…')
+    expect(at('export-selected').hasAttribute('disabled')).toBe(true)
+    expect(at('export-all').hasAttribute('disabled')).toBe(true)
+    expect(at('export-selected').textContent).toBe('Checking…')
+    expect(at('export-all').textContent).toBe('Checking…')
   })
 
   it('offers nothing while there is nothing to export or nothing to export from', () => {
     render(<ExportQueue {...props({ clips: 0 })} />, host)
-    expect(at('export').hasAttribute('disabled')).toBe(true)
+    expect(at('export-all').hasAttribute('disabled')).toBe(true)
 
     render(<ExportQueue {...props({ ready: false })} />, host)
-    expect(at('export').hasAttribute('disabled')).toBe(true)
+    expect(at('export-selected').hasAttribute('disabled')).toBe(true)
+    expect(at('export-all').hasAttribute('disabled')).toBe(true)
     expect(at('export-note').textContent).toContain('Reading the recording')
   })
 

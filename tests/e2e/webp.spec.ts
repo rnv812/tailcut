@@ -279,21 +279,14 @@ test('writes the selected crop as a silent animated WebP at the source pace', as
   const { context, editor } = await openTenSecondClip()
 
   try {
-    const original = await exportClipWith(editor, { mode: 'original', format: 'mp4' })
-    let promisedFrames: number | null = null
+    const original = await exportClipWith(editor, { format: 'mp4' })
 
     const animated = await exportClipWith(editor, {
       format: 'webp',
       crop: { x: 7, y: 5, width: 121, height: 65 },
       beforeExport: async (configured) => {
         await expect(configured.getByTestId('crop-geometry')).toHaveText('120 × 64')
-
-        const cost = await configured.getByTestId('cost-c1').textContent()
-        const match = cost?.match(/(\d+) frames at 120 × 64/)
-        expect(match, `the panel did not promise a frame count: ${cost ?? 'no cost line'}`).not.toBeNull()
-        promisedFrames = Number(match![1])
-        expect(promisedFrames).toBe(EXPECTED_FRAMES)
-
+        await expect(configured.getByTestId('format-c1')).toHaveValue('webp')
         await expect(configured.getByTestId('sound-c1')).toBeDisabled()
         await expect(configured.getByTestId('sound-c1')).not.toBeChecked()
       },
@@ -313,7 +306,6 @@ test('writes the selected crop as a silent animated WebP at the source pace', as
       },
     })
 
-    expect(promisedFrames).toBe(EXPECTED_FRAMES)
     expect(animated.name).toMatch(/\.webp$/)
 
     const riff = riffFacts(animated.file)

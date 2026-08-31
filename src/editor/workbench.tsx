@@ -69,6 +69,12 @@ interface ChoiceBook {
 }
 
 const NO_CHOICES: ReadonlyMap<string, Choice> = new Map()
+const INTERNAL_CODEC = 'auto' as const
+const INTERNAL_QUALITY = 'high' as const
+
+/** Legacy projects may still carry the removed Optimize choice. Export is automatic now. */
+export const automaticClip = (clip: Clip): Clip =>
+  clip.mode === 'original' ? clip : { ...clip, mode: 'original' }
 
 const duration = (seconds: number): string => {
   const total = Math.round(seconds)
@@ -270,8 +276,8 @@ function OpenWorkbench({
   // browser cannot be taken back, so Ctrl+Z has no business touching this.
   const [queue, setQueue] = useState<Queue>(EMPTY_QUEUE)
   const [source, setSource] = useState<ClipSource | null>(null)
-  const codec = options.export?.codec ?? 'auto'
-  const quality = options.export?.quality ?? 'high'
+  const codec = INTERNAL_CODEC
+  const quality = INTERNAL_QUALITY
   const choiceProfile = `${codec}:${quality}`
   /** The ladder's answer per geometry. Filled by the probe effect below; read here. */
   const [choiceBook, setChoiceBook] = useState<ChoiceBook>({
@@ -290,7 +296,7 @@ function OpenWorkbench({
    */
   const [probed, setProbed] = useState<ReadonlyMap<string, number>>(new Map())
 
-  const rewriteHead = options.export?.rewriteHead ?? false
+  const rewriteHead = false
   const runner = useMemo(
     () =>
       createRunner(
@@ -318,6 +324,8 @@ function OpenWorkbench({
   }, [reader, material])
 
   const selected = doc.clips.find((clip) => clip.id === ui.selectedClipId)
+  const exportClips = useMemo(() => doc.clips.map(automaticClip), [doc.clips])
+  const selectedForExport = exportClips.find((clip) => clip.id === ui.selectedClipId)
   /** The clip whose animation weight is being measured, and what that measurement is about. */
   const selectedProbeKey = selected ? probeKey(selected) : null
 
@@ -330,7 +338,7 @@ function OpenWorkbench({
   const wanted = useMemo(
     () =>
       new Map(
-        doc.clips
+        exportClips
           .filter((clip) => forcesEncoder(clip, ctx.keyframes.includes(clip.in), rewriteHead))
           .filter((clip) => clip.format !== 'webp')
           .map((clip) => {
@@ -338,11 +346,23 @@ function OpenWorkbench({
             return [geometryKey(geometry), geometry] as const
           }),
       ),
-    [doc.clips, ctx, rewriteHead],
+    [exportClips, ctx, rewriteHead],
   )
 
   /** True while any geometry of the document is still unanswered: the Export button waits on it. */
   const probing = [...wanted.keys()].some((key) => !choices.has(key))
+  const selectedProbing = Boolean(
+    selectedForExport &&
+      selectedForExport.format !== 'webp' &&
+      forcesEncoder(
+        selectedForExport,
+        ctx.keyframes.includes(selectedForExport.in),
+        rewriteHead,
+      ) &&
+      !choices.has(
+        geometryKey(geometryOf(selectedForExport.crop, ctx.frameSize, ctx.fps)),
+      ),
+  )
 
   // One cache for the life of the tab. A crop drag changes `wanted` every frame; putting this
   // inside the effect below would ask the browser the same still-pending question every frame.
@@ -372,16 +392,22 @@ function OpenWorkbench({
   }, [wanted, codecProbe, codec, quality, choiceProfile, choices])
 
   const estimate = useMemo(() => {
-    if (!selected || !source) return null
-    const path = pathFor(selected, source, ctx, choiceFor(selected, ctx, choices), rewriteHead)
+    if (!selectedForExport || !source) return null
+    const path = pathFor(
+      selectedForExport,
+      source,
+      ctx,
+      choiceFor(selectedForExport, ctx, choices),
+      rewriteHead,
+    )
     return estimateFor({
       path,
-      duration: selected.out - selected.in,
-      sourceBytes: planOf(source, selected).bytes,
+      duration: selectedForExport.out - selectedForExport.in,
+      sourceBytes: planOf(source, selectedForExport).bytes,
       pace,
       probedBytes: selectedProbeKey ? (probed.get(selectedProbeKey) ?? null) : null,
     })
-  }, [selected, selectedProbeKey, source, ctx, choices, rewriteHead, pace, probed])
+  }, [selectedForExport, selectedProbeKey, source, ctx, choices, rewriteHead, pace, probed])
 
   // Only the selected clip, and only in WebP: the probe decodes three groups of pictures, which
   // is cheap once and not cheap six times a keystroke. Keyed by `probeKey`, so a frame the user
@@ -745,7 +771,6 @@ function OpenWorkbench({
           selectedId={ui.selectedClipId}
           playhead={ui.playhead}
           fps={fps}
-          estimate={estimate}
           dispatch={store.dispatch}
           selectedOnly
           showPosition={false}
@@ -769,10 +794,17 @@ function OpenWorkbench({
           queue={queue}
           ready={source !== null}
           clips={doc.clips.length}
+          selected={selectedForExport !== undefined}
           estimate={estimate}
           probing={probing}
-          onExport={() =>
-            source && runner.enqueue(requestsFor(source, doc.clips, ctx, choices, rewriteHead))
+          selectedProbing={selectedProbing}
+          onExportSelected={() =>
+            source &&
+            selectedForExport &&
+            runner.enqueue(requestsFor(source, [selectedForExport], ctx, choices, rewriteHead))
+          }
+          onExportAll={() =>
+            source && runner.enqueue(requestsFor(source, exportClips, ctx, choices, rewriteHead))
           }
           onRetry={(id) => runner.retry(id)}
           onCancel={(id) => runner.cancel(id)}

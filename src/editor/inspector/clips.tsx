@@ -1,7 +1,5 @@
 import { useEffect, useState } from 'preact/hooks'
-import type { EncodingChoice } from '../../core/encode/codec'
-import type { Estimate } from '../../core/encode/estimate'
-import { heldByQuality, type Clip, type ClipMode } from '../../core/edit/clip'
+import { heldByQuality, type Clip } from '../../core/edit/clip'
 import type { EditContext } from '../../core/edit/context'
 import type { Doc } from '../../core/edit/project'
 import type { SessionAction } from '../../core/edit/session'
@@ -18,16 +16,6 @@ export interface ClipsProps {
   /** Media time, so it can be typed at like any other boundary. */
   playhead: number
   fps: number
-  /**
-   * What the selected clip costs, worked out by the tab. Null when nothing is selected.
-   *
-   * One estimate and not a map, because there is one to have: the path of a clip runs through
-   * `planClip`/`planFrames` and through the probe's answer, and doing that for every row on every
-   * keystroke would be the frame table walked six times a render. So the price is written under
-   * the **selected** row and nowhere else — which is also where a person is looking when they
-   * change the format, the mode or the frame.
-   */
-  estimate: Estimate | null
   dispatch: (action: SessionAction) => void
   /** The right inspector edits one selection; the media panel owns the full list. */
   selectedOnly?: boolean
@@ -174,123 +162,6 @@ function qualityNote(clip: Clip, ctx: EditContext) {
   )
 }
 
-/**
- * The rungs, in the words a person reads.
- *
- * Said out loud because this is the only place anybody learns that a crop changed the rung — and
- * with it constant quality. Keyed by `EncodingChoice['kind']`, so a fourth rung added to
- * the ladder is a compile error here rather than a blank in a sentence.
- */
-const RUNG_TEXT: Record<EncodingChoice['kind'], string> = {
-  'hevc-hw': 'HEVC in hardware',
-  'h264-hw': 'H.264 in hardware',
-  'h264-sw': 'H.264 in software',
-}
-
-/**
- * The two source codecs that need warnings, in the words a person reads.
- *
- * Two and no more: VP8 and H.264 really are made smaller by being encoded again, and a warning
- * over them would be a warning that means nothing.
- */
-const SOURCE_TEXT: Record<string, string> = { av01: 'AV1', vp09: 'VP9' }
-
-/**
- * What this clip's settings cost, in a sentence, before anything is pressed.
- *
- * Four different sentences for four different truths, and none of them says a number it cannot
- * stand behind. The rung is named because a crop can change it: below roughly 130×34 the
- * hardware encoders refuse and the software one accepts, and with the rung goes constant quality.
- *
- * **No weight is printed here.** The bytes are the Export panel's line (`weightNote`, queue.tsx),
- * and one number under two headings is two sentences about one clip which are free to drift
- * apart. This one says what the work *is*: the rung, the picture, the kind of quality, the
- * seconds and the two codec warnings.
- */
-function costNote(clip: Clip, estimate: Estimate, dispatch: (action: SessionAction) => void) {
-  if (estimate.kind === 'copy') {
-    return (
-      <p class="muted" data-testid={`cost-${clip.id}`}>
-        Copied from the recording as it is, in a moment. The picture is untouched.
-      </p>
-    )
-  }
-
-  if (estimate.kind === 'none') {
-    // The button belongs inside this branch and not beside it: here `estimate` is narrowed to the
-    // one variant that has something to offer, and a sibling of `costNote` would be reading
-    // `estimate.kind` off an `Estimate | null` all over again.
-    return (
-      <>
-        <p class="tc-clip-note" data-testid={`cost-${clip.id}`}>
-          {estimate.reason === 'no-encoder'
-            ? `This machine has no encoder for ${estimate.geometry.width} × ${estimate.geometry.height} at ${Math.round(estimate.geometry.framerate)} fps. Drop the crop to save the clip as it was recorded.`
-            : 'There is no picture in this clip to re-encode.'}
-        </p>
-        {estimate.reason === 'no-encoder' && (
-          <button
-            type="button"
-            data-testid={`drop-crop-${clip.id}`}
-            onClick={(event) => {
-              event.stopPropagation()
-              // Two actions, not one: dropping the frame and putting the mode back are two
-              // different changes to the document, and a seventh action made for one button
-              // would undo them together. Ctrl+Z takes them back one at a time, which is what
-              // the user watched happen.
-              dispatch({ type: 'clearCrop', id: clip.id })
-              dispatch({ type: 'setMode', id: clip.id, mode: 'original' })
-            }}
-          >
-            Drop the crop and copy
-          </button>
-        )}
-      </>
-    )
-  }
-
-  if (estimate.kind === 'webp') {
-    return (
-      <p class="muted" data-testid={`cost-${clip.id}`}>
-        {estimate.frames} frames at {estimate.geometry.width} × {estimate.geometry.height} — several
-        times the same clip as MP4, and with no sound. It is a picture that loops.{' '}
-        {estimate.seconds === null
-          ? 'The first one will show how fast this machine is.'
-          : `About ${Math.ceil(estimate.seconds)} s.`}
-      </p>
-    )
-  }
-
-  // "A fixed bitrate", never "constant quality": openh264 has no quantizer mode at all, and it
-  // was measured writing 1.97 Mbit/s when asked for 0.4. What that means for the size is the
-  // Export panel's sentence — "no smaller than" — and it is said there once.
-  const quality =
-    estimate.rung === 'h264-sw'
-      ? 'a fixed bitrate, because the software rung has no constant quality to offer'
-      : 'constant quality: bits go where the picture is hard, not where the clock says'
-
-  return (
-    <p class="muted" data-testid={`cost-${clip.id}`}>
-      Re-encoded as {RUNG_TEXT[estimate.rung]}, {estimate.frames} frames at{' '}
-      {estimate.geometry.width} × {estimate.geometry.height}, with {quality}.{' '}
-      {estimate.seconds === null
-        ? 'The first clip will show how fast this machine is.'
-        : `About ${Math.ceil(estimate.seconds)} s.`}{' '}
-      The sound is copied, not re-encoded.
-      {estimate.inflates && (
-        // This is said here because after the export it is too late to say it. A recording
-        // already packed by AV1 or VP9 is not made smaller by being packed again by an older
-        // codec — it is made bigger, and it loses detail on the way.
-        <span class="tc-clip-warn" data-testid={`inflates-${clip.id}`}>
-          {' '}
-          This recording is already {SOURCE_TEXT[estimate.sourceCodec] ?? estimate.sourceCodec}:
-          re-encoding it will more likely grow the file than shrink it. Original copies it as it
-          is, for nothing.
-        </span>
-      )}
-    </p>
-  )
-}
-
 /** The clips of the recording, the markers, and the playhead above them. */
 export function Clips({
   doc,
@@ -298,7 +169,6 @@ export function Clips({
   selectedId,
   playhead,
   fps,
-  estimate,
   dispatch,
   selectedOnly = false,
   showPosition = true,
@@ -418,26 +288,6 @@ export function Clips({
                   </select>
                 </label>
 
-                <label class="option tc-clip-select">
-                  <span class="label">Video</span>
-                  <select
-                    data-testid={`mode-${clip.id}`}
-                    value={clip.mode}
-                    disabled={clip.crop !== null || clip.format === 'webp'}
-                    onClick={(event) => event.stopPropagation()}
-                    onChange={(event) =>
-                      dispatch({
-                        type: 'setMode',
-                        id: clip.id,
-                        mode: (event.target as HTMLSelectElement).value as ClipMode,
-                      })
-                    }
-                  >
-                    <option value="original">Original</option>
-                    <option value="optimize">Optimize</option>
-                  </select>
-                </label>
-
                 <label class="option tc-clip-sound">
                   <input
                     type="checkbox"
@@ -453,7 +303,6 @@ export function Clips({
               </div>
             </section>
 
-            {clip.id === selectedId && estimate && costNote(clip, estimate, dispatch)}
           </li>
         ))}
       </ul>

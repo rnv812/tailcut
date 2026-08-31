@@ -119,9 +119,11 @@ async function cutAndExport(
   await editor.keyboard.press('i')
   await typeInto(editor, 'out-c1', '00:00:04:00')
   await expect(editor.getByTestId('out-c1')).toHaveValue('00:00:04:00')
-  await expect(editor.getByTestId('export')).toBeEnabled()
+  await expect(editor.getByTestId('export-selected')).toBeEnabled()
 
-  const [clip] = await collectDownloads(editor, 1, () => editor.getByTestId('export').click())
+  const [clip] = await collectDownloads(editor, 1, () =>
+    editor.getByTestId('export-selected').click(),
+  )
   await expect(editor.getByTestId('job-state')).toHaveText('Saved')
 
   const probed = probeFile(clip!.file)
