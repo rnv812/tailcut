@@ -110,6 +110,17 @@ const click = async (testId: string) => {
   await flush()
 }
 
+/** Opens one advanced group through the same disclosure control a person uses. */
+const openAdvanced = async (label: string) => {
+  const summary = document.body.querySelector<HTMLElement>(
+    `[data-testid="advanced-toggle"][aria-label="${label}"]`,
+  )!
+  const details = summary.closest<HTMLDetailsElement>('details')!
+  if (!details.open) summary.click()
+  await flush()
+  expect(details.open).toBe(true)
+}
+
 beforeEach(() => {
   stored = DEFAULTS
   totals = { id: 'totals', bytes: 2 * 1024 ** 3, cappedBytes: 0, fullAt: 0 }
@@ -153,15 +164,25 @@ describe('the settings page', () => {
     expect(document.body.textContent).toBe('Loading…')
   })
 
-  it('keeps the fine tuning folded away', async () => {
+  it('styles the native disclosure for fine tuning and keeps it folded away', async () => {
     await draw()
-    const folded = [...document.querySelectorAll('details')]
+    const folded = [...document.querySelectorAll<HTMLDetailsElement>('details.advanced')]
+    const toggles = [...document.querySelectorAll<HTMLElement>('[data-testid="advanced-toggle"]')]
 
-    expect(folded.length).toBeGreaterThan(0)
-    for (const details of folded) {
-      expect(details.open).toBe(false)
-      expect(details.querySelector('summary')!.textContent).toBe('Advanced')
-    }
+    expect(folded).toHaveLength(2)
+    expect(toggles.length).toBeGreaterThan(0)
+    expect(folded.every((details) => !details.open)).toBe(true)
+    expect(toggles.map((toggle) => toggle.textContent)).toEqual(['Advanced', 'Advanced'])
+    expect(toggles.map((toggle) => toggle.getAttribute('aria-label'))).toEqual([
+      'Advanced video detection settings',
+      'Advanced export settings',
+    ])
+
+    toggles[0]!.click()
+    await flush()
+
+    expect(folded[0]!.open).toBe(true)
+    expect(folded[1]!.open).toBe(false)
   })
 
   it('says what a buffer of this length will cost in memory, at the rate this user records', async () => {
@@ -225,6 +246,7 @@ describe('the settings page', () => {
     // earlier had just changed — a setting the user watched themselves change and found
     // unchanged a moment later.
     await draw()
+    await openAdvanced('Advanced video detection settings')
     check('to-disk', false)
     check('record-muted', false)
     await flush()
@@ -354,6 +376,7 @@ describe('the settings page', () => {
     await click('preset-strict')
     expect(written.at(-1)!.detection.minWidthPx).toBe(480)
 
+    await openAdvanced('Advanced video detection settings')
     type('min-width', '400')
     await settled()
 
@@ -389,6 +412,7 @@ describe('the settings page', () => {
 
   it('writes the probation in seconds', async () => {
     await draw()
+    await openAdvanced('Advanced video detection settings')
     type('probation', '12')
     await settled()
 
@@ -503,6 +527,7 @@ describe('the settings page', () => {
 
   it('enables every export setting and describes the formats it can write', async () => {
     await draw()
+    await openAdvanced('Advanced export settings')
 
     for (const id of ['format', 'codec', 'quality', 'rewrite-head']) {
       expect(field(id).disabled, `${id} is still waiting for work that now exists`).toBe(false)
@@ -517,6 +542,7 @@ describe('the settings page', () => {
     // displayed "HEVC, falling back to H.264" even when the runtime would choose H.264.
     // Disabled is not a licence to say something else.
     await draw()
+    await openAdvanced('Advanced export settings')
 
     expect(field('format').value).toBe(DEFAULTS.export.format)
     expect(field('codec').value).toBe(DEFAULTS.export.codec)
@@ -556,6 +582,7 @@ describe('the settings page', () => {
 
   it('stores whether the clip head is rewritten', async () => {
     await draw()
+    await openAdvanced('Advanced export settings')
     check('rewrite-head', true)
     await flush()
 
@@ -565,6 +592,7 @@ describe('the settings page', () => {
 
   it('stores the quality used for re-encoding', async () => {
     await draw()
+    await openAdvanced('Advanced export settings')
     select('quality', 'low')
     await flush()
 
@@ -577,6 +605,7 @@ describe('the settings page', () => {
     // the group waits. A name is typed a letter at a time, so it settles like a slider: one write
     // for the name, not one per keystroke.
     await draw()
+    await openAdvanced('Advanced export settings')
     type('name-template', '{host}')
     type('name-template', '{host} {date}')
     await settled()
@@ -591,6 +620,7 @@ describe('the settings page', () => {
 
   it('keeps silent video out when the user says so', async () => {
     await draw()
+    await openAdvanced('Advanced video detection settings')
     check('record-muted', false)
     await flush()
 

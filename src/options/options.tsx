@@ -79,20 +79,25 @@ function Group(props: { title: string; children: ComponentChildren }) {
   return (
     <section class="group">
       <h2 data-testid="group-title">{props.title}</h2>
-      {props.children}
+      <div class="group-body">{props.children}</div>
     </section>
   )
 }
 
-/**
- * The fine tuning, folded away. A <details> rather than an accordion of our own: it comes with a
- * keyboard, with find-in-page and with a state, none of which we would get right for free.
- */
-function Advanced(props: { children: ComponentChildren }) {
+/** Fine tuning behind the browser's accessible disclosure behavior, with the product's styling. */
+function Advanced(props: { label: string; children: ComponentChildren }) {
   return (
     <details class="advanced">
-      <summary>Advanced</summary>
-      {props.children}
+      <summary
+        class="advanced-toggle"
+        data-testid="advanced-toggle"
+        aria-label={props.label}
+      >
+        Advanced
+      </summary>
+      <div class="advanced-panel" data-testid="advanced-panel">
+        {props.children}
+      </div>
     </details>
   )
 }
@@ -382,26 +387,28 @@ export function Options() {
       </header>
 
       <Group title="Recording">
-        {MODES.map((mode) => (
-          <label class="row mode" key={mode.value}>
-            <input
-              type="radio"
-              name="mode"
-              data-testid={`mode-${mode.value}`}
-              checked={settings.recording.mode === mode.value}
-              onChange={() =>
-                edit((current) => ({
-                  ...current,
-                  recording: { ...current.recording, mode: mode.value },
-                }))
-              }
-            />
-            <span>
-              <b>{mode.label}</b>
-              <em>{mode.note}</em>
-            </span>
-          </label>
-        ))}
+        <div class="mode-grid">
+          {MODES.map((mode) => (
+            <label class="row mode" key={mode.value}>
+              <input
+                type="radio"
+                name="mode"
+                data-testid={`mode-${mode.value}`}
+                checked={settings.recording.mode === mode.value}
+                onChange={() =>
+                  edit((current) => ({
+                    ...current,
+                    recording: { ...current.recording, mode: mode.value },
+                  }))
+                }
+              />
+              <span>
+                <b>{mode.label}</b>
+                <em>{mode.note}</em>
+              </span>
+            </label>
+          ))}
+        </div>
 
         <NumberRow
           id="buffer"
@@ -450,7 +457,7 @@ export function Options() {
           </label>
         ))}
 
-        <Advanced>
+        <Advanced label="Advanced video detection settings">
           <NumberRow
             id="probation"
             label="Probation"
@@ -648,7 +655,7 @@ export function Options() {
           the same clip as MP4 — it is a picture that loops.
         </p>
 
-        <Advanced>
+        <Advanced label="Advanced export settings">
           <label class="row">
             <span class="label">File name</span>
             <input
