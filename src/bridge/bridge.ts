@@ -18,7 +18,7 @@ import {
   type SessionList,
   type SessionSummary,
 } from '../shared/protocol'
-import { memoryCeilingFor, siteAllows } from '../shared/settings'
+import { memoryCeilingFor, siteAllows, termsAccepted } from '../shared/settings'
 import { liveSettings } from '../shared/settings-store'
 import { HistoryWriter, historyWorker } from './history-writer'
 import { openPlainFile, openSoundFile } from './loader'
@@ -105,7 +105,7 @@ const store = new SessionStore({
  * defaults, which is also what the writer is built with.
  */
 const settings = liveSettings((next) => {
-  history.setEnabled(next.history.toDisk)
+  history.setEnabled(termsAccepted(next) && next.history.toDisk)
   applyRecordingMode()
 })
 
@@ -132,7 +132,8 @@ let pausedByHand = false
 
 /** Whether this page is recorded at all: the mode, the two site lists, and the quick switch. */
 function recordingHere(): boolean {
-  return !pausedByHand && siteAllows(settings.get(), pageContext.url)
+  const current = settings.get()
+  return termsAccepted(current) && !pausedByHand && siteAllows(current, pageContext.url)
 }
 
 /**

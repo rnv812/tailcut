@@ -98,10 +98,16 @@ async function offlinePopup(): Promise<{
   const browser = await chromium.launch()
   const popup = await browser.newPage()
 
-  await popup.route('**/popup/*', async (route) => {
-    const file = path.basename(new URL(route.request().url()).pathname)
-    const body = await readFile(path.resolve('dist/popup', file), 'utf8')
-    const contentType = file.endsWith('.js') ? 'text/javascript' : 'text/html'
+  await popup.route('https://tailcut.test/**', async (route) => {
+    const file = new URL(route.request().url()).pathname.replace(/^\/+/, '')
+    const body = await readFile(path.resolve('dist', file), 'utf8')
+    const contentType = file.endsWith('.js')
+      ? 'text/javascript'
+      : file.endsWith('.css')
+        ? 'text/css'
+        : file.endsWith('.svg')
+          ? 'image/svg+xml'
+          : 'text/html'
     await route.fulfill({ body, contentType })
   })
 
@@ -114,6 +120,13 @@ async function offlinePopup(): Promise<{
     Object.assign(window, {
       __save: { ok: true },
       chrome: {
+        storage: {
+          local: {
+            get: async () => ({
+              settings: { legal: { acceptedVersion: 1, acceptedAt: 1_756_022_100_000 } },
+            }),
+          },
+        },
         tabs: {
           query: async () => [{ id: 1 }],
           sendMessage: (_tabId: number, message: { type?: string } | null) =>
@@ -253,6 +266,11 @@ test('the badge shows what was gathered on the tab', async () => {
 test('the popup opens at its full height, not as a "Loading…" strip', async () => {
   const { browser, popup, answer } = await offlinePopup()
   const bodyHeight = () => popup.evaluate(() => document.body.getBoundingClientRect().height)
+
+  expect(
+    await popup.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--tc-accent').trim()),
+    'the offline popup did not load its shared production stylesheet',
+  ).toBe('#b7f03f')
 
   const loading = popup.getByText('Loading…')
   await expect(loading).toBeVisible()

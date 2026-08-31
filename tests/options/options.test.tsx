@@ -3,10 +3,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render } from 'preact'
 import {
   DEFAULTS,
+  LEGAL_VERSION,
   LIMITS,
   REFERENCE_BITS_PER_SECOND,
   memoryCeilingFor,
   merge,
+  termsAccepted,
   type Settings,
 } from '../../src/shared/settings'
 import { Options, bitsPerSecondOf, held, memoryFor } from '../../src/options/options'
@@ -24,6 +26,22 @@ const written: Settings[] = []
 let listeners: Array<(next: Settings, previous: Settings) => void> = []
 /** A read of the settings that never comes back: the page has to have something to show until it does. */
 let holdRead = false
+let refuseWrite = false
+let totalsReads = 0
+let sessionReads = 0
+
+interface LegalState {
+  acceptedVersion: number
+  acceptedAt: number
+}
+
+type SettingsWithLegal = Settings & { legal: LegalState }
+
+const withLegal = (legal: LegalState, over: Partial<Settings> = {}): Settings =>
+  ({ ...DEFAULTS, ...over, legal }) as SettingsWithLegal
+
+const accepted = (acceptedAt = 1_756_022_100_000, over: Partial<Settings> = {}): Settings =>
+  withLegal({ acceptedVersion: LEGAL_VERSION, acceptedAt }, over)
 
 vi.mock('../../src/shared/settings-store', () => ({
   readSettings: () =>
@@ -36,6 +54,7 @@ vi.mock('../../src/shared/settings-store', () => ({
   writeSettings: async (edit: (current: Settings) => Settings) => {
     const before = stored
     await new Promise((resolve) => setTimeout(resolve, 0))
+    if (refuseWrite) throw new Error('storage refused')
     stored = merge(edit(before))
     written.push(stored)
     return stored
@@ -58,8 +77,14 @@ let totals = { id: 'totals', bytes: 2 * 1024 ** 3, cappedBytes: 0, fullAt: 0 }
 let sessions: Array<{ bytes: number; seconds: number }> = [{ bytes: 450_000_000, seconds: 300 }]
 
 vi.mock('../../src/shared/history-db', () => ({
-  readTotals: async () => totals,
-  listSessions: async () => sessions,
+  readTotals: async () => {
+    totalsReads += 1
+    return totals
+  },
+  listSessions: async () => {
+    sessionReads += 1
+    return sessions
+  },
 }))
 
 /**
@@ -122,10 +147,13 @@ const openAdvanced = async (label: string) => {
 }
 
 beforeEach(() => {
-  stored = DEFAULTS
+  stored = accepted()
   totals = { id: 'totals', bytes: 2 * 1024 ** 3, cappedBytes: 0, fullAt: 0 }
   sessions = [{ bytes: 450_000_000, seconds: 300 }]
   holdRead = false
+  refuseWrite = false
+  totalsReads = 0
+  sessionReads = 0
   written.length = 0
   listeners = []
   // A new body rather than a cleared one: the module draws itself when it loads, exactly as the
@@ -139,6 +167,89 @@ afterEach(() => {
 })
 
 describe('the settings page', () => {
+  it('shows mandatory legal consent instead of settings until the current terms are accepted', async () => {
+    stored = withLegal({ acceptedVersion: 0, acceptedAt: 0 })
+    await draw()
+
+    expect(at('legal-consent')).not.toBeNull()
+    expect(document.querySelectorAll('[data-testid="group-title"]')).toHaveLength(0)
+    expect(at('reset')).toBeNull()
+    expect(totalsReads).toBe(0)
+    expect(sessionReads).toBe(0)
+  })
+
+  it('accepts the current terms only after confirmation and records when they were accepted', async () => {
+    const now = 1_756_022_399_000
+    vi.spyOn(Date, 'now').mockReturnValue(now)
+    stored = withLegal({ acceptedVersion: 0, acceptedAt: 0 })
+    await draw()
+
+    expect(field('legal-continue').disabled).toBe(true)
+    check('legal-agree', true)
+    await flush()
+    expect(field('legal-continue').disabled).toBe(false)
+    await click('legal-continue')
+
+    expect((written.at(-1) as SettingsWithLegal).legal).toEqual({
+      acceptedVersion: LEGAL_VERSION,
+      acceptedAt: now,
+    })
+    expect(termsAccepted(written.at(-1)!)).toBe(true)
+  })
+
+  it('keeps consent locked and explains when the agreement could not be stored', async () => {
+    stored = withLegal({ acceptedVersion: 0, acceptedAt: 0 })
+    refuseWrite = true
+    await draw()
+
+    check('legal-agree', true)
+    await flush()
+    await click('legal-continue')
+    await flush()
+
+    expect(written).toHaveLength(0)
+    expect(at('legal-consent')).not.toBeNull()
+    expect(at('group-title')).toBeNull()
+    expect(at('legal-error')?.getAttribute('role')).toBe('alert')
+    expect(at('legal-error')?.textContent).toContain('Could not save your agreement')
+    expect(field('legal-continue').disabled).toBe(false)
+  })
+
+  it('resets preferences without revoking accepted terms', async () => {
+    const legal = { acceptedVersion: LEGAL_VERSION, acceptedAt: 1_756_022_100_000 }
+    stored = withLegal(legal, {
+      history: { ...DEFAULTS.history, keepDays: 30 },
+    })
+    await draw()
+    await click('reset')
+
+    expect((written.at(-1) as SettingsWithLegal).legal).toEqual(legal)
+    expect(written.at(-1)!.history).toEqual(DEFAULTS.history)
+  })
+
+  it('keeps the legal links and donation link in a quiet footer after acceptance', async () => {
+    stored = accepted()
+    await draw()
+
+    const footer = document.querySelector<HTMLElement>('[data-testid="legal-footer"]')!
+    expect(footer).not.toBeNull()
+    expect(footer.textContent).toContain('Privacy')
+    expect(footer.textContent).toContain('Terms')
+
+    const support = footer.querySelector<HTMLAnchorElement>('[data-testid="support-link"]')!
+    expect(support.textContent).toBe('Donate')
+    expect(support.href).toBe('https://donatty.com/rnv812')
+    expect(support.target).toBe('_blank')
+    expect(support.rel.split(/\s+/)).toContain('noreferrer')
+    expect(support.classList.contains('legal-donate')).toBe(true)
+    expect(support.getAttribute('aria-describedby')).toBe('donation-note')
+    expect(support.title).toContain('voluntary')
+    expect(support.title).toContain('no features or benefits')
+    expect(document.querySelector('#donation-note')?.textContent).toContain(
+      'Donations are voluntary and unlock no features or benefits.',
+    )
+  })
+
   it('shows the four settings groups in recording order', async () => {
     await draw()
     const titles = [...document.querySelectorAll('[data-testid="group-title"]')].map(
@@ -299,7 +410,9 @@ describe('the settings page', () => {
   })
 
   it('marks a host as allowed or denied in one list', async () => {
-    stored = { ...DEFAULTS, recording: { ...DEFAULTS.recording, deny: ['ads.example'] } }
+    stored = accepted(1_756_022_100_000, {
+      recording: { ...DEFAULTS.recording, deny: ['ads.example'] },
+    })
     await draw()
 
     const row = at('host-row')!
@@ -315,10 +428,9 @@ describe('the settings page', () => {
     // One list and not two, because a user thinks about a site once: this one, yes or no. Sorted
     // by host and not by verdict, or a site changed from denied to allowed jumps somewhere else
     // in the list and the user has to find it again to change it back.
-    stored = {
-      ...DEFAULTS,
+    stored = accepted(1_756_022_100_000, {
       recording: { ...DEFAULTS.recording, allow: ['b.example'], deny: ['c.example', 'a.example'] },
-    }
+    })
     await draw()
 
     const rows = [...document.querySelectorAll('[data-testid="host-row"]')].map((row) =>
@@ -328,7 +440,9 @@ describe('the settings page', () => {
   })
 
   it('drops a host the user is done with', async () => {
-    stored = { ...DEFAULTS, recording: { ...DEFAULTS.recording, deny: ['ads.example'] } }
+    stored = accepted(1_756_022_100_000, {
+      recording: { ...DEFAULTS.recording, deny: ['ads.example'] },
+    })
     await draw()
 
     at('host-row')!.querySelector<HTMLButtonElement>('[data-testid="host-remove"]')!.click()
@@ -506,7 +620,11 @@ describe('the settings page', () => {
     // hour of it is more than one document holds. Silent, the slider promised half an hour and
     // the frame kept a third of it — and used to lose the recording altogether every few minutes
     // getting there.
-    stored = merge({ ...DEFAULTS, recording: { ...DEFAULTS.recording, bufferSeconds: 1_800 } })
+    stored = merge(
+      accepted(1_756_022_100_000, {
+        recording: { ...DEFAULTS.recording, bufferSeconds: 1_800 },
+      }),
+    )
     await draw()
 
     const ceiling = memoryCeilingFor(1_800)
@@ -589,13 +707,15 @@ describe('the settings page', () => {
   })
 
   it('restores every documented default on screen and in storage', async () => {
-    stored = { ...DEFAULTS, history: { ...DEFAULTS.history, keepDays: 30 } }
+    stored = accepted(1_756_022_100_000, {
+      history: { ...DEFAULTS.history, keepDays: 30 },
+    })
     await draw()
     expect(field('keep-days').value).toBe('30')
 
     await click('reset')
 
-    expect(written.at(-1)).toEqual(DEFAULTS)
+    expect(written.at(-1)).toEqual(accepted())
     expect(field('keep-days').value).toBe(String(DEFAULTS.history.keepDays))
   })
 
@@ -605,7 +725,9 @@ describe('the settings page', () => {
     await draw()
     expect(field('to-disk').checked).toBe(true)
 
-    const changed = { ...DEFAULTS, history: { ...DEFAULTS.history, toDisk: false } }
+    const changed = accepted(1_756_022_100_000, {
+      history: { ...DEFAULTS.history, toDisk: false },
+    })
     expect(listeners, 'the page subscribed to nothing').not.toEqual([])
     for (const listener of listeners) listener(changed, DEFAULTS)
     await flush()

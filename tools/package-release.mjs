@@ -26,14 +26,14 @@ const crc32 = (bytes) => {
   return (value ^ 0xffffffff) >>> 0
 }
 
-const filesBelow = async (directory, archivePrefix) => {
+export const filesBelow = async (directory, archivePrefix = '') => {
   const found = []
   const entries = await readdir(directory, { withFileTypes: true })
   entries.sort((a, b) => a.name.localeCompare(b.name, 'en'))
 
   for (const entry of entries) {
     const absolute = path.join(directory, entry.name)
-    const archived = `${archivePrefix}/${entry.name}`
+    const archived = archivePrefix ? `${archivePrefix}/${entry.name}` : entry.name
     if (entry.isDirectory()) found.push(...await filesBelow(absolute, archived))
     else if (entry.isFile()) found.push({ absolute, archived })
     else throw new Error(`release tree contains a non-file entry: ${absolute}`)
@@ -42,7 +42,7 @@ const filesBelow = async (directory, archivePrefix) => {
   return found
 }
 
-const zipFiles = async (files) => {
+export const zipFiles = async (files) => {
   const localParts = []
   const centralParts = []
   let offset = 0

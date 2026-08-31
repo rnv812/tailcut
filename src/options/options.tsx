@@ -2,14 +2,17 @@ import { render, type ComponentChildren } from 'preact'
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { listSessions, readTotals } from '../shared/history-db'
 import { formatBytes, formatSeconds } from '../shared/format'
+import { LegalConsent, LegalFooter } from '../shared/legal'
 import {
   DEFAULTS,
+  LEGAL_VERSION,
   LIMITS,
   REFERENCE_BITS_PER_SECOND,
   memoryCeilingFor,
   merge,
   presetNamed,
   presetOf,
+  termsAccepted,
   type DetectionPreset,
   type ExportFormat,
   type RecordingMode,
@@ -269,13 +272,19 @@ export function Options() {
   /** The tail of the writes already under way; see `push`. */
   const queue = useRef<Promise<unknown>>(Promise.resolve())
 
-  useEffect(() => {
-    void readSettings().then(setSettings)
+  const readUsage = () => {
     void readTotals().then((totals) => {
       setVolume(totals.bytes)
       setFull(totals.fullAt > 0)
     })
     void listSessions(50).then((sessions) => setRate(bitsPerSecondOf(sessions)))
+  }
+
+  useEffect(() => {
+    void readSettings().then((next) => {
+      setSettings(next)
+      if (termsAccepted(next)) readUsage()
+    })
     // The popup has quick switches of its own, so somebody else may write the same key. A stale
     // value here would put the old setting back the moment anything on this page is touched.
     return watchSettings((next) => setSettings(next))
@@ -367,22 +376,44 @@ export function Options() {
    */
   const keptSeconds = expected > ceiling ? (ceiling * 8) / rate : 0
 
+  const pageHead = (
+    <header class="page-head">
+      <div class="tc-brand">
+        <img
+          class="tc-brand-mark"
+          data-testid="brand-mark"
+          src="../assets/tailcut/svg/mark-light.svg"
+          alt="tailcut"
+        />
+        <div>
+          <h1>tailcut</h1>
+          <p>Settings</p>
+        </div>
+      </div>
+    </header>
+  )
+
+  if (!termsAccepted(settings)) {
+    return (
+      <main>
+        {pageHead}
+        <LegalConsent
+          onAccept={async () => {
+            const next = await writeSettings((current) => ({
+              ...current,
+              legal: { acceptedVersion: LEGAL_VERSION, acceptedAt: Date.now() },
+            }))
+            setSettings(next)
+            readUsage()
+          }}
+        />
+      </main>
+    )
+  }
+
   return (
     <main>
-      <header class="page-head">
-        <div class="tc-brand">
-          <img
-            class="tc-brand-mark"
-            data-testid="brand-mark"
-            src="../assets/tailcut/svg/mark-light.svg"
-            alt="tailcut"
-          />
-          <div>
-            <h1>tailcut</h1>
-            <p>Settings</p>
-          </div>
-        </div>
-      </header>
+      {pageHead}
 
       <Group title="Recording">
         <div class="mode-grid">
@@ -669,10 +700,14 @@ export function Options() {
       </Group>
 
       <div class="reset">
-        <button data-testid="reset" onClick={() => edit(() => DEFAULTS)}>
+        <button
+          data-testid="reset"
+          onClick={() => edit((current) => ({ ...DEFAULTS, legal: current.legal }))}
+        >
           Reset all settings
         </button>
       </div>
+      <LegalFooter />
     </main>
   )
 }

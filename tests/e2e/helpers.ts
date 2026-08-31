@@ -110,6 +110,8 @@ export interface LaunchOptions {
    * timers are clamped to 1 Hz.
    */
   throttled?: boolean
+  /** Leave the fresh profile at the real first-run consent screen. Most tests exercise later use. */
+  acceptTerms?: boolean
 }
 
 /**
@@ -154,10 +156,55 @@ export async function launchWithExtension(options: LaunchOptions = {}): Promise<
     options,
   )
 
-  let [sw] = context.serviceWorkers()
-  if (!sw) sw = await context.waitForEvent('serviceworker')
+  return closeContextOnFailure(context, async () => {
+    let [sw] = context.serviceWorkers()
+    if (!sw) sw = await context.waitForEvent('serviceworker')
 
-  return { context, extensionId: new URL(sw.url()).host }
+    const extensionId = new URL(sw.url()).host
+
+    if (options.acceptTerms !== false) {
+      const consent = await context.newPage()
+      try {
+        await consent.goto(`chrome-extension://${extensionId}/popup/popup.html`)
+        await acceptFirstRunTerms(consent)
+      } finally {
+        await consent.close()
+      }
+    }
+
+    return { context, extensionId }
+  })
+}
+
+/**
+ * Waits until the popup has resolved its asynchronous settings read, then accepts a fresh
+ * profile or leaves an already accepted profile untouched.
+ */
+export async function acceptFirstRunTerms(page: Page): Promise<void> {
+  const consent = page.getByTestId('legal-consent')
+  const footer = page.getByTestId('legal-footer')
+
+  // isVisible() is an immediate observation, not a wait. First wait for either stable state so a
+  // slow settings read cannot make a fresh profile look already accepted.
+  await consent.or(footer).waitFor({ state: 'visible' })
+  if (!(await consent.isVisible())) return
+
+  await page.getByTestId('legal-agree').check()
+  await page.getByTestId('legal-continue').click()
+  await footer.waitFor({ state: 'visible' })
+}
+
+/** Keeps a failed launch from leaving a Chromium process behind when no caller received it. */
+export async function closeContextOnFailure<T>(
+  context: BrowserContext,
+  prepare: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await prepare()
+  } catch (cause) {
+    await context.close().catch(() => undefined)
+    throw cause
+  }
 }
 
 /** The same browser without the extension — the baseline the overhead is measured against. */

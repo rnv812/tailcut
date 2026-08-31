@@ -21,4 +21,12 @@ describe('the runtime brand theme', () => {
     expect(css).toMatch(/:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--tc-accent\)/s)
     expect(css).toMatch(/:focus:not\(:focus-visible\)\s*\{[^}]*outline:\s*none/s)
   })
+
+  it('distinguishes legal links without relying on colour or hover', () => {
+    const css = theme()
+
+    expect(css).toMatch(
+      /\.legal-consent a,\s*\.legal-footer a\s*\{[^}]*text-decoration:\s*underline/s,
+    )
+  })
 })

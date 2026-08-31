@@ -11,6 +11,8 @@ import { BALANCED, LOOSE, STRICT, type TriageConfig } from '../core/triage'
  * `onChanged` rather than five arriving in no particular order.
  */
 export const SETTINGS_KEY = 'settings'
+/** Bump only when the material terms change and require a fresh acknowledgement. */
+export const LEGAL_VERSION = 1
 
 export type RecordingMode = 'all' | 'allowlist' | 'off'
 export type ExportFormat = 'mp4' | 'webp'
@@ -44,6 +46,11 @@ export interface ExportSettings {
   quality: ExportQuality
 }
 
+export interface LegalSettings {
+  acceptedVersion: number
+  acceptedAt: number
+}
+
 export interface Settings {
   recording: RecordingSettings
   /**
@@ -54,6 +61,7 @@ export interface Settings {
   detection: TriageConfig
   history: HistorySettings
   export: ExportSettings
+  legal: LegalSettings
 }
 
 /**
@@ -77,6 +85,7 @@ export const DEFAULTS: Settings = {
     askWhere: false,
     quality: 'high',
   },
+  legal: { acceptedVersion: 0, acceptedAt: 0 },
 }
 
 /**
@@ -216,6 +225,14 @@ export function merge(stored: unknown): Settings {
   const detection = group('detection')
   const history = group('history')
   const exported = group('export')
+  const legal = group('legal')
+  const acceptedVersion = legal.acceptedVersion
+  const acceptedAt = legal.acceptedAt
+  const legalAccepted =
+    acceptedVersion === LEGAL_VERSION &&
+    typeof acceptedAt === 'number' &&
+    Number.isFinite(acceptedAt) &&
+    acceptedAt > 0
 
   return {
     recording: {
@@ -253,7 +270,19 @@ export function merge(stored: unknown): Settings {
       askWhere: asBoolean(exported.askWhere, DEFAULTS.export.askWhere),
       quality: asOneOf(exported.quality, ['high', 'medium', 'low'] as const, DEFAULTS.export.quality),
     },
+    legal: legalAccepted
+      ? { acceptedVersion, acceptedAt }
+      : { ...DEFAULTS.legal },
   }
+}
+
+/** Whether this profile acknowledged the material terms shipped by this build. */
+export function termsAccepted(settings: Settings): boolean {
+  return (
+    settings.legal.acceptedVersion === LEGAL_VERSION &&
+    Number.isFinite(settings.legal.acceptedAt) &&
+    settings.legal.acceptedAt > 0
+  )
 }
 
 const PRESETS: Array<{ name: Exclude<DetectionPreset, 'custom'>; config: TriageConfig }> = [

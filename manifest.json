@@ -11,7 +11,7 @@
     "48": "assets/tailcut/icon/icon-48.png",
     "128": "assets/tailcut/icon/icon-128.png"
   },
-  "permissions": ["storage", "downloads", "activeTab", "scripting", "alarms"],
+  "permissions": ["storage", "downloads", "scripting", "alarms"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "sw/service-worker.js", "type": "module" },
   "action": {

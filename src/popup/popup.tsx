@@ -1,5 +1,8 @@
 import { render } from 'preact'
 import { useEffect, useState } from 'preact/hooks'
+import { LegalConsent, LegalFooter } from '../shared/legal'
+import { LEGAL_VERSION, termsAccepted } from '../shared/settings'
+import { readSettings, writeSettings } from '../shared/settings-store'
 import {
   clearHistory,
   deleteHistory,
@@ -429,6 +432,8 @@ function StorageBar(props: {
 }
 
 function Popup() {
+  /** null until the one permitted start-up read has answered. Recording data stays untouched. */
+  const [accepted, setAccepted] = useState<boolean | null>(null)
   // null — the tab has not answered yet. An answer with no sessions in it differs from that: on
   // that the popup already knows there was nothing to record, and says so in words.
   const [answer, setAnswer] = useState<SessionList | null>(null)
@@ -455,20 +460,50 @@ function Popup() {
   const changed = () => setRevision((turn) => turn + 1)
 
   useEffect(() => {
-    // Four reads, side by side rather than one after another: they answer independently, and the
-    // popup is obliged to open instantly. Nothing here computes and nothing walks the disk.
     let current = true
-    void listSessions().then((next) => current && setAnswer(next))
-    void historyRows().then((next) => current && setRows(next))
-    void storageInUse().then((next) => current && setInUse(next))
-    void pageUrl().then(async (where) => {
+    // Consent is the boundary, not merely another panel. The settings read is the only start-up
+    // read allowed before it; page sessions, history, and storage totals begin only after its
+    // answer says this version was accepted.
+    void readSettings().then((settings) => {
       if (!current) return
-      setUrl(where)
-      const next = await siteSwitch(where)
-      if (current) setSite(next)
+      const permitted = termsAccepted(settings)
+      setAccepted(permitted)
+      if (!permitted) return
+
+      // Four reads, side by side rather than one after another: they answer independently, and
+      // the popup is obliged to open instantly. Nothing here computes and nothing walks the disk.
+      void listSessions().then((next) => current && setAnswer(next))
+      void historyRows().then((next) => current && setRows(next))
+      void storageInUse().then((next) => current && setInUse(next))
+      void pageUrl().then(async (where) => {
+        if (!current) return
+        setUrl(where)
+        const next = await siteSwitch(where)
+        if (current) setSite(next)
+      })
     })
     return () => { current = false }
   }, [revision])
+
+  if (accepted === null) return <div class="pad muted">Loading…</div>
+
+  if (!accepted) {
+    return (
+      <div>
+        <Header />
+        <LegalConsent
+          onAccept={async () => {
+            await writeSettings((current) => ({
+              ...current,
+              legal: { acceptedVersion: LEGAL_VERSION, acceptedAt: Date.now() },
+            }))
+            setAccepted(true)
+            changed()
+          }}
+        />
+      </div>
+    )
+  }
 
   // The tab has not answered yet, and until it has there is nothing to say about the page. What
   // is on disk would be true already — it comes off the index — but a popup that drew its second
@@ -538,6 +573,7 @@ function Popup() {
           </section>
         )}
         {storage}
+        <LegalFooter />
       </div>
     )
   }
@@ -670,6 +706,7 @@ function Popup() {
       />
       </section>
       {storage}
+      <LegalFooter />
     </div>
   )
 }

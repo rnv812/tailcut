@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { BALANCED, LOOSE, STRICT } from '../../src/core/triage'
 import {
   DEFAULTS,
+  LEGAL_VERSION,
   LIMITS,
   REFERENCE_BITS_PER_SECOND,
   SPARE_MEMORY_BYTES,
@@ -10,6 +11,7 @@ import {
   presetOf,
   presetNamed,
   siteAllows,
+  termsAccepted,
   type Settings,
 } from '../../src/shared/settings'
 
@@ -28,6 +30,7 @@ describe('DEFAULTS', () => {
     // which codec a fresh installation actually reaches for until this line says `high`.
     expect(DEFAULTS.export.quality).toBe('high')
     expect(DEFAULTS.export.rewriteHead).toBe(false)
+    expect(DEFAULTS.legal).toEqual({ acceptedVersion: 0, acceptedAt: 0 })
   })
 
   it('is not shared with what it is merged into', () => {
@@ -56,6 +59,27 @@ describe('merge', () => {
     const stored = merge({ recording: { bufferSeconds: 60, deny: ['a.example'] } })
     expect(stored.recording.bufferSeconds).toBe(60)
     expect(stored.recording.deny).toEqual(['a.example'])
+  })
+
+  it('keeps a valid terms acceptance and refuses malformed legal state', () => {
+    const accepted = merge({ legal: { acceptedVersion: LEGAL_VERSION, acceptedAt: 1_788_000_000_000 } })
+    expect(accepted.legal).toEqual({
+      acceptedVersion: LEGAL_VERSION,
+      acceptedAt: 1_788_000_000_000,
+    })
+    expect(termsAccepted(accepted)).toBe(true)
+
+    for (const legal of [
+      null,
+      [],
+      { acceptedVersion: '1', acceptedAt: 1_788_000_000_000 },
+      { acceptedVersion: LEGAL_VERSION, acceptedAt: -1 },
+      { acceptedVersion: LEGAL_VERSION + 1, acceptedAt: 1_788_000_000_000 },
+    ]) {
+      const refused = merge({ legal })
+      expect(refused.legal).toEqual(DEFAULTS.legal)
+      expect(termsAccepted(refused)).toBe(false)
+    }
   })
 
   it('throws away what it does not know: a build of tomorrow wrote it, or a page did', () => {

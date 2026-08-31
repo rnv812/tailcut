@@ -148,7 +148,6 @@ const CONTENT_SCRIPT_WORLDS: Record<string, string> = {
  * the permission, and without the permissions entry the capability does not exist at run time.
  */
 const REQUIRED_PERMISSIONS: Record<string, string> = {
-  activeTab: 'the popup can access the tab the user is viewing',
   alarms: 'the badge is recalculated even after the service worker goes to sleep',
   downloads: 'the finished clip is saved as a file, which is the extension\'s purpose',
   scripting: 'the popup and badge enumerate every frame in the tab to query each one',
@@ -481,6 +480,10 @@ describe('manifest', () => {
     expect([...declared].sort(), 'the manifest contains an unjustified permission').toEqual(
       Object.keys(REQUIRED_PERMISSIONS).sort(),
     )
+  })
+
+  it('does not request activeTab in addition to permanent all-sites access', () => {
+    expect(manifest().permissions).not.toContain('activeTab')
   })
 
   it('allows all sites because segment refetches use other origins', () => {

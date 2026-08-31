@@ -14,6 +14,8 @@ import type {
   SessionSummary,
 } from '../../src/shared/protocol'
 import {
+  DEFAULTS,
+  LEGAL_VERSION,
   LIMITS,
   REFERENCE_BITS_PER_SECOND,
   SETTINGS_KEY,
@@ -97,6 +99,10 @@ const PAGE_TITLE = 'Clip — site.example'
 const REFERRER = 'https://referrer.example/from'
 const CAPABILITY_ID = '0123456789abcdef0123456789abcdef'
 const CAPABILITY = 'fedcba9876543210fedcba9876543210'
+const ACCEPTED_SETTINGS: Settings = {
+  ...DEFAULTS,
+  legal: { acceptedVersion: LEGAL_VERSION, acceptedAt: 1_756_022_100_000 },
+}
 
 /**
  * The key the registry holds the session of this page under. It is never an address:
@@ -620,7 +626,7 @@ function installHost(file: Uint8Array = plainBytes) {
  * frame reads it a turn or two after loading, so the turns are given here rather than left to
  * every caller to remember.
  */
-async function loadBridge(referrer?: string, stored?: unknown) {
+async function loadBridge(referrer?: string, stored: unknown = ACCEPTED_SETTINGS) {
   const win = installWindow(referrer, stored)
   vi.resetModules()
   await import('../../src/bridge/bridge')
@@ -2307,7 +2313,19 @@ describe('the word that this frame is recording', () => {
 describe('the recording setting', () => {
   /** The settings as the settings page would store them: one key, the whole of them under it. */
   const denying = (...hosts: string[]) => ({
+    ...ACCEPTED_SETTINGS,
     recording: { mode: 'all', bufferSeconds: 180, allow: [], deny: hosts },
+  })
+
+  it('keeps intake and history off until the current terms are accepted', async () => {
+    const win = await loadBridge(REFERRER, DEFAULTS)
+    win.context()
+
+    win.append(initBytes)
+    win.append(seg1Bytes)
+
+    expect(win.switches()).toEqual([false])
+    expect(await win.list()).toEqual([])
   })
 
   it('works out whether this page is recorded when the address arrives, and says so', async () => {
@@ -2465,6 +2483,7 @@ describe('the recording setting', () => {
 
   it('carries the bit and never the settings', async () => {
     const win = await loadBridge(REFERRER, {
+      ...ACCEPTED_SETTINGS,
       recording: { mode: 'allowlist', bufferSeconds: 180, allow: ['site.example'], deny: [] },
     })
 
@@ -2665,6 +2684,7 @@ describe('the quick switch of the popup', () => {
 
   it('never starts a recording the settings forbid', async () => {
     const win = await loadBridge(REFERRER, {
+      ...ACCEPTED_SETTINGS,
       recording: { mode: 'all', bufferSeconds: 180, allow: [], deny: ['site.example'] },
     })
     win.context()

@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import type { Omission, SaveResult, SessionSummary } from '../../src/shared/protocol'
-import { DEFAULTS, merge, type Settings } from '../../src/shared/settings'
+import { DEFAULTS, LEGAL_VERSION, merge, type Settings } from '../../src/shared/settings'
 import type { HistoryRow } from '../../src/popup/api'
 
 /**
@@ -19,6 +19,8 @@ let rows: HistoryRow[] = []
  */
 const IN_USE = { bytes: 1_610_612_736, full: false }
 let inUse = { ...IN_USE }
+let historyReads = 0
+let storageReads = 0
 
 /** Every pin and unpin the popup asked for, and every deletion and undo, in order. */
 const pinned: Array<[string, boolean]> = []
@@ -62,18 +64,23 @@ const asStored = (row: HistoryRow) => ({
 vi.mock('../../src/shared/history-db', () => ({
   // Sifted the way the index sifts: a row marked deleted is not in the list any more, whoever
   // asks and however soon after the mark.
-  listSessions: async (limit: number) =>
-    rows
+  listSessions: async (limit: number) => {
+    historyReads += 1
+    return rows
       .filter((row) => !marks.get(row.id))
       .slice(0, limit)
-      .map(asStored),
-  readTotals: async () => ({
-    id: 'totals',
-    bytes: inUse.bytes,
-    cappedBytes: 0,
-    // How a refusal by the browser is written down: the moment it happened, and never a flag.
-    fullAt: inUse.full ? 1_700_000_000_000 : 0,
-  }),
+      .map(asStored)
+  },
+  readTotals: async () => {
+    storageReads += 1
+    return {
+      id: 'totals',
+      bytes: inUse.bytes,
+      cappedBytes: 0,
+      // How a refusal by the browser is written down: the moment it happened, and never a flag.
+      fullAt: inUse.full ? 1_700_000_000_000 : 0,
+    }
+  },
   setPinned: async (id: string, on: boolean) => {
     pinned.push([id, on])
   },
@@ -304,13 +311,18 @@ const settle = async () => {
 beforeEach(() => {
   rows = []
   inUse = { ...IN_USE }
+  historyReads = 0
+  storageReads = 0
   pinned.length = 0
   deleted.length = 0
   undone.length = 0
   cleared = 0
   marks.clear()
   written.length = 0
-  stored = DEFAULTS
+  stored = {
+    ...DEFAULTS,
+    legal: { acceptedVersion: LEGAL_VERSION, acceptedAt: 1_700_000_000_000 },
+  }
   sent.length = 0
 })
 
@@ -323,6 +335,66 @@ afterEach(async () => {
   if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(100)
   vi.unstubAllGlobals()
   vi.useRealTimers()
+})
+
+describe('legal consent', () => {
+  it('takes over the popup before reading recordings when this version is not accepted', async () => {
+    stored = {
+      ...DEFAULTS,
+      legal: { acceptedVersion: LEGAL_VERSION - 1, acceptedAt: 1_699_000_000_000 },
+    }
+
+    await draw()
+
+    expect(at('legal-consent')).not.toBeNull()
+    expect(at('legal-agree')).not.toBeNull()
+    expect(at('legal-continue')).not.toBeNull()
+    expect(at('recordings')).toBeNull()
+    expect(sent.map(({ message }) => message)).not.toContainEqual({ type: 'tc:list' })
+    expect(historyReads, 'persistent recording history was read before consent').toBe(0)
+    expect(storageReads, 'persistent storage totals were read before consent').toBe(0)
+  })
+
+  it('records this legal version and the acceptance time after explicit agreement', async () => {
+    stored = { ...DEFAULTS, legal: { acceptedVersion: 0, acceptedAt: 0 } }
+    const before = Date.now()
+    await draw()
+
+    const agree = at('legal-agree') as HTMLInputElement | null
+    const proceed = at('legal-continue') as HTMLButtonElement | null
+    expect(agree).not.toBeNull()
+    expect(proceed).not.toBeNull()
+    expect(proceed!.disabled).toBe(true)
+
+    await click(agree!)
+    expect(proceed!.disabled).toBe(false)
+    await click(proceed!)
+
+    expect(written).toHaveLength(1)
+    expect(written[0]!.legal.acceptedVersion).toBe(LEGAL_VERSION)
+    expect(written[0]!.legal.acceptedAt).toBeGreaterThanOrEqual(before)
+    expect(written[0]!.legal.acceptedAt).toBeLessThanOrEqual(Date.now())
+  })
+
+  it('keeps exact privacy, terms, and support links in the popup after acceptance', async () => {
+    await draw()
+
+    const footer = at('legal-footer')
+    expect(footer).not.toBeNull()
+    const links = [...footer!.querySelectorAll<HTMLAnchorElement>('a')]
+    const named = (name: string) => links.find((link) => link.textContent === name)
+
+    expect(named('Privacy')?.href).toBe(
+      'https://github.com/rnv812/tailcut/blob/master/PRIVACY.md',
+    )
+    expect(named('Terms')?.href).toBe(
+      'https://github.com/rnv812/tailcut/blob/master/TERMS.md',
+    )
+    const support = footer!.querySelector<HTMLAnchorElement>('[data-testid="support-link"]')
+    expect(support?.href).toBe('https://donatty.com/rnv812')
+    expect(support?.target).toBe('_blank')
+    expect(support?.rel).toBe('noreferrer')
+  })
 })
 
 describe('the popup', () => {
@@ -1104,7 +1176,7 @@ describe('the history and the switches under it', () => {
   })
 
   it('offers no switch for the site while nothing is recorded anywhere', async () => {
-    stored = merge({ recording: { ...DEFAULTS.recording, mode: 'off' } })
+    stored = merge({ ...stored, recording: { ...DEFAULTS.recording, mode: 'off' } })
     await draw()
 
     // `Off` is not "this site is not recorded": neither list decides anything while it holds, so
