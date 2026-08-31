@@ -19,7 +19,7 @@ import type { SnapshotReader } from '../../core/snapshot/read'
 import { webpGeometry } from '../../core/webp/timing'
 import type { TrackKind } from '../../shared/types'
 import { encodeToTrack } from './encoder'
-import { CodecFailure } from './failure'
+import { CodecFailure, unexpectedFrameFormat } from './failure'
 import type { Codecs, FrameSource } from './frames'
 import { encodeWebp, type Surface } from './webp'
 
@@ -264,20 +264,31 @@ export function encodeIo(
       let result = null
       let lastFailure: CodecFailure | null = null
       for (const choice of runtimeChoices(path.choice, path.plan.geometry)) {
-        try {
-          result = await encodeToTrack(
-            path.plan,
-            choice,
-            frameSourceOf(reader, stale),
-            codecs,
-            report,
-          )
-          break
-        } catch (error) {
-          if (!(error instanceof CodecFailure) || error.stage !== 'encode') throw error
-          lastFailure = error
+        let normalizeFrames = false
+        for (;;) {
+          try {
+            result = await encodeToTrack(
+              path.plan,
+              choice,
+              frameSourceOf(reader, stale),
+              codecs,
+              report,
+              normalizeFrames,
+            )
+            break
+          } catch (error) {
+            if (!(error instanceof CodecFailure) || error.stage !== 'encode') throw error
+            lastFailure = error
+            if (!normalizeFrames && unexpectedFrameFormat(error)) {
+              normalizeFrames = true
+              continue
+            }
+            break
+          }
         }
+        if (result || stale()) break
       }
+      if (stale()) return null
       if (!result && lastFailure) throw lastFailure
       if (!result) return null
 

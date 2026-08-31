@@ -58,6 +58,7 @@ export async function encodeToTrack(
   source: FrameSource,
   codecs: Codecs,
   onFrames: (frames: number) => void,
+  normalizeFrames = false,
 ): Promise<EncodeResult | null> {
   const kept = plan.frames.filter((frame) => frame.keep)
   // Timestamp of a frame, in the microseconds the transport counts, to the ticks the file counts.
@@ -108,7 +109,7 @@ export async function encodeToTrack(
   let ticksSinceKey = 0
 
   try {
-    for await (const frame of decodedFrames(plan, source, codecs)) {
+    for await (const frame of decodedFrames(plan, source, codecs, normalizeFrames)) {
       // The frame belongs to this loop the moment it is handed over, and the end of a job is
       // exactly where one gets forgotten: `for await` closes what the stream is still holding,
       // never what it has already given away. A `VideoFrame` nobody closes is a buffer the

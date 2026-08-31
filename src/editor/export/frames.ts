@@ -48,6 +48,8 @@ export interface Codecs {
     },
   ): EncoderLike
   chunk(init: EncodedVideoChunkInit): EncodedVideoChunk
+  /** Copies a frame into ordinary CPU-backed storage accepted by the software encoder. */
+  normalize(frame: VideoFrame): Promise<VideoFrame>
   /**
    * The crop, cut out of a decoded frame — the one place a picture is made smaller than it was
    * recorded, and the reason it is a method rather than three lines inline is that a unit test
@@ -92,6 +94,7 @@ export async function* decodedFrames(
   plan: FramePlan,
   source: FrameSource,
   codecs: Codecs,
+  normalize = false,
 ): AsyncGenerator<VideoFrame> {
   const ready: VideoFrame[] = []
   let failed: Error | null = null
@@ -145,7 +148,16 @@ export async function* decodedFrames(
       // encoder, so this is where the whole chain finds its pace: no timer decides it.
       while (ready.length) {
         if (failed) throw failed
-        yield ready.shift()!
+        const frame = ready.shift()!
+        if (!normalize) {
+          yield frame
+          continue
+        }
+        try {
+          yield await codecs.normalize(frame)
+        } finally {
+          frame.close()
+        }
       }
 
       // A yield the browser does not clamp, once a sample. It is what keeps the tab painting
@@ -187,7 +199,18 @@ export async function* decodedFrames(
       throw failed ?? decodingFailure(error)
     }
     if (failed) throw failed
-    while (ready.length) yield ready.shift()!
+    while (ready.length) {
+      const frame = ready.shift()!
+      if (!normalize) {
+        yield frame
+        continue
+      }
+      try {
+        yield await codecs.normalize(frame)
+      } finally {
+        frame.close()
+      }
+    }
   } finally {
     for (const frame of ready) frame.close()
     ready.length = 0
@@ -256,6 +279,28 @@ export function liveCodecs(): Codecs {
     },
 
     chunk: (init) => new EncodedVideoChunk(init),
+
+    normalize: async (frame) => {
+      const visible = frame.visibleRect
+      if (!visible) throw new Error('The decoded frame has no visible picture to normalize.')
+      const rect = {
+        x: visible.x,
+        y: visible.y,
+        width: visible.width,
+        height: visible.height,
+      }
+      const options: VideoFrameCopyToOptions = { format: 'RGBA', rect }
+      const bytes = new Uint8Array(frame.allocationSize(options))
+      const layout = await frame.copyTo(bytes, options)
+      return new VideoFrame(bytes, {
+        format: 'RGBA',
+        codedWidth: rect.width,
+        codedHeight: rect.height,
+        layout: [...layout],
+        timestamp: frame.timestamp,
+        ...(frame.duration === null ? {} : { duration: frame.duration }),
+      })
+    },
 
     /**
      * The crop, and the only line of this program that cuts a picture.

@@ -1,12 +1,20 @@
 export class CodecFailure extends Error {
   constructor(
     readonly stage: 'decode' | 'encode',
+    readonly causeName: string,
+    readonly causeMessage: string,
     message: string,
   ) {
     super(message)
     this.name = 'CodecFailure'
   }
 }
+
+/** The one encoder refusal that a CPU-backed copy can change. */
+export const unexpectedFrameFormat = (failure: CodecFailure): boolean =>
+  failure.stage === 'encode' &&
+  failure.causeName === 'OperationError' &&
+  failure.causeMessage.includes('Unexpected frame format')
 
 /** A WebCodecs failure with enough context to identify which half of an export rejected which codec. */
 export function codecFailure(
@@ -27,5 +35,5 @@ export function codecFailure(
       ? `Decoding ${sourceCodec}`
       : `Encoding ${sourceCodec} to ${targetCodec ?? 'unknown'}`
 
-  return new CodecFailure(stage, `${operation} failed (${name}): ${message}`)
+  return new CodecFailure(stage, name, message, `${operation} failed (${name}): ${message}`)
 }

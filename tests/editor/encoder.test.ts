@@ -333,6 +333,8 @@ function fakeCodecs(
 
     chunk: (init) => init as unknown as EncodedVideoChunk,
 
+    normalize: async (frame) => frame,
+
     cut() {
       throw new Error('nothing here has a crop; the stream is what cuts one')
     },

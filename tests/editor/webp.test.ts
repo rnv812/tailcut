@@ -112,6 +112,7 @@ function fakeCodecs(): Fakes {
         ...init,
         byteLength: init.data.byteLength,
       }) as unknown as EncodedVideoChunk,
+    normalize: async (frame) => frame,
     cut: () => {
       throw new Error('These plans do not crop.')
     },

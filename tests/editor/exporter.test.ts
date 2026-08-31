@@ -309,12 +309,13 @@ interface IntegrationCodecs {
   encoderConfigs: VideoEncoderConfig[]
   decoded: number
   encoded: number
+  normalized: number
   closed: number
 }
 
 /** Enough WebCodecs to exercise the exporter seam without constructing a browser object. */
 const integrationCodecs = (
-  behavior: { failHardware?: boolean } = {},
+  behavior: { failHardware?: boolean; rejectUnnormalized?: boolean } = {},
 ): IntegrationCodecs => {
   const avcC = videoSampleEntry(INIT)!.children.get('avcC')!
   const fakes: IntegrationCodecs = {
@@ -322,6 +323,7 @@ const integrationCodecs = (
     encoderConfigs: [],
     decoded: 0,
     encoded: 0,
+    normalized: 0,
     closed: 0,
   }
 
@@ -333,6 +335,7 @@ const integrationCodecs = (
           const frame = {
             timestamp: chunk.timestamp,
             duration: chunk.duration,
+            normalized: false,
             close: () => {
               fakes.closed += 1
             },
@@ -351,6 +354,15 @@ const integrationCodecs = (
       return {
         encode(frame, options) {
           fakes.encoded += 1
+          if (
+            behavior.rejectUnnormalized &&
+            !(frame as unknown as { normalized?: boolean }).normalized
+          ) {
+            const error = new Error('Encoding error. (Unexpected frame format.)')
+            error.name = 'OperationError'
+            on.error(error)
+            return
+          }
           if (behavior.failHardware && config.hardwareAcceleration === 'prefer-hardware') {
             const error = new Error('Encoding error.')
             error.name = 'EncodingError'
@@ -378,6 +390,21 @@ const integrationCodecs = (
       }
     },
     chunk: (init) => init as unknown as EncodedVideoChunk,
+    normalize: async (frame) => {
+      fakes.normalized += 1
+      const source = frame as unknown as {
+        timestamp: number
+        duration: number | null
+      }
+      return {
+        timestamp: source.timestamp,
+        duration: source.duration,
+        normalized: true,
+        close: () => {
+          fakes.closed += 1
+        },
+      } as unknown as VideoFrame
+    },
     cut(frame) {
       return frame
     },
@@ -818,6 +845,32 @@ describe('encodeIo', () => {
       bitrate: 36_864,
       avc: { format: 'avc' },
     })
+    expect(parseInit(file!)!.tracks.map(({ codec }) => codec)).toEqual(['avc1'])
+  })
+
+  it('retries the software encoder with a normalized frame after it rejects decoder storage', async () => {
+    const reader = await fileSnapshot()
+    const source = (await openClipSource(reader, materialOf(reader.index)))!
+    const ctx = contextOf(source, 10)
+    const asked = clip({ in: 0, out: 2, mode: 'optimize', sound: false })
+    const request = requestsFor(source, [asked], ctx, choicesFor([asked], ctx), false)[0]!
+    const fakes = integrationCodecs({ rejectUnnormalized: true })
+
+    const file = await encodeIo(reader, fakes.codecs, integrationSurface, {
+      onPace: () => undefined,
+    }).encode(request, () => undefined, () => false)
+
+    expect(request.path.kind).toBe('encode')
+    expect(fakes.encoderConfigs.map((config) => [
+      config.codec,
+      config.hardwareAcceleration,
+    ])).toEqual([
+      ['avc1.42001e', undefined],
+      ['avc1.42001e', undefined],
+    ])
+    expect(fakes.normalized).toBe(
+      request.path.kind === 'encode' ? request.path.plan.kept : 0,
+    )
     expect(parseInit(file!)!.tracks.map(({ codec }) => codec)).toEqual(['avc1'])
   })
 

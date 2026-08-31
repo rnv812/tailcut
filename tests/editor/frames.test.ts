@@ -1,7 +1,8 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
   decodedFrames,
+  liveCodecs,
   MAX_FRAMES_IN_FLIGHT,
   type Codecs,
   type FrameSource,
@@ -75,7 +76,7 @@ interface FakeFrame {
   timestamp: number
   duration: number | null
   /** Which side of the crop it came from. */
-  from: 'decoded' | 'cut'
+  from: 'decoded' | 'cut' | 'cpu'
   closed: number
   close(): void
 }
@@ -88,7 +89,7 @@ interface FakeFrame {
  */
 type Emission = 'on-flush' | 'drip' | 'burst'
 
-function frameOf(timestamp: number, from: 'decoded' | 'cut'): FakeFrame {
+function frameOf(timestamp: number, from: 'decoded' | 'cut' | 'cpu'): FakeFrame {
   const frame: FakeFrame = {
     timestamp,
     duration: FRAME_US,
@@ -110,6 +111,9 @@ interface Fakes {
   cuts: Array<{ frame: FakeFrame; crop: Crop }>
   /** What `cut` gave back, in order. */
   cutOut: FakeFrame[]
+  /** CPU-backed copies made for an encoder retry. */
+  normalized: FakeFrame[]
+  normalizedFrom: FakeFrame[]
   /** Every frame either side of the crop ever made — what "closed" is counted over. */
   produced: FakeFrame[]
   decoderClosed: number
@@ -125,6 +129,7 @@ function fakeCodecs(
     scramble?: boolean
     failAfter?: number
     hangOnFlush?: boolean
+    normalizeReject?: boolean
   } = {},
 ): Fakes {
   const emit = options.emit ?? 'on-flush'
@@ -136,13 +141,15 @@ function fakeCodecs(
     decoded: [],
     cuts: [],
     cutOut: [],
+    normalized: [],
+    normalizedFrom: [],
     produced: [],
     decoderClosed: 0,
     maxQueued: 0,
     openNow: () => fakes.produced.filter((frame) => frame.closed === 0).length,
   }
 
-  const made = (timestamp: number, from: 'decoded' | 'cut'): FakeFrame => {
+  const made = (timestamp: number, from: 'decoded' | 'cut' | 'cpu'): FakeFrame => {
     const frame = frameOf(timestamp, from)
     fakes.produced.push(frame)
     return frame
@@ -231,6 +238,14 @@ function fakeCodecs(
       return init as unknown as EncodedVideoChunk
     },
 
+    async normalize(frame) {
+      fakes.normalizedFrom.push(frame as unknown as FakeFrame)
+      if (options.normalizeReject) throw new Error('CPU frame copy failed.')
+      const out = made(frame.timestamp, 'cpu')
+      fakes.normalized.push(out)
+      return out as unknown as VideoFrame
+    },
+
     cut(frame, crop) {
       const from = frame as unknown as FakeFrame
       fakes.cuts.push({ frame: from, crop })
@@ -262,9 +277,10 @@ async function collect(
   source: FrameSource,
   codecs: Codecs,
   each?: (frame: FakeFrame) => void,
+  normalize = false,
 ): Promise<FakeFrame[]> {
   const out: FakeFrame[] = []
-  for await (const frame of decodedFrames(plan, source, codecs)) {
+  for await (const frame of decodedFrames(plan, source, codecs, normalize)) {
     const fake = frame as unknown as FakeFrame
     out.push(fake)
     each?.(fake)
@@ -363,6 +379,21 @@ describe('decodedFrames: what comes out, and in what order', () => {
 })
 
 describe('decodedFrames: the crop', () => {
+  it('copies the cropped visible picture into CPU storage only when a retry asks for it', async () => {
+    const crop: Crop = { x: 48, y: 28, width: 160, height: 90 }
+    const plan = planOf(4, { crop })
+    const fakes = fakeCodecs()
+
+    const out = await collect(plan, sourceOf(), fakes.codecs, undefined, true)
+
+    expect(fakes.cuts).toHaveLength(plan.kept)
+    expect(fakes.normalizedFrom).toEqual(fakes.cutOut)
+    expect(out).toEqual(fakes.normalized)
+    expect(out.every((frame) => frame.from === 'cpu')).toBe(true)
+    for (const frame of fakes.cutOut) expect(frame.closed).toBe(1)
+    for (const frame of out) expect(frame.closed).toBe(0)
+  })
+
   it('cuts every frame it hands on, and closes the frame it cut from', async () => {
     const crop: Crop = { x: 48, y: 28, width: 160, height: 90 }
     const plan = planOf(6, { headTicks: 2 * FRAME_TICKS, crop })
@@ -401,6 +432,74 @@ describe('decodedFrames: the crop', () => {
     expect(fakes.cuts).toEqual([])
     expect(out).toEqual(fakes.decoded.filter((frame) => frame.timestamp >= plan.headUs))
     expect(out.every((frame) => frame.from === 'decoded')).toBe(true)
+  })
+})
+
+describe('liveCodecs: CPU frame normalization', () => {
+  it('copies only the visible picture to an RGBA buffer with the frame clock intact', async () => {
+    const rect = { x: 48, y: 28, width: 160, height: 90 }
+    const options: VideoFrameCopyToOptions[] = []
+    const layout = [{ offset: 0, stride: rect.width * 4 }]
+    const made: Array<{ bytes: Uint8Array; init: VideoFrameBufferInit }> = []
+    class FakeVideoFrame {
+      constructor(bytes: Uint8Array, init: VideoFrameBufferInit) {
+        made.push({ bytes, init })
+      }
+    }
+    vi.stubGlobal('VideoFrame', FakeVideoFrame)
+
+    try {
+      const source = {
+        visibleRect: rect,
+        timestamp: 7_654_321,
+        duration: 41_667,
+        allocationSize(one: VideoFrameCopyToOptions) {
+          options.push(one)
+          return rect.width * rect.height * 4
+        },
+        async copyTo(bytes: Uint8Array, one: VideoFrameCopyToOptions) {
+          options.push(one)
+          bytes[0] = 0x7b
+          return layout
+        },
+      } as unknown as VideoFrame
+
+      await liveCodecs().normalize(source)
+
+      expect(options).toEqual([
+        { format: 'RGBA', rect },
+        { format: 'RGBA', rect },
+      ])
+      expect(made).toHaveLength(1)
+      expect(made[0]!.bytes).toHaveLength(160 * 90 * 4)
+      expect(made[0]!.bytes[0]).toBe(0x7b)
+      expect(made[0]!.init).toEqual({
+        format: 'RGBA',
+        codedWidth: 160,
+        codedHeight: 90,
+        layout,
+        timestamp: 7_654_321,
+        duration: 41_667,
+      })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
+describe('decodedFrames: normalization failure', () => {
+  it('closes the rejected frame and every decoded frame waiting behind it', async () => {
+    const plan = planOf(4)
+    const fakes = fakeCodecs({ normalizeReject: true })
+
+    await expect(
+      collect(plan, sourceOf(), fakes.codecs, undefined, true),
+    ).rejects.toThrow('CPU frame copy failed.')
+
+    expect(fakes.normalizedFrom).toHaveLength(1)
+    expect(fakes.decoderClosed).toBe(1)
+    for (const frame of fakes.decoded) expect(frame.closed).toBe(1)
+    expect(fakes.openNow()).toBe(0)
   })
 })
 
