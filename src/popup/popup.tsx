@@ -489,7 +489,7 @@ function Popup() {
 
   if (!accepted) {
     return (
-      <div>
+      <div class="legal-screen">
         <Header />
         <LegalConsent
           onAccept={async () => {
