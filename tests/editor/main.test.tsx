@@ -91,6 +91,7 @@ vi.mock('../../src/editor/source/snapshot', () => ({
 
 vi.mock('../../src/shared/settings-store', () => ({
   readSettings: async () => DEFAULTS,
+  watchSettings: () => () => undefined,
 }))
 
 vi.mock('../../src/editor/source/preview', () => ({

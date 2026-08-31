@@ -2,7 +2,8 @@ import { render } from 'preact'
 import { useEffect, useState } from 'preact/hooks'
 import { setUsed } from '../shared/history-db'
 import { isSnapshotId, sourceTabIdIn } from '../shared/protocol'
-import { readSettings } from '../shared/settings-store'
+import { readSettings, watchSettings } from '../shared/settings-store'
+import type { Settings } from '../shared/settings'
 import { loadSnapshot } from './source/snapshot'
 import { buildPreview, type Preview } from './source/preview'
 import { Shell, type EditorOptions, type EditorState } from './shell'
@@ -33,6 +34,27 @@ function Editor() {
   useEffect(() => {
     let built: Preview | null = null
     let dropped = false
+    let latestSettings: Settings | null = null
+
+    const stopWatching = watchSettings((next) => {
+      latestSettings = next
+      setState((current) => {
+        if (current.status !== 'ready') return current
+        const opened = current.options?.export ?? next.export
+        const options: EditorOptions = {
+          ...current.options,
+          askWhere: next.export.askWhere,
+          export: {
+            ...opened,
+            codec: next.export.codec,
+            rewriteHead: next.export.rewriteHead,
+            askWhere: next.export.askWhere,
+            quality: next.export.quality,
+          },
+        }
+        return { ...current, options }
+      })
+    })
 
     // The settings are waited for rather than filled in afterwards: the name template is part of
     // the context every clip is named against, and a context that changed under a session would
@@ -47,7 +69,7 @@ function Editor() {
           readSettings(),
         ])
         opened = result[0]
-        settings = result[1]
+        settings = latestSettings ?? result[1]
       } catch {
         if (!dropped) setState({ status: 'failed', reason: 'open-failed' })
         return
@@ -117,6 +139,7 @@ function Editor() {
 
     return () => {
       dropped = true
+      stopWatching()
       built?.release()
     }
   }, [])

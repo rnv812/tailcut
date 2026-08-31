@@ -808,6 +808,76 @@ describe('the editor shell', () => {
     expect(button('export').textContent).toBe('Export 1 clip')
   })
 
+  it('applies live rewrite settings without replacing the edit document', async () => {
+    exportHarness.codecAnswer = true
+    const opened = {
+      ...(await cuttable()),
+      preview: previewOf({ width: 320, height: 240 }),
+      options: { export: { ...DEFAULTS.export, rewriteHead: true } },
+    }
+    await mount(opened)
+    press('ArrowRight')
+    press('i')
+    await until(
+      () => text('cost-c1').includes('Re-encoded as'),
+      `the initial rewrite verdict never arrived: ${text('cost-c1') || 'no cost line'}`,
+    )
+
+    show({
+      ...opened,
+      options: { export: { ...DEFAULTS.export, rewriteHead: false } },
+    })
+    await until(
+      () => text('cost-c1').includes('Copied from the recording'),
+      `the live rewrite setting never reached the clip: ${text('cost-c1') || 'no cost line'}`,
+    )
+    button('new-clip').click()
+    await settled()
+
+    expect(document.querySelectorAll('[data-testid="clip"]')).toHaveLength(2)
+    expect(document.querySelector<HTMLInputElement>('[data-testid="in-c1"]')!.value).toBe(
+      '00:00:00:01',
+    )
+  })
+
+  it('re-probes a live codec and quality setting for the existing clip', async () => {
+    exportHarness.codecAnswer = true
+    const opened = {
+      ...(await cuttable()),
+      preview: previewOf({ width: 320, height: 240 }),
+      options: {
+        export: { ...DEFAULTS.export, codec: 'h264' as const, quality: 'high' as const },
+      },
+    }
+    await mount(opened)
+    press('i')
+    await settled()
+    select('mode-c1', 'optimize')
+    await until(() => exportHarness.codecCalls.length > 0, 'the initial codec was never asked')
+    expect(exportHarness.codecCalls[0]!.codec).toMatch(/^avc1/)
+    const before = exportHarness.codecCalls.length
+
+    show({
+      ...opened,
+      options: {
+        export: { ...DEFAULTS.export, codec: 'hevc', quality: 'low' },
+      },
+    })
+    await until(
+      () => exportHarness.codecCalls.length > before,
+      'the changed codec was never asked',
+    )
+
+    expect(exportHarness.encodeIoCalls).toBe(1)
+    expect(exportHarness.codecCalls[before]!.codec).toMatch(/^hev1/)
+    button('export').click()
+    await until(() => exportHarness.encodeRequests.length > 0, 'the changed choice was not exported')
+    expect(exportHarness.encodeRequests[0]!.path.choice).toMatchObject({
+      kind: 'hevc-hw',
+      quantizer: 33,
+    })
+  })
+
   it('answers the keyboard from the tab and not from the player', async () => {
     await mount({ ...(await ready()), preview: previewOf() })
     press('ArrowRight')

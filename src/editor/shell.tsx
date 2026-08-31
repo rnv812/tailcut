@@ -11,22 +11,20 @@ export type EditorFailure = SnapshotFailure | 'open-failed' | 'preview-failed'
 export type PreviewState = Preview | 'building' | 'failed' | null
 
 /**
- * The settings needed by an open editor, read once when the tab opened.
+ * The settings needed by an open editor.
  *
- * It travels with the ready state rather than beside it because it is read before the workbench
- * is shown at all: the template is part of the context every clip is named against, and a context
- * that changed under a session would take the clips with it.
+ * The name and format are fixed when the tab opens because they are clip defaults. Codec, quality,
+ * rewrite and download placement stay current while the editor is open.
  */
 export interface EditorOptions extends SaveOptions {
   /**
-   * The whole Export settings group as the tab read it when it opened, not one field at a time.
+   * The whole Export settings group, kept together from storage to the workbench.
    *
    * The template a new clip is named by, the format it is born in, the codec the ladder is asked
    * for, the quality it is asked at, and whether a start off a key frame is rewritten. They
-   * arrive together because they are read together — one `readSettings` in `main.tsx`, before the
-   * first frame is drawn — and they travel on as one group for a second reason: two of them reach
-   * the model, one of them shows on the screen, and a group handed over field by field is a group
-   * that can lose the invisible one in silence. Absent — a tab that read no settings at all.
+   * arrive together because two of them reach the model, one of them shows on the screen, and a
+   * group handed over field by field is a group that can lose the invisible one in silence.
+   * Absent means a tab that read no settings at all.
    */
   export?: ExportSettings
 }

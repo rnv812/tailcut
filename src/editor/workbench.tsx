@@ -52,7 +52,7 @@ export interface WorkbenchProps {
   material: Material
   /** `null` means no picture; `failed` means picture exists but no preview could be assembled. */
   preview: PreviewState
-  /** Export settings as read when the tab opened: how a clip is named and where it goes. */
+  /** Export settings: clip defaults from opening plus live encode and save controls. */
   options: EditorOptions
   sourceTabId?: number
 }
@@ -62,6 +62,13 @@ interface OpenWorkbenchProps extends WorkbenchProps {
   selectedPicture: string
   onPicture: (trackId: string) => void
 }
+
+interface ChoiceBook {
+  profile: string
+  answers: ReadonlyMap<string, Choice>
+}
+
+const NO_CHOICES: ReadonlyMap<string, Choice> = new Map()
 
 const duration = (seconds: number): string => {
   const total = Math.round(seconds)
@@ -237,7 +244,7 @@ function OpenWorkbench({
   const built = preview === 'building' || preview === 'failed' ? null : preview
   const derived = useMemo(
     () => deriveMaterial(reader.index, built, options.export, selectedPicture),
-    [reader, built, options.export, selectedPicture],
+    [reader, built, options.export?.format, options.export?.nameTemplate, selectedPicture],
   )
   // A new context is a new store: the frame grid every clip is measured against has changed, and
   // clips measured against the old one would mean something else against the new.
@@ -263,8 +270,17 @@ function OpenWorkbench({
   // browser cannot be taken back, so Ctrl+Z has no business touching this.
   const [queue, setQueue] = useState<Queue>(EMPTY_QUEUE)
   const [source, setSource] = useState<ClipSource | null>(null)
+  const codec = options.export?.codec ?? 'auto'
+  const quality = options.export?.quality ?? 'high'
+  const choiceProfile = `${codec}:${quality}`
   /** The ladder's answer per geometry. Filled by the probe effect below; read here. */
-  const [choices, setChoices] = useState<ReadonlyMap<string, Choice>>(new Map())
+  const [choiceBook, setChoiceBook] = useState<ChoiceBook>({
+    profile: choiceProfile,
+    answers: NO_CHOICES,
+  })
+  // An answer belongs to both its geometry and the settings that chose the ladder. Until the
+  // current profile has answered, exporting waits instead of reusing another codec or quality.
+  const choices = choiceBook.profile === choiceProfile ? choiceBook.answers : NO_CHOICES
   /** How fast this machine has actually encoded. Empty until the first completed encode. */
   const [pace, setPace] = useState<PaceBook>(EMPTY_PACE)
   /**
@@ -280,12 +296,13 @@ function OpenWorkbench({
       createRunner(
         // A surface factory, not a surface: an MP4 copy or encode never constructs a canvas.
         encodeIo(reader, liveCodecs(), liveSurface, {
-          ...options,
+          askWhere: options.askWhere,
+          onSaved: options.onSaved,
           onPace: (kind, geometry, frames, ms) =>
             setPace((book) => notePace(book, kind, geometry, frames, ms)),
         }),
       ),
-    [reader, options],
+    [reader, options.askWhere, options.onSaved],
   )
 
   useEffect(() => runner.subscribe(setQueue), [runner])
@@ -337,18 +354,22 @@ function OpenWorkbench({
     void Promise.all(
       [...wanted].map(async ([key, geometry]) => {
         if (choices.has(key)) return
-        const choice = await chooseCodec(geometry, codecProbe, {
-          codec: options.export?.codec ?? 'auto',
-          quality: options.export?.quality ?? 'high',
-        })
-        if (live) setChoices((known) => (known.has(key) ? known : new Map(known).set(key, choice)))
+        const choice = await chooseCodec(geometry, codecProbe, { codec, quality })
+        if (live) {
+          setChoiceBook((known) => {
+            const answers = known.profile === choiceProfile ? known.answers : NO_CHOICES
+            return answers.has(key)
+              ? known
+              : { profile: choiceProfile, answers: new Map(answers).set(key, choice) }
+          })
+        }
       }),
     )
 
     return () => {
       live = false
     }
-  }, [wanted, codecProbe, options.export?.codec, options.export?.quality])
+  }, [wanted, codecProbe, codec, quality, choiceProfile, choices])
 
   const estimate = useMemo(() => {
     if (!selected || !source) return null
