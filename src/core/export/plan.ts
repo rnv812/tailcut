@@ -139,26 +139,41 @@ export function soundUnderPicture(source: ClipSource): ClipSource {
 
   const picture = runsOf(source.video)
   if (picture.length <= 1) return source
-  const indexes = new Set<number>()
+  const sound = runsOf(source.audio)
+  const soundGaps = sound
+    .slice(0, -1)
+    .map((run, index) => ({ start: run.end, end: sound[index + 1]!.start }))
+  const packet = Math.max(
+    0,
+    ...source.audio.samples.map((sample) => sample.duration / source.audio!.timescale),
+  )
+  const crossed = picture
+    .slice(0, -1)
+    .map((run, index) => ({ start: run.end, end: picture[index + 1]!.start }))
+    // A sound gap of the same length already describes the same seek, within one packet. Leave
+    // its edge packets alone. A materially shorter gap means sound was prefetched through part or
+    // all of the missing picture; remove that part so both resumed tracks lose the same interval.
+    .filter((gap) =>
+      !soundGaps.some((other) => {
+        const overlaps = other.end > gap.start && other.start < gap.end
+        const sameLength = Math.abs((other.end - other.start) - (gap.end - gap.start)) <= packet
+        return overlaps && sameLength
+      }),
+    )
 
-  for (const [index, sample] of source.audio.samples.entries()) {
-    const start = (sample.pts - source.audio.editOffset) / source.audio.timescale
-    const end = (sample.pts + sample.duration - source.audio.editOffset) / source.audio.timescale
-    if (picture.some((run) => end > run.start && start < run.end)) indexes.add(index)
-  }
+  if (crossed.length === 0) return source
 
-  const first = Math.min(...indexes)
-  if (Number.isFinite(first)) {
-    for (let index = Math.max(0, first - AUDIO_WARMUP_PACKETS); index < first; index++) {
-      indexes.add(index)
-    }
-  }
+  const samples = source.audio.samples.filter((sample) => {
+    const start = (sample.pts - source.audio!.editOffset) / source.audio!.timescale
+    const end = (sample.pts + sample.duration - source.audio!.editOffset) / source.audio!.timescale
+    return !crossed.some((gap) => start >= gap.start && end <= gap.end)
+  })
 
   return {
     video: source.video,
     audio: {
       ...source.audio,
-      samples: source.audio.samples.filter((_sample, index) => indexes.has(index)),
+      samples,
     },
   }
 }

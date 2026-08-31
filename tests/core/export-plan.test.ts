@@ -385,6 +385,14 @@ describe('seamsOf', () => {
 })
 
 describe('planPreview', () => {
+  it('leaves an existing sound gap intact when it already matches the picture gap', () => {
+    const watched = soundUnderPicture(holed)
+
+    expect(watched.audio!.samples.map((sample) => sample.source.at)).toEqual(
+      holed.audio!.samples.map((sample) => sample.source.at),
+    )
+  })
+
   it('matches prefetched sound to picture runs on the presentation clock', () => {
     const video = {
       ...madeTrack('video', 1000, 100, [
@@ -394,6 +402,20 @@ describe('planPreview', () => {
       editOffset: 200,
     }
     const audio = madeTrack('audio', 1000, 100, [{ at: 0, count: 13 }])
+    const watched = soundUnderPicture({ video, audio }).audio!
+
+    expect(watched.samples.map((sample) => sample.dts)).toEqual([0, 100, 200, 1000, 1100, 1200])
+  })
+
+  it('removes sound retained through part of a longer picture gap', () => {
+    const video = madeTrack('video', 1000, 100, [
+      { at: 0, count: 3 },
+      { at: 1000, count: 3 },
+    ])
+    const audio = madeTrack('audio', 1000, 100, [
+      { at: 0, count: 5 },
+      { at: 800, count: 5 },
+    ])
     const watched = soundUnderPicture({ video, audio }).audio!
 
     expect(watched.samples.map((sample) => sample.dts)).toEqual([0, 100, 200, 1000, 1100, 1200])
