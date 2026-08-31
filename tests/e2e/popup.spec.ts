@@ -276,26 +276,39 @@ test('the popup opens at its full height, not as a "Loading…" strip', async ()
 
 test('the popup reaches the other sessions of the page', async () => {
   const { browser, popup, answer } = await offlinePopup()
+  const longTitle = `${OLDER.title} — ${'a very long title '.repeat(8)}`
 
-  await answer([SUMMARY, OLDER])
+  await answer([SUMMARY, { ...OLDER, title: longTitle }])
   await expect(popup.getByTestId('title')).toHaveText(SUMMARY.title)
 
   // Show the first session alone and every other one on the page is invisible and out of reach.
   const rows = popup.getByTestId('session')
   await expect(rows).toHaveCount(1)
-  await expect(rows.first()).toContainText(OLDER.title)
+  await expect(rows.first()).toContainText(longTitle)
 
   await rows.first().click()
 
-  // The picked one takes the top block, and the one that stood there moves down into the list.
-  await expect(popup.getByTestId('title')).toHaveText(OLDER.title)
-  await expect(popup.getByTestId('duration')).toHaveText('5:00')
-  await expect(popup.getByTestId('session')).toContainText(SUMMARY.title)
+  // A click on a compact row must not reorder the list or replace the current recording.
+  await expect(popup.getByTestId('title')).toHaveText(SUMMARY.title)
+  await expect(popup.getByTestId('duration')).toHaveText('0:06')
+  await expect(popup.getByTestId('session')).toContainText(longTitle)
+
+  const containment = await popup.getByTestId('session').evaluate((row) => {
+    const rowBox = row.getBoundingClientRect()
+    const titleBox = row.querySelector('[data-testid="session-title"]')!.getBoundingClientRect()
+    return {
+      titleRight: titleBox.right,
+      rowRight: rowBox.right,
+      scrolls: row.scrollWidth > row.clientWidth,
+    }
+  })
+  expect(containment.titleRight).toBeLessThanOrEqual(containment.rowRight)
+  expect(containment.scrolls).toBe(false)
 
   await browser.close()
 })
 
-test('the popup explains a gapped save, and only while that recording is selected', async () => {
+test('the popup keeps a warning with the recording it describes', async () => {
   const { browser, popup, answer } = await offlinePopup()
 
   // The length shown is already the length of the joined file; the notice explains why a seek in
@@ -305,11 +318,12 @@ test('the popup explains a gapped save, and only while that recording is selecte
     'Recording gaps are joined in the saved clip.',
   )
 
-  // The notice belongs to the session it was sent about: the one picked out of the list will be
-  // saved whole, and a line left over from the previous one would be a warning about nothing.
+  // Clicking another row does not promote it or move the warning to a different recording.
   await popup.getByTestId('session').first().click()
-  await expect(popup.getByTestId('title')).toHaveText(OLDER.title)
-  await expect(popup.getByTestId('omits')).toHaveCount(0)
+  await expect(popup.getByTestId('title')).toHaveText(SUMMARY.title)
+  await expect(popup.getByTestId('omits')).toHaveText(
+    'Recording gaps are joined in the saved clip.',
+  )
 
   await browser.close()
 })

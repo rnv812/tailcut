@@ -25,6 +25,7 @@ import {
   type Omission,
   type SaveFailure,
   type SaveResult,
+  type SessionSummary,
   type SessionList,
   type SiteSwitch,
 } from './api'
@@ -165,6 +166,64 @@ function complaintFor(failure: SaveResult): string {
 
 /** How long the undo of a deletion stays on screen. The sweeper waits longer than this. */
 const UNDO_MS = 6_000
+
+/** A compact live recording keeps its place and exposes its own actions instead of becoming the
+ * large current card when clicked. */
+function LiveSessionRow({ session }: { session: SessionSummary }) {
+  const [busy, setBusy] = useState<'save' | 'edit' | null>(null)
+  const [failure, setFailure] = useState<string | null>(null)
+  const omitted = session.omits ? OMITTED[session.omits] : undefined
+
+  const save = async (): Promise<void> => {
+    setBusy('save')
+    setFailure(null)
+    const result = await saveAll(session.key)
+    setBusy(null)
+    if (!result.ok) setFailure(complaintFor(result))
+  }
+
+  const edit = async (): Promise<void> => {
+    setBusy('edit')
+    setFailure(null)
+    const result = await editSession(session.key)
+    if (result.ok && result.snapshotId) {
+      await openEditor(result.snapshotId)
+      window.close()
+      return
+    }
+    setBusy(null)
+    setFailure(EDIT_FAILED[result.reason ?? 'gone'])
+  }
+
+  return (
+    <div class="row session-row" data-testid="session">
+      <div class="session-copy">
+        <span class="row-title" data-testid="session-title">{session.title || UNTITLED}</span>
+        <span class="muted">{formatDuration(session.duration)} · {formatBytes(session.bytes)}</span>
+      </div>
+      <div class="session-actions">
+        <button
+          class="quiet"
+          data-testid="session-save"
+          disabled={busy !== null}
+          onClick={() => void save()}
+        >
+          {busy === 'save' ? 'Saving…' : 'Save'}
+        </button>
+        <button
+          class="quiet"
+          data-testid="session-edit"
+          disabled={busy !== null}
+          onClick={() => void edit()}
+        >
+          {busy === 'edit' ? 'Opening…' : 'Edit'}
+        </button>
+      </div>
+      {omitted && <div class="session-note">{omitted}</div>}
+      {failure && <div class="failed session-failure" role="alert">{failure}</div>}
+    </div>
+  )
+}
 
 function History(props: {
   rows: HistoryRow[]
@@ -373,8 +432,6 @@ function Popup() {
   // null — the tab has not answered yet. An answer with no sessions in it differs from that: on
   // that the popup already knows there was nothing to record, and says so in words.
   const [answer, setAnswer] = useState<SessionList | null>(null)
-  // The session the user picked out of the list; null — none was picked and the freshest stands.
-  const [pickedKey, setPickedKey] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   // The refusal of the last save, whole: the popup owes the user the reason and not only the
   // fact. null — nothing has been refused since the last time the complaint was cleared.
@@ -485,11 +542,9 @@ function Popup() {
     )
   }
 
-  // The list comes newest first: at the top is what is being watched right now, and that is what
-  // the popup opens on. A page has several sessions as a matter of course — a feed of short clips
-  // leaves one behind per video — so the rest of them are listed below and can be shown here in
-  // its place.
-  const current = sessions.find((session) => session.key === pickedKey) ?? sessions[0]!
+  // The list comes newest first. The newest stays in the current card; older live recordings keep
+  // their position and expose their own actions below it.
+  const current = sessions[0]!
   // Every other session of the page that the user could actually do something with.
   //
   // A session with no bytes in it is left out. It is not a lie — a save of it answers, truthfully,
@@ -502,16 +557,6 @@ function Popup() {
   // an offer but the state of the page: something is being recorded and has not come to anything
   // yet, and the button says so in as many words.
   const others = sessions.filter((session) => session !== current && session.bytes > 0)
-
-  // Picking is closed while a save is running, along with the button that started it: the answer
-  // of the bridge is about the session that was saved, and switching under it would hang the
-  // verdict on a session nobody tried to save.
-  const pick = (key: string) => {
-    setPickedKey(key)
-    // The complaint belongs to the session it was made about — either complaint.
-    setFailure(null)
-    setEditFailed(null)
-  }
 
   // A code the popup has no words for shows nothing rather than an empty box: the bridge and the
   // popup ship together, but the popup is the one that would be left drawing the gap.
@@ -613,16 +658,7 @@ function Popup() {
       {others.length > 0 && (
         <div class="recent-sessions">
           {others.map((session) => (
-            <button
-              key={session.key}
-              class="row"
-              data-testid="session"
-              disabled={saving || editing}
-              onClick={() => pick(session.key)}
-            >
-              <span class="row-title">{session.title || UNTITLED}</span>
-              <span class="muted">{formatDuration(session.duration)}</span>
-            </button>
+            <LiveSessionRow key={session.key} session={session} />
           ))}
         </div>
       )}

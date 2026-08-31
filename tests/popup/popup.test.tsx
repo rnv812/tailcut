@@ -141,6 +141,8 @@ const row: HistoryRow = {
   pinned: false,
 }
 
+const OTHER_SNAPSHOT = '1f2c7d1e-4b0a-4a3f-9c2e-9b5a1d6f8c32'
+
 type Sent = { tabId: number; message: unknown }
 
 /**
@@ -518,12 +520,13 @@ describe('the popup', () => {
     expect(at('omits')).toBeNull()
   })
 
-  it('carries the notice of the session it shows, not of the one it showed', async () => {
+  it('keeps the notice on the current recording when another row is clicked', async () => {
     await mount({ sessions: [{ ...fresh, omits: 'gap' }, older] })
 
     await click(allAt('session')[0]!)
 
-    expect(at('omits'), 'the notice of the previous session stayed on screen').toBeNull()
+    expect(textAt('title')).toBe(fresh.title)
+    expect(textAt('omits')).toBe('Recording gaps are joined in the saved clip.')
   })
 
   it('says where the sound came from when it came from a track beside the picture', async () => {
@@ -549,7 +552,8 @@ describe('the popup', () => {
 
     await click(allAt('session')[0]!)
 
-    expect(at('paired-sound')).toBeNull()
+    expect(textAt('title')).toBe(fresh.title)
+    expect(at('paired-sound')).not.toBeNull()
   })
 
   it('saves the session it showed', async () => {
@@ -585,30 +589,38 @@ describe('the popup and the other sessions of the page', () => {
     expect(at('recent')).toBeNull()
   })
 
-  it('shows the session picked out of the list in place of the current one', async () => {
+  it('does not promote a recording when its row is clicked', async () => {
     await mount({ sessions: [fresh, older] })
 
     await click(allAt('session')[0]!)
 
-    expect(textAt('title')).toBe(older.title)
-    expect(textAt('host')).toBe('other.example')
-    expect(textAt('duration')).toBe('5:00')
-    // The one that was current takes the place of the one that was picked: the list holds every
-    // session but the one being shown, or a session would vanish from the popup on being chosen.
+    expect(textAt('title')).toBe(fresh.title)
+    expect(textAt('host')).toBe('site.example')
     expect(allAt('session').map((row) => row.textContent)).toEqual([
-      expect.stringContaining(fresh.title),
+      expect.stringContaining(older.title),
     ])
   })
 
-  it('saves the session picked out of the list, not the freshest one', async () => {
+  it('saves another recording from its own action without promoting it', async () => {
     const { sent } = await mount({ sessions: [fresh, older] })
 
-    await click(allAt('session')[0]!)
-    await click(saveButton())
+    await click(allAt('session-save')[0]!)
 
     expect(sent.map((item) => item.message)).toEqual([
       { type: 'tc:list' },
       { type: 'tc:save', key: older.key },
+    ])
+    expect(textAt('title')).toBe(fresh.title)
+  })
+
+  it('opens another recording in the editor from its own action', async () => {
+    const chrome = await mount({ sessions: [fresh, older] })
+    chrome.setEditReply({ ok: true, snapshotId: OTHER_SNAPSHOT })
+
+    await click(allAt('session-edit')[0]!)
+
+    expect(chrome.created).toEqual([
+      { url: `chrome-extension://tailcut/editor/editor.html?s=${OTHER_SNAPSHOT}&tab=7`, windowId: 23 },
     ])
   })
 
@@ -619,9 +631,8 @@ describe('the popup and the other sessions of the page', () => {
     const empty: SessionSummary = { ...older, key: 'empty', title: 'Nothing in it', duration: 0, bytes: 0 }
     await mount({ sessions: [fresh, empty, older] })
 
-    // A row is an offer to switch to that session, and this one can only refuse: the bridge
-    // answers "there is nothing recorded to save yet" and the popup would have shown 0:00 and a
-    // button that does nothing.
+    // A row offers direct actions, and this one can only refuse them: the bridge answers that
+    // there is nothing recorded to save yet.
     expect(allAt('session').map((row) => row.textContent)).toEqual([
       expect.stringContaining(older.title),
     ])
@@ -747,14 +758,14 @@ describe('Edit', () => {
     expect(chrome.closed).toBe(true)
   })
 
-  it('freezes exactly the session the popup is showing', async () => {
+  it('does not redirect the main Edit action when another row is clicked', async () => {
     const chrome = await mount({ sessions: [fresh, older] })
     chrome.setEditReply({ ok: true, snapshotId: SNAPSHOT })
 
     await click(allAt('session')[0]!)
     await click(editButton())
 
-    expect(chrome.sent.at(-1)!.message).toEqual({ type: 'tc:edit', key: older.key })
+    expect(chrome.sent.at(-1)!.message).toEqual({ type: 'tc:edit', key: fresh.key })
   })
 
   it('explains a session that has gone instead of opening an empty tab', async () => {
@@ -795,7 +806,7 @@ describe('Edit', () => {
     expect(new Set(shown).size, 'two refusals are explained in the same words').toBe(4)
   })
 
-  it('takes the complaint back with the session it was made about', async () => {
+  it('keeps a current-recording complaint when another row is clicked', async () => {
     const chrome = await mount({ sessions: [fresh, older] })
     chrome.setEditReply({ ok: false, reason: 'gone' })
 
@@ -804,9 +815,8 @@ describe('Edit', () => {
 
     await click(allAt('session')[0]!)
 
-    // A complaint about the session that was showing is not a complaint about the one now in its
-    // place, and the save complaint beside it has always been taken back this way.
-    expect(at('edit-error')).toBeNull()
+    expect(textAt('title')).toBe(fresh.title)
+    expect(at('edit-error')).not.toBeNull()
   })
 
   it('closes both buttons while the snapshot is being written', async () => {

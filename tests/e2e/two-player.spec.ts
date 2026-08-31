@@ -28,9 +28,15 @@ const streamsOf = (file: string): string[][] =>
 const framesOf = (file: string): number[] =>
   probeFile(file).streams.map((s) => Number(s.nb_read_frames))
 
-/** Moves the popup onto the other live recording in the unified list. */
-async function pickTheOther(popup: Page): Promise<void> {
-  await popup.getByTestId('session').first().click()
+/** Saves the other live recording through its own stable row action. */
+async function saveTheOther(player: Page, popup: Page): Promise<string> {
+  const started = player.waitForEvent('download')
+  await popup.getByTestId('session-save').first().click()
+  const download = await started
+  expect(download.suggestedFilename()).toMatch(/\.mp4$/)
+  const file = await download.path()
+  expect(file, 'the other recording left no file on disk').not.toBeNull()
+  return file!
 }
 
 /**
@@ -72,8 +78,7 @@ test('two players on one page save as two files, neither holding the other', asy
   // Both sessions belong to the same page and are signed with its title, so which is which is
   // settled by what is inside the two files rather than by the name over them.
   const first = await saveAll(page, popup)
-  await pickTheOther(popup)
-  const second = await saveAll(page, popup)
+  const second = await saveTheOther(page, popup)
 
   const byCodec = new Map(
     [first, second].map((file) => [streamsOf(file).map((s) => s[1]).join('+'), file]),
