@@ -44,7 +44,6 @@ test('what was watched before the browser was closed is still there after it ope
       await expect(popup.getByTestId('history-row')).toHaveCount(1)
       // The volume shown is the index's own sum, and it is not zero after a restart: the totals
       // row survived, and the repair did not decide the disk was empty.
-      await expect(popup.getByTestId('in-use')).not.toHaveText('0 KB on disk')
       const bytesOnDisk = Number(await popup.getByTestId('in-use').getAttribute('data-bytes'))
       expect(bytesOnDisk).toBeGreaterThan(0)
 

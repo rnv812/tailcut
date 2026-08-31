@@ -444,14 +444,14 @@ test('a session whose key changes on the fly stays one row', async () => {
 
 /**
  * The complete persisted-history path in a browser: a recording from a closed tab, listed
- * in a popup opened over a page that never played anything, pinned, deleted, put back — and the
+ * in a popup opened over a page that never played anything, deleted, put back — and the
  * quick switch beside it.
  *
  * Every one of those crosses a boundary no unit set has: the index is IndexedDB written by a
  * bridge frame and read by the popup, and the pause travels the extension message, the content
  * script, the port and back.
  */
-test('the popup lists what an earlier tab recorded, pins it and deletes it', async () => {
+test('the popup lists what an earlier tab recorded and deletes it', async () => {
   test.setTimeout(90_000)
 
   const { context, extensionId } = await launchWithExtension()
@@ -467,8 +467,7 @@ test('the popup lists what an earlier tab recorded, pins it and deletes it', asy
     const popup = await openPopupOn(context, blank, extensionId)
 
     await expect(popup.getByTestId('history-row')).toHaveCount(1)
-    await popup.getByTestId('history-pin').click()
-    await expect(popup.getByTestId('history-pin')).toHaveText('Pinned')
+    await expect(popup.getByTestId('history-pin')).toHaveCount(0)
 
     await popup.getByTestId('history-delete').click()
     await expect(popup.getByTestId('history-row')).toHaveCount(0)

@@ -215,6 +215,10 @@ export interface HistoryRow {
 export async function historyRows(limit = 20): Promise<HistoryRow[]> {
   try {
     const sessions = await listHistory(limit)
+    // Pinning no longer exists in the simplified popup. Release pins written by older builds so
+    // those rows rejoin retention and quota eviction instead of becoming permanent disk use with
+    // no control that can reverse it.
+    await Promise.all(sessions.filter((session) => session.pinned).map((session) => setPinned(session.id, false)))
     return sessions.map((session) => ({
       id: session.id,
       key: session.key,
@@ -223,7 +227,7 @@ export async function historyRows(limit = 20): Promise<HistoryRow[]> {
       seconds: session.seconds,
       bytes: session.bytes,
       lastSeenAt: session.lastSeenAt,
-      pinned: session.pinned,
+      pinned: false,
     }))
   } catch {
     // No index yet, or a store the browser would not open. An empty history is what nothing
@@ -232,6 +236,7 @@ export async function historyRows(limit = 20): Promise<HistoryRow[]> {
   }
 }
 
+/** Kept for stored rows written by older versions; the simplified popup no longer exposes it. */
 export const pinHistory = (id: string, pinned: boolean) => setPinned(id, pinned)
 
 /**
@@ -244,6 +249,16 @@ export const pinHistory = (id: string, pinned: boolean) => setPinned(id, pinned)
  */
 export const deleteHistory = (id: string) => setDeleted(id, Date.now())
 export const undoDelete = (id: string) => setDeleted(id, 0)
+
+/** Clears every recording kept on disk through the service worker, which owns deletion. */
+export async function clearHistory(): Promise<boolean> {
+  try {
+    const answer: unknown = await chrome.runtime.sendMessage({ type: 'tc:clear' })
+    return (answer as { ok?: unknown } | undefined)?.ok === true
+  } catch {
+    return false
+  }
+}
 
 /**
  * Occupied volume, as the index has it. Never navigator.storage.estimate(): the index tracks the

@@ -28,7 +28,7 @@ const streamsOf = (file: string): string[][] =>
 const framesOf = (file: string): number[] =>
   probeFile(file).streams.map((s) => Number(s.nb_read_frames))
 
-/** Moves the popup onto the other session of the page — the one waiting in Recent. */
+/** Moves the popup onto the other live recording in the unified list. */
 async function pickTheOther(popup: Page): Promise<void> {
   await popup.getByTestId('session').first().click()
 }
@@ -66,7 +66,7 @@ test('two players on one page save as two files, neither holding the other', asy
 
   const popup = await openPopupOn(context, page, extensionId)
 
-  // Two players, two codec sets, two sessions: one is shown and the other waits in Recent.
+  // Two players, two codec sets, two sessions in one recordings list.
   await expect(popup.getByTestId('session')).toHaveCount(1)
 
   // Both sessions belong to the same page and are signed with its title, so which is which is

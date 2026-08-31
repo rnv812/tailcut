@@ -831,6 +831,17 @@ describe('the history the popup shows', () => {
     expect(asked).toEqual([20])
   })
 
+  it('releases pins left by versions whose popup still exposed Pin', async () => {
+    indexed = [indexRow({ pinned: true })]
+    installChrome()
+    const { historyRows } = await importApi()
+
+    expect(await historyRows()).toEqual([
+      expect.objectContaining({ id: 'h1', pinned: false }),
+    ])
+    expect(pinned).toEqual([['h1', false]])
+  })
+
   it('shows an empty history where the index would not open, rather than nothing at all', async () => {
     indexRefuses = true
     installChrome()

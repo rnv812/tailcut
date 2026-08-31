@@ -1,6 +1,7 @@
 import { render } from 'preact'
 import { useEffect, useState } from 'preact/hooks'
 import {
+  clearHistory,
   deleteHistory,
   editSession,
   formatBytes,
@@ -14,7 +15,6 @@ import {
   openSettings,
   pageUrl,
   pauseThisTab,
-  pinHistory,
   saveAll,
   setSiteRecorded,
   siteSwitch,
@@ -166,21 +166,37 @@ function complaintFor(failure: SaveResult): string {
 /** How long the undo of a deletion stays on screen. The sweeper waits longer than this. */
 const UNDO_MS = 6_000
 
-function History(props: { rows: HistoryRow[]; hide: Set<string>; onChanged: () => void }) {
-  const [deleted, setDeleted] = useState<HistoryRow | null>(null)
-  const shown = props.rows.filter((row) => !props.hide.has(row.key) && row.id !== deleted?.id)
+function History(props: {
+  rows: HistoryRow[]
+  hide: Set<string>
+  onDeleted: (id: string) => void
+  onChanged: () => void
+}) {
+  const [deleted, setDeleted] = useState<Array<{ row: HistoryRow; expiresAt: number }>>([])
+  const hiddenIds = new Set(deleted.map((entry) => entry.row.id))
+  const shown = props.rows.filter((row) => !props.hide.has(row.key) && !hiddenIds.has(row.id))
 
   useEffect(() => {
-    if (!deleted) return
-    const timer = setTimeout(() => setDeleted(null), UNDO_MS)
+    if (!deleted.length) return
+    const nextExpiry = Math.min(...deleted.map((entry) => entry.expiresAt))
+    const timer = setTimeout(() => {
+      const now = Date.now()
+      setDeleted((current) => {
+        const expired = current.filter((entry) => entry.expiresAt <= now)
+        if (expired.length) {
+          for (const entry of expired) props.onDeleted(entry.row.id)
+          props.onChanged()
+        }
+        return current.filter((entry) => entry.expiresAt > now)
+      })
+    }, Math.max(0, nextExpiry - Date.now()))
     return () => clearTimeout(timer)
   }, [deleted])
 
-  if (!shown.length && !deleted) return null
+  if (!shown.length && !deleted.length) return null
 
   return (
     <div class="history" data-testid="history">
-      <div class="muted label">History</div>
 
       {shown.map((row) => (
         <div class="row history-row" data-testid="history-row" key={row.id}>
@@ -208,12 +224,11 @@ function History(props: { rows: HistoryRow[]; hide: Set<string>; onChanged: () =
             </span>
           </button>
           <button
-            class={row.pinned ? 'pin on' : 'pin'}
-            data-testid="history-pin"
-            title={row.pinned ? 'Kept until you unpin it' : 'Keep this recording'}
-            onClick={() => void pinHistory(row.id, !row.pinned).then(props.onChanged)}
+            class="quiet"
+            data-testid="history-edit"
+            onClick={() => void openHistoryEditor(row.id)}
           >
-            {row.pinned ? 'Pinned' : 'Pin'}
+            Edit
           </button>
           <button
             class="quiet"
@@ -222,8 +237,8 @@ function History(props: { rows: HistoryRow[]; hide: Set<string>; onChanged: () =
               // Marked deleted at once, so the row is out of every list before the user has let
               // go of the button; the files go with the sweeper, and the toast below is the
               // window in which that can be called off.
-              setDeleted(row)
-              void deleteHistory(row.id).then(props.onChanged)
+              setDeleted((current) => [...current, { row, expiresAt: Date.now() + UNDO_MS }])
+              void deleteHistory(row.id)
             }}
           >
             Delete
@@ -231,19 +246,19 @@ function History(props: { rows: HistoryRow[]; hide: Set<string>; onChanged: () =
         </div>
       ))}
 
-      {deleted && (
-        <div class="toast" data-testid="undo" role="status">
-          <span>Deleted “{deleted.title || UNTITLED}”</span>
+      {deleted.map(({ row }) => (
+        <div class="toast" data-testid="undo" role="status" key={row.id}>
+          <span>Deleted “{row.title || UNTITLED}”</span>
           <button
             onClick={() => {
-              void undoDelete(deleted.id).then(props.onChanged)
-              setDeleted(null)
+              void undoDelete(row.id).then(props.onChanged)
+              setDeleted((current) => current.filter((entry) => entry.row.id !== row.id))
             }}
           >
             Undo
           </button>
         </div>
-      )}
+      ))}
     </div>
   )
 }
@@ -259,17 +274,16 @@ function History(props: { rows: HistoryRow[]; hide: Set<string>; onChanged: () =
  */
 const RECORDING_OFF = 'Recording is off in Settings — no site is recorded.'
 
-function Footer(props: {
+function SiteControl(props: {
   url: string
   site: SiteSwitch
   paused: boolean
-  inUse: { bytes: number; full: boolean }
   onChanged: () => void
 }) {
   const host = hostOf(props.url)
 
   return (
-    <div class="footer">
+    <div class="site-control" data-testid="site-control">
       <label class="switch">
         <input
           type="checkbox"
@@ -295,24 +309,62 @@ function Footer(props: {
         {props.paused ? 'Resume on this page' : 'Pause on this page'}
       </button>
 
-      <div class="muted in-use" data-testid="in-use" data-bytes={props.inUse.bytes}>
-        {/* A full disk is a state and not an error: the browser is within its rights to refuse.
-            The sweeper has already lowered the ceiling to fit, and what the user needs to
-            know is that nothing new is going down until room is made. */}
-        {props.inUse.full
-          ? `Disk full — ${formatBytes(props.inUse.bytes)} kept`
-          : `${formatBytes(props.inUse.bytes)} on disk`}
-      </div>
-
-      <button class="quiet" data-testid="open-settings" onClick={() => void openSettings()}>
-        Settings
-      </button>
-
       {props.site.off && (
         <div class="muted why" data-testid="site-off">
           {RECORDING_OFF}
         </div>
       )}
+    </div>
+  )
+}
+
+function StorageBar(props: {
+  memoryBytes: number
+  inUse: { bytes: number; full: boolean }
+  hasHistory: boolean
+  onCleared: () => void
+}) {
+  const [confirming, setConfirming] = useState(false)
+  const [clearFailed, setClearFailed] = useState(false)
+
+  const clear = async () => {
+    const ok = await clearHistory()
+    setConfirming(false)
+    setClearFailed(!ok)
+    if (ok) props.onCleared()
+  }
+
+  return (
+    <div class="storage-bar">
+      <div class="storage-numbers">
+        <span data-testid="memory-in-use">This tab: {formatBytes(props.memoryBytes)} in memory</span>
+        <span data-testid="in-use" data-bytes={props.inUse.bytes}>
+          <span data-testid="disk-in-use">
+            {props.inUse.full
+              ? `Disk full: ${formatBytes(props.inUse.bytes)} kept`
+              : `History: ${formatBytes(props.inUse.bytes)} on disk`}
+          </span>
+        </span>
+      </div>
+      <div class="storage-actions" data-testid="storage-actions">
+        {props.hasHistory && !confirming && (
+          <button class="quiet danger" data-testid="delete-all" onClick={() => setConfirming(true)}>
+            Delete all
+          </button>
+        )}
+        {confirming && (
+          <div class="clear-confirm">
+            <button class="quiet" onClick={() => setConfirming(false)}>Cancel</button>
+            <button class="quiet danger" data-testid="confirm-delete-all" onClick={() => void clear()}>
+              Confirm delete all
+            </button>
+          </div>
+        )}
+        <button class="quiet" data-testid="open-settings" onClick={() => void openSettings()}>
+          Settings
+        </button>
+      </div>
+      {clearFailed && <div class="failed">Could not delete the recordings.</div>}
     </div>
   )
 }
@@ -348,13 +400,17 @@ function Popup() {
   useEffect(() => {
     // Four reads, side by side rather than one after another: they answer independently, and the
     // popup is obliged to open instantly. Nothing here computes and nothing walks the disk.
-    void listSessions().then(setAnswer)
-    void historyRows().then(setRows)
-    void storageInUse().then(setInUse)
+    let current = true
+    void listSessions().then((next) => current && setAnswer(next))
+    void historyRows().then((next) => current && setRows(next))
+    void storageInUse().then((next) => current && setInUse(next))
     void pageUrl().then(async (where) => {
+      if (!current) return
       setUrl(where)
-      setSite(await siteSwitch(where))
+      const next = await siteSwitch(where)
+      if (current) setSite(next)
     })
+    return () => { current = false }
   }, [revision])
 
   // The tab has not answered yet, and until it has there is nothing to say about the page. What
@@ -372,22 +428,26 @@ function Popup() {
    * halves would be one recording pretending to be two, and the two rows would lead to different
    * places — the registry of the frame, and the pieces on disk.
    */
-  const below = (
-    <>
-      <History
-        rows={rows}
-        hide={new Set(sessions.map((session) => session.key))}
-        onChanged={changed}
-      />
-      <Footer
-        url={url}
-        site={site}
-        // What the frame answered, and never what it was asked: the pause lives in the frame.
-        paused={answer.paused === true}
-        inUse={inUse}
-        onChanged={changed}
-      />
-    </>
+  const siteControl = (
+    <SiteControl
+      url={url}
+      site={site}
+      paused={answer.paused === true}
+      onChanged={changed}
+    />
+  )
+  const hideHistory = new Set(sessions.map((session) => session.key))
+  const visibleHistory = rows.filter((row) => !hideHistory.has(row.key))
+  const storage = (
+    <StorageBar
+      memoryBytes={sessions.reduce((sum, session) => sum + session.bytes, 0)}
+      inUse={inUse}
+      hasHistory={rows.length > 0 || inUse.bytes > 0}
+      onCleared={() => {
+        setRows([])
+        setInUse({ bytes: 0, full: false })
+      }}
+    />
   )
 
   if (!sessions.length) {
@@ -405,10 +465,22 @@ function Popup() {
     return (
       <div>
         <Header />
+        {siteControl}
         <div class="pad muted" data-testid="nothing">
           {nothing}
         </div>
-        {below}
+        {visibleHistory.length > 0 && (
+          <section class="recordings" data-testid="recordings">
+            <h2 class="section-heading">Recordings</h2>
+            <History
+              rows={rows}
+              hide={hideHistory}
+              onDeleted={(id) => setRows((current) => current.filter((row) => row.id !== id))}
+              onChanged={changed}
+            />
+          </section>
+        )}
+        {storage}
       </div>
     )
   }
@@ -471,8 +543,11 @@ function Popup() {
   return (
     <div>
       <Header />
+      {siteControl}
 
-      <div class="pad">
+      <section class="recordings" data-testid="recordings">
+        <h2 class="section-heading">Recordings</h2>
+      <div class="pad current-recording">
         <div class="title" data-testid="title">
           {current.title || UNTITLED}
         </div>
@@ -536,8 +611,7 @@ function Popup() {
       </div>
 
       {others.length > 0 && (
-        <div class="recent" data-testid="recent">
-          <div class="muted label">Recent</div>
+        <div class="recent-sessions">
           {others.map((session) => (
             <button
               key={session.key}
@@ -552,8 +626,14 @@ function Popup() {
           ))}
         </div>
       )}
-
-      {below}
+      <History
+        rows={rows}
+        hide={hideHistory}
+        onDeleted={(id) => setRows((current) => current.filter((row) => row.id !== id))}
+        onChanged={changed}
+      />
+      </section>
+      {storage}
     </div>
   )
 }

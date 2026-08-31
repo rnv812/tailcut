@@ -6,7 +6,7 @@
   body {
     margin: 0;
     width: 380px;
-    min-height: 210px;
+    min-height: 360px;
     max-height: 600px;
     overflow-y: auto;
     background:
@@ -88,14 +88,17 @@
     font-size: 11px;
   }
 
-  .recent,
-  .history {
+  .recordings {
     margin: 0 12px 12px;
-    padding: 10px 8px;
+    padding: 10px;
     border: 1px solid var(--tc-border);
     border-radius: var(--tc-radius);
     background: rgba(23, 24, 31, 0.78);
   }
+  .recordings .pad { margin: 0 0 8px; }
+  .section-heading { margin: 0; padding: 1px 4px 9px; color: var(--tc-paper); font-size: 12px;
+                     font-weight: 750; letter-spacing: .06em; text-transform: uppercase; }
+  .history, .recent-sessions { display: grid; gap: 5px; }
   .label {
     padding: 0 7px 6px;
     color: var(--tc-muted);
@@ -142,7 +145,6 @@
   .history-open > :nth-child(4) { text-align: right; white-space: nowrap; }
   .history-open > :nth-child(4) { grid-area: when; }
 
-  .pin,
   .quiet {
     min-height: 28px;
     padding: 4px 8px;
@@ -153,10 +155,8 @@
     font-size: 11px;
     white-space: nowrap;
   }
-  .pin:hover,
   .quiet:hover { border-color: #5a5f6c; background: var(--tc-surface-hover); color: var(--tc-text); }
-  .pin { min-width: 54px; text-align: center; }
-  .pin.on { border-color: var(--tc-accent); color: var(--tc-accent); }
+  .quiet.danger { color: #ff9da8; }
 
   .toast {
     display: flex;
@@ -173,7 +173,8 @@
   .toast button { min-height: 27px; padding: 3px 9px; border: 0; border-radius: 6px;
                   background: var(--tc-accent); color: var(--tc-graphite); font-weight: 700; }
 
-  .footer {
+  .site-control,
+  .storage-bar {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 10px 12px;
@@ -184,6 +185,12 @@
     border-radius: var(--tc-radius);
     background: rgba(23, 24, 31, 0.78);
   }
+  .site-control { margin-top: 12px; }
+  .storage-bar { grid-template-columns: minmax(0, 1fr) auto; }
+  .storage-numbers { display: grid; gap: 2px; color: var(--tc-muted); font-size: 11px; }
+  .storage-actions { display: flex; justify-content: flex-end; gap: 5px; }
+  .clear-confirm { display: flex; gap: 5px; }
+  .storage-bar > .failed { grid-column: 1 / -1; margin-top: 0; }
   .switch { display: flex; align-items: center; gap: 8px; min-width: 0; cursor: pointer; }
   .switch input {
     position: relative;
@@ -212,8 +219,9 @@
   .switch span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .switch b { font-weight: 650; }
   .switch:has(input:disabled) { color: var(--tc-subtle); cursor: default; }
-  .footer .quiet { justify-self: end; }
-  .footer .why { grid-column: 1 / -1; }
+  .site-control .quiet,
+  .storage-actions { justify-self: end; }
+  .site-control .why { grid-column: 1 / -1; }
 </style>
 <body></body>
 <script type="module" src="popup.js"></script>

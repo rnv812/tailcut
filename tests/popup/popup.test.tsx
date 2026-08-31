@@ -24,6 +24,7 @@ let inUse = { ...IN_USE }
 const pinned: Array<[string, boolean]> = []
 const deleted: string[] = []
 const undone: string[] = []
+let cleared = 0
 
 /**
  * The deletion marks the index holds, by identifier: the moment a row was deleted, or nothing.
@@ -185,6 +186,15 @@ function installChrome(reply: Reply) {
   vi.stubGlobal('chrome', {
     runtime: {
       getURL: (path: string) => `chrome-extension://tailcut/${path}`,
+      sendMessage: async (message: { type?: string }) => {
+        if (message.type === 'tc:clear') {
+          cleared += 1
+          rows = []
+          inUse = { bytes: 0, full: false }
+          return { ok: true }
+        }
+        return undefined
+      },
       // Chrome may place this page wherever it chooses. Kept as a no-op so the settings test
       // detects that old path by its missing same-window tab rather than by a fake API crash.
       openOptionsPage: async () => undefined,
@@ -295,6 +305,7 @@ beforeEach(() => {
   pinned.length = 0
   deleted.length = 0
   undone.length = 0
+  cleared = 0
   marks.clear()
   written.length = 0
   stored = DEFAULTS
@@ -810,6 +821,46 @@ describe('Edit', () => {
 })
 
 describe('history', () => {
+  it('puts site recording first and presents live and stored material as one recordings list', async () => {
+    rows = [row]
+    await mount({ sessions: [fresh, older] })
+
+    const siteControl = at('site-control')!
+    const recordings = at('recordings')!
+    expect(
+      siteControl.compareDocumentPosition(recordings) & Node.DOCUMENT_POSITION_FOLLOWING,
+      'the recording switch was not before the recordings',
+    ).toBeTruthy()
+    expect(recordings.textContent).toContain(fresh.title)
+    expect(recordings.textContent).toContain(older.title)
+    expect(recordings.textContent).toContain(row.title)
+    expect(bodyText()).not.toContain('Recent')
+    expect(bodyText()).not.toContain('Pin')
+  })
+
+  it('shows the current tab memory separately from persistent disk storage', async () => {
+    inUse = { bytes: 1_610_612_736, full: false }
+    await mount({ sessions: [fresh, older] })
+
+    expect(textAt('memory-in-use')).toContain('87.3 MB')
+    expect(textAt('disk-in-use')).toContain('1.50 GB')
+  })
+
+  it('clears all stored recordings from one explicit history action', async () => {
+    rows = [row]
+    await draw()
+
+    const actions = at('storage-actions')!
+    expect(actions.querySelector('[data-testid="delete-all"]')).not.toBeNull()
+    expect(actions.querySelector('[data-testid="open-settings"]')).not.toBeNull()
+
+    await click(at('delete-all')!)
+    await click(at('confirm-delete-all')!)
+
+    expect(cleared).toBe(1)
+    expect(allAt('history-row')).toHaveLength(0)
+  })
+
   it('lists what is on disk under what the page is recording now', async () => {
     inUse = { bytes: 1_610_612_736, full: false }
     rows = [
@@ -829,19 +880,25 @@ describe('history', () => {
     expect(document.querySelectorAll('[data-testid="history-row"]')).toHaveLength(0)
   })
 
-  it('pins and unpins a session', async () => {
+  it('keeps Delete all available when the stored row is also live on this page', async () => {
+    rows = [{ ...row, key: fresh.key }]
+    await draw()
+
+    expect(document.querySelectorAll('[data-testid="history-row"]')).toHaveLength(0)
+    expect(at('delete-all')).not.toBeNull()
+  })
+
+  it('does not expose the old pin state as a second history mode', async () => {
     rows = [row]
     await draw()
-    document.querySelector<HTMLButtonElement>('[data-testid="history-pin"]')!.click()
-    await settle()
-    expect(pinned).toEqual([['h1', true]])
+    expect(at('history-pin')).toBeNull()
+    expect(pinned).toEqual([])
   })
 
   it('takes a row away at once and offers to put it back', async () => {
     rows = [row]
     await draw()
-    document.querySelector<HTMLButtonElement>('[data-testid="history-delete"]')!.click()
-    await settle()
+    await click(document.querySelector<HTMLButtonElement>('[data-testid="history-delete"]')!)
 
     expect(deleted).toEqual(['h1'])
     expect(document.querySelectorAll('[data-testid="history-row"]')).toHaveLength(0)
@@ -923,17 +980,10 @@ describe('the history and the switches under it', () => {
     ])
   })
 
-  it('unpins a session it shows as pinned', async () => {
+  it('does not expose pin even for a row kept by an older version', async () => {
     rows = [{ ...row, pinned: true }]
     await draw()
-
-    // The button says what the row is, and pressing it says the opposite: written as a plain
-    // "pin", it would be a button that cannot be taken back and a recording eviction never
-    // touches again.
-    expect(textAt('history-pin')).toBe('Pinned')
-    document.querySelector<HTMLButtonElement>('[data-testid="history-pin"]')!.click()
-    await settle()
-
+    expect(at('history-pin')).toBeNull()
     expect(pinned).toEqual([['h1', false]])
   })
 
@@ -971,6 +1021,31 @@ describe('the history and the switches under it', () => {
     expect(deleted).toEqual(['h1'])
   })
 
+  it('does not bring an earlier row back when two recordings are deleted quickly', async () => {
+    const other: HistoryRow = {
+      ...row,
+      id: 'h2',
+      key: 'https://old.example/w|avc1|60',
+      title: 'The second one',
+    }
+    rows = [row, other]
+    await draw()
+
+    await click(allAt('history-delete')[0]!)
+    await click(allAt('history-delete')[0]!)
+
+    expect(allAt('history-row')).toHaveLength(0)
+    expect(deleted).toEqual(['h1', 'h2'])
+  })
+
+  it('names the recordings region for assistive navigation', async () => {
+    rows = [row]
+    await draw()
+
+    const region = at('recordings')!
+    expect(region.querySelector('h2')?.textContent).toBe('Recordings')
+  })
+
   it('says when a recording was last watched, and how much of the disk it holds', async () => {
     rows = [{ ...row, lastSeenAt: Date.now() - 26 * 3_600_000 }]
     await draw()
@@ -991,8 +1066,7 @@ describe('the history and the switches under it', () => {
     rows = [row]
     await draw()
 
-    document.querySelector<HTMLButtonElement>('[data-testid="history-delete"]')!.click()
-    await settle()
+    await click(document.querySelector<HTMLButtonElement>('[data-testid="history-delete"]')!)
     expect(at('undo'), 'setup: nothing was offered back').not.toBeNull()
 
     await vi.advanceTimersByTimeAsync(6_000)
@@ -1010,8 +1084,7 @@ describe('the history and the switches under it', () => {
     rows = [row]
     await draw()
 
-    document.querySelector<HTMLButtonElement>('[data-testid="history-delete"]')!.click()
-    await settle()
+    await click(document.querySelector<HTMLButtonElement>('[data-testid="history-delete"]')!)
 
     await vi.advanceTimersByTimeAsync(6_000)
     await settle()
