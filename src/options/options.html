@@ -27,6 +27,7 @@
     padding: 0 4px;
   }
   .page-head .tc-brand-mark { width: 36px; height: 36px; }
+  .page-head .tc-support-link { flex: 0 0 auto; }
   h1 { margin: 0; font-size: 20px; font-weight: 750; letter-spacing: -0.04em; }
   .page-head p { margin: 1px 0 0; color: var(--tc-muted); font-size: 12px; }
 
@@ -152,8 +153,22 @@
   }
   .host-row:hover { background: rgba(255, 255, 255, 0.025); }
   .host-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .host-row .allowed { border-color: rgba(125, 221, 158, 0.38); color: var(--tc-success); }
-  .host-row .denied { border-color: rgba(255, 128, 142, 0.38); color: var(--tc-danger); }
+  .host-status {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 68px;
+    min-height: 27px;
+    padding: 3px 8px;
+    border: 1px solid var(--tc-border-strong);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.025);
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .host-status.allowed { border-color: rgba(125, 221, 158, 0.38); color: var(--tc-success); }
+  .host-status.blocked { border-color: rgba(255, 128, 142, 0.38); color: var(--tc-danger); }
+  .host-action { min-width: 64px; }
 
   .advanced { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--tc-border); }
   .advanced-toggle {
@@ -192,6 +207,11 @@
 
   .reset { margin-top: 24px; text-align: right; }
   .reset button { color: var(--tc-muted); }
+  .reset + .legal-footer {
+    margin-top: 16px;
+    padding: 16px 4px 0;
+    border-top: 1px solid var(--tc-border);
+  }
 
   @media (max-width: 760px) {
     body { padding: 24px 14px 48px; }

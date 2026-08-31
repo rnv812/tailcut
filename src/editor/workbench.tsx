@@ -19,6 +19,7 @@ import type { Hover } from '../core/timeline/hover'
 import type { ClipBand } from '../core/timeline/layout'
 import { snapSet } from '../core/timeline/snap'
 import { formatBytes } from '../shared/format'
+import { SupportLink } from '../shared/legal'
 import { HelpSheet } from './help'
 import { EditToolbar } from './edit-toolbar'
 import {
@@ -591,19 +592,22 @@ function OpenWorkbench({
             </span>
           </div>
         </div>
-        {sourceTabId !== undefined && (
-          <div class="head-actions">
-            <button
-              type="button"
-              data-testid="return-source"
-              title="Return to the video tab"
-              onClick={() => void focusSourceTab(sourceTabId).then((ok) => setSourceMissing(!ok))}
-            >
-              ← Back to video
-            </button>
-            {sourceMissing && <span class="failure">The source tab is no longer open.</span>}
-          </div>
-        )}
+        <div class="head-actions">
+          {sourceTabId !== undefined && (
+            <>
+              <button
+                type="button"
+                data-testid="return-source"
+                title="Return to the video tab"
+                onClick={() => void focusSourceTab(sourceTabId).then((ok) => setSourceMissing(!ok))}
+              >
+                ← Back to video
+              </button>
+              {sourceMissing && <span class="failure">The source tab is no longer open.</span>}
+            </>
+          )}
+          <SupportLink />
+        </div>
       </header>
 
       <aside class="media-panel" data-testid="media-panel">

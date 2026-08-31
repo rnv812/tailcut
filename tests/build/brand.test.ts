@@ -29,4 +29,11 @@ describe('the runtime brand theme', () => {
       /\.legal-consent a,\s*\.legal-footer a\s*\{[^}]*text-decoration:\s*underline/s,
     )
   })
+
+  it('styles author support as a compact header action with a real icon', () => {
+    const css = theme()
+
+    expect(css).toMatch(/\.tc-support-link\s*\{[^}]*display:\s*inline-flex/s)
+    expect(css).toMatch(/\.tc-support-link svg\s*\{[^}]*width:/s)
+  })
 })

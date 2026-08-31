@@ -172,7 +172,7 @@ const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
  * lowercased — hosts are case-insensitive and a list that thinks otherwise refuses to match the
  * site the user was looking at.
  */
-function asHost(value: unknown): string {
+export function normalizeHost(value: unknown): string {
   if (typeof value !== 'string') return ''
   const text = value.trim().toLowerCase()
   if (!text) return ''
@@ -199,7 +199,7 @@ function asHosts(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   const hosts: string[] = []
   for (const entry of value) {
-    const host = asHost(entry)
+    const host = normalizeHost(entry)
     // Cleaned rather than dropped: one entry the user mistyped is no reason to lose the list.
     if (host && !hosts.includes(host)) hosts.push(host)
   }

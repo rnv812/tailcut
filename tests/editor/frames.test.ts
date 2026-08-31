@@ -485,6 +485,66 @@ describe('liveCodecs: CPU frame normalization', () => {
       vi.unstubAllGlobals()
     }
   })
+
+  it('reads an opaque decoded frame through a canvas before constructing the CPU frame', async () => {
+    const rect = { x: 48, y: 28, width: 160, height: 90 }
+    const pixels = {
+      width: rect.width,
+      height: rect.height,
+      data: new Uint8ClampedArray(rect.width * rect.height * 4),
+    }
+    const draws: unknown[][] = []
+    const made: Array<{ source: unknown; init: VideoFrameInit }> = []
+
+    class FakeOffscreenCanvas {
+      constructor(
+        readonly width: number,
+        readonly height: number,
+      ) {}
+
+      getContext() {
+        return {
+          drawImage: (...args: unknown[]) => draws.push(args),
+          getImageData: () => pixels,
+        }
+      }
+    }
+    class FakeVideoFrame {
+      constructor(source: unknown, init: VideoFrameInit) {
+        made.push({ source, init })
+      }
+    }
+    vi.stubGlobal('OffscreenCanvas', FakeOffscreenCanvas)
+    vi.stubGlobal('VideoFrame', FakeVideoFrame)
+
+    const source = {
+      format: null,
+      visibleRect: rect,
+      timestamp: 7_654_321,
+      duration: 41_667,
+      allocationSize() {
+        throw new DOMException('Operation is not supported when format is null.', 'NotSupportedError')
+      },
+    } as unknown as VideoFrame
+
+    try {
+      await liveCodecs().normalize(source)
+
+      expect(draws).toEqual([[source, 0, 0, rect.width, rect.height]])
+      expect(made).toEqual([{
+        source: pixels.data,
+        init: {
+          format: 'RGBA',
+          codedWidth: 160,
+          codedHeight: 90,
+          timestamp: 7_654_321,
+          duration: 41_667,
+        },
+      }])
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
 })
 
 describe('decodedFrames: normalization failure', () => {

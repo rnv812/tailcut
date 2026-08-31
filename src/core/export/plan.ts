@@ -102,6 +102,67 @@ export interface Seam {
   pull: number
 }
 
+interface Span {
+  start: number
+  end: number
+}
+
+/** Continuous presentation-time runs of one track, in seconds. */
+function runsOf(track: SourceTrack): Span[] {
+  const spans = track.samples
+    .map((sample) => ({
+      start: (sample.pts - track.editOffset) / track.timescale,
+      end: (sample.pts + sample.duration - track.editOffset) / track.timescale,
+    }))
+    .sort((a, b) => a.start - b.start)
+  const runs: Span[] = []
+
+  for (const span of spans) {
+    const last = runs[runs.length - 1]
+    if (last && span.start <= last.end) last.end = Math.max(last.end, span.end)
+    else runs.push({ ...span })
+  }
+
+  return runs
+}
+
+/**
+ * Sound under the recorded picture, excluding packets fetched ahead through a picture hole.
+ *
+ * The picture is what the viewer watched. Adaptive players commonly buffer longer audio pieces
+ * across a seek or a live-video discontinuity; keeping those packets makes the old picture freeze
+ * while unheard prefetched sound plays. Retain packets overlapping picture runs, plus decoder
+ * warm-up at the head, so preview, selected export and Save all join the same material.
+ */
+export function soundUnderPicture(source: ClipSource): ClipSource {
+  if (source.video.kind !== 'video' || !source.audio) return source
+
+  const picture = runsOf(source.video)
+  if (picture.length <= 1) return source
+  const indexes = new Set<number>()
+
+  for (const [index, sample] of source.audio.samples.entries()) {
+    const start = (sample.pts - source.audio.editOffset) / source.audio.timescale
+    const end = (sample.pts + sample.duration - source.audio.editOffset) / source.audio.timescale
+    if (picture.some((run) => end > run.start && start < run.end)) indexes.add(index)
+  }
+
+  const first = Math.min(...indexes)
+  if (Number.isFinite(first)) {
+    for (let index = Math.max(0, first - AUDIO_WARMUP_PACKETS); index < first; index++) {
+      indexes.add(index)
+    }
+  }
+
+  return {
+    video: source.video,
+    audio: {
+      ...source.audio,
+      samples: source.audio.samples.filter((_sample, index) => indexes.has(index)),
+    },
+  }
+}
+
 export function seamsOf(source: ClipSource): Seam[] {
   const sound = source.audio ? holesOf(source.audio) : null
 
@@ -120,8 +181,18 @@ export function seamsOf(source: ClipSource): Seam[] {
 }
 
 export function planClip(source: ClipSource, request: ClipRequest): ExportPlan {
-  const videoSource = decodableVideo(source.video)
-  const decodable = videoSource === source.video ? source : { ...source, video: videoSource }
+  const repaired = decodableVideo(source.video)
+  const videoSource = repaired.track
+  const decodable =
+    videoSource === source.video
+      ? source
+      : {
+          ...source,
+          video: videoSource,
+          ...(source.audio
+            ? { audio: soundAfterDecodablePicture(source.audio, repaired.discarded) }
+            : {}),
+        }
   const seams = seamsOf(decodable)
   const tracks: PlannedTrack[] = []
 
@@ -153,10 +224,17 @@ export function planClip(source: ClipSource, request: ClipRequest): ExportPlan {
  * the index before the next sync sample, but their references are not, so handing one to a fresh
  * decoder is invalid. The skipped stretch becomes part of the hole seen by the seam planner.
  */
-function decodableVideo(track: SourceTrack): SourceTrack {
-  if (track.kind !== 'video') return track
+interface DecodableTrack {
+  track: SourceTrack
+  /** Presentation stretches present in the recording but unusable without the missing reference. */
+  discarded: Hole[]
+}
+
+function decodableVideo(track: SourceTrack): DecodableTrack {
+  if (track.kind !== 'video') return { track, discarded: [] }
 
   const samples: SourceSample[] = []
+  const dropped: SourceSample[] = []
   let previousEnd: number | null = null
   // `firstFrame` already chooses the first usable entry for the head of a clip. This pass only
   // repairs later runs, where `planTrack` would otherwise keep walking across the gap.
@@ -167,11 +245,56 @@ function decodableVideo(track: SourceTrack): SourceTrack {
     if (!waitingForSync || sample.sync) {
       samples.push(sample)
       waitingForSync = false
+    } else {
+      dropped.push(sample)
     }
     previousEnd = sample.dts + sample.duration
   }
 
-  return samples.length === track.samples.length ? track : { ...track, samples }
+  return {
+    track: samples.length === track.samples.length ? track : { ...track, samples },
+    discarded: presentationHoles(track, dropped),
+  }
+}
+
+/** Presentation stretches occupied by samples that cannot be decoded, merged in time order. */
+function presentationHoles(track: SourceTrack, samples: readonly SourceSample[]): Hole[] {
+  const spans = samples
+    .map((sample) => ({
+      from: (sample.pts - track.editOffset) / track.timescale,
+      to: (sample.pts + sample.duration - track.editOffset) / track.timescale,
+    }))
+    .sort((a, b) => a.from - b.from)
+  const merged: Hole[] = []
+
+  for (const span of spans) {
+    const last = merged[merged.length - 1]
+    if (last && span.from <= last.to) last.to = Math.max(last.to, span.to)
+    else merged.push({ ...span })
+  }
+
+  return merged
+}
+
+/**
+ * Drop sound that belongs to picture frames discarded at the start of a resumed GOP.
+ *
+ * A seek can leave the first picture fragment after a gap starting with delta frames. They cannot
+ * be decoded without the group that the gap removed, so `decodableVideo` waits for the next sync
+ * frame. Keeping sound from that unusable stretch would play it under the frozen pre-gap picture
+ * and put it ahead. Whole packets are removed; the seam planner then closes the widened hole in
+ * both tracks by the same amount.
+ */
+function soundAfterDecodablePicture(audio: SourceTrack, discarded: readonly Hole[]): SourceTrack {
+  if (discarded.length === 0) return audio
+
+  const samples = audio.samples.filter((sample) => {
+    const start = (sample.pts - audio.editOffset) / audio.timescale
+    const end = (sample.pts + sample.duration - audio.editOffset) / audio.timescale
+    return !discarded.some((span) => end > span.from && start < span.to)
+  })
+
+  return samples.length === audio.samples.length ? audio : { ...audio, samples }
 }
 
 /**
@@ -201,8 +324,9 @@ export function presentationSpan(track: SourceTrack): { start: number; end: numb
 export function planPreview(source: ClipSource): ExportPlan {
   if (source.video.samples.length === 0) return { tracks: [], duration: 0, bytes: 0 }
 
-  const span = presentationSpan(source.video)
-  return planClip(source, {
+  const watched = soundUnderPicture(source)
+  const span = presentationSpan(watched.video)
+  return planClip(watched, {
     in: span.start,
     out: span.end,
     sound: source.audio !== undefined,
@@ -221,7 +345,12 @@ function holesOf(track: SourceTrack): Hole[] {
     const previous = track.samples[i - 1]!
     const next = track.samples[i]!
     const ends = previous.dts + previous.duration
-    if (next.dts > ends) holes.push({ from: ends / track.timescale, to: next.dts / track.timescale })
+    if (next.dts > ends) {
+      holes.push({
+        from: (ends - track.editOffset) / track.timescale,
+        to: (next.dts - track.editOffset) / track.timescale,
+      })
+    }
   }
 
   return holes
@@ -257,7 +386,11 @@ function planTrack(track: SourceTrack, request: ClipRequest, seams: Seam[]): Pla
         // What is left of the hole after both tracks have been pulled by the same amount. Zero
         // for the track that had the smaller one; for the other, the difference — and it stays in
         // the file as an extra tick or two on the sample in front of the seam.
-        const pull = pullAcross(seams, ends / scale, next.dts / scale)
+        const pull = pullAcross(
+          seams,
+          (ends - track.editOffset) / scale,
+          (next.dts - track.editOffset) / scale,
+        )
         duration += Math.max(0, hole - Math.round(pull * scale))
       }
     }

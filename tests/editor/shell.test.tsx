@@ -376,9 +376,14 @@ describe('the editor shell', () => {
   it('identifies the workbench with the packaged tailcut mark', async () => {
     show(await ready())
     const mark = document.querySelector<HTMLImageElement>('[data-testid="brand-mark"]')
+    const support = document.querySelector<HTMLAnchorElement>('[data-testid="support-link"]')
 
     expect(mark?.alt).toBe('tailcut')
     expect(mark?.getAttribute('src')).toBe('../assets/tailcut/svg/mark-light.svg')
+    expect(support?.closest('.head-actions')).not.toBeNull()
+    expect(support?.textContent).toContain('Support the author')
+    expect(support?.href).toBe('https://donatty.com/rnv812')
+    expect(support?.title).toContain('free and open source')
   })
 
   it('returns to the original page tab without closing the editor', async () => {

@@ -289,6 +289,29 @@ export function liveCodecs(): Codecs {
         width: visible.width,
         height: visible.height,
       }
+
+      // A hardware decoder may expose an opaque GPU frame: its `format` is null and neither
+      // `allocationSize()` nor `copyTo()` is supported, even when RGBA is explicitly requested.
+      // Canvas is the browser-provided readback path for that frame. `getImageData()` matters:
+      // constructing from the canvas itself could produce another opaque frame and send the retry
+      // around the same failure again.
+      if (frame.format === null) {
+        const canvas = new OffscreenCanvas(rect.width, rect.height)
+        const context = canvas.getContext('2d', { willReadFrequently: true })
+        if (!context) throw new Error('Could not create a canvas for CPU frame conversion.')
+        // A VideoFrame is rendered through its visible rectangle already. In the crop path that
+        // rectangle is the selected piece, so applying its coded x/y again would cut it twice.
+        context.drawImage(frame, 0, 0, rect.width, rect.height)
+        const pixels = context.getImageData(0, 0, rect.width, rect.height)
+        return new VideoFrame(pixels.data, {
+          format: 'RGBA',
+          codedWidth: rect.width,
+          codedHeight: rect.height,
+          timestamp: frame.timestamp,
+          ...(frame.duration === null ? {} : { duration: frame.duration }),
+        })
+      }
+
       const options: VideoFrameCopyToOptions = { format: 'RGBA', rect }
       const bytes = new Uint8Array(frame.allocationSize(options))
       const layout = await frame.copyTo(bytes, options)

@@ -5,7 +5,12 @@ import { runtimeChoices, type Choice, type EncodeGeometry } from '../../core/enc
 import { geometryOf } from '../../core/encode/crop'
 import { framesOf, pathFor } from '../../core/encode/path'
 import { contentTypeOf, fileNameOf, uniqueNames } from '../../core/export/naming'
-import { planClip, type ClipSource, type ExportPlan } from '../../core/export/plan'
+import {
+  planClip,
+  soundUnderPicture,
+  type ClipSource,
+  type ExportPlan,
+} from '../../core/export/plan'
 import {
   bytesFrom,
   clipSourceFrom,
@@ -92,7 +97,11 @@ export async function openClipSource(
 
 /** What one clip would be written as — the same plan the export runs, so the estimate cannot lie. */
 export function planOf(source: ClipSource, clip: Clip): ExportPlan {
-  return planClip(source, { in: clip.in, out: clip.out, sound: clip.sound })
+  return planClip(soundUnderPicture(source), {
+    in: clip.in,
+    out: clip.out,
+    sound: clip.sound,
+  })
 }
 
 /**

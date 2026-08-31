@@ -4,6 +4,7 @@ import type { EncodingChoice } from '../../src/core/encode/codec'
 import { framesOf, laneOf, pathFor } from '../../src/core/encode/path'
 import type { Clip } from '../../src/core/edit/clip'
 import type { EditContext } from '../../src/core/edit/context'
+import type { ClipSource, SourceTrack } from '../../src/core/export/plan'
 import { clipSourceOf } from '../../src/core/export/source'
 import type { Located } from '../../src/shared/types'
 
@@ -80,6 +81,44 @@ describe('pathFor', () => {
 
     expect(path.kind).toBe('copy')
     expect(path.kind === 'copy' && path.plan.tracks[0]?.kind).toBe('video')
+  })
+
+  it('drops sound prefetched through a picture gap on the copy path', () => {
+    const made = (track: SourceTrack, at: readonly number[]): SourceTrack => ({
+      ...track,
+      timescale: 1000,
+      editOffset: 0,
+      samples: at.map((dts) => ({
+        dts,
+        pts: dts,
+        duration: 100,
+        sync: true,
+        source: { at: dts, length: 10 },
+      })),
+    })
+    const audioTemplate: SourceTrack = {
+      ...source.video,
+      kind: 'audio',
+      width: 0,
+      height: 0,
+    }
+    const gapped: ClipSource = {
+      video: made(source.video, [0, 100, 200, 1000, 1100, 1200]),
+      audio: made(audioTemplate, Array.from({ length: 13 }, (_value, index) => index * 100)),
+    }
+
+    const path = pathFor(clip({ in: 0, out: 1.3, sound: true }), gapped, ctx, null, false)
+
+    expect(path.kind).toBe('copy')
+    const sound = path.kind === 'copy' && path.plan.tracks.find((track) => track.kind === 'audio')
+    expect(sound && sound.samples.map((sample) => sample.source.at)).toEqual([
+      0,
+      100,
+      200,
+      1000,
+      1100,
+      1200,
+    ])
   })
 
   it('encodes a crop even when the clip otherwise asks for original', () => {

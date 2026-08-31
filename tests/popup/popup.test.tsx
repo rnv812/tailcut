@@ -376,7 +376,7 @@ describe('legal consent', () => {
     expect(written[0]!.legal.acceptedAt).toBeLessThanOrEqual(Date.now())
   })
 
-  it('keeps exact privacy, terms, and support links in the popup after acceptance', async () => {
+  it('keeps legal links in the footer and support in the sticky header', async () => {
     await draw()
 
     const footer = at('legal-footer')
@@ -390,10 +390,16 @@ describe('legal consent', () => {
     expect(named('Terms')?.href).toBe(
       'https://github.com/rnv812/tailcut/blob/master/TERMS.md',
     )
-    const support = footer!.querySelector<HTMLAnchorElement>('[data-testid="support-link"]')
+    expect(footer!.querySelector('[data-testid="support-link"]')).toBeNull()
+    expect(footer!.textContent).toContain('Use only media you have permission to save.')
+
+    const support = document.querySelector<HTMLAnchorElement>('[data-testid="support-link"]')
+    expect(support?.closest('.top')).not.toBeNull()
+    expect(support?.textContent).toContain('Support the author')
     expect(support?.href).toBe('https://donatty.com/rnv812')
     expect(support?.target).toBe('_blank')
     expect(support?.rel).toBe('noreferrer')
+    expect(support?.title).toContain('free and open source')
   })
 })
 
@@ -409,7 +415,8 @@ describe('the popup', () => {
   it('waits while the tab has not answered', async () => {
     await mount('silent')
 
-    expect(bodyText()).toBe('Loading…')
+    expect(bodyText()).toContain('Loading…')
+    expect(at('support-link')?.closest('.top')).not.toBeNull()
   })
 
   it('says there was nothing to record on a page with no recording', async () => {
@@ -652,6 +659,7 @@ describe('the popup and the other sessions of the page', () => {
     expect(allAt('session').map((row) => row.textContent)).toEqual([
       expect.stringContaining(older.title),
     ])
+    expect(allAt('session-status').map((status) => status.textContent)).toEqual(['Live'])
   })
 
   it('says nothing of other sessions when there is only one', async () => {
@@ -661,11 +669,20 @@ describe('the popup and the other sessions of the page', () => {
     expect(at('recent')).toBeNull()
   })
 
-  it('does not promote a recording when its row is clicked', async () => {
-    await mount({ sessions: [fresh, older] })
+  it('opens another recording from its title without promoting it', async () => {
+    const chrome = await mount({ sessions: [fresh, older] })
+    chrome.setEditReply({ ok: true, snapshotId: OTHER_SNAPSHOT })
 
-    await click(allAt('session')[0]!)
+    await click(allAt('session-open')[0]!)
 
+    expect(chrome.sent.map((item) => item.message)).toEqual([
+      { type: 'tc:list' },
+      { type: 'tc:edit', key: older.key },
+    ])
+    expect(chrome.created).toEqual([
+      { url: `chrome-extension://tailcut/editor/editor.html?s=${OTHER_SNAPSHOT}&tab=7`, windowId: 23 },
+    ])
+    expect(chrome.closed).toBe(true)
     expect(textAt('title')).toBe(fresh.title)
     expect(textAt('host')).toBe('site.example')
     expect(allAt('session').map((row) => row.textContent)).toEqual([
@@ -908,10 +925,15 @@ describe('history', () => {
     await mount({ sessions: [fresh, older] })
 
     const siteControl = at('site-control')!
+    const storageActions = at('storage-actions')!
     const recordings = at('recordings')!
     expect(
-      siteControl.compareDocumentPosition(recordings) & Node.DOCUMENT_POSITION_FOLLOWING,
-      'the recording switch was not before the recordings',
+      siteControl.compareDocumentPosition(storageActions) & Node.DOCUMENT_POSITION_FOLLOWING,
+      'the storage controls were not below the recording switch',
+    ).toBeTruthy()
+    expect(
+      storageActions.compareDocumentPosition(recordings) & Node.DOCUMENT_POSITION_FOLLOWING,
+      'the storage controls were not above the recordings',
     ).toBeTruthy()
     expect(recordings.textContent).toContain(fresh.title)
     expect(recordings.textContent).toContain(older.title)
@@ -952,6 +974,7 @@ describe('history', () => {
 
     expect(document.querySelector('[data-testid="history-title"]')!.textContent).toBe('Yesterday')
     expect(document.querySelector('[data-testid="history-length"]')!.textContent).toBe('4:00')
+    expect(textAt('history-status')).toBe('On disk')
   })
 
   it('leaves out what the tab is already showing above', async () => {

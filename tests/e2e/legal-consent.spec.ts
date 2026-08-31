@@ -9,6 +9,7 @@ test('requires explicit responsible-use agreement before exposing extension acti
     await expect(popup.getByTestId('legal-consent')).toBeVisible()
     await expect(popup.getByTestId('legal-continue')).toBeDisabled()
     await expect(popup.getByTestId('recordings')).toHaveCount(0)
+    await expect(popup.getByTestId('support-link')).toHaveText(/Support the author/)
 
     const bottomSpace = await popup.getByTestId('legal-consent').evaluate((card) => {
       const cardBox = card.getBoundingClientRect()

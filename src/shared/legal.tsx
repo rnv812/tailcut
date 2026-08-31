@@ -4,6 +4,9 @@ export const PRIVACY_URL = 'https://github.com/rnv812/tailcut/blob/master/PRIVAC
 export const TERMS_URL = 'https://github.com/rnv812/tailcut/blob/master/TERMS.md'
 export const SUPPORT_URL = 'https://donatty.com/rnv812'
 
+const SUPPORT_TITLE =
+  'tailcut is free and open source. If it saves you time, support the author.'
+
 const ExternalLink = (props: {
   href: string
   children: preact.ComponentChildren
@@ -13,6 +16,25 @@ const ExternalLink = (props: {
     {props.children}
   </a>
 )
+
+export function SupportLink() {
+  return (
+    <a
+      class="tc-support-link"
+      href={SUPPORT_URL}
+      target="_blank"
+      rel="noreferrer"
+      data-testid="support-link"
+      title={SUPPORT_TITLE}
+      aria-label="Support the author"
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8l1.1 1.1L12 21l7.8-7.5 1.1-1.1a5.5 5.5 0 0 0-.1-7.8Z" />
+      </svg>
+      <span>Support the author</span>
+    </a>
+  )
+}
 
 export function LegalConsent(props: { onAccept: () => void | Promise<void> }) {
   const [agreed, setAgreed] = useState(false)
@@ -71,24 +93,10 @@ export function LegalConsent(props: { onAccept: () => void | Promise<void> }) {
 export function LegalFooter() {
   return (
     <footer class="legal-footer" data-testid="legal-footer">
-      <span>
-        Only save media you own or are allowed to use.{' '}
-        <span id="donation-note">Donations are voluntary and unlock no features or benefits.</span>
-      </span>
-      <nav aria-label="Legal and support">
+      <span>Use only media you have permission to save.</span>
+      <nav aria-label="Legal">
         <ExternalLink href={PRIVACY_URL}>Privacy</ExternalLink>
         <ExternalLink href={TERMS_URL}>Terms</ExternalLink>
-        <a
-          class="legal-donate"
-          href={SUPPORT_URL}
-          target="_blank"
-          rel="noreferrer"
-          data-testid="support-link"
-          aria-describedby="donation-note"
-          title="Donation is voluntary and provides no features or benefits"
-        >
-          Donate
-        </a>
       </nav>
     </footer>
   )

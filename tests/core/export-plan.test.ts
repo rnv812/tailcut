@@ -5,6 +5,7 @@ import {
   planClip,
   planPreview,
   seamsOf,
+  soundUnderPicture,
   type ClipSource,
   type PlannedTrack,
   type SourceSample,
@@ -161,8 +162,11 @@ function pullsAcrossSeam(source: ClipSource, tracks: PlannedTrack[]): number[] {
     const samples = track.kind === 'video' ? source.video.samples : source.audio!.samples
     let decode = 0
     for (const [i, planned] of track.samples.entries()) {
-      const sample = samples[i]!
-      const previous = samples[i - 1]
+      const sample = samples.find((candidate) => candidate.source.at === planned.source.at)!
+      const previousPlanned = track.samples[i - 1]
+      const previous = previousPlanned
+        ? samples.find((candidate) => candidate.source.at === previousPlanned.source.at)
+        : undefined
       if (previous && sample.dts > previous.dts + previous.duration) {
         return (sample.dts - decode) / track.timescale
       }
@@ -279,10 +283,10 @@ describe('seamsOf', () => {
     const seams = seamsOf(holed)
     expect(seams).toHaveLength(1)
     const [seam] = seams
-    // Two seconds of picture are missing; the sound stops a little earlier and comes back a
-    // little earlier, because a packet is not a frame.
-    expect(seam!.from).toBeCloseTo(2, 6)
-    expect(seam!.to).toBeCloseTo(4, 6)
+    // Two seconds of picture are missing. The boundaries are on the presentation clock, after
+    // the source edit has hidden the reordered lead-in.
+    expect(seam!.from).toBeCloseTo(2 - holed.video.editOffset / holed.video.timescale, 6)
+    expect(seam!.to).toBeCloseTo(4 - holed.video.editOffset / holed.video.timescale, 6)
     // 88064 ticks of 44100 — the sound's own hole, and the smaller of the two.
     expect(seam!.pull).toBeCloseTo(1.996916, 6)
     expect(seam!.pull).toBeLessThan(seam!.to - seam!.from)
@@ -298,8 +302,8 @@ describe('seamsOf', () => {
     expect(seams).toHaveLength(1)
     const [seam] = seams
 
-    expect(seam!.from).toBeCloseTo(2, 6)
-    expect(seam!.to).toBeCloseTo(4, 6)
+    expect(seam!.from).toBeCloseTo(2 - wider.video.editOffset / wider.video.timescale, 6)
+    expect(seam!.to).toBeCloseTo(4 - wider.video.editOffset / wider.video.timescale, 6)
     expect(seam!.pull).toBeCloseTo(seam!.to - seam!.from, 9)
     // The sound's own hole is twice that, and it is not what the seam pulls by.
     expect(widestHole(wider.audio!)).toBeGreaterThan(seam!.pull + 1)
@@ -357,6 +361,22 @@ describe('seamsOf', () => {
     expect(seamsOf(oneSided)[0]!.pull).toBe(0)
   })
 
+  it('pairs holes on the presentation clock when the tracks have different edits', () => {
+    const video = {
+      ...madeTrack('video', 1000, 100, [
+        { at: 1000, count: 3 },
+        { at: 2000, count: 3 },
+      ]),
+      editOffset: 1000,
+    }
+    const audio = madeTrack('audio', 1000, 100, [
+      { at: 0, count: 3 },
+      { at: 1000, count: 3 },
+    ])
+
+    expect(seamsOf({ video, audio })).toEqual([{ from: 0.3, to: 1, pull: 0.7 }])
+  })
+
   it('collapses a hole entirely when there is no sound at all', () => {
     const silent: ClipSource = { video: holed.video }
     const [seam] = seamsOf(silent)
@@ -365,6 +385,20 @@ describe('seamsOf', () => {
 })
 
 describe('planPreview', () => {
+  it('matches prefetched sound to picture runs on the presentation clock', () => {
+    const video = {
+      ...madeTrack('video', 1000, 100, [
+        { at: 200, count: 3 },
+        { at: 1200, count: 3 },
+      ]),
+      editOffset: 200,
+    }
+    const audio = madeTrack('audio', 1000, 100, [{ at: 0, count: 13 }])
+    const watched = soundUnderPicture({ video, audio }).audio!
+
+    expect(watched.samples.map((sample) => sample.dts)).toEqual([0, 100, 200, 1000, 1100, 1200])
+  })
+
   it('reproduces the edit the source itself carries', () => {
     const plan = planPreview(whole)
     const video = trackByKind(plan.tracks, 'video')
@@ -511,6 +545,44 @@ describe('planClip', () => {
     expect(sources).not.toContainEqual(secondDelta.source)
     expect(sources).toContainEqual(firstEntry.source)
     expect(sources).toContainEqual(secondEntry.source)
+  })
+
+  it('drops sound that resumes before the picture can decode after a gap', () => {
+    // The second picture run begins at 1.0 s, but its first decodable frame is the sync sample at
+    // 1.2 s. Sound resumes at 1.0 s as well. Keeping those first two packets lets them play under
+    // the frozen frame before the gap and leaves the sound visibly ahead until the keyframe.
+    const audio = madeTrack('audio', 1000, 100, [
+      { at: 0, count: 3 },
+      { at: 1000, count: 20 },
+    ])
+    const source = { video: gapsIntoGroups, audio }
+    const plan = planClip(source, { in: 0, out: 3, sound: true })
+    const sound = trackByKind(plan.tracks, 'audio')
+    const retained = new Set(sound.samples.map((sample) => sample.source.at))
+
+    expect(retained.has(audio.samples.find((sample) => sample.dts === 1000)!.source.at)).toBe(false)
+    expect(retained.has(audio.samples.find((sample) => sample.dts === 1100)!.source.at)).toBe(false)
+    expect(retained.has(audio.samples.find((sample) => sample.dts === 1200)!.source.at)).toBe(true)
+    expect(retained.has(audio.samples.find((sample) => sample.dts === 2000)!.source.at)).toBe(false)
+    expect(retained.has(audio.samples.find((sample) => sample.dts === 2100)!.source.at)).toBe(true)
+
+    const pulls = pullsAcrossSeam(source, plan.tracks)
+    expect(Math.abs(pulls[0]! - pulls[1]!)).toBeLessThan(0.001)
+  })
+
+  it('matches discarded picture and sound on their presentation clocks', () => {
+    const video = { ...gapsIntoGroups, editOffset: 200 }
+    const audio = madeTrack('audio', 1000, 100, [{ at: 0, count: 30 }])
+    const plan = planClip({ video, audio }, { in: -0.2, out: 2.2, sound: true })
+    const retained = new Set(
+      trackByKind(plan.tracks, 'audio').samples.map((sample) => sample.source.at),
+    )
+
+    // Raw video 1.0…1.2 is presentation 0.8…1.0 because its edit begins 200 ms in. Audio has no
+    // edit, so the packets at 0.8 and 0.9 are the ones belonging to those unusable delta frames.
+    expect(retained.has(audio.samples.find((sample) => sample.dts === 800)!.source.at)).toBe(false)
+    expect(retained.has(audio.samples.find((sample) => sample.dts === 900)!.source.at)).toBe(false)
+    expect(retained.has(audio.samples.find((sample) => sample.dts === 1000)!.source.at)).toBe(true)
   })
 
   it('gives the sound a running start and hides it too', () => {
@@ -781,14 +853,28 @@ describe('planClip', () => {
     expect(video.samples.filter((s) => s.duration !== 512).map((s) => s.duration)).toEqual([15387])
   })
 
-  it('leaves a one-sided hole alone', () => {
-    const oneSided: ClipSource = { video: holed.video, audio: whole.audio }
-    const video = trackByKind(planClip(oneSided, { in: 0, out: 6, sound: true }).tracks, 'video')
+  it('joins a picture hole even when sound was buffered through it', () => {
+    const video = madeTrack('video', 1000, 100, [
+      { at: 0, count: 3 },
+      { at: 1000, count: 3 },
+    ])
+    const audio = madeTrack('audio', 1000, 100, [{ at: 0, count: 13 }])
+    const plan = planPreview({ video, audio })
+    const picture = trackByKind(plan.tracks, 'video')
+    const sound = trackByKind(plan.tracks, 'audio')
 
-    // The frame before the hole lasts the whole two seconds of it: the picture freezes while the
-    // sound, which never stopped, plays on. 24576 ticks of hole on top of its own 512.
-    const stretched = video.samples.filter((s) => s.duration !== 512)
-    expect(stretched.map((s) => s.duration)).toEqual([512 + 24576])
+    // Audio fetched ahead through a picture gap is not watched material. Keeping it makes the
+    // preview freeze on the last frame of every live segment while that sound plays. Both tracks
+    // therefore lose the same 0.7 s and the resumed picture follows the previous frame directly.
+    expect(picture.samples.map((sample) => sample.duration)).toEqual([100, 100, 100, 100, 100, 100])
+    expect(sound.samples.map((sample) => sample.source.at)).toEqual([
+      audio.samples[0]!.source.at,
+      audio.samples[1]!.source.at,
+      audio.samples[2]!.source.at,
+      audio.samples[10]!.source.at,
+      audio.samples[11]!.source.at,
+      audio.samples[12]!.source.at,
+    ])
   })
 
   it('keeps every tick of a one-sided hole, however narrow the hole is', () => {

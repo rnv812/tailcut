@@ -37,6 +37,7 @@
   .head-copy { flex: 1 1 auto; min-width: 0; }
   .head-actions { display: flex; align-items: center; gap: 10px; margin-left: auto; }
   .head-actions button { white-space: nowrap; }
+  .head-actions .tc-support-link { flex: 0 0 auto; }
   .head-actions .failure { font-size: 11px; }
   .media-panel {
     grid-area: media;
@@ -485,7 +486,8 @@
       grid-template-areas: "head" "media" "player" "timeline" "inspector";
     }
     .media-panel { overflow: visible; border-right: 0; border-bottom: 1px solid var(--tc-border); }
-    .head { align-items: flex-start; }
+    .head { align-items: flex-start; flex-wrap: wrap; }
+    .head-actions { flex: 1 0 100%; justify-content: flex-end; flex-wrap: wrap; margin-left: 0; }
   }
 </style>
 <body></body>

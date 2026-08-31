@@ -22,6 +22,8 @@
     z-index: 4;
     display: flex;
     align-items: center;
+    justify-content: space-between;
+    gap: 12px;
     min-height: 52px;
     padding: 10px 14px;
     border-bottom: 1px solid var(--tc-border);
@@ -30,6 +32,7 @@
   }
   .top .tc-brand-mark { width: 27px; height: 27px; }
   .top .tc-brand-name { font-size: 17px; }
+  .top .tc-support-link { flex: 0 0 auto; }
 
   .pad {
     margin: 12px;
@@ -132,7 +135,40 @@
     gap: 6px 8px;
     background: rgba(29, 31, 39, 0.72);
   }
-  .session-copy { display: grid; min-width: 0; gap: 2px; }
+  .session-open {
+    display: grid;
+    width: 100%;
+    min-width: 0;
+    gap: 2px;
+    padding: 2px 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+  }
+  .session-open:hover:not(:disabled) .row-title { color: var(--tc-accent); }
+  .session-meta { display: flex; align-items: center; gap: 6px; }
+  .recording-state {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 5px;
+    border: 1px solid var(--tc-border-strong);
+    border-radius: 999px;
+    font-size: 9px;
+    font-weight: 750;
+    letter-spacing: .03em;
+    line-height: 1.4;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .recording-state.live { border-color: rgba(183, 240, 63, .35); color: var(--tc-accent); }
+  .recording-state.stored { color: var(--tc-muted); }
+  .history-source { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .history-source [data-testid='history-host'] {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .session-actions { display: flex; gap: 5px; }
   .session-note,
   .session-failure { grid-column: 1 / -1; }

@@ -5,6 +5,7 @@ import { decoderConfigOf } from '../../src/core/encode/decoder'
 import { normalizeCrop, type Crop } from '../../src/core/encode/crop'
 import {
   planClip,
+  soundUnderPicture,
   type ClipRequest,
   type ClipSource,
   type PlannedTrack,
@@ -256,17 +257,17 @@ describe('planFrames: what is decoded and what is encoded', () => {
 
   it('keeps the durations the copy path settled on, so a hole it closed stays closed', () => {
     const request: ClipRequest = { in: 0, out: 6, sound: true }
-    const copy = videoOf(planClip(holed, request))
+    const copy = videoOf(planClip(soundUnderPicture(holed), request))
     const plan = planFrames(holed, request, null, FRAMERATE)!
 
     // The premise: this material really does have a seam in it, and the copy path really did
     // close it. The frame in front of the hole runs a frame and a little — the tick or two the
     // sound could not give up — where the recording has it standing for two whole seconds.
-    const seam = copy.samples.findIndex(
-      (sample, index) => index + 1 < copy.samples.length && sample.duration !== FRAME_TICKS,
+    const source = chosenSamples(holed.video, copy)
+    const seam = source.findIndex(
+      (sample, index) => index + 1 < source.length && source[index + 1]!.pts - sample.pts > 20_000,
     )
     expect(seam, 'the holed fixture has no seam in it').toBeGreaterThan(0)
-    const source = chosenSamples(holed.video, copy)
     const gap = source[seam + 1]!.pts - source[seam]!.pts
     expect(gap, 'the recording has no hole at the seam').toBeGreaterThan(20_000)
     expect(copy.samples[seam]!.duration).toBeLessThan(2 * FRAME_TICKS)

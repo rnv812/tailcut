@@ -36,7 +36,8 @@ select {
 button,
 input,
 select,
-summary {
+summary,
+a {
   transition:
     border-color 120ms ease,
     background-color 120ms ease,
@@ -48,7 +49,8 @@ summary {
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
-summary:focus-visible {
+summary:focus-visible,
+a:focus-visible {
   outline: 2px solid var(--tc-accent);
   outline-offset: 2px;
 }
@@ -82,6 +84,38 @@ select:disabled {
   font-size: 18px;
   font-weight: 750;
   letter-spacing: -0.04em;
+}
+
+.tc-support-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 5px 10px;
+  border: 1px solid rgba(183, 240, 63, 0.44);
+  border-radius: var(--tc-radius-sm);
+  background: rgba(183, 240, 63, 0.09);
+  color: var(--tc-accent);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.tc-support-link:hover {
+  border-color: var(--tc-accent);
+  background: rgba(183, 240, 63, 0.15);
+}
+.tc-support-link svg {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
 }
 
 .legal-consent {
@@ -118,23 +152,14 @@ select:disabled {
 .legal-footer {
   display: flex;
   flex-wrap: wrap;
-  justify-content: space-between;
+  align-items: center;
+  justify-content: center;
   gap: 5px 14px;
+  text-align: center;
   color: var(--tc-muted);
   font-size: 11px;
 }
 .legal-footer nav { display: flex; flex-wrap: wrap; gap: 12px; }
-.legal-footer .legal-donate {
-  display: inline-flex;
-  align-items: center;
-  min-height: 28px;
-  padding: 4px 10px;
-  border: 1px solid var(--tc-accent);
-  border-radius: var(--tc-radius-sm);
-  background: rgba(183, 240, 63, 0.1);
-  font-weight: 700;
-  text-decoration: none;
-}
 
 ::selection {
   background: rgba(183, 240, 63, 0.28);

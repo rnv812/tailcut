@@ -1,6 +1,6 @@
 import { render } from 'preact'
 import { useEffect, useState } from 'preact/hooks'
-import { LegalConsent, LegalFooter } from '../shared/legal'
+import { LegalConsent, LegalFooter, SupportLink } from '../shared/legal'
 import { LEGAL_VERSION, termsAccepted } from '../shared/settings'
 import { readSettings, writeSettings } from '../shared/settings-store'
 import {
@@ -51,6 +51,7 @@ function Header() {
         />
         <span class="tc-brand-name">tailcut</span>
       </div>
+      <SupportLink />
     </header>
   )
 }
@@ -200,10 +201,19 @@ function LiveSessionRow({ session }: { session: SessionSummary }) {
 
   return (
     <div class="row session-row" data-testid="session">
-      <div class="session-copy">
+      <button
+        class="session-open"
+        data-testid="session-open"
+        disabled={busy !== null}
+        aria-label={`Edit ${session.title || UNTITLED}`}
+        onClick={() => void edit()}
+      >
         <span class="row-title" data-testid="session-title">{session.title || UNTITLED}</span>
-        <span class="muted">{formatDuration(session.duration)} · {formatBytes(session.bytes)}</span>
-      </div>
+        <span class="muted session-meta">
+          <span class="recording-state live" data-testid="session-status">Live</span>
+          {formatDuration(session.duration)} · {formatBytes(session.bytes)}
+        </span>
+      </button>
       <div class="session-actions">
         <button
           class="quiet"
@@ -273,8 +283,11 @@ function History(props: {
             {/* Where it came from and what it costs. The weight belongs beside the address rather
                 than under the length: the two questions a row answers are "what is this" and
                 "what is it taking up", and the second is the one a full disk is made of. */}
-            <span class="muted" data-testid="history-host">
-              {hostOf(row.url)} · {formatBytes(row.bytes)}
+            <span class="history-source">
+              <span class="recording-state stored" data-testid="history-status">On disk</span>
+              <span class="muted" data-testid="history-host">
+                {hostOf(row.url)} · {formatBytes(row.bytes)}
+              </span>
             </span>
             <span class="muted" data-testid="history-length">
               {formatDuration(row.seconds)}
@@ -485,7 +498,14 @@ function Popup() {
     return () => { current = false }
   }, [revision])
 
-  if (accepted === null) return <div class="pad muted">Loading…</div>
+  if (accepted === null) {
+    return (
+      <div>
+        <Header />
+        <div class="pad muted">Loading…</div>
+      </div>
+    )
+  }
 
   if (!accepted) {
     return (
@@ -508,7 +528,14 @@ function Popup() {
   // The tab has not answered yet, and until it has there is nothing to say about the page. What
   // is on disk would be true already — it comes off the index — but a popup that drew its second
   // half first would jump under the hand that opened it.
-  if (answer === null) return <div class="pad muted">Loading…</div>
+  if (answer === null) {
+    return (
+      <div>
+        <Header />
+        <div class="pad muted">Loading…</div>
+      </div>
+    )
+  }
 
   const sessions = answer.sessions
 
@@ -558,6 +585,7 @@ function Popup() {
       <div>
         <Header />
         {siteControl}
+        {storage}
         <div class="pad muted" data-testid="nothing">
           {nothing}
         </div>
@@ -572,7 +600,6 @@ function Popup() {
             />
           </section>
         )}
-        {storage}
         <LegalFooter />
       </div>
     )
@@ -625,6 +652,7 @@ function Popup() {
     <div>
       <Header />
       {siteControl}
+      {storage}
 
       <section class="recordings" data-testid="recordings">
         <h2 class="section-heading">Recordings</h2>
@@ -705,7 +733,6 @@ function Popup() {
         onChanged={changed}
       />
       </section>
-      {storage}
       <LegalFooter />
     </div>
   )

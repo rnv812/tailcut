@@ -661,16 +661,20 @@ describe('encodeToTrack: called off, and material that is not a metronome', () =
   })
 
   it('keeps the total right where the frames are not all the same length', async () => {
-    // A recording with a two-second hole in it, which `planClip` closed by shortening the frame in
-    // front of the seam. The durations of this clip are therefore not all equal.
-    const kept = overSeam.frames.filter((frame) => frame.keep)
-    const seam = kept.findIndex((frame) => frame.duration !== FRAME_TICKS)
-    expect(seam, 'the holed fixture has no seam in it').toBeGreaterThan(0)
+    // Packet and frame grids can leave a few ticks on the frame in front of a joined seam. State
+    // that shape directly: the preview path now trims prefetched sound and can close this fixture
+    // exactly, but the encoder still has to preserve a non-metronomic plan when one reaches it.
+    const frames = overSeam.frames.map((frame, index) =>
+      index === 12 ? { ...frame, duration: frame.duration + 38 } : frame,
+    )
+    const varied = { ...overSeam, frames }
+    const kept = varied.frames.filter((frame) => frame.keep)
+    expect(kept.some((frame) => frame.duration !== FRAME_TICKS)).toBe(true)
 
     const fakes = fakeCodecs()
-    const result = (await encodeToTrack(overSeam, SOFTWARE, sourceOf(), fakes.codecs, () => {}))!
+    const result = (await encodeToTrack(varied, SOFTWARE, sourceOf(), fakes.codecs, () => {}))!
 
-    expect(result.video.samples).toHaveLength(overSeam.kept)
+    expect(result.video.samples).toHaveLength(varied.kept)
     expect(sum(result.video.samples.map((sample) => sample.duration))).toBe(
       sum(kept.map((frame) => frame.duration)),
     )

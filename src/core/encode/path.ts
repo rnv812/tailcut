@@ -1,6 +1,6 @@
 import { forcesEncoder, type Clip } from '../edit/clip'
 import type { EditContext } from '../edit/context'
-import { planClip, type ClipSource, type ExportPlan } from '../export/plan'
+import { planClip, soundUnderPicture, type ClipSource, type ExportPlan } from '../export/plan'
 import type { JobKind } from '../export/queue'
 import { keptForRate, WEBP_FPS } from '../webp/timing'
 import type { Choice, EncodeGeometry, EncodingChoice } from './codec'
@@ -47,12 +47,13 @@ export function pathFor(
 ): ClipPath {
   const request = { in: clip.in, out: clip.out, sound: clip.sound }
   const startsOnKeyframe = ctx.keyframes.includes(clip.in)
+  const watched = soundUnderPicture(source)
 
   if (!forcesEncoder(clip, startsOnKeyframe, rewriteHead)) {
-    return { kind: 'copy', plan: planClip(source, request) }
+    return { kind: 'copy', plan: planClip(watched, request) }
   }
 
-  const plan = planFrames(source, request, clip.crop, ctx.fps)
+  const plan = planFrames(watched, request, clip.crop, ctx.fps)
   if (!plan) {
     return {
       kind: 'blocked',

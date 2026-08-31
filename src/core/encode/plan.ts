@@ -1,4 +1,10 @@
-import { planClip, type ClipRequest, type ClipSource, type PlannedTrack } from '../export/plan'
+import {
+  planClip,
+  soundUnderPicture,
+  type ClipRequest,
+  type ClipSource,
+  type PlannedTrack,
+} from '../export/plan'
 import { geometryOf, normalizeCrop, type Crop } from './crop'
 import { decoderConfigOf, sampleEntryFormat } from './decoder'
 import type { EncodeGeometry } from './codec'
@@ -82,7 +88,7 @@ export function planFrames(
   crop: Crop | null,
   framerate: number,
 ): FramePlan | null {
-  const plan = planClip(source, request)
+  const plan = planClip(soundUnderPicture(source), request)
   const video = plan.tracks.find((track) => track.kind === 'video')
   // WebCodecs accepts no delta chunk after configure: if retention left no entry point at all,
   // `planClip` has nothing decodable to start from and deliberately leaves the first retained

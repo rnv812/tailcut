@@ -227,7 +227,7 @@ describe('the settings page', () => {
     expect(written.at(-1)!.history).toEqual(DEFAULTS.history)
   })
 
-  it('keeps the legal links and donation link in a quiet footer after acceptance', async () => {
+  it('keeps legal links in a quiet footer and support in the page header', async () => {
     stored = accepted()
     await draw()
 
@@ -236,18 +236,17 @@ describe('the settings page', () => {
     expect(footer.textContent).toContain('Privacy')
     expect(footer.textContent).toContain('Terms')
 
-    const support = footer.querySelector<HTMLAnchorElement>('[data-testid="support-link"]')!
-    expect(support.textContent).toBe('Donate')
+    expect(footer.textContent).toContain('Use only media you have permission to save.')
+    expect(footer.querySelector('[data-testid="support-link"]')).toBeNull()
+
+    const support = document.querySelector<HTMLAnchorElement>('[data-testid="support-link"]')!
+    expect(support.closest('.page-head')).not.toBeNull()
+    expect(support.textContent).toContain('Support the author')
     expect(support.href).toBe('https://donatty.com/rnv812')
     expect(support.target).toBe('_blank')
     expect(support.rel.split(/\s+/)).toContain('noreferrer')
-    expect(support.classList.contains('legal-donate')).toBe(true)
-    expect(support.getAttribute('aria-describedby')).toBe('donation-note')
-    expect(support.title).toContain('voluntary')
-    expect(support.title).toContain('no features or benefits')
-    expect(document.querySelector('#donation-note')?.textContent).toContain(
-      'Donations are voluntary and unlock no features or benefits.',
-    )
+    expect(support.title).toContain('free and open source')
+    expect(support.title).toContain('support the author')
   })
 
   it('shows the four settings groups in recording order', async () => {
@@ -272,7 +271,8 @@ describe('the settings page', () => {
     holdRead = true
     await draw()
 
-    expect(document.body.textContent).toBe('Loading…')
+    expect(document.body.textContent).toContain('Loading…')
+    expect(at('support-link')?.closest('.page-head')).not.toBeNull()
   })
 
   it('styles the native disclosure for fine tuning and keeps it folded away', async () => {
@@ -417,11 +417,29 @@ describe('the settings page', () => {
 
     const row = at('host-row')!
     expect(row.textContent).toContain('ads.example')
+    expect(row.querySelector('[data-testid="host-status"]')?.textContent).toBe('Blocked')
+    expect(row.querySelector('[data-testid="host-toggle"]')?.textContent).toBe('Allow')
     row.querySelector<HTMLButtonElement>('[data-testid="host-toggle"]')!.click()
     await flush()
 
     expect(written.at(-1)!.recording.allow).toEqual(['ads.example'])
     expect(written.at(-1)!.recording.deny).toEqual([])
+    expect(at('host-row')!.querySelector('[data-testid="host-status"]')?.textContent).toBe('Allowed')
+    expect(at('host-row')!.querySelector('[data-testid="host-toggle"]')?.textContent).toBe('Block')
+  })
+
+  it('ignores an existing host without changing its current status', async () => {
+    stored = accepted(1_756_022_100_000, {
+      recording: { ...DEFAULTS.recording, allow: ['site.example'] },
+    })
+    await draw()
+
+    type('host-input', 'HTTPS://SITE.EXAMPLE:8443/watch?v=1')
+    await flush()
+    await click('host-add')
+
+    expect(written).toEqual([])
+    expect(at('host-row')!.querySelector('[data-testid="host-status"]')?.textContent).toBe('Allowed')
   })
 
   it('keeps the two lists in one order, whichever list a host is in', async () => {

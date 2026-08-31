@@ -2,7 +2,7 @@ import { render, type ComponentChildren } from 'preact'
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { listSessions, readTotals } from '../shared/history-db'
 import { formatBytes, formatSeconds } from '../shared/format'
-import { LegalConsent, LegalFooter } from '../shared/legal'
+import { LegalConsent, LegalFooter, SupportLink } from '../shared/legal'
 import {
   DEFAULTS,
   LEGAL_VERSION,
@@ -10,6 +10,7 @@ import {
   REFERENCE_BITS_PER_SECOND,
   memoryCeilingFor,
   merge,
+  normalizeHost,
   presetNamed,
   presetOf,
   termsAccepted,
@@ -82,6 +83,26 @@ function Group(props: { title: string; children: ComponentChildren }) {
       <h2 data-testid="group-title">{props.title}</h2>
       <div class="group-body">{props.children}</div>
     </section>
+  )
+}
+
+function OptionsHeader() {
+  return (
+    <header class="page-head">
+      <div class="tc-brand">
+        <img
+          class="tc-brand-mark"
+          data-testid="brand-mark"
+          src="../assets/tailcut/svg/mark-light.svg"
+          alt="tailcut"
+        />
+        <div>
+          <h1>tailcut</h1>
+          <p>Settings</p>
+        </div>
+      </div>
+      <SupportLink />
+    </header>
   )
 }
 
@@ -191,7 +212,17 @@ export function HostRows(props: {
     // A host out of whatever was typed is settled in one place, and that place is `merge`: the
     // list goes through it on its way to storage and the page shows what came back, so an
     // address pasted here turns into its host and nonsense turns into nothing at all.
-    put(typed, false)
+    const normalized = normalizeHost(typed)
+    if (!normalized) {
+      put(typed, false)
+      setTyped('')
+      return
+    }
+    if (props.allow.includes(normalized) || props.deny.includes(normalized)) {
+      setTyped('')
+      return
+    }
+    put(normalized, false)
     setTyped('')
   }
 
@@ -213,12 +244,19 @@ export function HostRows(props: {
       {rows.map((row) => (
         <div class="host-row" data-testid="host-row" key={row.host}>
           <span class="host-name">{row.host}</span>
+          <span
+            class={`host-status ${row.allowed ? 'allowed' : 'blocked'}`}
+            data-testid="host-status"
+          >
+            {row.allowed ? 'Allowed' : 'Blocked'}
+          </span>
           <button
             data-testid="host-toggle"
-            class={row.allowed ? 'allowed' : 'denied'}
+            class="host-action"
+            aria-label={`${row.allowed ? 'Block' : 'Allow'} recording on ${row.host}`}
             onClick={() => put(row.host, !row.allowed)}
           >
-            {row.allowed ? 'Allowed' : 'Denied'}
+            {row.allowed ? 'Block' : 'Allow'}
           </button>
           <button
             data-testid="host-remove"
@@ -290,7 +328,14 @@ export function Options() {
     return watchSettings((next) => setSettings(next))
   }, [])
 
-  if (!settings) return <div class="loading">Loading…</div>
+  if (!settings) {
+    return (
+      <main>
+        <OptionsHeader />
+        <div class="loading">Loading…</div>
+      </main>
+    )
+  }
 
   /**
    * Stores one edit, after everything already being stored.
@@ -376,27 +421,10 @@ export function Options() {
    */
   const keptSeconds = expected > ceiling ? (ceiling * 8) / rate : 0
 
-  const pageHead = (
-    <header class="page-head">
-      <div class="tc-brand">
-        <img
-          class="tc-brand-mark"
-          data-testid="brand-mark"
-          src="../assets/tailcut/svg/mark-light.svg"
-          alt="tailcut"
-        />
-        <div>
-          <h1>tailcut</h1>
-          <p>Settings</p>
-        </div>
-      </div>
-    </header>
-  )
-
   if (!termsAccepted(settings)) {
     return (
       <main>
-        {pageHead}
+        <OptionsHeader />
         <LegalConsent
           onAccept={async () => {
             const next = await writeSettings((current) => ({
@@ -413,7 +441,7 @@ export function Options() {
 
   return (
     <main>
-      {pageHead}
+      <OptionsHeader />
 
       <Group title="Recording">
         <div class="mode-grid">
