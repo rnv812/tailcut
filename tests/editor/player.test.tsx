@@ -184,8 +184,8 @@ describe('Player playback boundary', () => {
       expect(control, `${testId} is missing`).not.toBeNull()
       expect(control.getAttribute('aria-label')).toBe(label)
       expect(control.title).toBe(label)
-      expect(control.textContent?.trim(), `${testId} has no visible icon`).not.toBe('')
-      expect(control.textContent?.trim()).not.toBe(label)
+      expect(control.querySelector('svg.tc-icon'), `${testId} has no vector icon`).not.toBeNull()
+      expect(control.textContent?.trim(), `${testId} uses a text glyph`).toBe('')
     }
 
     const volume = host.querySelector<HTMLInputElement>('[data-testid="volume"]')!
@@ -193,7 +193,7 @@ describe('Player playback boundary', () => {
     expect(volume.title).toBe('Volume')
   })
 
-  it('keeps edit controls in their own row under the transport', () => {
+  it('keeps monitor and edit controls in one transport row', () => {
     mount({
       index: 2,
       endMode: 'stop',
@@ -203,7 +203,8 @@ describe('Player playback boundary', () => {
     const row = host.querySelector('[data-testid="player-edit-controls"]')!
     expect(row).not.toBeNull()
     expect(row.querySelector('[data-testid="set-in"]')?.textContent).toBe('Set In')
-    expect(row.closest('.transport')).toBeNull()
+    expect(row.closest('.transport')).not.toBeNull()
+    expect(host.querySelectorAll('.transport')).toHaveLength(1)
   })
 
   it('runs frame steps and timeline jumps without stopping playback', () => {
@@ -370,6 +371,30 @@ describe('Player playback boundary', () => {
     expect(onPlaying).toHaveBeenCalledWith(false)
     expect(pause).toHaveBeenCalledOnce()
     expect(callback).toBeNull()
+  })
+
+  it('restarts the active range when Play is pressed after Stop at Out', async () => {
+    const onSeek = vi.fn()
+    const onPlaying = vi.fn()
+    mount({ index: 1, endMode: 'stop', onSeek, onPlaying })
+    await effects()
+
+    fire(3)
+    expect(onPlaying).toHaveBeenLastCalledWith(false)
+
+    mount({ index: 3, endMode: 'stop', playing: false, onSeek, onPlaying })
+    await effects()
+    onSeek.mockClear()
+    play.mockClear()
+
+    host.querySelector<HTMLButtonElement>('[data-testid="play"]')!.click()
+    expect(onPlaying).toHaveBeenLastCalledWith(true)
+    mount({ index: 3, endMode: 'stop', playing: true, onSeek, onPlaying })
+    await effects()
+
+    expect(onSeek).toHaveBeenCalledWith(1)
+    expect(host.querySelector<HTMLVideoElement>('video')!.currentTime).toBe(table.seekTimeOf(1))
+    expect(play).toHaveBeenCalledOnce()
   })
 
   it('loops from the last displayed frame before Out back to In', async () => {

@@ -272,27 +272,35 @@
     width: 100%;
     grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
     align-items: center;
-    gap: 12px;
+    gap: 10px;
+    padding: 5px;
+    border: 1px solid var(--tc-border);
+    border-radius: 9px;
+    background: rgba(20, 21, 27, 0.72);
   }
-  .transport-left { display: flex; justify-content: flex-end; }
+  .transport-left { display: flex; min-width: 0; justify-content: flex-end; align-items: center; gap: 8px; }
   .transport-center { display: flex; justify-content: center; }
-  .transport-right { display: flex; align-items: center; gap: 8px; }
+  .transport-right { display: flex; min-width: 0; align-items: center; gap: 8px; }
   .transport-jump,
   .transport-playback,
-  .transport-volume { display: inline-flex; align-items: center; }
-  .transport button { min-width: 32px; padding-inline: 7px; }
-  .transport-playback [data-testid='play'] { min-width: 38px; }
-  .transport-volume input { width: 78px; accent-color: var(--tc-accent); }
+  .transport-volume,
+  .transport-edit { display: inline-flex; align-items: center; }
+  .transport-jump,
+  .transport-playback { padding: 2px; border: 1px solid var(--tc-border); border-radius: 7px; background: rgba(8, 9, 12, 0.38); }
+  .transport-jump button,
+  .transport-playback button { min-width: 30px; border-color: transparent; background: transparent; padding-inline: 6px; }
+  .transport-jump button + button,
+  .transport-playback button + button { border-left-color: var(--tc-border); border-radius: 0; }
+  .transport-playback [data-testid='play'] { min-width: 40px; border-radius: 6px; }
+  .transport-volume input { width: 70px; accent-color: var(--tc-accent); }
   .transport-end-mode { white-space: nowrap; }
   .transport-edit {
-    display: flex;
-    align-items: center;
-    justify-content: center;
     gap: 8px;
-    width: 100%;
+    min-width: 0;
   }
   .tc-monitor-edit { color: var(--tc-accent); }
-  .transport-edit .tc-field { margin-left: 8px; }
+  .transport-edit .tc-field { margin-left: 2px; }
+  .transport-edit .tc-field-input { width: 92px; }
   .transport [data-testid='play'],
   .tc-export > [data-testid='export'] {
     border-color: var(--tc-accent);
@@ -333,7 +341,7 @@
   }
   .tc-clip-name {
     width: 100%;
-    margin-bottom: 8px;
+    min-width: 0;
     padding: 0 2px 5px;
     border: 0;
     border-bottom: 1px solid transparent;
@@ -344,9 +352,23 @@
   }
   .tc-clip-name:hover,
   .tc-clip-name:focus { border-bottom-color: var(--tc-border-strong); }
-  .tc-clip-times { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .tc-clip-header { display: flex; align-items: flex-start; gap: 8px; }
+  .tc-clip-remove { flex: 0 0 auto; min-width: 29px; min-height: 29px; padding: 5px; color: var(--tc-muted); }
+  .tc-clip-section { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--tc-border); }
+  .tc-clip-section h3 { margin: 0; color: var(--tc-muted); font-size: 10px; font-weight: 700;
+                        letter-spacing: .08em; text-transform: uppercase; }
+  .tc-clip-section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 9px; }
+  .tc-clip-times { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+  .tc-clip-times .tc-field { display: grid; gap: 4px; }
+  .tc-clip-times .tc-field-input { width: 100%; box-sizing: border-box; }
+  .tc-clip-duration { display: flex; align-items: baseline; gap: 6px; }
+  .tc-clip-duration > span { color: var(--tc-muted); font-size: 10px; }
   .tc-clip-length { color: var(--tc-muted); font-variant-numeric: tabular-nums; }
-  .tc-clip-options { display: flex; gap: 8px; align-items: center; margin-top: 9px; flex-wrap: wrap; }
+  .tc-clip-options { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; align-items: end; margin-top: 8px; }
+  .tc-clip-options .option { margin: 0; }
+  .tc-clip-select { display: grid; gap: 4px; }
+  .tc-clip-select select { width: 100%; min-width: 0; }
+  .tc-clip-sound { min-height: 30px; }
   .tc-clip-options button { min-height: 27px; padding: 3px 8px; }
   .tc-clip-note { margin: 7px 0 0; color: var(--tc-warning); font-size: 11px; }
 

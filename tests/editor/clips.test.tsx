@@ -169,6 +169,25 @@ describe('Clips', () => {
     expect(host.querySelector('[data-testid="length-c1"]')!.textContent).toBe('00:00:04:00')
   })
 
+  it('groups identity, range, and output into a clear settings hierarchy', async () => {
+    await show(docOf([clip()]))
+
+    const card = host.querySelector('[data-testid="clip"]')!
+    expect(card.querySelector('[data-testid="clip-header-c1"] [data-testid="name-c1"]')).not.toBeNull()
+
+    const range = card.querySelector('[data-testid="clip-range-c1"]')!
+    expect(range.querySelector('[data-testid="in-c1"]')).not.toBeNull()
+    expect(range.querySelector('[data-testid="out-c1"]')).not.toBeNull()
+    expect(range.querySelector('[data-testid="length-c1"]')!.parentElement?.textContent).toContain(
+      'Duration',
+    )
+
+    const output = card.querySelector('[data-testid="clip-output-c1"]')!
+    expect(output.querySelector('[data-testid="format-c1"]')).not.toBeNull()
+    expect(output.querySelector('[data-testid="mode-c1"]')).not.toBeNull()
+    expect(output.querySelector('[data-testid="sound-c1"]')).not.toBeNull()
+  })
+
   it('renames as the name is typed, and refuses to send an empty one', async () => {
     const dispatch = await show(docOf([clip()]))
     await type('name-c1', 'Intro')

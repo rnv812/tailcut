@@ -4,6 +4,7 @@ import type { FrameTable } from '../../core/timeline/frames'
 import { formatTimecode } from '../../core/timeline/timecode'
 import { frameSeeker, type FrameSeeker } from './seek'
 import type { Preview } from '../source/preview'
+import { Icon, type IconName } from '../icon'
 
 /** A `<video>` that can say which frame it is showing. Chromium can; the type does not know it. */
 type FrameCallbackVideo = HTMLVideoElement & {
@@ -30,7 +31,7 @@ interface PlaybackFrames {
 interface IconButtonProps {
   testId: string
   label: string
-  icon: string
+  icon: IconName
   disabled?: boolean
   onClick: () => void
   onPointerDown?: JSX.PointerEventHandler<HTMLButtonElement>
@@ -63,7 +64,7 @@ function IconButton({
       onPointerCancel={onPointerCancel}
       onLostPointerCapture={onLostPointerCapture}
     >
-      <span aria-hidden="true">{icon}</span>
+      <Icon name={icon} />
     </button>
   )
 }
@@ -333,14 +334,19 @@ export function Player({
     // The owner may change the active clip while the player stands elsewhere, or Play may be
     // pressed after a previous range ended. This seek belongs to playback, so it goes straight to
     // the element; frameSeeker deliberately ignores seeks it did not issue.
-    if (ready && (indexRef.current < boundary.first || indexRef.current > boundary.last)) {
+    if (
+      ready &&
+      (indexRef.current < boundary.first ||
+        indexRef.current > boundary.last ||
+        (endMode === 'stop' && indexRef.current === boundary.last))
+    ) {
       video.currentTime = table.seekTimeOf(boundary.first)
       reportedIndex.current = boundary.first
       onSeekRef.current(boundary.first)
     }
 
     void video.play().catch(() => onPlayingRef.current(false))
-  }, [playing, ready, table, boundary])
+  }, [playing, ready, table, boundary, endMode])
 
   // The forward half of the shuttle is the element's own doing: it decodes ahead and keeps the
   // sound with it up to about four times, which nothing we could write would do better.
@@ -442,24 +448,29 @@ export function Player({
             <IconButton
               testId="recording-start"
               label="Go to recording start"
-              icon="⏮"
+              icon="recording-start"
               onClick={onRecordingStart}
             />
             <IconButton
               testId="range-start"
               label="Go to active range start"
-              icon="|◀"
+              icon="range-start"
               disabled={!boundary}
               onClick={onRangeStart}
             />
             <IconButton
               testId="previous-marker"
               label="Go to previous marker"
-              icon="◀◆"
+              icon="previous-marker"
               disabled={!hasPreviousMarker}
               onClick={onPreviousMarker}
             />
           </div>
+          {editorControls && (
+            <div class="transport-edit" data-testid="player-edit-controls">
+              {editorControls}
+            </div>
+          )}
         </div>
 
         <div class="transport-center">
@@ -467,7 +478,7 @@ export function Player({
             <HeldStepButton
               testId="prev"
               label="Previous frame"
-              icon="◀"
+              icon="previous-frame"
               disabled={index <= 0}
               repeatEveryMs={frameRepeatMs}
               onClick={() => onStep(-1)}
@@ -475,13 +486,13 @@ export function Player({
             <IconButton
               testId="play"
               label={playLabel}
-              icon={playing ? '⏸' : '▶'}
+              icon={playing ? 'pause' : 'play'}
               onClick={() => onPlaying(!playing)}
             />
             <HeldStepButton
               testId="next"
               label="Next frame"
-              icon="▶"
+              icon="next-frame"
               disabled={index >= table.count() - 1}
               repeatEveryMs={frameRepeatMs}
               onClick={() => onStep(1)}
@@ -494,21 +505,21 @@ export function Player({
             <IconButton
               testId="next-marker"
               label="Go to next marker"
-              icon="◆▶"
+              icon="next-marker"
               disabled={!hasNextMarker}
               onClick={onNextMarker}
             />
             <IconButton
               testId="range-end"
               label="Go to active range end"
-              icon="▶|"
+              icon="range-end"
               disabled={!boundary}
               onClick={onRangeEnd}
             />
             <IconButton
               testId="recording-end"
               label="Go to recording end"
-              icon="⏭"
+              icon="recording-end"
               onClick={onRecordingEnd}
             />
           </div>
@@ -528,7 +539,7 @@ export function Player({
             <IconButton
               testId="mute"
               label={muteLabel}
-              icon={muted ? '🔇' : '🔊'}
+              icon={muted ? 'muted' : 'volume'}
               onClick={() => onMuted(!muted)}
             />
             <input
@@ -545,12 +556,6 @@ export function Player({
           </div>
         </div>
       </div>
-
-      {editorControls && (
-        <div class="transport-edit" data-testid="player-edit-controls">
-          {editorControls}
-        </div>
-      )}
 
       <div class={catchingUp ? 'readout catching-up' : 'readout'}>
         <span data-testid="timecode">{formatTimecode(frame?.pts ?? 0, fps)}</span>

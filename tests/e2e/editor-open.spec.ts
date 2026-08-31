@@ -20,6 +20,32 @@ test('Edit opens an editor tab over the material of the page', async () => {
       await expect(editor.getByTestId(pane)).toBeVisible()
     }
 
+    const transport = await editor.evaluate(() => {
+      const rect = (selector: string) => document.querySelector(selector)!.getBoundingClientRect()
+      const row = rect('.transport')
+      const play = rect('[data-testid="play"]')
+      const video = rect('video')
+      const controls = [...document.querySelectorAll<HTMLElement>('.transport button, .transport input')]
+      const controlCenters = controls.map((control) => {
+        const box = control.getBoundingClientRect()
+        return box.top + box.height / 2
+      })
+      return {
+        rowCenter: row.left + row.width / 2,
+        playCenter: play.left + play.width / 2,
+        videoCenter: video.left + video.width / 2,
+        controlCenterSpread: Math.max(...controlCenters) - Math.min(...controlCenters),
+        controlsFitOneLine: controls.every((control) => {
+          const box = control.getBoundingClientRect()
+          return box.top >= row.top && box.bottom <= row.bottom
+        }),
+      }
+    })
+    expect(transport.controlsFitOneLine).toBe(true)
+    expect(Math.abs(transport.playCenter - transport.rowCenter)).toBeLessThanOrEqual(1)
+    expect(Math.abs(transport.playCenter - transport.videoCenter)).toBeLessThanOrEqual(1)
+    expect(transport.controlCenterSpread).toBeLessThanOrEqual(1)
+
     await expect(editor.getByTestId('return-source')).toBeVisible()
     expect(new URL(editor.url()).searchParams.get('tab')).not.toBeNull()
 

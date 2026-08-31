@@ -7,6 +7,7 @@ import type { Doc } from '../../core/edit/project'
 import type { SessionAction } from '../../core/edit/session'
 import { formatTimecode } from '../../core/timeline/timecode'
 import type { ExportFormat } from '../../shared/settings'
+import { Icon } from '../icon'
 import { TimecodeField } from './timecode-field'
 
 export interface ClipsProps {
@@ -344,98 +345,113 @@ export function Clips({
             hidden={selectedOnly && clip.id !== selectedId}
             onClick={() => dispatch({ type: 'selectClip', id: clip.id })}
           >
-            <NameField clip={clip} dispatch={dispatch} />
-
-            <div class="tc-clip-times">
-              <TimecodeField
-                id={`in-${clip.id}`}
-                label="In"
-                seconds={clip.in}
-                fps={fps}
-                onCommit={(time) => dispatch({ type: 'trim', id: clip.id, edge: 'in', time, typed: true })}
-              />
-              <TimecodeField
-                id={`out-${clip.id}`}
-                label="Out"
-                seconds={clip.out}
-                fps={fps}
-                onCommit={(time) => dispatch({ type: 'trim', id: clip.id, edge: 'out', time, typed: true })}
-              />
-              <span class="tc-clip-length" data-testid={`length-${clip.id}`}>
-                {formatTimecode(clip.out - clip.in, fps)}
-              </span>
+            <div class="tc-clip-header" data-testid={`clip-header-${clip.id}`}>
+              <NameField clip={clip} dispatch={dispatch} />
+              <button
+                type="button"
+                class="tc-clip-remove"
+                data-testid={`remove-${clip.id}`}
+                aria-label="Remove clip"
+                title="Remove clip"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  dispatch({ type: 'removeClip', id: clip.id })
+                }}
+              >
+                <Icon name="trash" />
+              </button>
             </div>
 
-            {qualityNote(clip, ctx)}
+            <section class="tc-clip-section" data-testid={`clip-range-${clip.id}`}>
+              <div class="tc-clip-section-heading">
+                <h3>Range</h3>
+                <span class="tc-clip-duration">
+                  <span>Duration</span>
+                  <strong class="tc-clip-length" data-testid={`length-${clip.id}`}>
+                    {formatTimecode(clip.out - clip.in, fps)}
+                  </strong>
+                </span>
+              </div>
+              <div class="tc-clip-times">
+                <TimecodeField
+                  id={`in-${clip.id}`}
+                  label="In"
+                  seconds={clip.in}
+                  fps={fps}
+                  onCommit={(time) => dispatch({ type: 'trim', id: clip.id, edge: 'in', time, typed: true })}
+                />
+                <TimecodeField
+                  id={`out-${clip.id}`}
+                  label="Out"
+                  seconds={clip.out}
+                  fps={fps}
+                  onCommit={(time) => dispatch({ type: 'trim', id: clip.id, edge: 'out', time, typed: true })}
+                />
+              </div>
+              {qualityNote(clip, ctx)}
+            </section>
 
             {/*
               The controls stop the click from reaching the row. The row selects the clip, and a
               click that both removes a clip and selects it sends two actions and two steps of
               history for one press — and the second is a selection of something that is gone.
             */}
-            <div class="tc-clip-options">
-              <label class="option">
-                <span class="label">Format</span>
-                <select
-                  data-testid={`format-${clip.id}`}
-                  value={clip.format}
-                  onClick={(event) => event.stopPropagation()}
-                  onChange={(event) =>
-                    dispatch({
-                      type: 'setFormat',
-                      id: clip.id,
-                      format: (event.target as HTMLSelectElement).value as ExportFormat,
-                    })
-                  }
-                >
-                  <option value="mp4">MP4</option>
-                  <option value="webp">Animated WebP</option>
-                </select>
-              </label>
+            <section class="tc-clip-section" data-testid={`clip-output-${clip.id}`}>
+              <h3>Output</h3>
+              <div class="tc-clip-options">
+                <label class="option tc-clip-select">
+                  <span class="label">Format</span>
+                  <select
+                    data-testid={`format-${clip.id}`}
+                    value={clip.format}
+                    onClick={(event) => event.stopPropagation()}
+                    onChange={(event) =>
+                      dispatch({
+                        type: 'setFormat',
+                        id: clip.id,
+                        format: (event.target as HTMLSelectElement).value as ExportFormat,
+                      })
+                    }
+                  >
+                    <option value="mp4">MP4</option>
+                    <option value="webp">Animated WebP</option>
+                  </select>
+                </label>
 
-              <label class="option">
-                <span class="label">Video</span>
-                <select
-                  data-testid={`mode-${clip.id}`}
-                  value={clip.mode}
-                  disabled={clip.crop !== null || clip.format === 'webp'}
-                  onClick={(event) => event.stopPropagation()}
-                  onChange={(event) =>
-                    dispatch({
-                      type: 'setMode',
-                      id: clip.id,
-                      mode: (event.target as HTMLSelectElement).value as ClipMode,
-                    })
-                  }
-                >
-                  <option value="original">Original</option>
-                  <option value="optimize">Optimize</option>
-                </select>
-              </label>
+                <label class="option tc-clip-select">
+                  <span class="label">Video</span>
+                  <select
+                    data-testid={`mode-${clip.id}`}
+                    value={clip.mode}
+                    disabled={clip.crop !== null || clip.format === 'webp'}
+                    onClick={(event) => event.stopPropagation()}
+                    onChange={(event) =>
+                      dispatch({
+                        type: 'setMode',
+                        id: clip.id,
+                        mode: (event.target as HTMLSelectElement).value as ClipMode,
+                      })
+                    }
+                  >
+                    <option value="original">Original</option>
+                    <option value="optimize">Optimize</option>
+                  </select>
+                </label>
 
-              <label class="option">
-                <input
-                  type="checkbox"
-                  data-testid={`sound-${clip.id}`}
-                  checked={clip.sound && clip.format !== 'webp'}
-                  disabled={clip.format === 'webp'}
-                  onClick={(event) => event.stopPropagation()}
-                  onChange={() => dispatch({ type: 'toggleSound', id: clip.id })}
-                />
-                Sound
-              </label>
+                <label class="option tc-clip-sound">
+                  <input
+                    type="checkbox"
+                    data-testid={`sound-${clip.id}`}
+                    checked={clip.sound && clip.format !== 'webp'}
+                    disabled={clip.format === 'webp'}
+                    onClick={(event) => event.stopPropagation()}
+                    onChange={() => dispatch({ type: 'toggleSound', id: clip.id })}
+                  />
+                  Sound
+                </label>
 
-              <button
-                type="button"
-                data-testid={`remove-${clip.id}`}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  dispatch({ type: 'removeClip', id: clip.id })
-                }}
-              >
-                Remove
-              </button>
-            </div>
+              </div>
+            </section>
 
             {clip.id === selectedId && estimate && costNote(clip, estimate, dispatch)}
           </li>

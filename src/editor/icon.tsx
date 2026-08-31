@@ -11,6 +11,18 @@ export type IconName =
   | 'zoom-in'
   | 'snap'
   | 'help'
+  | 'recording-start'
+  | 'recording-end'
+  | 'range-start'
+  | 'range-end'
+  | 'previous-marker'
+  | 'next-marker'
+  | 'previous-frame'
+  | 'next-frame'
+  | 'play'
+  | 'pause'
+  | 'volume'
+  | 'muted'
 
 /** Small line icons inherit the button color and never carry the accessible name themselves. */
 export function Icon({ name }: { name: IconName }) {
@@ -40,6 +52,30 @@ export function Icon({ name }: { name: IconName }) {
         return <path d="M5 4v9a7 7 0 0 0 14 0V4h-5v9a2 2 0 0 1-4 0V4H5Z" />
       case 'help':
         return <><circle cx="12" cy="12" r="9" /><path d="M9.8 9a2.4 2.4 0 1 1 3.3 2.2c-.8.4-1.1.9-1.1 1.8M12 17h.01" /></>
+      case 'recording-start':
+        return <><path d="M5 5v14M19 6l-8 6 8 6V6Z" /></>
+      case 'recording-end':
+        return <><path d="M19 5v14M5 6l8 6-8 6V6Z" /></>
+      case 'range-start':
+        return <><path d="M7 5v14M18 7l-7 5 7 5V7Z" /></>
+      case 'range-end':
+        return <><path d="M17 5v14M6 7l7 5-7 5V7Z" /></>
+      case 'previous-marker':
+        return <><path d="m8 12 4-4v8l-4-4ZM16 8l4 4-4 4-4-4 4-4Z" /></>
+      case 'next-marker':
+        return <><path d="m16 12-4-4v8l4-4ZM8 8l4 4-4 4-4-4 4-4Z" /></>
+      case 'previous-frame':
+        return <path d="m16 7-7 5 7 5V7Z" />
+      case 'next-frame':
+        return <path d="m8 7 7 5-7 5V7Z" />
+      case 'play':
+        return <path d="m8 5 11 7-11 7V5Z" />
+      case 'pause':
+        return <><path d="M8 6v12M16 6v12" /></>
+      case 'volume':
+        return <><path d="M5 10v4h4l5 4V6L9 10H5Z" /><path d="M17 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12" /></>
+      case 'muted':
+        return <><path d="M5 10v4h4l5 4V6L9 10H5Z" /><path d="m17 10 4 4m0-4-4 4" /></>
     }
   })()
 
