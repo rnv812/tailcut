@@ -4,6 +4,7 @@ import type { FramePlan } from '../../core/encode/plan'
 import type { EncodedVideo } from '../../core/encode/assemble'
 import type { OutSample } from '../../core/iso/progressive'
 import { decodedFrames, MAX_FRAMES_IN_FLIGHT, type Codecs, type FrameSource } from './frames'
+import { codecFailure } from './failure'
 
 /**
  * How often a key frame is asked for.
@@ -70,29 +71,37 @@ export async function encodeToTrack(
   const emitted: Array<{ bytes: Uint8Array; sync: boolean; timestamp: number }> = []
   let description: Uint8Array | null = null
   let failed: Error | null = null
+  const encodingFailure = (cause: unknown): Error =>
+    codecFailure('encode', plan.decoder.codec, choice.config.codec, cause)
 
-  const encoder = codecs.encoder(choice.config, {
-    chunk(chunk, metadata) {
-      const config = metadata?.decoderConfig
-      if (config?.description && !description) {
-        const raw = config.description
-        description = raw instanceof Uint8Array ? new Uint8Array(raw) : new Uint8Array(raw as ArrayBuffer)
-      }
-      const bytes = new Uint8Array(chunk.byteLength)
-      chunk.copyTo(bytes)
-      // A chunk whose timestamp is not one we handed in cannot be placed in the track. It has
-      // never been seen and would be a bug in the encoder, not in the clip — dropping it silently
-      // would lose a frame, so it is a failure with a name.
-      if (!ticksAt.has(chunk.timestamp)) {
-        failed = new Error('The encoder returned a frame that was never sent to it.')
-        return
-      }
-      emitted.push({ bytes, sync: chunk.type === 'key', timestamp: chunk.timestamp })
-    },
-    error(error) {
-      failed = error
-    },
-  })
+  let encoder
+  try {
+    encoder = codecs.encoder(choice.config, {
+      chunk(chunk, metadata) {
+        const config = metadata?.decoderConfig
+        if (config?.description && !description) {
+          const raw = config.description
+          description =
+            raw instanceof Uint8Array ? new Uint8Array(raw) : new Uint8Array(raw as ArrayBuffer)
+        }
+        const bytes = new Uint8Array(chunk.byteLength)
+        chunk.copyTo(bytes)
+        // A chunk whose timestamp is not one we handed in cannot be placed in the track. It has
+        // never been seen and would be a bug in the encoder, not in the clip — dropping it silently
+        // would lose a frame, so it is a failure with a name.
+        if (!ticksAt.has(chunk.timestamp)) {
+          failed = new Error('The encoder returned a frame that was never sent to it.')
+          return
+        }
+        emitted.push({ bytes, sync: chunk.type === 'key', timestamp: chunk.timestamp })
+      },
+      error(error) {
+        failed = encodingFailure(error)
+      },
+    })
+  } catch (error) {
+    throw encodingFailure(error)
+  }
 
   let sent = 0
   const keyInterval = KEY_INTERVAL_SECONDS * plan.timescale
@@ -112,7 +121,11 @@ export async function encodeToTrack(
 
       const wantsKey = sent === 0 || ticksSinceKey >= keyInterval
       try {
-        encoder.encode(frame, optionsFor(choice, wantsKey))
+        try {
+          encoder.encode(frame, optionsFor(choice, wantsKey))
+        } catch (error) {
+          throw failed ?? encodingFailure(error)
+        }
       } finally {
         // Always, and immediately. A held frame is a buffer the collector does not count.
         frame.close()
@@ -127,10 +140,20 @@ export async function encodeToTrack(
       onFrames(emitted.length)
 
       // The one place the whole chain waits. Everything upstream is bounded by this.
-      if (encoder.queued > MAX_FRAMES_IN_FLIGHT) await encoder.drainTo(MAX_FRAMES_IN_FLIGHT)
+      if (encoder.queued > MAX_FRAMES_IN_FLIGHT) {
+        try {
+          await encoder.drainTo(MAX_FRAMES_IN_FLIGHT)
+        } catch (error) {
+          throw failed ?? encodingFailure(error)
+        }
+      }
     }
 
-    await encoder.flush()
+    try {
+      await encoder.flush()
+    } catch (error) {
+      throw failed ?? encodingFailure(error)
+    }
     if (failed) throw failed
     if (source.stale()) return null
 

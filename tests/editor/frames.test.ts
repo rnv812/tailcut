@@ -173,7 +173,9 @@ function fakeCodecs(
           decodes += 1
           if (decodes === options.failAfter) {
             broken = true
-            on.error(new Error('the decoder gave up'))
+            const error = new Error('Encoding error.')
+            error.name = 'EncodingError'
+            on.error(error)
             return
           }
           owed.push(chunk.timestamp)
@@ -483,7 +485,9 @@ describe('decodedFrames: when it ends early', () => {
         seen.push(frame)
         frame.close()
       }),
-    ).rejects.toThrow('the decoder gave up')
+    ).rejects.toThrow(
+      'Decoding avc1.4d400d failed (EncodingError): Encoding error.',
+    )
 
     // The premise: frames were flowing when it broke.
     expect(seen.length).toBeGreaterThan(0)
@@ -497,7 +501,9 @@ describe('decodedFrames: when it ends early', () => {
     // flush, and it is a throw too — a job that quietly produced no frames would be written out
     // as an empty file.
     const dead = fakeCodecs({ emit: 'drip', failAfter: 1 })
-    await expect(collect(plan, sourceOf(), dead.codecs)).rejects.toThrow('the decoder gave up')
+    await expect(collect(plan, sourceOf(), dead.codecs)).rejects.toThrow(
+      'Decoding avc1.4d400d failed (EncodingError): Encoding error.',
+    )
     expect(dead.decoded).toEqual([])
     expect(dead.decoderClosed).toBe(1)
   })

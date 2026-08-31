@@ -259,3 +259,29 @@ export async function chooseCodec(
 
   return { kind: 'none', tried }
 }
+
+/**
+ * The already-probed choice followed by codecs that can take over if a real encoder rejects it.
+ *
+ * `isConfigSupported` is advisory: a hardware encoder can answer true and still report
+ * `EncodingError` when real frames arrive. The quality is recoverable from the quantizer because
+ * the three settings deliberately use three distinct values. A software choice has nowhere
+ * further to fall.
+ */
+export function runtimeChoices(
+  first: EncodingChoice,
+  geometry: EncodeGeometry,
+): EncodingChoice[] {
+  if (first.kind === 'h264-sw') return [first]
+
+  const quality = (Object.keys(QUANTIZERS) as ExportQuality[]).find(
+    (one) => QUANTIZERS[one] === first.quantizer,
+  )
+  if (!quality) return [first]
+
+  const h264 = ladderFor(geometry, { codec: 'h264', quality }).map(
+    (rung) => rung.choice as EncodingChoice,
+  )
+  if (first.kind === 'hevc-hw') return [first, ...h264]
+  return [first, h264[1]!]
+}

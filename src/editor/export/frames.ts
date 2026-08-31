@@ -1,6 +1,7 @@
 import type { Crop } from '../../core/encode/crop'
 import type { FramePlan } from '../../core/encode/plan'
 import type { Located } from '../../shared/types'
+import { codecFailure } from './failure'
 
 /**
  * How many chunks the decoder is allowed to owe frames for at once.
@@ -94,40 +95,47 @@ export async function* decodedFrames(
 ): AsyncGenerator<VideoFrame> {
   const ready: VideoFrame[] = []
   let failed: Error | null = null
+  const decodingFailure = (cause: unknown): Error =>
+    codecFailure('decode', plan.decoder.codec, null, cause)
 
-  const decoder = codecs.decoder(
-    { ...plan.decoder, hardwareAcceleration: 'prefer-software' },
-    {
-      frame(frame) {
-        // Before the entry point: decoded because what follows is predicted from it, never shown.
-        // This is the whole of what replaces the edit list on this path.
-        if (frame.timestamp < plan.headUs) {
-          frame.close()
-          return
-        }
+  let decoder: DecoderLike
+  try {
+    decoder = codecs.decoder(
+      { ...plan.decoder, hardwareAcceleration: 'prefer-software' },
+      {
+        frame(frame) {
+          // Before the entry point: decoded because what follows is predicted from it, never shown.
+          // This is the whole of what replaces the edit list on this path.
+          if (frame.timestamp < plan.headUs) {
+            frame.close()
+            return
+          }
 
-        if (!plan.crop) {
-          ready.push(frame)
-          return
-        }
+          if (!plan.crop) {
+            ready.push(frame)
+            return
+          }
 
-        // This is the one place in the program a picture is made smaller than it was recorded.
-        // It has to happen here because `VideoEncoder` does not crop: handed the whole frame with
-        // a config the size of the rectangle, it *scales* — a squashed clip of exactly the size
-        // that was asked for, which is the shape a wrong answer takes here. `plan.crop` is in the
-        // source's own pixels and `plan.geometry` is its size, so what comes out needs no
-        // resizing on the way into the encoder.
-        try {
-          ready.push(codecs.cut(frame, plan.crop))
-        } finally {
-          frame.close()
-        }
+          // This is the one place in the program a picture is made smaller than it was recorded.
+          // It has to happen here because `VideoEncoder` does not crop: handed the whole frame with
+          // a config the size of the rectangle, it *scales* — a squashed clip of exactly the size
+          // that was asked for, which is the shape a wrong answer takes here. `plan.crop` is in the
+          // source's own pixels and `plan.geometry` is its size, so what comes out needs no
+          // resizing on the way into the encoder.
+          try {
+            ready.push(codecs.cut(frame, plan.crop))
+          } finally {
+            frame.close()
+          }
+        },
+        error(error) {
+          failed = decodingFailure(error)
+        },
       },
-      error(error) {
-        failed = error
-      },
-    },
-  )
+    )
+  } catch (error) {
+    throw decodingFailure(error)
+  }
 
   try {
     for (const sample of plan.frames) {
@@ -151,19 +159,33 @@ export async function* decodedFrames(
       // decoder never holds more than `MAX_FRAMES_IN_FLIGHT` and therefore never owes more than
       // that many frames. Waiting is on `dequeue`; polling here would be a nested `setTimeout`,
       // floored at 4 ms, capping the whole loop at about 140 frames a second.
-      if (decoder.queued >= MAX_FRAMES_IN_FLIGHT) await decoder.drainTo(MAX_FRAMES_IN_FLIGHT - 1)
+      if (decoder.queued >= MAX_FRAMES_IN_FLIGHT) {
+        try {
+          await decoder.drainTo(MAX_FRAMES_IN_FLIGHT - 1)
+        } catch (error) {
+          throw failed ?? decodingFailure(error)
+        }
+      }
 
-      decoder.decode(
-        codecs.chunk({
-          type: sample.sync ? 'key' : 'delta',
-          timestamp: Math.round((sample.pts * 1_000_000) / plan.timescale),
-          duration: Math.round((sample.duration * 1_000_000) / plan.timescale),
-          data: bytes,
-        }),
-      )
+      try {
+        decoder.decode(
+          codecs.chunk({
+            type: sample.sync ? 'key' : 'delta',
+            timestamp: Math.round((sample.pts * 1_000_000) / plan.timescale),
+            duration: Math.round((sample.duration * 1_000_000) / plan.timescale),
+            data: bytes,
+          }),
+        )
+      } catch (error) {
+        throw failed ?? decodingFailure(error)
+      }
     }
 
-    await decoder.flush()
+    try {
+      await decoder.flush()
+    } catch (error) {
+      throw failed ?? decodingFailure(error)
+    }
     if (failed) throw failed
     while (ready.length) yield ready.shift()!
   } finally {

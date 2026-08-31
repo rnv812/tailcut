@@ -306,16 +306,20 @@ const integrationSurface = (): IntegrationSurface => {
 
 interface IntegrationCodecs {
   codecs: Codecs
+  encoderConfigs: VideoEncoderConfig[]
   decoded: number
   encoded: number
   closed: number
 }
 
 /** Enough WebCodecs to exercise the exporter seam without constructing a browser object. */
-const integrationCodecs = (): IntegrationCodecs => {
+const integrationCodecs = (
+  behavior: { failHardware?: boolean } = {},
+): IntegrationCodecs => {
   const avcC = videoSampleEntry(INIT)!.children.get('avcC')!
   const fakes: IntegrationCodecs = {
     codecs: null as unknown as Codecs,
+    encoderConfigs: [],
     decoded: 0,
     encoded: 0,
     closed: 0,
@@ -341,11 +345,18 @@ const integrationCodecs = (): IntegrationCodecs => {
         drainTo: () => Promise.resolve(),
       }
     },
-    encoder(_config, on) {
+    encoder(config, on) {
+      fakes.encoderConfigs.push(config)
       let first = true
       return {
         encode(frame, options) {
           fakes.encoded += 1
+          if (behavior.failHardware && config.hardwareAcceleration === 'prefer-hardware') {
+            const error = new Error('Encoding error.')
+            error.name = 'EncodingError'
+            on.error(error)
+            return
+          }
           const bytes = Uint8Array.of(0, 0, 0, 1, fakes.encoded & 0xff)
           on.chunk(
             {
@@ -759,6 +770,55 @@ describe('encodeIo', () => {
       ['mp4', loud!.path.plan.geometry, framesOf(loud!.path), 250],
       ['mp4', silent!.path.plan.geometry, framesOf(silent!.path), 300],
     ])
+  })
+
+  it('retries a lying HEVC hardware encoder through H.264 hardware and software', async () => {
+    const reader = await fileSnapshot()
+    const source = (await openClipSource(reader, materialOf(reader.index)))!
+    const ctx = contextOf(source, 10)
+    const asked = clip({ in: 0, out: 2, mode: 'optimize', sound: false })
+    const geometry = geometryOf(asked.crop, ctx.frameSize, ctx.fps)
+    const hevc: EncodingChoice = {
+      kind: 'hevc-hw',
+      config: {
+        codec: 'hev1.1.6.L93.B0',
+        width: geometry.width,
+        height: geometry.height,
+        framerate: geometry.framerate,
+        hardwareAcceleration: 'prefer-hardware',
+        bitrateMode: 'quantizer',
+        latencyMode: 'quality',
+      },
+      control: 'quantizer',
+      quantizer: 22,
+    }
+    const request = requestsFor(
+      source,
+      [asked],
+      ctx,
+      new Map([[geometryKey(geometry), hevc]]),
+      false,
+    )[0]!
+    const fakes = integrationCodecs({ failHardware: true })
+
+    const file = await encodeIo(reader, fakes.codecs, integrationSurface, {
+      onPace: () => undefined,
+    }).encode(request, () => undefined, () => false)
+
+    expect(fakes.encoderConfigs.map((config) => [
+      config.codec,
+      config.hardwareAcceleration,
+      config.bitrateMode,
+    ])).toEqual([
+      ['hev1.1.6.L93.B0', 'prefer-hardware', 'quantizer'],
+      ['avc1.64001e', 'prefer-hardware', 'quantizer'],
+      ['avc1.64001e', 'prefer-software', 'constant'],
+    ])
+    expect(fakes.encoderConfigs[2]).toMatchObject({
+      bitrate: 36_864,
+      avc: { format: 'avc' },
+    })
+    expect(parseInit(file!)!.tracks.map(({ codec }) => codec)).toEqual(['avc1'])
   })
 
   it('reports every WebP frame without reading the clip sound and records WebP pace', async () => {

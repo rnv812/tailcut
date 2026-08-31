@@ -212,6 +212,8 @@ function fakeCodecs(
     decoder?: 'tap' | 'burst'
     /** Have the encoder hand its first chunk back under this timestamp instead of its own. */
     stray?: number
+    /** Have the encoder report WebCodecs' generic asynchronous failure on this accepted frame. */
+    failAfter?: number
   } = {},
 ): Fakes {
   const describeOn = options.describeOn === undefined ? 0 : options.describeOn
@@ -300,6 +302,11 @@ function fakeCodecs(
           const item = { timestamp: frame.timestamp, options: encodeOptions }
           fakes.fed.push(item)
           pending.push(item)
+          if (fakes.fed.length === options.failAfter) {
+            const error = new Error('Encoding error.')
+            error.name = 'EncodingError'
+            on.error(error)
+          }
           fakes.maxQueued = Math.max(fakes.maxQueued, pending.length)
         },
         async flush() {
@@ -527,6 +534,21 @@ describe('encodeToTrack: what the encoder is asked for', () => {
 })
 
 describe('encodeToTrack: the account the encoder gives of itself', () => {
+  it('names the source, target and browser failure when the encoder dies asynchronously', async () => {
+    const plan = planOf(4)
+    const fakes = fakeCodecs({ failAfter: 1 })
+
+    await expect(
+      encodeToTrack(plan, SOFTWARE, sourceOf(), fakes.codecs, () => {}),
+    ).rejects.toThrow(
+      'Encoding avc1.4d400d to avc1.42001e failed (EncodingError): Encoding error.',
+    )
+
+    expect(fakes.fed).toHaveLength(1)
+    expect(fakes.encoderClosed).toBe(1)
+    expect(fakes.framesClosed).toBe(fakes.framesMade)
+  })
+
   it('writes the description it was given into the sample entry, whichever chunk brought it', async () => {
     const plan = planOf(4)
 

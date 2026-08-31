@@ -159,6 +159,39 @@ async function installVp9KeyAudit(context: BrowserContext): Promise<void> {
   })
 }
 
+/** Record exactly what a clip from a later retained run hands to the real decoder. */
+async function installDecoderAudit(context: BrowserContext): Promise<void> {
+  await context.addInitScript(() => {
+    const configurations: Array<{
+      codec: string
+      codedWidth?: number
+      codedHeight?: number
+      description: number
+    }> = []
+    const chunks: Array<{ type: EncodedVideoChunkType; timestamp: number; bytes: number }> = []
+    const configure = VideoDecoder.prototype.configure
+    const decode = VideoDecoder.prototype.decode
+
+    VideoDecoder.prototype.configure = function (config) {
+      const raw = config.description
+      configurations.push({
+        codec: config.codec,
+        ...(config.codedWidth === undefined ? {} : { codedWidth: config.codedWidth }),
+        ...(config.codedHeight === undefined ? {} : { codedHeight: config.codedHeight }),
+        description: raw ? raw.byteLength : 0,
+      })
+      return configure.call(this, config)
+    }
+    VideoDecoder.prototype.decode = function (chunk) {
+      chunks.push({ type: chunk.type, timestamp: chunk.timestamp, bytes: chunk.byteLength })
+      return decode.call(this, chunk)
+    }
+    Object.defineProperty(window, 'tcDecoderAudit', {
+      get: () => ({ configurations, chunks }),
+    })
+  })
+}
+
 async function refuseAllEncoders(context: BrowserContext): Promise<void> {
   await context.addInitScript(() => {
     Object.defineProperty(VideoEncoder, 'isConfigSupported', {
@@ -462,6 +495,78 @@ test('decodes VP9 when HLS metadata leaves every sample dependency unknown', asy
     expect(audit.chunks, 'the VP9 fixture never reached VideoDecoder').toBeGreaterThan(0)
     expect(audit.falseKeys, 'a VP9 delta frame was mislabeled as a decoder entry point').toBe(0)
     expect(probeFile(saved.file).streams[0]!.codec_name).toBe('h264')
+  } finally {
+    await context.close()
+  }
+})
+
+test('encodes a clip entirely inside the retained run after a media gap', async () => {
+  test.setTimeout(180_000)
+  const { context, extensionId } = await launchWithExtension()
+  await installDecoderAudit(context)
+  const player = await context.newPage()
+
+  try {
+    await routeLocal(player, 'codecs.html', PLAYER_URL)
+    const feed = [
+      {
+        mime: 'video/mp4; codecs="avc1.4d400d"',
+        init: '/fixtures/h264/init-stream0.m4s',
+        // Segment two is absent. Segment three is a separately decodable retained run.
+        chunks: [1, 3].map((n) => `/fixtures/h264/chunk-stream0-0000${n}.m4s`),
+      },
+      {
+        mime: 'audio/mp4; codecs="mp4a.40.2"',
+        init: '/fixtures/h264/init-stream1.m4s',
+        chunks: [1, 3, 4].map((n) => `/fixtures/h264/chunk-stream1-0000${n}.m4s`),
+      },
+    ]
+    await player.goto(`${PLAYER_URL}#${encodeURIComponent(JSON.stringify(feed))}`)
+    await player.waitForFunction(() => (window as unknown as { allAppended?: boolean }).allAppended)
+    await player.evaluate(() => {
+      const video = document.querySelector('video')!
+      video.currentTime = 4.25
+      return video.play()
+    })
+    await player.waitForFunction(() => document.querySelector('video')!.currentTime >= 5.5)
+
+    const { editor } = await clickEdit(context, player, extensionId)
+    await editor.waitForFunction(() => (document.querySelector('video')?.readyState ?? 0) >= 2)
+    await typeInto(editor, 'playhead-field', '00:00:04:06')
+    await editor.keyboard.press('i')
+    await typeInto(editor, 'out-c1', '00:00:05:12')
+
+    const saved = await exportClipWith(editor, {
+      mode: 'optimize',
+      beforeExport: async (page) => {
+        await expect(page.getByTestId('cost-c1')).toContainText('Re-encoded as')
+      },
+    })
+    const audit = await editor.evaluate(() =>
+      (window as unknown as {
+        tcDecoderAudit: {
+          configurations: Array<{
+            codec: string
+            codedWidth?: number
+            codedHeight?: number
+            description: number
+          }>
+          chunks: Array<{ type: EncodedVideoChunkType; timestamp: number; bytes: number }>
+        }
+      }).tcDecoderAudit,
+    )
+
+    expect(audit.configurations).toEqual([
+      { codec: 'avc1.4d400d', codedWidth: 320, codedHeight: 240, description: 40 },
+    ])
+    expect(audit.chunks.length, 'the later retained run never reached VideoDecoder').toBeGreaterThan(0)
+    expect(audit.chunks[0]).toMatchObject({ type: 'key' })
+    expect(audit.chunks[0]!.bytes).toBeGreaterThan(0)
+    expect(audit.chunks.every((chunk) => Number.isSafeInteger(chunk.timestamp))).toBe(true)
+    // Source run three begins four seconds into the session. Decoder transport is rebased onto
+    // the planned clip, so neither the gap nor its absolute session time reaches WebCodecs.
+    expect(Math.max(...audit.chunks.map((chunk) => chunk.timestamp))).toBeLessThan(2_000_000)
+    expect(probeFile(saved.file).streams.map((stream) => stream.codec_name)).toEqual(['h264', 'aac'])
   } finally {
     await context.close()
   }

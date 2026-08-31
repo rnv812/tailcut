@@ -1,7 +1,7 @@
 import type { Clip } from '../../core/edit/clip'
 import type { EditContext } from '../../core/edit/context'
 import { assembleEncoded } from '../../core/encode/assemble'
-import type { Choice, EncodeGeometry } from '../../core/encode/codec'
+import { runtimeChoices, type Choice, type EncodeGeometry } from '../../core/encode/codec'
 import { geometryOf } from '../../core/encode/crop'
 import { framesOf, pathFor } from '../../core/encode/path'
 import { contentTypeOf, fileNameOf, uniqueNames } from '../../core/export/naming'
@@ -19,6 +19,7 @@ import type { SnapshotReader } from '../../core/snapshot/read'
 import { webpGeometry } from '../../core/webp/timing'
 import type { TrackKind } from '../../shared/types'
 import { encodeToTrack } from './encoder'
+import { CodecFailure } from './failure'
 import type { Codecs, FrameSource } from './frames'
 import { encodeWebp, type Surface } from './webp'
 
@@ -260,13 +261,24 @@ export function encodeIo(
         return stale() ? null : file
       }
 
-      const result = await encodeToTrack(
-        path.plan,
-        path.choice,
-        frameSourceOf(reader, stale),
-        codecs,
-        report,
-      )
+      let result = null
+      let lastFailure: CodecFailure | null = null
+      for (const choice of runtimeChoices(path.choice, path.plan.geometry)) {
+        try {
+          result = await encodeToTrack(
+            path.plan,
+            choice,
+            frameSourceOf(reader, stale),
+            codecs,
+            report,
+          )
+          break
+        } catch (error) {
+          if (!(error instanceof CodecFailure) || error.stage !== 'encode') throw error
+          lastFailure = error
+        }
+      }
+      if (!result && lastFailure) throw lastFailure
       if (!result) return null
 
       // Pace is the encoder's pace, not the audio muxer's. It is reported only after the complete
