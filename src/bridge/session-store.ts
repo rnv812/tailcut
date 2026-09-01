@@ -2,6 +2,11 @@ import { parseFragment } from '../core/iso/fragment'
 import { parseInit } from '../core/iso/init'
 import { topLevelBoxes } from '../core/iso/reader'
 import {
+  samplesInSegment,
+  trackDefaults,
+  type SampleDefaults,
+} from '../core/iso/samples'
+import {
   encryptedMedia,
   ingestInit,
   type IngestedInit,
@@ -777,6 +782,47 @@ function convertedChunk(
   }
 }
 
+/** The coded-frame times MSE uses to decide and place a sequence-mode discontinuity. */
+interface SequenceTiming {
+  firstDts: number
+  firstPts: number
+  lastDts: number
+  lastDuration: number
+  highestPtsEnd: number
+}
+
+/** Reads one fragment's coded-frame times in seconds on its declared track clock. */
+function sequenceTiming(
+  track: TrackHeader,
+  chunk: Chunk,
+  defaults: Map<number, SampleDefaults>,
+): SequenceTiming | null {
+  const tracks = samplesInSegment(chunk.bytes, defaults)
+  const fragment = parseFragment(chunk.bytes, track.info.tracks)
+  const found =
+    tracks.find((candidate) => candidate.trackId === fragment?.trackId) ??
+    (tracks.length === 1 ? tracks[0] : undefined)
+  const declared =
+    track.info.tracks.find((candidate) => candidate.trackId === found?.trackId) ??
+    (track.info.tracks.length === 1 ? track.info.tracks[0] : undefined)
+  const first = found?.samples[0]
+  const last = found?.samples[found.samples.length - 1]
+  if (!declared || !(declared.timescale > 0) || !first || !last || !(last.duration > 0)) return null
+
+  const scale = declared.timescale
+  let highestPtsEnd = Number.NEGATIVE_INFINITY
+  for (const sample of found.samples) {
+    highestPtsEnd = Math.max(highestPtsEnd, (sample.pts + sample.duration) / scale)
+  }
+  return {
+    firstDts: first.dts / scale,
+    firstPts: first.pts / scale,
+    lastDts: last.dts / scale,
+    lastDuration: last.duration / scale,
+    highestPtsEnd,
+  }
+}
+
 /** What the page has said about one `<audio>` of its own; see SoundSource in the protocol. */
 export interface SoundInput {
   sourceId: string
@@ -1432,22 +1478,60 @@ export class SessionStore {
     if (chunks.length === 0) return
 
     const offsets = new Array<number>(chunks.length).fill(finalOffset)
-    if (input.sequence) {
-      // Sequence mode may process several complete media segments from one appendBuffer call.
-      // MSE exposes only the offset of the last one after updateend. Walk backwards over the raw
-      // decode spans to recover the placement of every segment before it. Applying the final
-      // offset to all of them gives repeated-timestamp fragments one start and PtsMap keeps only
-      // the last: observed on Twitch as a regular forward jump in an otherwise smooth preview.
-      for (let at = chunks.length - 2; at >= 0; at--) {
-        const current = chunks[at]!
-        const next = chunks[at + 1]!
-        // Continuous timestamps, including the small jitter MSE tolerates inside one coded-frame
-        // group, keep one offset and keep their gap. A timestamp reset or overlap is where
-        // sequence mode advances the next segment to the end of the current one.
-        offsets[at] =
-          next.start <= current.end
-            ? offsets[at + 1]! + next.start - current.end
-            : offsets[at + 1]!
+    if (input.sequence && chunks.length > 1) {
+      const defaults = trackDefaults(header.initBytes)
+      const timings = chunks.map((chunk) => sequenceTiming(header, chunk, defaults))
+      const groups: Array<{
+        from: number
+        to: number
+        firstPts: number
+        highestPtsEnd: number
+      }> = []
+      let from = 0
+      const highestEnd = (start: number, end: number): number => {
+        let highest = Number.NEGATIVE_INFINITY
+        for (let at = start; at <= end; at++) {
+          highest = Math.max(highest, timings[at]?.highestPtsEnd ?? chunks[at]!.end)
+        }
+        return highest
+      }
+
+      for (let at = 0; at < chunks.length - 1; at++) {
+        const current = timings[at]
+        const next = timings[at + 1]
+        const discontinuity =
+          current && next
+            ? next.firstDts < current.lastDts ||
+              next.firstDts - current.lastDts > 2 * current.lastDuration
+            : chunks[at + 1]!.start <= chunks[at]!.end
+        if (!discontinuity) continue
+
+        groups.push({
+          from,
+          to: at,
+          firstPts: timings[from]?.firstPts ?? chunks[from]!.start,
+          highestPtsEnd: highestEnd(from, at),
+        })
+        from = at + 1
+      }
+      groups.push({
+        from,
+        to: chunks.length - 1,
+        firstPts: timings[from]?.firstPts ?? chunks[from]!.start,
+        highestPtsEnd: highestEnd(from, chunks.length - 1),
+      })
+
+      // MSE exposes the offset of the last coded-frame group after updateend. Recover every
+      // earlier group from the same relation MSE used: its highest presentation end becomes the
+      // next group's first presentation timestamp. Decode spans alone are wrong for B-frames.
+      let groupOffset = finalOffset
+      for (let at = groups.length - 1; at >= 0; at--) {
+        const group = groups[at]!
+        if (at < groups.length - 1) {
+          const next = groups[at + 1]!
+          groupOffset += next.firstPts - group.highestPtsEnd
+        }
+        for (let chunk = group.from; chunk <= group.to; chunk++) offsets[chunk] = groupOffset
       }
     }
 

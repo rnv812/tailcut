@@ -198,6 +198,31 @@ function moof(trackId: number, baseTime: number, samples: number, sampleDuration
   ])
 }
 
+/** A two-frame fragment whose presentation order differs from its decode order. */
+function reorderedMoof(trackId: number, baseTime: number, sampleDuration: number) {
+  return new Uint8Array([
+    ...box(
+      'moof',
+      box(
+        'traf',
+        box('tfhd', u32(0), u32(trackId)),
+        box('tfdt', u32(0), u32(baseTime)),
+        // sample_duration_present + sample_composition_time_offset_present
+        box(
+          'trun',
+          u32(0x000900),
+          u32(2),
+          u32(sampleDuration),
+          u32(2 * sampleDuration),
+          u32(sampleDuration),
+          u32(0),
+        ),
+      ),
+    ),
+    ...box('mdat', zeros(16)),
+  ])
+}
+
 describe('SessionStore', () => {
   it('opens a session on an init segment', () => {
     const store = new SessionStore()
@@ -271,6 +296,39 @@ describe('SessionStore', () => {
     expect(chunks[0]!.end).toBe(2)
     expect(chunks[1]!.start).toBeCloseTo(secondStart / 12_288, 8)
     expect(chunks[1]!.end).toBeCloseTo(secondStart / 12_288 + 2, 8)
+  })
+
+  it('joins a forward discontinuity that sequence mode rebases', () => {
+    const store = new SessionStore()
+    const first = moof(1, 0, 2, 12_288)
+    const second = moof(1, 5 * 12_288, 2, 12_288)
+    const together = new Uint8Array(first.byteLength + second.byteLength)
+    together.set(first, 0)
+    together.set(second, first.byteLength)
+
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: together, timestampOffset: -3, sequence: true })
+
+    const chunks = only(store.list()[0]!).map.runs()[0]!.chunks
+    expect(chunks.map(shapeOf)).toEqual([
+      [0, 2, first.byteLength],
+      [2, 4, second.byteLength],
+    ])
+    expect(selectMaterial(store.list()[0]!)[0]!.timestampOffsets).toEqual([0, -3])
+  })
+
+  it('recovers sequence offsets from presentation time when frames are reordered', () => {
+    const store = new SessionStore()
+    const first = reorderedMoof(1, 0, 12_288)
+    const second = reorderedMoof(1, 5 * 12_288, 12_288)
+    const together = new Uint8Array(first.byteLength + second.byteLength)
+    together.set(first, 0)
+    together.set(second, first.byteLength)
+
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: together, timestampOffset: -6, sequence: true })
+
+    expect(selectMaterial(store.list()[0]!)[0]!.timestampOffsets).toEqual([-2, -6])
   })
 
   it('ignores a fragment without an init instead of breaking the parse', () => {
