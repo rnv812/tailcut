@@ -23,6 +23,8 @@ const CLIP = 'https://cdn.example/loop.mp4'
 const TRACK = 'https://sound.example/track.mp3'
 const OTHER_TRACK = 'https://sound.example/other.mp3'
 const SOURCE = `plain:${CLIP}`
+const NEXT_CLIP = 'https://cdn.example/next-loop.mp4'
+const NEXT_SOURCE = `plain:${NEXT_CLIP}`
 
 /** The picture states 35 frames at ten a second. */
 const LENGTH = 3.5
@@ -88,6 +90,7 @@ function registry(files: Record<string, Uint8Array> = { [CLIP]: picture, [TRACK]
       const url = options.url ?? TRACK
       store.sound({
         sourceId: `sound:${url}`,
+        pictureSourceId: SOURCE,
         url,
         durationSeconds: 24.5,
         buffered: options.buffered ?? [[0, 24.5]],
@@ -124,6 +127,58 @@ async function saved(session: Session, name: string) {
 }
 
 describe('a page that plays its sound apart from its picture', () => {
+  it('keeps each soundtrack with the feed video that played beside it', async () => {
+    const page = registry({
+      [CLIP]: picture,
+      [NEXT_CLIP]: picture,
+      [TRACK]: soundtrack,
+      [OTHER_TRACK]: soundtrack,
+    })
+    const sound = (sourceId: string, url: string, pictureSourceId: string, playing: boolean) =>
+      page.store.sound({
+        sourceId,
+        url,
+        pictureSourceId,
+        durationSeconds: 24.5,
+        buffered: [[0, 24.5]],
+        playing,
+      })
+    const show = (sourceId: string, url: string, title: string, now: number) =>
+      page.store.plain({
+        sourceId,
+        url,
+        pageUrl: PAGE,
+        title,
+        durationSeconds: LENGTH,
+        buffered: [[0, LENGTH]],
+        now,
+      })
+
+    sound(`sound:${TRACK}`, TRACK, SOURCE, true)
+    show(SOURCE, CLIP, 'First feed video', 1000)
+    page.store.promotePending(SOURCE)
+    await page.store.settled()
+    show(SOURCE, CLIP, 'First feed video', 1001)
+    await page.store.settled()
+
+    sound(`sound:${TRACK}`, TRACK, SOURCE, false)
+    sound(`sound:${OTHER_TRACK}`, OTHER_TRACK, NEXT_SOURCE, true)
+    show(NEXT_SOURCE, NEXT_CLIP, 'Second feed video', 2000)
+    page.store.promotePending(NEXT_SOURCE)
+    await page.store.settled()
+    show(NEXT_SOURCE, NEXT_CLIP, 'Second feed video', 2001)
+    await page.store.settled()
+    // An old feed element may report more buffered material after the page has moved on. Its own
+    // report must not make it adopt the track that is playing beside the new item.
+    show(SOURCE, CLIP, 'First feed video', 2002)
+    await page.store.settled()
+
+    const first = page.store.list().find((session) => session.plain?.url === CLIP)
+    const second = page.store.list().find((session) => session.plain?.url === NEXT_CLIP)
+    expect(first?.plain?.sound?.url).toBe(TRACK)
+    expect(second?.plain?.sound?.url).toBe(OTHER_TRACK)
+  })
+
   it('costs nothing for the soundtrack until a picture has asked for it', async () => {
     const page = registry()
 

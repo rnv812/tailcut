@@ -704,6 +704,7 @@ function receivePage(data: PageToBridge): void {
   if (data.type === 'tc:sound') {
     store.sound({
       sourceId: data.sourceId,
+      pictureSourceId: data.pictureSourceId,
       url: data.url,
       durationSeconds: data.durationSeconds,
       buffered: data.buffered,

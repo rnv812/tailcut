@@ -227,6 +227,8 @@ export interface PlainSource {
 export interface SoundSource {
   /** Identity of the soundtrack inside the page: its address, marked off as a sound. */
   sourceId: string
+  /** The ordinary video element this track was heard beside, when that pairing was unambiguous. */
+  pictureSourceId?: string
   /** The address the element resolved, absolute, exactly as it will have to be fetched. */
   url: string
   /** How long the whole track is as the element states it; zero while it states nothing. */

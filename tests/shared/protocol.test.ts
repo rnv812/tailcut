@@ -263,6 +263,7 @@ describe('isTabToExtension', () => {
 const sound: PageToBridge = {
   type: 'tc:sound',
   sourceId: 'sound:https://cdn.example/track.m4a',
+  pictureSourceId: 'plain:https://cdn.example/picture.mp4',
   url: 'https://cdn.example/track.m4a',
   durationSeconds: 184.2,
   buffered: [[0, 184.2]],

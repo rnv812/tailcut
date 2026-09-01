@@ -144,7 +144,7 @@ function soundSourceOf(element: HTMLMediaElement): SoundSource | null {
 
 /** Everything about a soundtrack that a report would carry, as one string to compare. */
 function soundSignature(source: SoundSource): string {
-  return `${source.playing ? 1 : 0}|${plainSignature(source)}`
+  return `${source.playing ? 1 : 0}|${source.pictureSourceId ?? ''}|${plainSignature(source)}`
 }
 
 /** What the isolated world says to the bridge about one stream: whether to keep it. */
@@ -398,20 +398,10 @@ export function startWatching(
   let saidUnreachable = false
   /** Whether the page has already been declared protected: the refusal never turns. */
   let saidEncrypted = false
-  /**
-   * Whether anything on this page has been playing sound of its own; see VideoSignals.soundApart.
-   *
-   * Remembered rather than read afresh on each poll because a pause freezes a recording instead
-   * of erasing it. The user watches a looping picture under a track, pauses, and opens the popup
-   * — and read live, the page would be silent at that
-   * moment, the picture would go back to being a banner, and the session would be dropped from
-   * under the popup that was opened to save it.
-   *
-   * That a page keeps its sound in another element is a fact about the page and not about the
-   * instant. What it is not is a way past anything else: the picture still has to be a real player
-   * of a real size, watched through the whole grace period.
-   */
-  let soundHeard = false
+  /** Soundtrack source → the one ordinary picture it was heard beside. Kept across a pause. */
+  const soundPictures = new Map<string, string>()
+  /** Pictures known to have played with a separate soundtrack; the source-scoped triage signal. */
+  const picturesWithSound = new Set<string>()
 
   /** Shadow roots already under observation: a weak set, so a detached tree can still be freed. */
   const observed = new WeakSet<ShadowRoot>()
@@ -521,13 +511,38 @@ export function startWatching(
       if (!standing || (sound.playing && !standing.playing)) sounds.set(sound.sourceId, sound)
     }
 
-    for (const sound of sounds.values()) if (sound.playing) soundHeard = true
+    const playingSounds = [...sounds.values()].filter((sound) => sound.playing)
+    const playingPictures = new Set<string>()
+    const measurements = new Map<
+      HTMLMediaElement,
+      { plain: PlainSource | null; signals: VideoSignals }
+    >()
+    for (const [element, state] of watched) {
+      if (element.localName === 'audio' || !element.isConnected) continue
+      const picture = plainSourceOf(element)
+      const signals = signalsOf(state, false)
+      measurements.set(element, { plain: picture, signals })
+      if (picture && signals.playing && signals.visible) playingPictures.add(picture.sourceId)
+    }
+
+    // The DOM supplies no explicit relationship between separate <video> and <audio> elements.
+    // Bind only when the page leaves exactly one possible pair. A feed with a previous item still
+    // attached must never lend the new item's sound to it.
+    if (playingSounds.length === 1 && playingPictures.size === 1) {
+      const pictureSourceId = [...playingPictures][0]!
+      soundPictures.set(playingSounds[0]!.sourceId, pictureSourceId)
+      picturesWithSound.add(pictureSourceId)
+    }
 
     for (const [sourceId, sound] of sounds) {
-      const signature = soundSignature(sound)
+      const report: SoundSource = {
+        ...sound,
+        pictureSourceId: soundPictures.get(sourceId),
+      }
+      const signature = soundSignature(report)
       if (soundTold.get(sourceId) === signature) continue
       soundTold.set(sourceId, signature)
-      onSound(sound)
+      onSound(report)
     }
 
     for (const [element, state] of watched) {
@@ -542,7 +557,12 @@ export function startWatching(
       const elapsed = (now - state.lastTick) / 1000
       state.lastTick = now
 
-      const signals = signalsOf(state, soundHeard)
+      const measured = measurements.get(element)!
+      const plain = measured.plain
+      const signals = {
+        ...measured.signals,
+        soundApart: plain ? picturesWithSound.has(plain.sourceId) : false,
+      }
       // Time since the previous poll has already played, so include it in this verdict. Adding it
       // afterward would cross the threshold one poll late. A pause, hidden tab, or off-screen
       // element stops the counter without resetting accumulated time.
@@ -563,7 +583,6 @@ export function startWatching(
       // the common case off the video platforms — or the address from createObjectURL has not
       // reached this world yet, in which case there is nobody to say a verdict to and it will be
       // said as soon as there is.
-      const plain = plainSourceOf(element)
       if (!plain) continue
 
       // One file is one piece of material however many elements the page hangs it on, and the

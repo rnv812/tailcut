@@ -826,6 +826,7 @@ function sequenceTiming(
 /** What the page has said about one `<audio>` of its own; see SoundSource in the protocol. */
 export interface SoundInput {
   sourceId: string
+  pictureSourceId?: string
   url: string
   durationSeconds: number
   buffered: Array<[number, number]>
@@ -1048,6 +1049,8 @@ export class SessionStore {
   private plainSources = new Map<string, PlainState>()
   /** sourceId → a soundtrack an `<audio>` of the page is playing; see sound(). */
   private soundSources = new Map<string, SoundState>()
+  /** Ordinary picture source → the soundtrack sources explicitly observed beside it. */
+  private pairedSounds = new Map<string, Set<string>>()
   /** Reads of the tables now in flight: what settled() waits on. */
   private reads = new Set<Promise<void>>()
   private readonly openPlain?: PlainOpener
@@ -1239,9 +1242,19 @@ export class SessionStore {
     state.playing = input.playing
     state.played ||= input.playing
 
-    // A soundtrack that has just started playing is news for every picture on the page: one that
-    // was refused as a banner a moment ago may be half of a work now.
-    for (const plain of this.plainSources.values()) this.syncPlain(plain)
+    // The watcher preserves element identity and reports a pair only when the page leaves one
+    // possible picture. Resynchronising every picture here is what used to replace a feed item's
+    // soundtrack with the audio of the item scrolled to after it.
+    if (input.pictureSourceId) {
+      let paired = this.pairedSounds.get(input.pictureSourceId)
+      if (!paired) {
+        paired = new Set()
+        this.pairedSounds.set(input.pictureSourceId, paired)
+      }
+      paired.add(input.sourceId)
+      const plain = this.plainSources.get(input.pictureSourceId)
+      if (plain) this.syncPlain(plain)
+    }
   }
 
   /**
@@ -1265,8 +1278,11 @@ export class SessionStore {
     // while somebody decides to save from it. A page that has played two tracks in turn — a feed,
     // a playlist — falls through both and is left unpaired rather than guessed at: putting a
     // stranger's sound into somebody's clip is worse than handing them a silent one and saying so.
-    const playing = [...this.soundSources.values()].filter((sound) => sound.playing)
-    const heard = [...this.soundSources.values()].filter((sound) => sound.played)
+    const associated = [...(this.pairedSounds.get(state.sourceId) ?? [])]
+      .map((sourceId) => this.soundSources.get(sourceId))
+      .filter((sound): sound is SoundState => sound !== undefined)
+    const playing = associated.filter((sound) => sound.playing)
+    const heard = associated.filter((sound) => sound.played)
     const candidates = playing.length ? playing : heard
 
     if (candidates.length !== 1) {
@@ -1324,7 +1340,9 @@ export class SessionStore {
           sound.opened = opened
         }
 
-        for (const plain of this.plainSources.values()) this.syncPlain(plain)
+        for (const plain of this.plainSources.values()) {
+          if (this.pairedSounds.get(plain.sourceId)?.has(sound.sourceId)) this.syncPlain(plain)
+        }
       })
       .catch(() => {
         sound.reading = false

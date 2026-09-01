@@ -1061,6 +1061,16 @@ const loopingPicture = (overrides: Record<string, unknown> = {}) =>
   plainVideo({ muted: true, loop: true, controls: false, duration: 9.48, ...overrides })
 
 describe('the watcher and a page that plays its sound apart from its picture', () => {
+  it('identifies the one visible playing picture beside a soundtrack', async () => {
+    const watcher = await startWatcher()
+    stand(loopingPicture())
+    play(soundElement())
+
+    tick()
+
+    expect(watcher.sounds.at(-1)?.pictureSourceId).toBe(CLIP_ID)
+  })
+
   it('reports the soundtrack an <audio> is playing', async () => {
     const watcher = await startWatcher()
     play(soundElement())
