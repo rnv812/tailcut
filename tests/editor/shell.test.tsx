@@ -415,6 +415,31 @@ describe('the editor shell', () => {
     expect(text('duration')).toBe('0:06')
   })
 
+  it('shows the whole composite monitor duration instead of the selected ABR track duration', async () => {
+    const state = await ready()
+    const picture = state.material.video!.track
+    const composite: Preview = {
+      ...previewOf(),
+      monitor: {
+        pictures: [
+          {
+            trackId: picture.id,
+            representation: picture.representation,
+            start: 0,
+            end: 6,
+            codec: picture.info.tracks[0]!.codec,
+            width: picture.info.tracks[0]!.width,
+            height: picture.info.tracks[0]!.height,
+          },
+        ],
+      },
+    }
+
+    show({ ...state, material: { ...state.material, duration: 4 }, preview: composite })
+
+    expect(text('duration')).toBe('0:06')
+  })
+
   it('counts the gaps out loud instead of passing over them', async () => {
     show(await ready())
     expect(text('gaps')).toContain('1 gap')

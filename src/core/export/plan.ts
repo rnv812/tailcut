@@ -129,6 +129,53 @@ function runsOf(track: SourceTrack): Span[] {
 }
 
 /**
+ * Removes a small packaging skew where sound starts just after the resumed picture.
+ *
+ * Separate MSE buffers do not have to cut their fragments on the same sample. A late audio
+ * boundary within two picture frames is still the same resumed run, not a stretch of intentional
+ * silence. Keeping that boundary turns every later packet into visibly late sound. Larger holes
+ * remain untouched: they describe material the recording really does not contain.
+ */
+function alignLateSound(video: SourceTrack, audio: SourceTrack): SourceTrack {
+  const picture = runsOf(video)
+  const sound = runsOf(audio)
+  if (picture.length <= 1 || sound.length <= 1) return audio
+
+  const frame = Math.max(0, ...video.samples.map((sample) => sample.duration / video.timescale))
+  const packet = Math.max(0, ...audio.samples.map((sample) => sample.duration / audio.timescale))
+  const window = 2 * frame + packet
+  const shifts: Array<{ start: number; end: number; by: number }> = []
+
+  for (let index = 0; index + 1 < sound.length; index++) {
+    const from = sound[index]!.end
+    const at = sound[index + 1]!.start
+    const matching = picture
+      .slice(0, -1)
+      .map((run, pictureIndex) => ({ start: run.end, end: picture[pictureIndex + 1]!.start }))
+      .find((hole) => hole.end > from && hole.start < at)
+    if (!matching) continue
+
+    const late = at - matching.end
+    if (late > packet && late <= window && Math.abs(from - matching.start) <= window) {
+      shifts.push({ start: at, end: sound[index + 1]!.end, by: late })
+    }
+  }
+
+  if (shifts.length === 0) return audio
+
+  return {
+    ...audio,
+    samples: audio.samples.map((sample) => {
+      const at = (sample.pts - audio.editOffset) / audio.timescale
+      const shift = shifts.find((candidate) => at >= candidate.start && at < candidate.end)
+      if (!shift) return sample
+      const ticks = Math.round(shift.by * audio.timescale)
+      return { ...sample, dts: sample.dts - ticks, pts: sample.pts - ticks }
+    }),
+  }
+}
+
+/**
  * Sound under the recorded picture, excluding packets fetched ahead through a picture hole.
  *
  * The picture is what the viewer watched. Adaptive players commonly buffer longer audio pieces
@@ -173,10 +220,7 @@ export function soundUnderPicture(source: ClipSource): ClipSource {
 
   return {
     video: source.video,
-    audio: {
-      ...source.audio,
-      samples,
-    },
+    audio: alignLateSound(source.video, { ...source.audio, samples }),
   }
 }
 

@@ -1,19 +1,50 @@
 import { assembleMp4 } from '../../core/export/assemble'
 import { planPreview } from '../../core/export/plan'
+import { audioDecoderConfig } from '../../core/codec/audio'
+import { decoderConfigOf } from '../../core/encode/decoder'
+import { audioSampleEntry, videoSampleEntry } from '../../core/iso/entry'
 import {
   bytesFrom,
   clipSourceFrom,
   clipSourceOf,
   movieTracksOf,
+  sourceTrackOf,
   type SourceSegment,
   type SourceTrackInput,
 } from '../../core/export/source'
-import { framesOf, framesOfTrack, FrameTable, retimeToPlan, type Frame }
-  from '../../core/timeline/frames'
+import {
+  framesOf,
+  framesOfTrack,
+  FrameTable,
+  retimeToPlan,
+  type Frame,
+} from '../../core/timeline/frames'
 import type { SnapshotTrack } from '../../core/snapshot/format'
 import type { Material, MaterialTrack } from '../../core/snapshot/material'
 import type { SnapshotReader } from '../../core/snapshot/read'
 import type { Located, TrackKind } from '../../shared/types'
+import {
+  audioMonitorClock,
+  compositeFrames,
+  monitorShift,
+  pictureProgram,
+  type PictureProgram,
+} from './composite'
+
+export interface PreviewConsumer {
+  url: string
+  release(): void
+}
+
+export interface MonitorPicture {
+  trackId: string
+  representation: string
+  start: number
+  end: number
+  codec: string
+  width: number
+  height: number
+}
 
 export interface Preview {
   /** Object URL of the file the `<video>` plays. */
@@ -33,6 +64,12 @@ export interface Preview {
    * no third number and no origin — the difference between the two is whatever the plan did.
    */
   frames: FrameTable
+  /** Selected representation's frame grid for clip geometry, snapping and encode rate. */
+  editFrames?: FrameTable
+  /** Chronological ABR ownership. Only parts of the selected track may be cut. */
+  monitor?: { pictures: MonitorPicture[] }
+  /** A second media element gets an independent MediaSource attachment. Blob previews omit it. */
+  openConsumer?: () => PreviewConsumer
   release(): void
 }
 
@@ -92,6 +129,123 @@ function previewOf(
   }
 }
 
+interface MonitorSegment {
+  bytes: Uint8Array
+  timestampOffset: number
+  window?: { start: number; end: number }
+}
+
+interface MonitorPart {
+  mime: string
+  initBytes: Uint8Array
+  segments: MonitorSegment[]
+}
+
+interface MonitorStream {
+  parts: MonitorPart[]
+}
+
+/** The MIME declaration Chromium expects beside an ISO init segment. */
+function mimeOf(initBytes: Uint8Array): string | null {
+  const picture = videoSampleEntry(initBytes)
+  const sound = audioSampleEntry(initBytes)
+  const video = picture ? decoderConfigOf(picture.bytes) : null
+  const audio = sound ? audioDecoderConfig(sound) : null
+  if ((picture && !video) || (sound && !audio)) return null
+  const kind = picture ? 'video' : sound ? 'audio' : null
+  if (!kind) return null
+  const codecs = [video?.codec, audio?.codec].filter((codec): codec is string => Boolean(codec))
+  return codecs.length ? `${kind}/mp4; codecs="${codecs.join(',')}"` : null
+}
+
+const append = (buffer: SourceBuffer, bytes: Uint8Array): Promise<void> =>
+  new Promise((resolve, reject) => {
+    const done = (): void => {
+      cleanup()
+      resolve()
+    }
+    const failed = (): void => {
+      cleanup()
+      reject(new Error('MediaSource rejected preview material'))
+    }
+    const cleanup = (): void => {
+      buffer.removeEventListener('updateend', done)
+      buffer.removeEventListener('error', failed)
+    }
+    buffer.addEventListener('updateend', done, { once: true })
+    buffer.addEventListener('error', failed, { once: true })
+    try {
+      buffer.appendBuffer(bytes.slice().buffer as ArrayBuffer)
+    } catch (cause) {
+      cleanup()
+      reject(cause)
+    }
+  })
+
+async function appendStream(source: MediaSource, stream: MonitorStream): Promise<void> {
+  const first = stream.parts[0]
+  if (!first) return
+  const buffer = source.addSourceBuffer(first.mime)
+  let mime = first.mime
+
+  for (const part of stream.parts) {
+    if (part.mime !== mime) {
+      if (typeof buffer.changeType !== 'function') throw new Error('MediaSource cannot change codec')
+      buffer.changeType(part.mime)
+      mime = part.mime
+    }
+    await append(buffer, part.initBytes)
+    for (const segment of part.segments) {
+      if (segment.window) {
+        buffer.appendWindowEnd = segment.window.end
+        buffer.appendWindowStart = segment.window.start
+      }
+      if (buffer.timestampOffset !== segment.timestampOffset) {
+        buffer.timestampOffset = segment.timestampOffset
+      }
+      await append(buffer, segment.bytes)
+    }
+  }
+}
+
+/** One independently attachable replay of the captured SourceBuffer program. */
+function mediaConsumer(streams: MonitorStream[], duration: number): PreviewConsumer {
+  const source = new MediaSource()
+  const url = URL.createObjectURL(source)
+  let released = false
+
+  source.addEventListener(
+    'sourceopen',
+    () => {
+      void Promise.all(streams.map((stream) => appendStream(source, stream)))
+        .then(() => {
+          if (released || source.readyState !== 'open') return
+          if (Number.isFinite(duration) && duration > 0) source.duration = duration
+          source.endOfStream()
+        })
+        .catch(() => {
+          if (!released && source.readyState === 'open') {
+            try {
+              source.endOfStream('decode')
+            } catch {
+              // The video element reports the decode failure; cleanup must not replace it.
+            }
+          }
+        })
+    },
+    { once: true },
+  )
+
+  return {
+    url,
+    release: () => {
+      if (released) return
+      released = true
+      URL.revokeObjectURL(url)
+    },
+  }
+}
+
 /**
  * The preview of material that arrived as an ordinary complete file.
  *
@@ -136,6 +290,234 @@ async function fileMaterialPreview(
   )
 }
 
+function segmentByAddress(loaded: Loaded): Map<number, SourceSegment> {
+  return new Map(loaded.segments.map((segment) => [segment.at.at, segment]))
+}
+
+const sampleKey = (sample: { source: Located }): string =>
+  `${sample.source.at}:${sample.source.length}`
+
+/** Audio appends retimed by the same kept-packet and common-seam policy as `planPreview`. */
+function monitorAudioSegments(
+  program: PictureProgram,
+  frames: FrameTable,
+  loaded: Loaded,
+): MonitorSegment[] | null {
+  const original = sourceTrackOf({
+    kind: 'audio',
+    initBytes: loaded.initBytes,
+    segments: loaded.segments,
+  })
+  if (!original) return null
+
+  const clock = audioMonitorClock(program, frames, original)
+  const raw = new Map(original.samples.map((sample) => [sampleKey(sample), sample]))
+  const output: MonitorSegment[] = []
+
+  for (const segment of loaded.segments) {
+    const inside = clock.audio.samples
+      .filter(
+        (sample) =>
+          sample.source.at >= segment.at.at &&
+          sample.source.at + sample.source.length <= segment.at.at + segment.at.length,
+      )
+      .sort((a, b) => a.dts - b.dts || a.pts - b.pts)
+    if (!inside.length) continue
+
+    const groups: typeof inside[] = []
+    for (const sample of inside) {
+      const originalSample = raw.get(sampleKey(sample))
+      if (!originalSample) continue
+      const correction = sample.pts - originalSample.pts
+      const last = groups[groups.length - 1]
+      const previous = last?.[last.length - 1]
+      const previousRaw = previous ? raw.get(sampleKey(previous)) : undefined
+      const previousCorrection = previous && previousRaw ? previous.pts - previousRaw.pts : correction
+      const time = (sample.pts - clock.audio.editOffset) / clock.audio.timescale
+      const previousTime = previous
+        ? (previous.pts - clock.audio.editOffset) / clock.audio.timescale
+        : time
+      if (
+        !last ||
+        !previous ||
+        sample.dts > previous.dts + previous.duration ||
+        correction !== previousCorrection ||
+        clock.shiftAt(time) !== clock.shiftAt(previousTime)
+      ) groups.push([sample])
+      else last.push(sample)
+    }
+
+    for (const group of groups) {
+      const first = group[0]!
+      const firstRaw = raw.get(sampleKey(first))!
+      const start = (first.pts - clock.audio.editOffset) / clock.audio.timescale
+      const end = Math.max(
+        ...group.map(
+          (sample) =>
+            (sample.pts + sample.duration - clock.audio.editOffset) / clock.audio.timescale,
+        ),
+      )
+      const shift = clock.shiftAt(start)
+      const window = { start: Math.max(0, start + shift), end: end + shift }
+      if (!(window.end > window.start)) continue
+      output.push({
+        bytes: segment.bytes,
+        timestampOffset:
+          (segment.timestampOffset ?? 0) +
+          (first.pts - firstRaw.pts) / clock.audio.timescale +
+          shift,
+        window,
+      })
+    }
+  }
+
+  return output
+}
+
+/** A monitor of every ABR picture part. Clip indexing remains on `material.video`. */
+async function compositeMonitorPreview(
+  reader: SnapshotReader,
+  material: Material,
+  program: PictureProgram,
+): Promise<Preview | null> {
+  if (typeof MediaSource === 'undefined') return null
+
+  const pictures = [
+    ...new Map(program.parts.map((part) => [part.track.track.id, part.track])).values(),
+  ]
+  const loadedPictures = await Promise.all(
+    pictures.map(async (track) => ({ track, loaded: await load(reader, track, 'video') })),
+  )
+  const loadedByTrack = new Map(
+    loadedPictures.map((entry) => [entry.track.track.id, entry.loaded]),
+  )
+
+  const pictureFrameSources = loadedPictures.flatMap(({ track, loaded }) => {
+    const declared = track.track.info.tracks.find((candidate) => candidate.kind === 'video')
+    if (!declared || !(declared.timescale > 0)) return []
+    return [
+      {
+        trackId: track.track.id,
+        frames: framesOf({
+          init: loaded.initBytes,
+          trackId: declared.trackId,
+          timescale: declared.timescale,
+          segments: loaded.segments.map((segment) => ({
+            bytes: segment.bytes,
+            source: segment.at,
+            ...(segment.timestampOffset
+              ? { decodeTimeOffset: Math.round(segment.timestampOffset * declared.timescale) }
+              : {}),
+          })),
+        }),
+      },
+    ]
+  })
+  const frames = compositeFrames(program, pictureFrameSources)
+  if (!frames.count()) return null
+
+  const pictureParts: MonitorPart[] = []
+  for (const part of program.parts) {
+    const loaded = loadedByTrack.get(part.track.track.id)
+    const mime = loaded ? mimeOf(loaded.initBytes) : null
+    if (!loaded || !mime || !MediaSource.isTypeSupported(mime)) return null
+    const segments = segmentByAddress(loaded)
+    pictureParts.push({
+      mime,
+      initBytes: loaded.initBytes,
+      segments: part.chunks.flatMap((chunk) => {
+        const segment = segments.get(chunk.source.at)
+        return segment
+          ? [{
+              bytes: segment.bytes,
+              timestampOffset:
+                (chunk.timestampOffset ?? 0) + monitorShift(program, chunk.start),
+              window: {
+                start: part.start + monitorShift(program, part.start),
+                end: part.end + monitorShift(program, part.end),
+              },
+            }]
+          : []
+      }),
+    })
+  }
+
+  const streams: MonitorStream[] = [{ parts: pictureParts }]
+  let bytes = loadedPictures.reduce(
+    (sum, entry) =>
+      sum +
+      entry.loaded.initBytes.byteLength +
+      entry.loaded.segments.reduce((track, segment) => track + segment.bytes.byteLength, 0),
+    0,
+  )
+
+  if (material.audio?.span) {
+    const sound = await load(reader, material.audio, 'audio')
+    const mime = mimeOf(sound.initBytes)
+    if (!mime || !MediaSource.isTypeSupported(mime)) return null
+    const segments = monitorAudioSegments(program, frames, sound)
+    if (!segments) return null
+    streams.push({
+      parts: [{
+        mime,
+        initBytes: sound.initBytes,
+        segments,
+      }],
+    })
+    bytes += sound.initBytes.byteLength
+    for (const segment of sound.segments) bytes += segment.bytes.byteLength
+  }
+
+  const last = frames.at(frames.count() - 1)!
+  const duration = last.out + last.duration
+  const consumers = new Set<PreviewConsumer>()
+  const openConsumer = (): PreviewConsumer => {
+    const opened = mediaConsumer(streams, duration)
+    const release = opened.release
+    const tracked: PreviewConsumer = {
+      url: opened.url,
+      release: () => {
+        consumers.delete(tracked)
+        release()
+      },
+    }
+    consumers.add(tracked)
+    return tracked
+  }
+  const primary = openConsumer()
+  const declared = material.video?.track.info.tracks.find((track) => track.kind === 'video')
+  const selectedFrames = pictureFrameSources.find(
+    (source) => source.trackId === material.video?.track.id,
+  )?.frames ?? []
+  const monitorPictures = program.parts.flatMap((part): MonitorPicture[] => {
+    const info = part.track.track.info.tracks.find((track) => track.kind === 'video')
+    return info
+      ? [{
+          trackId: part.track.track.id,
+          representation: part.track.track.representation,
+          start: part.start,
+          end: part.end,
+          codec: info.codec,
+          width: info.width,
+          height: info.height,
+        }]
+      : []
+  })
+
+  return {
+    url: primary.url,
+    bytes,
+    frameSize: { width: declared?.width ?? 0, height: declared?.height ?? 0 },
+    frames,
+    editFrames: FrameTable.of(selectedFrames),
+    monitor: { pictures: monitorPictures },
+    openConsumer,
+    release: () => {
+      for (const consumer of [...consumers]) consumer.release()
+    },
+  }
+}
+
 /**
  * The file the editor plays.
  *
@@ -154,6 +536,13 @@ export async function buildPreview(
 ): Promise<Preview | null> {
   const picture = material.video
   if (!picture?.span) return null
+
+  const program = pictureProgram(material)
+  const pictureTracks = new Set(program.parts.map((part) => part.track.track.id))
+  if (pictureTracks.size > 1) {
+    const composite = await compositeMonitorPreview(reader, material, program)
+    if (composite) return composite
+  }
 
   // Material that was never intercepted, held in the snapshot as the file it came in.
   const whole = picture.track.whole

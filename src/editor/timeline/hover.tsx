@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useReducer, useRef, useState } from 'preact/hooks'
+import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'preact/hooks'
 import { THUMB_WIDTH_PX, tooltipLeft, type Hover } from '../../core/timeline/hover'
 import { formatTimecode } from '../../core/timeline/timecode'
 import { thumbSource, type ThumbSource } from '../player/thumbs'
@@ -29,6 +29,13 @@ export function FramePreview({ preview, hover, widthPx, fps }: FramePreviewProps
   // asks for a repaint; the action is typed `void` so that the bump takes no argument.
   const [, arrived] = useReducer((count: number, _bump: void) => count + 1, 0)
   const [height, setHeight] = useState(Math.round((THUMB_WIDTH_PX * 9) / 16))
+  const wantsConsumer = Boolean(hover && preview.openConsumer)
+  const consumer = useMemo(
+    () => (wantsConsumer ? preview.openConsumer?.() ?? null : null),
+    [preview, wantsConsumer],
+  )
+
+  useLayoutEffect(() => () => consumer?.release(), [consumer])
 
   const table = preview.frames
   const index = hover ? Math.max(0, table.indexAt(hover.time)) : -1
@@ -50,7 +57,7 @@ export function FramePreview({ preview, hover, widthPx, fps }: FramePreviewProps
       made.close()
       source.current = null
     }
-  }, [table])
+  }, [table, consumer])
 
   useEffect(() => {
     if (index >= 0) source.current?.want(index)
@@ -83,17 +90,19 @@ export function FramePreview({ preview, hover, widthPx, fps }: FramePreviewProps
         pointerEvents: 'none',
       }}
     >
-      {/* The element the pictures are taken off. It is never seen and never played, and it is
-          kept mounted so that the cache outlives the pointer leaving the strip. */}
-      <video
-        ref={video}
-        src={preview.url}
-        preload="auto"
-        muted
-        playsInline
-        onLoadedMetadata={measure}
-        style={{ position: 'absolute', width: '1px', height: '1px', opacity: 0 }}
-      />
+      {/* The element the pictures are taken off. It is never seen or played. Blob previews keep
+          it mounted for their cache; a composite opens its second MediaSource only on demand. */}
+      {(consumer || !preview.openConsumer) && (
+        <video
+          ref={video}
+          src={consumer?.url ?? preview.url}
+          preload="auto"
+          muted
+          playsInline
+          onLoadedMetadata={measure}
+          style={{ position: 'absolute', width: '1px', height: '1px', opacity: 0 }}
+        />
+      )}
       <canvas
         ref={canvas}
         width={THUMB_WIDTH_PX}

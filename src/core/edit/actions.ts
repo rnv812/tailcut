@@ -136,9 +136,14 @@ function moveClipTo(project: Project, clip: Clip, time: number, ctx: EditContext
  */
 function startClip(project: Project, edge: 'in' | 'out', ctx: EditContext): Project {
   const at = project.ui.playhead
+  // A composite monitor can show another captured picture while this edit still belongs to one
+  // selected representation. It is viewable, not silently editable with the selected picture's
+  // crop geometry and export source.
+  const atZone = zoneAt(ctx, at)
+  if (!atZone) return project
   const run = runAt(ctx, at) ?? { start: 0, end: ctx.duration }
-  const start = edge === 'in' ? at : run.start
-  const end = edge === 'in' ? run.end : at
+  const start = edge === 'in' ? at : Math.max(run.start, atZone.start)
+  const end = edge === 'in' ? Math.min(run.end, atZone.end) : at
 
   const draft: Clip = {
     id: `c${project.doc.nextId}`,
@@ -152,7 +157,7 @@ function startClip(project: Project, edge: 'in' | 'out', ctx: EditContext): Proj
     }),
     in: start,
     out: end,
-    representation: zoneAt(ctx, start)?.representation ?? '',
+    representation: zoneAt(ctx, start)?.representation ?? atZone.representation,
     sound: true,
     crop: null,
     format: ctx.newClipFormat,

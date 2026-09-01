@@ -84,6 +84,16 @@ describe('marking', () => {
     expect(reduce(standing, { type: 'setIn' }, ctx)).toBe(standing)
   })
 
+  it('does not start a clip while the composite monitor is over another representation', () => {
+    const selectedOnly = {
+      ...ctx,
+      zones: ctx.zones.filter((zone) => zone.representation === '480p'),
+    }
+    const standing = reduce(newProject(1200, selectedOnly), at(7), selectedOnly)
+
+    expect(reduce(standing, { type: 'setIn' }, selectedOnly)).toBe(standing)
+  })
+
   it('I with a clip selected moves its in point and leaves the out alone', () => {
     const project = run([at(1), { type: 'setIn' }, at(2), { type: 'setIn' }])
 

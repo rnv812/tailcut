@@ -421,6 +421,36 @@ describe('planPreview', () => {
     expect(watched.samples.map((sample) => sample.dts)).toEqual([0, 100, 200, 1000, 1100, 1200])
   })
 
+  it('aligns a sound run that resumes less than two picture frames after the picture', () => {
+    const video = madeTrack('video', 1000, 100, [
+      { at: 0, count: 3 },
+      { at: 1000, count: 3 },
+    ])
+    const audio = madeTrack('audio', 1000, 20, [
+      { at: 0, count: 15 },
+      { at: 1180, count: 15 },
+    ])
+    const watched = soundUnderPicture({ video, audio }).audio!
+
+    expect(watched.samples.slice(15, 18).map((sample) => sample.dts)).toEqual([1000, 1020, 1040])
+  })
+
+  it('aligns each late sound run once when a recording has multiple gaps', () => {
+    const video = madeTrack('video', 1000, 100, [
+      { at: 0, count: 3 },
+      { at: 1000, count: 3 },
+      { at: 2000, count: 3 },
+    ])
+    const audio = madeTrack('audio', 1000, 20, [
+      { at: 0, count: 15 },
+      { at: 1180, count: 15 },
+      { at: 2180, count: 15 },
+    ])
+    const watched = soundUnderPicture({ video, audio }).audio!
+
+    expect([watched.samples[15]!.dts, watched.samples[30]!.dts]).toEqual([1000, 2000])
+  })
+
   it('reproduces the edit the source itself carries', () => {
     const plan = planPreview(whole)
     const video = trackByKind(plan.tracks, 'video')

@@ -4,15 +4,17 @@ import { frameGrid } from '../../core/timeline/grid'
 import {
   allGaps,
   cuttingLane,
+  gapsBetween,
   laneOf,
   lanesOf,
   materialSpan,
   type Lane,
   type Span,
 } from '../../core/timeline/lanes'
+import { continuesRun } from '../../core/timeline/map'
 import { hostOf } from '../../shared/format'
 import { DEFAULTS, type ExportSettings } from '../../shared/settings'
-import type { Preview } from './preview'
+import type { MonitorPicture, Preview } from './preview'
 
 export interface EditorMaterial {
   /** Everything the model needs to know about the material, and nothing it can edit. */
@@ -26,6 +28,40 @@ export interface EditorMaterial {
   gaps: Span[]
   /** The holes of every lane, as targets to stick to: two near edges are two chances to hit. */
   snapGaps: Span[]
+}
+
+/** The picture lane the composite monitor actually owns, after overlapping ABR buffers switch. */
+function monitorLane(pictures: readonly MonitorPicture[]): Lane {
+  const runs: Span[] = []
+  const zones: Lane['zones'] = []
+
+  for (const picture of pictures) {
+    const run = runs[runs.length - 1]
+    if (run && continuesRun(run.end, picture.start)) run.end = Math.max(run.end, picture.end)
+    else runs.push({ start: picture.start, end: picture.end })
+
+    const zone = zones[zones.length - 1]
+    if (
+      zone &&
+      zone.representation === picture.representation &&
+      zone.codec === picture.codec &&
+      zone.width === picture.width &&
+      zone.height === picture.height
+    ) {
+      zone.end = Math.max(zone.end, picture.end)
+    } else {
+      zones.push({
+        start: picture.start,
+        end: picture.end,
+        representation: picture.representation,
+        codec: picture.codec,
+        width: picture.width,
+        height: picture.height,
+      })
+    }
+  }
+
+  return { kind: 'video', runs, gaps: gapsBetween(runs), zones }
 }
 
 /**
@@ -48,36 +84,58 @@ export function deriveMaterial(
   exported?: ExportSettings,
   pictureTrackId?: string,
 ): EditorMaterial {
-  // A frame grid describes one picture track. When the caller names that track, showing another
-  // picture's zones beside it would offer stretches this editor cannot seek or cut until the
-  // representation is opened. Independent sound remains visible beside every picture.
-  const visibleTracks = pictureTrackId
+  // A Blob preview describes one picture track. A composite monitor names the ABR family it can
+  // actually play, so the timeline may show that whole family while edit ownership below stays
+  // on the selected track. Independent sound remains visible beside either shape.
+  const monitorPictures = preview?.monitor?.pictures ?? []
+  const monitorTrackIds = new Set(monitorPictures.map((part) => part.trackId))
+  const visibleTracks = monitorTrackIds.size
     ? index.tracks.filter(
-        (track) => track.id === pictureTrackId || !track.kinds.includes('video'),
+        (track) => monitorTrackIds.has(track.id) || !track.kinds.includes('video'),
       )
-    : index.tracks
-  const lanes = lanesOf(visibleTracks)
+    : pictureTrackId
+      ? index.tracks.filter(
+          (track) => track.id === pictureTrackId || !track.kinds.includes('video'),
+        )
+      : index.tracks
+  const rawLanes = lanesOf(visibleTracks)
+  const lanes = monitorPictures.length
+    ? rawLanes.map((lane) => (lane.kind === 'video' ? monitorLane(monitorPictures) : lane))
+    : rawLanes
   const picture = laneOf(lanes, 'video')
   const rows = preview ? preview.frames.frames() : []
+  const editFrames = preview?.editFrames ?? preview?.frames
+  const editableTrackId = pictureTrackId ?? monitorPictures[0]?.trackId
+  const editableZones = monitorPictures.length
+    ? monitorPictures
+        .filter((part) => part.trackId === editableTrackId)
+        .map(({ representation, start, end, codec, width, height }) => ({
+          representation,
+          start,
+          end,
+          codec,
+          width,
+          height,
+        }))
+    : picture?.zones ?? []
 
-  // This is the one place where the two halves of an EditContext are joined, and they come from
-  // different material on purpose: the grid from the open representation (the only one there are
-  // frames of), the runs, the zones and the length from the whole recording (which is what the
-  // timeline draws). See the note on EditContext for what may and may not be assumed of that.
+  // This is the one place where monitor coverage and edit ownership are joined. The frame grid,
+  // runs and length describe what the visible player can traverse; zones describe only stretches
+  // owned by the selected representation, whose geometry and export source the edit uses.
   const ctx: EditContext = {
     frames: frameGrid({
       pts: Float64Array.from(rows, (frame) => frame.pts),
       durations: Float64Array.from(rows, (frame) => frame.duration),
     }),
-    keyframes: preview ? preview.frames.keyframeTimes() : new Float64Array(),
-    fps: preview ? preview.frames.fps() : 0,
+    keyframes: editFrames ? editFrames.keyframeTimes() : new Float64Array(),
+    fps: editFrames ? editFrames.fps() : 0,
     // The size of the picture the preview holds, which is the size the crop rectangle is drawn
     // over and the size the encoder will be asked for. Nothing else in the snapshot answers this:
     // `index` describes every representation, and a crop is a rectangle of the open one.
     frameSize: preview?.frameSize ?? { width: 0, height: 0 },
     newClipFormat: exported?.format ?? DEFAULTS.export.format,
     runs: picture?.runs ?? [],
-    zones: picture?.zones ?? [],
+    zones: editableZones,
     duration: materialSpan(lanes)?.end ?? 0,
     title: index.page.title,
     nameTemplate: exported?.nameTemplate,

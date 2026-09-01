@@ -80,6 +80,26 @@ const afterEffects = async (): Promise<void> => {
 }
 
 describe('FramePreview', () => {
+  it('opens a MediaSource consumer only while a thumbnail is actually requested', () => {
+    const release = vi.fn()
+    const openConsumer = vi.fn(() => ({ url: 'blob:tailcut/thumbnail', release }))
+    const composite = { ...preview, openConsumer }
+
+    render(<FramePreview preview={composite} hover={null} widthPx={1_000} fps={FPS} />, host)
+
+    expect(openConsumer).not.toHaveBeenCalled()
+    expect(host.querySelector('video')).toBeNull()
+
+    render(<FramePreview preview={composite} hover={{ xPx: 100, time: 1 }} widthPx={1_000} fps={FPS} />, host)
+
+    expect(openConsumer).toHaveBeenCalledOnce()
+    expect(host.querySelector('video')!.getAttribute('src')).toBe('blob:tailcut/thumbnail')
+
+    render(<FramePreview preview={composite} hover={null} widthPx={1_000} fps={FPS} />, host)
+    expect(release).toHaveBeenCalledOnce()
+    expect(host.querySelector('video')).toBeNull()
+  })
+
   it('stays out of the way while the pointer is not over the strip', async () => {
     let taken = 0
     vi.stubGlobal('createImageBitmap', async () => {

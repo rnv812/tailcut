@@ -534,6 +534,9 @@ function OpenWorkbench({
   }, [shuttle, store])
 
   const page = reader.index.page
+  const shownDuration = built?.monitor
+    ? derived.ctx.runs.reduce((seconds, run) => seconds + run.end - run.start, 0)
+    : material.duration
   const monitorControls = () => (
     <>
       <button
@@ -581,7 +584,7 @@ function OpenWorkbench({
             {HOST(page.url)}
           </div>
           <div class="meta">
-            <span data-testid="duration">{duration(material.duration)}</span>
+            <span data-testid="duration">{duration(shownDuration)}</span>
             <span class="muted" data-testid="bytes">
               {formatBytes(material.bytes)}
             </span>

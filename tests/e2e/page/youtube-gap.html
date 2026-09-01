@@ -1,0 +1,63 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta
+  http-equiv="Content-Security-Policy"
+  content="default-src 'self'; frame-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; media-src blob:"
+/>
+<title>YouTube-shaped player with a gap</title>
+<video controls muted width="640" style="background: #000"></video>
+<script>
+  const video = document.querySelector('video')
+  const mediaSource = new MediaSource()
+  const soundShift = Number(new URLSearchParams(location.search).get('soundShift') ?? 0)
+  video.src = URL.createObjectURL(mediaSource)
+
+  window.allAppended = false
+  window.failure = null
+
+  const append = (sourceBuffer, bytes) =>
+    new Promise((resolve, reject) => {
+      sourceBuffer.addEventListener('updateend', resolve, { once: true })
+      sourceBuffer.addEventListener('error', () => reject(new Error('appendBuffer failed')), {
+        once: true,
+      })
+      sourceBuffer.appendBuffer(bytes)
+    })
+  const bytes = async (url) => (await fetch(url)).arrayBuffer()
+
+  mediaSource.addEventListener('sourceopen', async () => {
+    try {
+      const picture = mediaSource.addSourceBuffer('video/mp4; codecs="av01.0.00M.08"')
+      const sound = mediaSource.addSourceBuffer('audio/webm; codecs="opus"')
+
+      await append(picture, await bytes('/fixtures/av1/init-stream0.m4s'))
+      await append(sound, await bytes('/fixtures/webm/init-stream1.webm'))
+
+      // Picture segments one and three. The tail of Opus can start slightly before or after the
+      // picture tail, as separate YouTube SourceBuffers do around a seek. An early tail is audio
+      // prefetched before the first resumed picture; a late tail arrives after that picture.
+      for (const n of ['00001', '00003']) {
+        await append(picture, await bytes(`/fixtures/av1/chunk-stream0-${n}.m4s`))
+      }
+      await append(sound, await bytes('/fixtures/webm/chunk-stream1-00001.webm'))
+      sound.timestampOffset = soundShift
+      await append(sound, await bytes('/fixtures/webm/chunk-stream1-00003.webm'))
+      await append(sound, await bytes('/fixtures/webm/chunk-stream1-00004.webm'))
+
+      mediaSource.endOfStream()
+      window.allAppended = true
+    } catch (error) {
+      window.failure = String(error)
+    }
+  })
+
+  // Playback stalls at the first missing range unless the player seeks over it. YouTube performs
+  // the same seek itself; doing it here lets triage observe enough watched time to retain the run.
+  const crossGap = () => {
+    if (video.currentTime >= 1.85 && video.currentTime < 4 + Math.max(0, soundShift)) {
+      video.currentTime = 4 + Math.max(0, soundShift)
+    }
+  }
+  video.addEventListener('timeupdate', crossGap)
+  video.addEventListener('waiting', crossGap)
+</script>

@@ -10,35 +10,31 @@ import type { ViewBounds } from '../timeline/view'
  * would double the memory of the tab for nothing. Everything in it is plain data, so the whole
  * model is testable from a dozen numbers.
  *
- * **Two different sets of material live in here, and the split is deliberate.** `frames`,
- * `keyframes` and `fps` describe the **open representation** — the one `materialOf` chose and
- * `buildPreview` assembled, the only one there are frames of. `runs`, `zones` and `duration`
- * describe the **whole recording**, every representation of it, because that is what the
- * timeline draws and what the inspector counts: a page that dropped to 480p for a minute did
- * record that minute, and hiding it would be a lie about the recording.
+ * **Two different sets of material live in here, and the split is deliberate.** `frames`, `runs`
+ * and `duration` describe the visible monitor. Usually that is one representation; an ABR
+ * composite can traverse every representation that belonged to the same SourceBuffer.
+ * `keyframes`, `fps`, `frameSize` and `zones` describe only the selected representation, because
+ * its bytes and geometry are the only source an edit may export.
  *
- * The consequences are named rather than discovered. `ctx.duration` can be longer than anything
- * the preview can show. `zoneAt`/`runAt` can answer about a stretch the playhead cannot reach —
- * `seek` quantises onto `frames`, so it never lands there, and `normalizeClip` clamps a clip
- * into its own zone, so a clip cannot be stretched across it either. `startClip` may take a
- * `run.end` from beyond the open representation; `normalizeClip` pulls it back the same way.
- * Nothing downstream is allowed to assume the two sets agree, and no field is quietly
- * reinterpreted to make them.
+ * The consequences are named rather than discovered. A composite playhead can stand on a frame
+ * owned by another representation while `zoneAt` answers nothing. That stretch is viewable, not
+ * editable. `startClip` refuses it, and normalization keeps every existing clip inside one of the
+ * selected representation's zones. Nothing downstream may infer edit ownership from a frame.
  */
 export interface EditContext {
-  /** Frame boundaries of the **open representation**, ascending (see timeline/grid.ts). */
+  /** Frame boundaries of the visible monitor, ascending (see timeline/grid.ts). */
   frames: Float64Array
-  /** Times of the sync samples: `FrameTable.keyframeTimes()`. Snapping reads it. */
+  /** Times of the selected representation's sync samples. Copy-boundary checks read it. */
   keyframes: Float64Array
-  /** Frames a second of the open representation. */
+  /** Frames a second in the selected representation, used for export geometry and timecodes. */
   fps: number
   /**
-   * Coded size of the **open representation**: what a crop is a rectangle of.
+   * Coded size of the **selected representation**: what a crop is a rectangle of.
    *
-   * Beside `frames`, `keyframes` and `fps` rather than beside `duration`, and for the same reason
-   * they are: it describes the one representation there are frames of, not the whole recording.
-   * Where it comes from is `deriveMaterial`, off the file the player is playing — see the next
-   * step, and see why a zero here would be a crop that silently collapses to nothing.
+   * Beside `keyframes` and `fps` rather than beside `duration`, because all three describe the
+   * source an edit exports, not every picture the monitor can show. Where it comes from is
+   * `deriveMaterial`, off the selected picture — see why a zero here would be a crop that silently
+   * collapses to nothing.
    */
   frameSize: { width: number; height: number }
   /**
@@ -49,11 +45,11 @@ export interface EditContext {
    * setting that does nothing. When absent, it defaults to `'mp4'`.
    */
   newClipFormat: ExportFormat
-  /** Continuous stretches of the picture across **all** representations, in time order. */
+  /** Continuous stretches the visible monitor can play, in time order. */
   runs: Span[]
-  /** Quality zones of the picture across **all** representations, in time order. */
+  /** Editable stretches owned by the selected representation, in time order. */
   zones: Zone[]
-  /** End of the whole recording, seconds — not of the open representation. */
+  /** End of the visible monitor, in seconds. */
   duration: number
   /** Title of the page: clips are named after it. */
   title: string

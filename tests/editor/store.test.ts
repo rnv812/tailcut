@@ -174,6 +174,95 @@ describe('deriveMaterial', () => {
     ])
   })
 
+  it('shows the whole ABR monitor but makes only the selected representation editable', () => {
+    const low = {
+      ...source.tracks[0]!,
+      id: 'low',
+      bufferId: 'abr-picture',
+      representation: 'video:avc1:640x480:low',
+      chunks: [
+        { start: 0, end: 3, bytes: new Uint8Array(8) },
+        { start: 4, end: 6, bytes: new Uint8Array(8) },
+      ],
+    }
+    const high = {
+      ...source.tracks[0]!,
+      id: 'high',
+      bufferId: 'abr-picture',
+      representation: 'video:avc1:1280x720:high',
+      chunks: [{ start: 2, end: 5, bytes: new Uint8Array(8) }],
+    }
+    const abrIndex = planSnapshot(
+      { page: source.page, tracks: [low, high, source.tracks[1]!] },
+      { id: 'abr', capturedAt: 0, producer: 'test' },
+    ).index
+    const monitorFps = 50
+    const frames = Array.from({ length: 6 * monitorFps }, (_, at): Frame => ({
+      pts: at / monitorFps,
+      out: at / monitorFps,
+      duration: 1 / monitorFps,
+      sync: at % monitorFps === 0,
+      source: { at: 0, length: 1 },
+    }))
+    const selectedFrames = FrameTable.of(
+      [0, 4].flatMap((from) =>
+        Array.from({ length: 2 * FPS }, (_, at): Frame => ({
+          pts: from + at / FPS,
+          out: from + at / FPS,
+          duration: 1 / FPS,
+          sync: at === 0,
+          source: { at: 0, length: 1 },
+        })),
+      ),
+    )
+    const composite = {
+      ...preview,
+      frames: FrameTable.of(frames),
+      editFrames: selectedFrames,
+      monitor: {
+        pictures: [
+          { trackId: 'low', representation: low.representation, start: 0, end: 2, codec: 'avc1', width: 640, height: 480 },
+          { trackId: 'high', representation: high.representation, start: 2, end: 4, codec: 'avc1', width: 1280, height: 720 },
+          { trackId: 'low', representation: low.representation, start: 4, end: 6, codec: 'avc1', width: 640, height: 480 },
+        ],
+      },
+    } as Preview & {
+      editFrames: FrameTable
+      monitor: { pictures: Array<{ trackId: string; representation: string; start: number; end: number; codec: string; width: number; height: number }> }
+    }
+
+    const { ctx, lanes } = deriveMaterial(abrIndex, composite, undefined, 'low')
+
+    expect(lanes.find((lane) => lane.kind === 'video')!.runs).toEqual([{ start: 0, end: 6 }])
+    expect(
+      lanes.find((lane) => lane.kind === 'video')!.zones.map(({ start, end, representation }) => [
+        start,
+        end,
+        representation,
+      ]),
+    ).toEqual([
+      [0, 2, low.representation],
+      [2, 4, high.representation],
+      [4, 6, low.representation],
+    ])
+    expect(ctx.fps).toBe(FPS)
+    expect(ctx.keyframes).toEqual(selectedFrames.keyframeTimes())
+    expect(ctx.zones.map(({ start, end, representation }) => [start, end, representation])).toEqual([
+      [0, 2, low.representation],
+      [4, 6, low.representation],
+    ])
+
+    const middle = reduce(newProject(1_000, ctx), { type: 'seek', time: 3 }, ctx)
+    expect(reduce(middle, { type: 'setIn' }, ctx)).toBe(middle)
+
+    const returned = reduce(newProject(1_000, ctx), { type: 'seek', time: 4.5 }, ctx)
+    const clipped = reduce(returned, { type: 'setOut' }, ctx)
+    expect(clipped.doc.clips[0]).toMatchObject({
+      in: 4,
+      representation: low.representation,
+    })
+  })
+
   /**
    * Delivery, not source. What `frameSize` is measured from is the preview's own video track,
    * and that is proven where a preview is really assembled — `tests/editor/preview.test.ts`.

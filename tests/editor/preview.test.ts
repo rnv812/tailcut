@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { buildPreview } from '../../src/editor/source/preview'
 import { planSnapshot, type SnapshotSource } from '../../src/core/snapshot/build'
@@ -14,6 +14,8 @@ const read = (path: string): Uint8Array => new Uint8Array(readFileSync(`tests/fi
 /** Video of the fixture: 320×240, 24 fps, 48 frames and two seconds in each segment. */
 const INIT = read('h264/init-stream0.m4s')
 const SEGMENTS = [1, 2, 3].map((n) => read(`h264/chunk-stream0-0000${n}.m4s`))
+const AUDIO_INIT = read('h264/init-stream1.m4s')
+const AUDIO_SEGMENTS = [1, 2, 3, 4].map((n) => read(`h264/chunk-stream1-0000${n}.m4s`))
 const FPS = 24
 const PER_SEGMENT = 48
 
@@ -186,6 +188,141 @@ const preview = async (indexes: number[]) => {
 }
 
 describe('buildPreview', () => {
+  it('gives the visible player and thumbnail separate MediaSource consumers for ABR material', async () => {
+    const mimes: string[] = []
+    const windows: Array<{ mime: string; start: number; end: number; offset: number }> = []
+    class FakeSourceBuffer extends EventTarget {
+      timestampOffset = 0
+      appendWindowStart = 0
+      appendWindowEnd = Number.POSITIVE_INFINITY
+
+      constructor(private readonly mime: string) {
+        super()
+      }
+
+      appendBuffer(): void {
+        windows.push({
+          mime: this.mime,
+          start: this.appendWindowStart,
+          end: this.appendWindowEnd,
+          offset: this.timestampOffset,
+        })
+        queueMicrotask(() => this.dispatchEvent(new Event('updateend')))
+      }
+
+      changeType(): void {}
+    }
+
+    class FakeMediaSource extends EventTarget {
+      static isTypeSupported(): boolean {
+        return true
+      }
+
+      readyState: ReadyState = 'open'
+      duration = Number.NaN
+
+      constructor() {
+        super()
+        queueMicrotask(() => this.dispatchEvent(new Event('sourceopen')))
+      }
+
+      addSourceBuffer(mime: string): SourceBuffer {
+        mimes.push(mime)
+        return new FakeSourceBuffer(mime) as unknown as SourceBuffer
+      }
+
+      endOfStream(): void {
+        this.readyState = 'ended'
+      }
+    }
+
+    vi.stubGlobal('MediaSource', FakeMediaSource)
+    let nextUrl = 0
+    const create = vi.spyOn(URL, 'createObjectURL').mockImplementation(
+      () => `blob:tailcut/composite-${++nextUrl}`,
+    )
+    const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+
+    try {
+      const reader = await snapshotFrom({
+        page,
+        tracks: [
+          {
+            id: 'low',
+            bufferId: 'low-buffer',
+            representation: 'video:avc1.4d401e:320x240:low',
+            kinds: ['video'],
+            info: parseInit(INIT)!,
+            initBytes: INIT,
+            chunks: [{ start: 0, end: 2, bytes: SEGMENTS[0]! }],
+          },
+          {
+            id: 'high',
+            // A second init on the same SourceBuffer is the ABR switch this monitor joins.
+            bufferId: 'low-buffer',
+            representation: 'video:avc1.4d401e:320x240:high',
+            kinds: ['video'],
+            info: parseInit(INIT)!,
+            initBytes: INIT,
+            chunks: [{ start: 4, end: 6, bytes: SEGMENTS[2]! }],
+          },
+          {
+            id: 'sound',
+            bufferId: 'sound-buffer',
+            representation: 'audio:mp4a.40.2',
+            kinds: ['audio'],
+            info: parseInit(AUDIO_INIT)!,
+            initBytes: AUDIO_INIT,
+            chunks: AUDIO_SEGMENTS.map((bytes, at) => ({
+              start: at * 2,
+              end: at * 2 + 2,
+              bytes,
+            })),
+          },
+        ],
+      })
+
+      const built = (await buildPreview(reader, materialOf(reader.index)))!
+      const thumbnail = built.openConsumer!()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+
+      expect(built.frames.count()).toBe(2 * PER_SEGMENT)
+      expect(built.openConsumer).toBeTypeOf('function')
+      expect(thumbnail.url).not.toBe(built.url)
+      expect(create).toHaveBeenCalledTimes(2)
+      expect(mimes).toEqual([
+        'video/mp4; codecs="avc1.4d400d"',
+        'audio/mp4; codecs="mp4a.40.2"',
+        'video/mp4; codecs="avc1.4d400d"',
+        'audio/mp4; codecs="mp4a.40.2"',
+      ])
+      expect(windows).toContainEqual(expect.objectContaining({ mime: expect.stringMatching(/^video/), start: 0, end: 2 }))
+      expect(windows).toContainEqual(expect.objectContaining({ mime: expect.stringMatching(/^video/), start: 2, end: 4 }))
+      const resumedAudio = windows.find(
+        (append) =>
+          append.mime.startsWith('audio/') &&
+          append.offset < -1.9 &&
+          append.start >= 1.9 &&
+          append.start < 2.1,
+      )
+      expect(
+        resumedAudio,
+        `resumed audio was not pulled by the corrected common A/V seam: ${JSON.stringify(windows)}`,
+      ).toBeDefined()
+      // The sound gap is 1.973696 s, slightly shorter than the two-second picture gap. Pulling by
+      // the picture alone makes every later AAC packet 26 ms early, while the ordinary preview
+      // policy pulls both tracks by the shared 1.973696 s.
+      expect(resumedAudio!.offset).toBeCloseTo(-1.9736961451, 6)
+
+      thumbnail.release()
+      built.release()
+      expect(revoke).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.restoreAllMocks()
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('assembles a file out of the whole of the material and counts its frames', async () => {
     const built = await preview([0, 1, 2])
 

@@ -106,4 +106,12 @@
     await append(await fetchBytes(NEXT), picture)
     window.moreAppended = true
   }
+
+  /** Returns to the first representation after the switched stretch, as Twitch ABR does. */
+  window.tcAppendReturn = async () => {
+    picture.timestampOffset = 10
+    await append(await fetchBytes(INIT), picture)
+    await append(await fetchBytes(SEGMENTS[0]), picture)
+    window.returnAppended = true
+  }
 </script>
