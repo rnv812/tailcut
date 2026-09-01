@@ -15,6 +15,3 @@ Suggested manifest mapping:
 Suggested state convention: a lime tail means the buffer contains segments; an empty buffer is
 mono; unavailable is disabled. Sizes from 16-32 px use compact geometry with a wider cut and
 larger tail.
-
-README.md:
-  <img src="assets/tailcut/svg/lockup-dark.svg" alt="TailCut">
