@@ -1,0 +1,49 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>worker sequence player</title>
+<video controls muted width="640" style="background: #000"></video>
+<script>
+  const WORKER = `
+    self.addEventListener('message', (event) => {
+      if (!event.data || event.data.type !== 'play') return
+      const source = new MediaSource()
+      const handle = source.handle
+      self.postMessage({ type: 'handle', handle }, [handle])
+
+      source.addEventListener('sourceopen', async () => {
+        const buffer = source.addSourceBuffer('video/mp4; codecs="avc1.4d401e"')
+        buffer.mode = 'sequence'
+        const append = (bytes) => new Promise((resolve, reject) => {
+          buffer.addEventListener('updateend', resolve, { once: true })
+          buffer.addEventListener('error', () => reject(new Error('appendBuffer failed')), {
+            once: true,
+          })
+          buffer.appendBuffer(bytes)
+        })
+
+        try {
+          await append(event.data.init)
+          for (let pass = 0; pass < 3; pass++) await append(event.data.segment.slice(0))
+          self.postMessage({ type: 'done' })
+        } catch (error) {
+          self.postMessage({ type: 'failed', error: String(error) })
+        }
+      })
+    })
+  `
+
+  ;(async () => {
+    const [init, segment] = await Promise.all([
+      fetch('/fixtures/h264/init-stream0.m4s').then((response) => response.arrayBuffer()),
+      fetch('/fixtures/h264/chunk-stream0-00001.m4s').then((response) => response.arrayBuffer()),
+    ])
+    const worker = new Worker(URL.createObjectURL(new Blob([WORKER], { type: 'text/javascript' })))
+    const video = document.querySelector('video')
+    worker.addEventListener('message', (event) => {
+      if (event.data.type === 'handle') video.srcObject = event.data.handle
+      if (event.data.type === 'done') window.allAppended = true
+      if (event.data.type === 'failed') window.workerError = event.data.error
+    })
+    worker.postMessage({ type: 'play', init, segment }, [init, segment])
+  })()
+</script>

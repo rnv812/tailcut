@@ -25,6 +25,15 @@ describe('layoutBatch', () => {
     ])
   })
 
+  it('keeps the SourceBuffer placement beside a history part', () => {
+    const shifted = { ...chunk(10, 12, 100, 1), timestampOffset: 10 }
+    const layout = layoutBatch('aaaa-000000.tcm', 1, [
+      { representation: 'video:avc1:1920x1080', chunk: shifted },
+    ])
+
+    expect(layout.piece.parts[0]).toMatchObject({ start: 10, end: 12, timestampOffset: 10 })
+  })
+
   it('places the init segment in front of the material it explains', () => {
     const layout = layoutBatch('aaaa-000000.tcm', 1, video)
     expect(layout.inits).toEqual([{ representation: 'video:avc1:1920x1080', at: 0, length: 8 }])

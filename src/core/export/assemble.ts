@@ -29,6 +29,7 @@ export function assembleMp4(plan: ExportPlan, bytesOf: (at: Located) => Uint8Arr
         sync: sample.sync,
       })),
       skipTicks: track.skipTicks,
+      ...(track.delayTicks === undefined ? {} : { delayTicks: track.delayTicks }),
     })),
   )
 }

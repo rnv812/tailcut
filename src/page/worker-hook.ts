@@ -26,7 +26,14 @@ type FromWorker =
   | { type: 'tc:worker'; sourceId: string }
   | { type: 'tc:handle'; sourceId: string }
   | { type: 'tc:worker-failed'; text: string }
-  | { type: 'tc:append'; sourceId: string; bufferId: string; mime: string; bytes: ArrayBuffer }
+  | {
+      type: 'tc:append'
+      sourceId: string
+      bufferId: string
+      mime: string
+      bytes: ArrayBuffer
+      timestampOffset?: number
+    }
 
 export interface ShimConfig {
   handshake: string
@@ -233,18 +240,58 @@ function workerShim(config: ShimConfig): void {
           bytes = new ArrayBuffer(view.byteLength)
           new Uint8Array(bytes).set(new Uint8Array(view.buffer, view.byteOffset, view.byteLength))
         }
-        queueMicrotask(() => {
-          send(
-            {
-              type: 'tc:append',
-              sourceId: tracked.sourceId,
-              bufferId: tracked.bufferId,
-              mime: tracked.mime,
-              bytes,
-            },
-            [bytes],
-          )
-        })
+        const report = (): void => {
+          let timestampOffset: number | undefined
+          try {
+            const value = this.timestampOffset
+            if (Number.isFinite(value) && value !== 0) timestampOffset = value
+          } catch {
+            // A page-defined accessor must not make appendBuffer fail on the page's behalf.
+          }
+          queueMicrotask(() => {
+            send(
+              {
+                type: 'tc:append',
+                sourceId: tracked.sourceId,
+                bufferId: tracked.bufferId,
+                mime: tracked.mime,
+                bytes,
+                ...(timestampOffset === undefined ? {} : { timestampOffset }),
+              },
+              [bytes],
+            )
+          })
+        }
+
+        let sequence = false
+        try {
+          sequence = this.mode === 'sequence'
+        } catch {
+          // Treat an unreadable page-defined accessor as the ordinary segments mode.
+        }
+        if (sequence) {
+          let listening = false
+          try {
+            this.addEventListener('updateend', report, { once: true })
+            listening = true
+          } catch {
+            // A replaced EventTarget method must not keep the page from appending its segment.
+          }
+          if (listening) {
+            try {
+              return appendBuffer.call(this, data)
+            } catch (cause) {
+              try {
+                this.removeEventListener('updateend', report)
+              } catch {
+                // Preserve the appendBuffer exception rather than cleanup trouble.
+              }
+              throw cause
+            }
+          }
+        }
+
+        report()
       }
 
       return appendBuffer.call(this, data)
@@ -448,6 +495,9 @@ export function installWorkerHook(send: Send): void {
         bufferId: message.bufferId,
         mime: message.mime,
         bytes: message.bytes,
+        ...(message.timestampOffset === undefined
+          ? {}
+          : { timestampOffset: message.timestampOffset }),
       },
       [message.bytes],
     )

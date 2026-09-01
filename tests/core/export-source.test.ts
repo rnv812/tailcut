@@ -287,6 +287,24 @@ describe('sourceTrackOf', () => {
     expect(times).toEqual([...times].sort((a, b) => a - b))
   })
 
+  it('indexes equal raw fragments at their SourceBuffer timestamp offsets', () => {
+    const map = new ByteMap()
+    const first = VIDEO[0]!
+    const second = first.slice()
+    const track = sourceTrackOf({
+      kind: 'video',
+      initBytes: VIDEO_INIT,
+      segments: [
+        { bytes: first, at: map.place(first) },
+        { bytes: second, at: map.place(second), timestampOffset: 2 },
+      ],
+    })!
+
+    expect(track.samples).toHaveLength(96)
+    expect(track.dropped).toBe(0)
+    expect(track.samples[48]!.dts).toBe(2 * track.timescale)
+  })
+
   it('reads a single-track segment whose traf numbers the track its own way', () => {
     // A segment carrying one track is free to number its traf anything: there is only one track
     // it could be about, and packagers do differ from their own init here. Every fixture family

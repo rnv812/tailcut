@@ -3,6 +3,7 @@ import {
   clickEdit,
   collectDownloads,
   decodeFile,
+  frameTimes,
   launchWithExtension,
   probeFile,
   routeLocal,
@@ -137,6 +138,12 @@ async function cutAndExport(
   expect(probed.streams.some((stream) => stream.codec_type === 'video')).toBe(true)
   expect(Number(probed.format.duration)).toBeGreaterThan(1)
   expect(Number(probed.format.duration)).toBeLessThan(4)
+  const pictureTimes = frameTimes(clip!.file, 'v')
+  const soundTimes = frameTimes(clip!.file, 'a')
+  expect(pictureTimes.length).toBeGreaterThan(0)
+  expect(soundTimes.length).toBeGreaterThan(0)
+  expect(Math.abs(pictureTimes[0]! - soundTimes[0]!)).toBeLessThan(0.05)
+  expect(Math.abs(pictureTimes.at(-1)! - soundTimes.at(-1)!)).toBeLessThan(0.1)
   // The fallback name means the title never reached the file: the page had one in both legs.
   expect(clip!.name).not.toBe('tailcut.mp4')
   decodeFile(clip!.file)

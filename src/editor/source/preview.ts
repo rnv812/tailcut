@@ -63,7 +63,13 @@ async function load(
   return {
     kind,
     initBytes,
-    segments: segments.map((bytes, at) => ({ bytes, at: chunks[at]!.source })),
+    segments: segments.map((bytes, at) => ({
+      bytes,
+      at: chunks[at]!.source,
+      ...(chunks[at]!.timestampOffset === undefined
+        ? {}
+        : { timestampOffset: chunks[at]!.timestampOffset }),
+    })),
   }
 }
 
@@ -199,7 +205,13 @@ export async function buildPreview(
           init: loaded[0]!.initBytes,
           trackId: declared.trackId,
           timescale: declared.timescale,
-          segments: loaded[0]!.segments.map((one) => ({ bytes: one.bytes, source: one.at })),
+          segments: loaded[0]!.segments.map((one) => ({
+            bytes: one.bytes,
+            source: one.at,
+            ...(one.timestampOffset
+              ? { decodeTimeOffset: Math.round(one.timestampOffset * declared.timescale) }
+              : {}),
+          })),
         }),
         shown,
       )

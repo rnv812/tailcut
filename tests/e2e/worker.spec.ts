@@ -1,7 +1,14 @@
 import { test, expect, type BrowserContext, type Frame, type Page } from '@playwright/test'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { launchWithExtension, openPopupOn, routeLocal } from './helpers'
+import {
+  clickEdit,
+  exportClipWith,
+  launchWithExtension,
+  openPopupOn,
+  probeFile,
+  routeLocal,
+} from './helpers'
 
 /** A page whose player builds its MediaSource inside a dedicated worker — the shape of twitch. */
 const PAGE_URL = 'https://tailcut.test/worker-player'
@@ -11,6 +18,8 @@ const URL_PAGE = 'https://tailcut.test/url-worker'
 const CSP_PAGE = 'https://tailcut.test/csp-worker'
 /** A page that builds its worker in the first burst of parsing, before any task has run. */
 const EARLY_PAGE = 'https://tailcut.test/worker-early'
+const OFFSET_PAGE = 'https://tailcut.test/worker-offset'
+const SEQUENCE_PAGE = 'https://tailcut.test/worker-sequence'
 /** A worker address of another origin: the browser refuses it, and so must the hook. */
 const FOREIGN_WORKER = 'https://elsewhere.example/js/url-worker.js'
 
@@ -525,4 +534,120 @@ test('the popup lists what was recorded out of a worker', async () => {
   ).toHaveCount(0)
 
   await close(context)
+})
+
+test('the editor keeps worker fragments placed by SourceBuffer timestampOffset continuous', async () => {
+  test.setTimeout(90_000)
+  const { context, page, extensionId, log } = await open(OFFSET_PAGE, 'worker-offset.html')
+  await playerDone(page)
+
+  try {
+    const state = await page.evaluate(() => ({
+      error: (window as unknown as { workerError?: string }).workerError ?? null,
+      buffered: (() => {
+        const video = document.querySelector('video')!
+        return video.buffered.length
+          ? [video.buffered.start(0), video.buffered.end(video.buffered.length - 1)]
+          : null
+      })(),
+    }))
+    expect(state.error, `the worker player failed; console: ${log()}`).toBeNull()
+    expect(state.buffered?.[0]).toBeCloseTo(0, 6)
+    expect(state.buffered?.[1]).toBeCloseTo(6, 5)
+
+    await page.evaluate(() => {
+      const video = document.querySelector('video')!
+      video.loop = true
+      return video.play()
+    })
+    await page.waitForTimeout(7_000)
+
+    const { editor } = await clickEdit(context, page, extensionId)
+    await expect(editor.getByTestId('duration')).toHaveText('0:06')
+    await expect(editor.getByTestId('gaps')).toHaveText('0 gaps')
+    await expect(editor.getByTestId('frame-count')).toHaveText('144')
+    await editor.waitForFunction(() => (document.querySelector('video')?.readyState ?? 0) >= 2)
+
+    await editor.evaluate(() => {
+      const state = window as unknown as { tcOffsetFrameTimes?: number[] }
+      const video = document.querySelector('video')!
+      state.tcOffsetFrameTimes = []
+
+      const collect = (_now: number, metadata: { mediaTime: number }): void => {
+        state.tcOffsetFrameTimes!.push(metadata.mediaTime)
+        if (metadata.mediaTime < 4.5) video.requestVideoFrameCallback(collect)
+      }
+      video.requestVideoFrameCallback(collect)
+    })
+    await editor.getByTestId('play').click()
+    await editor.waitForFunction(
+      () => {
+        const times = (window as unknown as { tcOffsetFrameTimes?: number[] }).tcOffsetFrameTimes
+        return times !== undefined && times.length > 0 && times[times.length - 1]! >= 4.25
+      },
+      undefined,
+      { timeout: 15_000 },
+    )
+
+    const played = await editor.evaluate(
+      () => (window as unknown as { tcOffsetFrameTimes: number[] }).tcOffsetFrameTimes,
+    )
+    expect(played[0]).toBeLessThan(0.5)
+    expect(played.at(-1)).toBeGreaterThanOrEqual(4.25)
+    for (let index = 1; index < played.length; index++) {
+      const step = played[index]! - played[index - 1]!
+      expect(step, `preview moved backwards at frame callback ${index}`).toBeGreaterThanOrEqual(0)
+      expect(step, `preview jumped at frame callback ${index}`).toBeLessThan(0.25)
+    }
+    for (const seam of [2, 4]) {
+      const after = played.findIndex((time) => time >= seam)
+      expect(after, `preview did not play across the ${seam}s seam`).toBeGreaterThan(0)
+      expect(played[after]! - played[after - 1]!, `preview jumped across the ${seam}s seam`).toBeLessThan(
+        0.25,
+      )
+    }
+
+    await editor.getByTestId('play').click()
+    await editor.getByTestId('recording-start').click()
+    await editor.keyboard.press('i')
+    await expect(editor.getByTestId('clip')).toHaveCount(1)
+
+    const exported = probeFile((await exportClipWith(editor)).file)
+    const video = exported.streams.find((stream) => stream.codec_type === 'video')!
+    expect(Number(video.nb_read_frames)).toBe(144)
+    expect(Number(exported.format.duration)).toBeCloseTo(6, 2)
+  } finally {
+    await close(context)
+  }
+})
+
+test('the editor follows SourceBuffer sequence mode placement', async () => {
+  test.setTimeout(45_000)
+  const { context, page, extensionId, log } = await open(SEQUENCE_PAGE, 'worker-sequence.html')
+  await playerDone(page)
+
+  try {
+    const state = await page.evaluate(() => ({
+      error: (window as unknown as { workerError?: string }).workerError ?? null,
+      buffered: (() => {
+        const video = document.querySelector('video')!
+        return video.buffered.length
+          ? [video.buffered.start(0), video.buffered.end(video.buffered.length - 1)]
+          : null
+      })(),
+    }))
+    expect(state.error, `the worker sequence player failed; console: ${log()}`).toBeNull()
+    expect(state.buffered?.[0]).toBeCloseTo(0, 6)
+    expect(state.buffered?.[1]).toBeCloseTo(6, 5)
+
+    await page.evaluate(() => document.querySelector('video')!.play())
+    await page.waitForTimeout(7_000)
+
+    const { editor } = await clickEdit(context, page, extensionId)
+    await expect.soft(editor.getByTestId('duration')).toHaveText('0:06')
+    await expect.soft(editor.getByTestId('gaps')).toHaveText('0 gaps')
+    await expect.soft(editor.getByTestId('frame-count')).toHaveText('144')
+  } finally {
+    await close(context)
+  }
 })

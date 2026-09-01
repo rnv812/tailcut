@@ -29,6 +29,8 @@ export interface SnapshotChunkEntry {
   start: number
   end: number
   data: Located
+  /** SourceBuffer timeline shift in seconds for the raw segment stored at data. */
+  timestampOffset?: number
 }
 
 /** One SourceBuffer of the session: its init segment, its map, its representation. */
@@ -147,8 +149,19 @@ const isTrack = (value: unknown): boolean => {
   if (track.whole !== undefined && !isLocated(track.whole)) return false
 
   return track.chunks.every((chunk: unknown) => {
-    const entry = chunk as { start?: unknown; end?: unknown; data?: unknown }
-    return typeof entry.start === 'number' && typeof entry.end === 'number' && isLocated(entry.data)
+    const entry = chunk as {
+      start?: unknown
+      end?: unknown
+      data?: unknown
+      timestampOffset?: unknown
+    }
+    return (
+      typeof entry.start === 'number' &&
+      typeof entry.end === 'number' &&
+      isLocated(entry.data) &&
+      (entry.timestampOffset === undefined ||
+        (typeof entry.timestampOffset === 'number' && Number.isFinite(entry.timestampOffset)))
+    )
   })
 }
 

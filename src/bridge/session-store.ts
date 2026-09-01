@@ -254,6 +254,8 @@ export interface AppendInput {
   url: string
   title: string
   bytes: Uint8Array
+  /** SourceBuffer timeline shift in seconds when this append was accepted. */
+  timestampOffset?: number
   now: number
   /**
    * The type that SourceBuffer was opened with, as the page spelled it. Only the ingest boundary
@@ -644,6 +646,9 @@ function planCapturedSave(session: Session): SavePlan {
   const material: MuxTrack[] = picked.map((chunks, index) => ({
     initBytes: chosen[index]!.initBytes,
     segments: chunks.map((chunk) => chunk.bytes),
+    ...(chunks.some((chunk) => chunk.timestampOffset !== undefined)
+      ? { timestampOffsets: chunks.map((chunk) => chunk.timestampOffset ?? 0) }
+      : {}),
   }))
 
   let bytes = 0
@@ -718,7 +723,7 @@ export function selectMaterial(session: Session): MuxTrack[] {
  * A chunk out of an ISO BMFF media segment. The bytes travel on as they arrived: a captured
  * segment is already what a saved file is assembled from.
  */
-function isoChunk(track: TrackHeader, bytes: Uint8Array): Chunk | null {
+function isoChunk(track: TrackHeader, bytes: Uint8Array, timestampOffset = 0): Chunk | null {
   // The tracks of the init go with the bytes: a fragment may state nothing about how long its
   // samples last, and then the `trex` this init was read for is the only thing that does.
   const fragment = parseFragment(bytes, track.info.tracks)
@@ -739,8 +744,13 @@ function isoChunk(track: TrackHeader, bytes: Uint8Array): Chunk | null {
   // popup summary. Such a fragment has no time at all.
   if (!(declared.timescale > 0)) return null
 
-  const start = fragment.baseMediaDecodeTime / declared.timescale
-  return { start, end: start + fragment.duration / declared.timescale, bytes }
+  const start = fragment.baseMediaDecodeTime / declared.timescale + timestampOffset
+  return {
+    start,
+    end: start + fragment.duration / declared.timescale,
+    bytes,
+    ...(timestampOffset === 0 ? {} : { timestampOffset }),
+  }
 }
 
 /**
@@ -749,11 +759,20 @@ function isoChunk(track: TrackHeader, bytes: Uint8Array): Chunk | null {
  * the fragment it wrote begins and ends. What lands on the map is the converted bytes; the ones
  * the page appended are of no further use to anybody and are not kept.
  */
-function convertedChunk(convert: SegmentConverter, bytes: Uint8Array): Chunk | null {
+function convertedChunk(
+  convert: SegmentConverter,
+  bytes: Uint8Array,
+  timestampOffset = 0,
+): Chunk | null {
   const converted = convert(bytes)
   if (!converted) return null
 
-  return { start: converted.start, end: converted.end, bytes: converted.bytes }
+  return {
+    start: converted.start + timestampOffset,
+    end: converted.end + timestampOffset,
+    bytes: converted.bytes,
+    ...(timestampOffset === 0 ? {} : { timestampOffset }),
+  }
 }
 
 /** What the page has said about one `<audio>` of its own; see SoundSource in the protocol. */
@@ -1389,7 +1408,13 @@ export class SessionStore {
     const header = representation === undefined ? undefined : source?.headers.get(representation)
     if (!source || !header) return
 
-    const chunk = header.convert ? convertedChunk(header.convert, bytes) : isoChunk(header, bytes)
+    const timestampOffset =
+      typeof input.timestampOffset === 'number' && Number.isFinite(input.timestampOffset)
+        ? input.timestampOffset
+        : 0
+    const chunk = header.convert
+      ? convertedChunk(header.convert, bytes, timestampOffset)
+      : isoChunk(header, bytes, timestampOffset)
     if (!chunk) return
 
     if (this.rejected.has(input.sourceId)) {

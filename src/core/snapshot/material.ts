@@ -57,6 +57,9 @@ export function trackMaterialOf(track: SnapshotTrack): MaterialTrack {
       end: entry.end,
       bytes: NO_BYTES,
       source: entry.data,
+      ...(entry.timestampOffset === undefined
+        ? {}
+        : { timestampOffset: entry.timestampOffset }),
     }
     map.insert(chunk)
     bytes += entry.data.length

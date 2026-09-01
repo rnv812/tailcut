@@ -41,12 +41,41 @@ function workerRealm() {
 
   class FakeSourceBuffer {
     readonly appended: Array<{ digest: string; byteLength: number }> = []
+    timestampOffset = 0
+    mode: AppendMode = 'segments'
+    sequenceOffsetAfterAppend = 0
+    private readonly listeners: Array<{
+      listener: EventListenerOrEventListenerObject
+      once: boolean
+    }> = []
     constructor(readonly mime: string) {}
+    addEventListener(
+      type: string,
+      listener: EventListenerOrEventListenerObject,
+      options?: AddEventListenerOptions | boolean,
+    ): void {
+      if (type !== 'updateend') return
+      this.listeners.push({
+        listener,
+        once: typeof options === 'object' && options.once === true,
+      })
+    }
+    removeEventListener(type: string, listener: EventListenerOrEventListenerObject): void {
+      if (type !== 'updateend') return
+      const at = this.listeners.findIndex((entry) => entry.listener === listener)
+      if (at >= 0) this.listeners.splice(at, 1)
+    }
     appendBuffer(data: BufferSource): void {
       const bytes = ArrayBuffer.isView(data)
         ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
         : new Uint8Array(data)
       this.appended.push({ digest: digest(bytes), byteLength: bytes.byteLength })
+      if (this.mode === 'sequence') this.timestampOffset = this.sequenceOffsetAfterAppend
+      for (const entry of [...this.listeners]) {
+        if (typeof entry.listener === 'function') entry.listener(new Event('updateend'))
+        else entry.listener.handleEvent(new Event('updateend'))
+        if (entry.once) this.removeEventListener('updateend', entry.listener)
+      }
     }
   }
 
@@ -271,6 +300,31 @@ describe('the shim inside the page worker', () => {
       ['w1s1', 'w1b2', MIME],
       ['w1s1', 'w1b3', 'audio/mp4; codecs="mp4a.40.2"'],
     ])
+  })
+
+  it('reports the SourceBuffer timestamp offset used for an append', async () => {
+    const { realm, sent } = connected()
+    const buffer = new realm.MediaSource().addSourceBuffer(MIME)
+
+    buffer.timestampOffset = 12.5
+    buffer.appendBuffer(new Uint8Array([1, 2, 3]))
+    await Promise.resolve()
+
+    const append = sent.find((item) => item.message.type === 'tc:append')!
+    expect(append.message).toMatchObject({ timestampOffset: 12.5 })
+  })
+
+  it('reports the offset sequence mode derives while processing the append', async () => {
+    const { realm, sent } = connected()
+    const buffer = new realm.MediaSource().addSourceBuffer(MIME)
+
+    buffer.mode = 'sequence'
+    buffer.sequenceOffsetAfterAppend = 7.5
+    buffer.appendBuffer(new Uint8Array([1, 2, 3]))
+    await Promise.resolve()
+
+    const append = sent.find((item) => item.message.type === 'tc:append')!
+    expect(append.message).toMatchObject({ timestampOffset: 7.5 })
   })
 
   it('copies the segment before appendBuffer returns, and sends it in a microtask', async () => {

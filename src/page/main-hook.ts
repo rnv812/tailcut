@@ -166,20 +166,64 @@ SourceBuffer.prototype.appendBuffer = function (data: BufferSource): void {
   // segment copy. These are boolean reads beside a WeakMap lookup already performed.
   if (tracked && !refused && !paused) {
     const bytes = copyOf(data)
-    // Send from a microtask so the player's synchronous path stays empty.
-    queueMicrotask(() => {
-      send(
-        {
-          type: 'tc:append',
-          sourceId: tracked.sourceId,
-          bufferId: tracked.bufferId,
-          mime: tracked.mime,
-          bytes,
-        },
-        // Transfer the copy we own to avoid another pass over every segment.
-        [bytes],
-      )
-    })
+    const report = (): void => {
+      // In segments mode MSE uses the value already present at appendBuffer. In sequence mode it
+      // derives a new one while processing the segment, so updateend is the first point where the
+      // effective placement can be read. Capture before the microtask in either case: the page
+      // may change it as soon as its own updateend handler resumes.
+      let timestampOffset: number | undefined
+      try {
+        const value = this.timestampOffset
+        if (Number.isFinite(value) && value !== 0) timestampOffset = value
+      } catch {
+        // A page-defined accessor must not make appendBuffer fail on the page's behalf.
+      }
+      queueMicrotask(() => {
+        send(
+          {
+            type: 'tc:append',
+            sourceId: tracked.sourceId,
+            bufferId: tracked.bufferId,
+            mime: tracked.mime,
+            bytes,
+            ...(timestampOffset === undefined ? {} : { timestampOffset }),
+          },
+          // Transfer the copy we own to avoid another pass over every segment.
+          [bytes],
+        )
+      })
+    }
+
+    let sequence = false
+    try {
+      sequence = this.mode === 'sequence'
+    } catch {
+      // Treat an unreadable page-defined accessor as the ordinary segments mode.
+    }
+
+    if (sequence) {
+      let listening = false
+      try {
+        this.addEventListener('updateend', report, { once: true })
+        listening = true
+      } catch {
+        // A replaced EventTarget method must not keep the page from appending its segment.
+      }
+      if (listening) {
+        try {
+          return originalAppendBuffer.call(this, data)
+        } catch (cause) {
+          try {
+            this.removeEventListener('updateend', report)
+          } catch {
+            // Preserve the appendBuffer exception rather than replacing it with cleanup trouble.
+          }
+          throw cause
+        }
+      }
+    }
+
+    report()
   }
 
   return originalAppendBuffer.call(this, data)

@@ -135,6 +135,18 @@ describe('startWaveform', () => {
     expect(states).toEqual([])
   })
 
+  it('sends each segment with its SourceBuffer timestamp offset', async () => {
+    withDecoder()
+    const shifted = material({ start: 1, end: 6 })
+    shifted.audio!.runs[0]!.chunks[0]!.timestampOffset = 4
+    startWaveform(reader, shifted, () => {}, { workerUrl: 'worker.js' })
+    await settle()
+
+    expect(FakeWorker.made[0]!.posted[0]!.runs[0]!.segments[0]).toMatchObject({
+      timestampOffset: 4,
+    })
+  })
+
   it('takes the slice length from the caller when it is given one', async () => {
     withDecoder()
     startWaveform(reader, material({ start: 1, end: 6 }), () => {}, {

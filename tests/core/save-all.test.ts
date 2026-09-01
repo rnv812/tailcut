@@ -316,6 +316,25 @@ describe('Save all, written as an ordinary mp4', () => {
     expect(digest(...mediaOf(file))).toBe(digest(...H264.video.segments.flatMap(mediaOf)))
   })
 
+  it('keeps segments repeated at distinct SourceBuffer timestamp offsets', () => {
+    const segment = H264.video.segments[0]!
+    const file = onDisk(
+      'save-h264-timestamp-offset.mp4',
+      saveAllMp4([
+        {
+          initBytes: H264.video.init,
+          segments: [segment, segment.slice()],
+          timestampOffsets: [0, 2],
+        },
+      ]),
+    )
+    const saved = probe(file)
+
+    expect(Number(saved.streams[0]!.nb_read_packets)).toBe(96)
+    expect(Number(saved.format.duration)).toBeCloseTo(4, 3)
+    decode(file)
+  })
+
   it('joins every picture run even when sound was buffered through its hole', () => {
     const video = { ...H264.video, segments: [H264.video.segments[0]!, H264.video.segments[2]!] }
     const material = recorded([video, H264.audio])

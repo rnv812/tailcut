@@ -305,7 +305,7 @@ export function Player({
   // A timeline, marker or transport jump changes the controlled index while the element keeps
   // playing. Move the element without restarting it. An index just reported by the element is
   // only the owner reflecting requestVideoFrameCallback back to us and must not seek it again.
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!ready || !playing) return
     if (reportedIndex.current === index) {
       reportedIndex.current = null

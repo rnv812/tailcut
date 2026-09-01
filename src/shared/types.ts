@@ -69,6 +69,8 @@ export interface Chunk {
   start: number
   end: number
   bytes: Uint8Array
+  /** Seconds MSE added to the coded timestamps when this segment was appended. */
+  timestampOffset?: number
 }
 
 /** A continuous stretch with no gaps in it. */

@@ -351,6 +351,8 @@ function readRun(
 export interface PlacedSegment {
   bytes: Uint8Array
   source: Located
+  /** Timeline shift already converted into ticks of the selected track. */
+  decodeTimeOffset?: number
 }
 
 /** A sample addressed in that source rather than in the segment it was found in. */
@@ -452,8 +454,8 @@ export function sampleRunOf(input: SampleRunInput): SampleRun {
           : new Uint8Array(0)
       const fromBitstream = input.syncOf?.(coded)
       arrived.push({
-        dts: sample.dts,
-        pts: sample.pts,
+        dts: sample.dts + (segment.decodeTimeOffset ?? 0),
+        pts: sample.pts + (segment.decodeTimeOffset ?? 0),
         duration: sample.duration,
         sync: fromBitstream ?? sample.sync,
         source: { at: segment.source.at + sample.at, length: sample.size },

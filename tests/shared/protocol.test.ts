@@ -148,6 +148,12 @@ describe('isPageToBridge', () => {
     if (value.type !== 'tc:append') throw new Error('expected tc:append')
     expect(value.bytes.byteLength).toBe(4)
   })
+
+  it('accepts only a finite SourceBuffer timestamp offset', () => {
+    expect(isPageToBridge({ ...append, timestampOffset: 12.5 })).toBe(true)
+    expect(isPageToBridge({ ...append, timestampOffset: Number.POSITIVE_INFINITY })).toBe(false)
+    expect(isPageToBridge({ ...append, timestampOffset: '12.5' })).toBe(false)
+  })
 })
 
 /** Requests of the popup and the service worker to the content script of a tab. */

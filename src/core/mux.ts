@@ -26,6 +26,8 @@ export interface MuxTrack {
   initBytes: Uint8Array
   /** Media segments. Any order: the muxer lays them out by decode time, not by arrival. */
   segments: Uint8Array[]
+  /** SourceBuffer timestamp offset for each segment, in seconds. Missing means all zero. */
+  timestampOffsets?: number[]
 }
 
 /** A moof with everything that belongs to it, marked out inside the segment it arrived in. */

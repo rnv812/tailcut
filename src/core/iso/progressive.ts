@@ -68,6 +68,8 @@ export interface ProgressiveTrack {
    * a shorter clip is a shorter list of samples.
    */
   skipTicks: number
+  /** Silence before this track begins, in ticks of this track. */
+  delayTicks?: number
 }
 
 export interface ProgressiveOptions {
@@ -89,6 +91,7 @@ export interface ProgressiveOptions {
 export function presentationTicks(track: {
   samples: Array<{ duration: number; cts: number }>
   skipTicks: number
+  delayTicks?: number
 }): number {
   let decode = 0
   let end = 0
@@ -98,7 +101,7 @@ export function presentationTicks(track: {
     decode += sample.duration
   }
 
-  return Math.max(0, end - track.skipTicks)
+  return Math.max(0, track.delayTicks ?? 0) + Math.max(0, end - track.skipTicks)
 }
 
 /**
@@ -246,7 +249,7 @@ function trackBox(
 }
 
 /**
- * The edit list: one entry, and only ever one.
+ * The edit list: one media entry, optionally preceded by silence.
  *
  * A list of several was the obvious way to skip over the stretches the viewer never watched, and
  * it was measured and rejected: the picture comes out right and the sound does not — ffmpeg butts
@@ -261,7 +264,24 @@ function trackBox(
  * samples past its out point were never written.
  */
 function editList(track: ProgressiveTrack, span: number): Uint8Array | null {
-  if (track.skipTicks <= 0) return null
+  const delay = Math.max(0, track.delayTicks ?? 0)
+  if (track.skipTicks <= 0 && delay <= 0) return null
+
+  const entries: Uint8Array[] = []
+  if (delay > 0) {
+    entries.push(
+      u64(toMovieTicks(delay, track.timescale)),
+      i64(-1),
+      u16(1, 0),
+    )
+  }
+
+  const mediaSpan = Math.max(0, span - delay)
+  entries.push(
+    u64(toMovieTicks(mediaSpan, track.timescale)),
+    i64(Math.max(0, track.skipTicks)),
+    u16(1, 0),
+  )
 
   return boxOf(
     'edts',
@@ -269,10 +289,8 @@ function editList(track: ProgressiveTrack, span: number): Uint8Array | null {
       'elst',
       1,
       0,
-      u32(1),
-      u64(toMovieTicks(span, track.timescale)), // segment_duration, in ticks of the movie
-      i64(Math.max(0, track.skipTicks)), // media_time, in ticks of the track
-      u16(1, 0), // media_rate_integer, media_rate_fraction
+      u32(delay > 0 ? 2 : 1),
+      ...entries,
     ),
   )
 }

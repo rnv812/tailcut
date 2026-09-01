@@ -78,7 +78,14 @@ export function startWaveform(
     const runs = await Promise.all(
       track.runs.map(async (run) => ({
         start: run.start,
-        segments: (await reader.bytesOfMany(run.chunks.map((chunk) => chunk.source))).map(own),
+        segments: (await reader.bytesOfMany(run.chunks.map((chunk) => chunk.source))).map(
+          (bytes, index) => ({
+            bytes: own(bytes),
+            ...(run.chunks[index]!.timestampOffset === undefined
+              ? {}
+              : { timestampOffset: run.chunks[index]!.timestampOffset }),
+          }),
+        ),
       })),
     )
     if (cancelled) return
@@ -123,7 +130,10 @@ export function startWaveform(
       sliceSeconds: options.sliceSeconds ?? WAVEFORM_SLICE_SECONDS,
       runs,
     }
-    worker.postMessage(request, [request.init, ...runs.flatMap((run) => run.segments)])
+    worker.postMessage(request, [
+      request.init,
+      ...runs.flatMap((run) => run.segments.map((segment) => segment.bytes)),
+    ])
   })()
 
   return {

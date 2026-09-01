@@ -61,6 +61,13 @@ function installPage(options: { eme?: boolean } = {}) {
 
   class FakeSourceBuffer {
     readonly appended: Array<{ byteLength: number; digest: string }> = []
+    timestampOffset = 0
+    mode: AppendMode = 'segments'
+    sequenceOffsetAfterAppend = 0
+    private readonly listeners: Array<{
+      listener: EventListenerOrEventListenerObject
+      once: boolean
+    }> = []
     /**
      * What the browser throws instead of appending. appendBuffer exceptions are normal MSE
      * behavior: QuotaExceededError for a full buffer and InvalidStateError when appending during
@@ -68,9 +75,31 @@ function installPage(options: { eme?: boolean } = {}) {
      */
     failWith: unknown = null
     constructor(readonly mime: string) {}
+    addEventListener(
+      type: string,
+      listener: EventListenerOrEventListenerObject,
+      options?: AddEventListenerOptions | boolean,
+    ): void {
+      if (type !== 'updateend') return
+      this.listeners.push({
+        listener,
+        once: typeof options === 'object' && options.once === true,
+      })
+    }
+    removeEventListener(type: string, listener: EventListenerOrEventListenerObject): void {
+      if (type !== 'updateend') return
+      const at = this.listeners.findIndex((entry) => entry.listener === listener)
+      if (at >= 0) this.listeners.splice(at, 1)
+    }
     appendBuffer(data: BufferSource): void {
       if (this.failWith !== null) throw this.failWith
       this.appended.push(snapshot(data))
+      if (this.mode === 'sequence') this.timestampOffset = this.sequenceOffsetAfterAppend
+      for (const entry of [...this.listeners]) {
+        if (typeof entry.listener === 'function') entry.listener(new Event('updateend'))
+        else entry.listener.handleEvent(new Event('updateend'))
+        if (entry.once) this.removeEventListener('updateend', entry.listener)
+      }
     }
   }
 
@@ -215,6 +244,31 @@ afterEach(() => {
 })
 
 describe('segment copy', () => {
+  it('reports the SourceBuffer timestamp offset used for an append', async () => {
+    const page = installPage()
+    await importHook()
+    const { sourceBuffer } = openSource(page)
+
+    sourceBuffer.timestampOffset = 12.5
+    sourceBuffer.appendBuffer(segment(64))
+    await flush()
+
+    expect(page.of('tc:append')[0]!.message).toMatchObject({ timestampOffset: 12.5 })
+  })
+
+  it('reports the offset sequence mode derives while processing the append', async () => {
+    const page = installPage()
+    await importHook()
+    const { sourceBuffer } = openSource(page)
+
+    sourceBuffer.mode = 'sequence'
+    sourceBuffer.sequenceOffsetAfterAppend = 7.5
+    sourceBuffer.appendBuffer(segment(64))
+    await flush()
+
+    expect(page.of('tc:append')[0]!.message).toMatchObject({ timestampOffset: 7.5 })
+  })
+
   it('does not detach the page buffer so a bare ArrayBuffer can be appended again', async () => {
     const page = installPage()
     await importHook()

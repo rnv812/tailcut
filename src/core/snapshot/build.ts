@@ -88,6 +88,7 @@ export function planSnapshot(source: SnapshotSource, meta: SnapshotMeta): Snapsh
       start: chunk.start,
       end: chunk.end,
       data: whole ?? place(chunk.bytes),
+      ...(chunk.timestampOffset === undefined ? {} : { timestampOffset: chunk.timestampOffset }),
     }))
 
     tracks.push({

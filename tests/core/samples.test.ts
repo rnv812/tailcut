@@ -894,6 +894,21 @@ describe('sampleRunOf', () => {
     expect(ticksOf(run.samples)).toEqual(ticksOf(once.samples))
   })
 
+  it('places equal raw fragments at distinct SourceBuffer decode offsets', () => {
+    const first = placed([videoSegments[0]!])[0]!
+    const second = placed([videoSegments[0]!])[0]!
+    const run = sampleRunOf({
+      segments: [first, { ...second, decodeTimeOffset: 2 * 12_288 }],
+      trackId: 1,
+      kind: 'video',
+      defaults,
+    })
+
+    expect(run.samples).toHaveLength(96)
+    expect(run.dropped).toBe(0)
+    expect(run.samples[48]!.dts).toBe(2 * 12_288)
+  })
+
   it('measures sameness in ticks, where a tolerance in seconds cannot reach', () => {
     // The rule this replaced compared presentation times in seconds and called anything within a
     // microsecond of another the same frame. Nothing says a track is counted in thousandths: on

@@ -724,6 +724,7 @@ function receivePage(data: PageToBridge): void {
       url: pageContext.url,
       title: pageContext.title,
       bytes: new Uint8Array(data.bytes),
+      ...(data.timestampOffset === undefined ? {} : { timestampOffset: data.timestampOffset }),
       now: Date.now(),
     })
 

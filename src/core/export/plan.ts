@@ -78,6 +78,8 @@ export interface PlannedTrack {
    * the tail is gone because those samples are omitted from the output.
    */
   skipTicks: number
+  /** Ticks of silence before this track begins at the clip head. */
+  delayTicks?: number
 }
 
 export interface ExportPlan {
@@ -426,6 +428,7 @@ function planTrack(track: SourceTrack, request: ClipRequest, seams: Seam[]): Pla
     height: track.height,
     samples,
     skipTicks: Math.max(0, enters - head.dts),
+    ...(!video && head.dts > enters ? { delayTicks: head.dts - enters } : {}),
   }
 }
 
@@ -472,7 +475,24 @@ function firstPacket(track: SourceTrack, ticks: number): number {
   for (const [i, sample] of track.samples.entries()) {
     if (sample.dts <= ticks) holding = i
   }
-  return Math.max(0, holding - AUDIO_WARMUP_PACKETS)
+
+  // The requested instant can lie in a recording gap. The last packet before that gap belongs to
+  // the old decoder run; the first packet after it is the earliest sound this clip can carry.
+  const held = track.samples[holding]!
+  const future = track.samples[holding + 1]
+  if (future && ticks >= held.dts + held.duration && future.dts > ticks) holding += 1
+
+  let first = holding
+  for (let count = 0; count < AUDIO_WARMUP_PACKETS && first > 0; count++) {
+    const previous = track.samples[first - 1]!
+    const current = track.samples[first]!
+    // A decoder can use packets immediately in front of the entry point, not packets stranded on
+    // the other side of a missing run. Crossing that discontinuity makes the edit-list skip keep
+    // the whole source-time hole after the plan has already removed it from sample durations.
+    if (current.dts > previous.dts + previous.duration) break
+    first -= 1
+  }
+  return first
 }
 
 /**

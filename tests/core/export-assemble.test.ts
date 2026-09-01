@@ -4,6 +4,7 @@ import { assembleMp4 } from '../../src/core/export/assemble'
 import {
   planClip,
   planPreview,
+  soundUnderPicture,
   type ClipSource,
   type SourceTrack,
 } from '../../src/core/export/plan'
@@ -263,6 +264,79 @@ describe('assembleMp4', () => {
     // recording, then frame 96, with nothing invented in between.
     expect(frameAt(file, 47).equals(frameAt(reference, 47))).toBe(true)
     expect(frameAt(file, 48).equals(frameAt(reference, 96))).toBe(true)
+  })
+
+  it('starts resumed sound after the picture when its first packet is late', () => {
+    const picture = holed.source.video
+    const sourceAudio = holed.source.audio!
+    const pictureResume = picture.samples.find((sample, index, samples) => {
+      const previous = samples[index - 1]
+      return previous !== undefined && sample.dts > previous.dts + previous.duration
+    })!
+    const pictureResumeSeconds =
+      (pictureResume.pts - picture.editOffset) / picture.timescale
+    const soundResumeIndex = sourceAudio.samples.findIndex((sample, index, samples) => {
+      const previous = samples[index - 1]
+      return previous !== undefined && sample.dts > previous.dts + previous.duration
+    })
+    const lateAudio: SourceTrack = {
+      ...sourceAudio,
+      samples: sourceAudio.samples.filter((sample, index) => {
+        if (index < soundResumeIndex) return true
+        return (sample.pts - sourceAudio.editOffset) / sourceAudio.timescale > pictureResumeSeconds
+      }),
+    }
+    const firstResumedSound = lateAudio.samples[soundResumeIndex]!
+    const soundResumeSeconds =
+      (firstResumedSound.pts - lateAudio.editOffset) / lateAudio.timescale
+    const delay = soundResumeSeconds - pictureResumeSeconds
+    const source = soundUnderPicture({ video: picture, audio: lateAudio })
+    const file = writeTemp(
+      'export-late-resumed-sound.mp4',
+      assembleMp4(
+        planClip(source, { in: pictureResumeSeconds, out: 5.5, sound: true }),
+        holed.bytesOf,
+      ),
+    )
+    const streams = probeFile(file).probed!.streams
+    const video = streams.find((stream) => stream.codec_type === 'video')!
+    const audio = streams.find((stream) => stream.codec_type === 'audio')!
+
+    // This fixture's first retained AAC packet begins 17 ms after the resumed video frame. An
+    // empty edit keeps that interval silent. Without it the planner reaches back across the gap,
+    // writes a media-time skip longer than the new run, and ffmpeg exposes no audible frames.
+    expect(delay).toBeCloseTo(0.017052, 6)
+    expect(Number(video.start_time)).toBe(0)
+    expect(Number(audio.start_time)).toBeCloseTo(delay, 5)
+    expect(Number(audio.nb_read_frames)).toBeGreaterThan(0)
+  })
+
+  it('keeps sound aligned when a selected clip starts well after a repaired picture gap', () => {
+    const prefetched = materialOf([1, 3], [1, 2, 3, 4])
+    const picture = prefetched.source.video
+    const resumed = picture.samples.find((sample, index, samples) => {
+      const previous = samples[index - 1]
+      return previous !== undefined && sample.dts > previous.dts + previous.duration
+    })!
+    const resume = (resumed.pts - picture.editOffset) / picture.timescale
+    const file = writeTemp(
+      'export-selected-after-gap.mp4',
+      assembleMp4(
+        planClip(soundUnderPicture(prefetched.source), {
+          in: resume + 0.5,
+          out: resume + 1.5,
+          sound: true,
+        }),
+        prefetched.bytesOf,
+      ),
+    )
+    const streams = probeFile(file).probed!.streams
+    const video = streams.find((stream) => stream.codec_type === 'video')!
+    const audio = streams.find((stream) => stream.codec_type === 'audio')!
+
+    expect(Math.abs(Number(video.start_time) - Number(audio.start_time))).toBeLessThan(1 / 1000)
+    expect(Math.abs(Number(video.duration) - Number(audio.duration))).toBeLessThan(1 / 24)
+    expect(decodeWarnings(file)).toBe('')
   })
 
   it('writes a clip with no sound in it', () => {

@@ -67,6 +67,20 @@ describe('planSnapshot', () => {
     ])
   })
 
+  it('carries SourceBuffer placement metadata into the snapshot index', () => {
+    const shifted: SnapshotSource = {
+      ...source,
+      tracks: [
+        {
+          ...source.tracks[0]!,
+          chunks: [{ ...source.tracks[0]!.chunks[0]!, timestampOffset: 7.5 }],
+        },
+      ],
+    }
+
+    expect(planSnapshot(shifted, META).index.tracks[0]!.chunks[0]!.timestampOffset).toBe(7.5)
+  })
+
   it('has every Located point at exactly the bytes that were put there', () => {
     const plan = planSnapshot(source, META)
     const file = concatBytes(plan.parts)

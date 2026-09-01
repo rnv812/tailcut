@@ -249,6 +249,23 @@ describe('assembleEncoded', () => {
     expect(Number(viewOf(body).getBigInt64(16))).toBe(plannedAudio.skipTicks)
   })
 
+  it('keeps the silent lead of copied sound beside an encoded picture', () => {
+    const delayTicks = 2_205
+    const file = writeTemp(
+      'encode-delayed-sound.mp4',
+      assembleEncoded(picture, {
+        track: { ...plannedAudio, delayTicks },
+        bytesOf,
+      }),
+    )
+    const audio = probeFile(file).probed!.streams.find(
+      (stream) => stream.codec_type === 'audio',
+    )!
+
+    expect(Number(audio.start_time)).toBeCloseTo(delayTicks / plannedAudio.timescale, 6)
+    expect(Number(audio.nb_read_frames)).toBeGreaterThan(0)
+  })
+
   it('states a composition offset that precedes decode, which is the shape an encoder returns', () => {
     // Not hypothetical, and not the copy path's problem. The chunks come back in decode order
     // carrying the source's own presentation times, and `samplesOf` takes the dropped head off

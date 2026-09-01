@@ -8,6 +8,7 @@ import {
   clickEdit,
   collectDownloads,
   exportClipWith,
+  frameTimes,
   launchWithExtension,
   placeCrop,
   placeFullFrameCrop,
@@ -501,7 +502,7 @@ test('decodes VP9 when HLS metadata leaves every sample dependency unknown', asy
   }
 })
 
-test('encodes a clip entirely inside the retained run after a media gap', async () => {
+test('exports a clip from the start of a retained run after a media gap', async () => {
   test.setTimeout(180_000)
   const { context, extensionId } = await launchWithExtension()
   await installDecoderAudit(context)
@@ -533,9 +534,14 @@ test('encodes a clip entirely inside the retained run after a media gap', async 
 
     const { editor } = await clickEdit(context, player, extensionId)
     await editor.waitForFunction(() => (document.querySelector('video')?.readyState ?? 0) >= 2)
-    await typeInto(editor, 'playhead-field', '00:00:04:06')
+    await typeInto(editor, 'playhead-field', '00:00:04:00')
     await editor.keyboard.press('i')
     await typeInto(editor, 'out-c1', '00:00:05:12')
+
+    const copied = await exportClipWith(editor)
+    const copiedSound = frameTimes(copied.file, 'a')
+    expect(copiedSound.length, 'the copy path hid the whole resumed sound run').toBeGreaterThan(0)
+    expect(copiedSound.at(-1)).toBeGreaterThan(1.4)
 
     const saved = await exportClipWith(editor, {
       encode: true,
@@ -565,6 +571,9 @@ test('encodes a clip entirely inside the retained run after a media gap', async 
     // the planned clip, so neither the gap nor its absolute session time reaches WebCodecs.
     expect(Math.max(...audit.chunks.map((chunk) => chunk.timestamp))).toBeLessThan(2_000_000)
     expect(probeFile(saved.file).streams.map((stream) => stream.codec_name)).toEqual(['h264', 'aac'])
+    const encodedSound = frameTimes(saved.file, 'a')
+    expect(encodedSound.length, 'the encode path hid the whole resumed sound run').toBeGreaterThan(0)
+    expect(encodedSound.at(-1)).toBeGreaterThan(1.4)
   } finally {
     await context.close()
   }

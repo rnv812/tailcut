@@ -49,6 +49,8 @@ export interface HistoryPart {
   /** Byte range inside the piece file. */
   at: number
   length: number
+  /** SourceBuffer timeline shift in seconds for the raw segment in this part. */
+  timestampOffset?: number
 }
 
 /** One piece file, as the index remembers it. */
@@ -128,6 +130,9 @@ export function layoutBatch(
       representation: item.representation,
       start: item.chunk.start,
       end: item.chunk.end,
+      ...(item.chunk.timestampOffset === undefined
+        ? {}
+        : { timestampOffset: item.chunk.timestampOffset }),
       ...place(item.chunk.bytes),
     })
     if (item.chunk.end > until) until = item.chunk.end

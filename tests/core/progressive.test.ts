@@ -550,6 +550,23 @@ describe('buildProgressiveMp4', () => {
     expect(findBox(whole, ['moov', 'trak', 'edts'])).toBeNull()
   })
 
+  it('writes an empty edit before material that starts late', () => {
+    const delayTicks = 2_205 // 50 ms at the audio track's 44.1 kHz timescale.
+    const bytes = buildProgressiveMp4([{ ...audio, delayTicks }])
+    const elst = findBox(bytes, ['moov', 'trak', 'edts', 'elst'])!
+    const body = boxBody(bytes, elst)
+    const view = new DataView(body.buffer, body.byteOffset, body.byteLength)
+
+    expect(view.getUint8(0)).toBe(1)
+    expect(view.getUint32(4)).toBe(2)
+    expect(Number(view.getBigUint64(8))).toBe(4_500)
+    expect(Number(view.getBigInt64(16))).toBe(-1)
+    expect(Number(view.getBigInt64(36))).toBe(audio.skipTicks)
+    expect(presentationTicks({ ...audio, delayTicks })).toBe(
+      presentationTicks(audio) + delayTicks,
+    )
+  })
+
   it('states the length of a real cut in every box that carries one', () => {
     // The fixture rebuilt into itself is the one clip where all these numbers agree by accident:
     // both its tracks come out at exactly 540000 ticks of the movie, and its picture hides the

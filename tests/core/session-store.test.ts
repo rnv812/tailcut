@@ -218,6 +218,23 @@ describe('SessionStore', () => {
     expect(track.map.duration()).toBeGreaterThan(3)
   })
 
+  it('places and stores fragments on the SourceBuffer timestamp-offset timeline', () => {
+    const store = new SessionStore()
+    const repeated = moof(1, 0, 2, 12_288)
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: repeated })
+    store.append({ ...page, bytes: repeated.slice(), timestampOffset: 2 })
+
+    const chunks = only(store.list()[0]!).map.runs()[0]!.chunks
+    expect(chunks.map(shapeOf)).toEqual([
+      [0, 2, repeated.byteLength],
+      [2, 4, repeated.byteLength],
+    ])
+    expect(parseFragment(chunks[1]!.bytes)!.baseMediaDecodeTime).toBe(0)
+    expect(chunks[1]!.timestampOffset).toBe(2)
+    expect(selectMaterial(store.list()[0]!)[0]!.timestampOffsets).toEqual([0, 2])
+  })
+
   it('ignores a fragment without an init instead of breaking the parse', () => {
     const store = new SessionStore()
     store.append({ ...page, bytes: seg1 })

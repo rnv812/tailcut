@@ -112,6 +112,18 @@ describe('historyIndexOf', () => {
     ])
   })
 
+  it('restores the SourceBuffer placement from disk into the snapshot index', () => {
+    const shifted: HistoryPiece[] = [
+      {
+        ...pieces[1]!,
+        parts: [{ ...pieces[1]!.parts[0]!, timestampOffset: 4 }],
+      },
+    ]
+
+    const track = historyIndexOf(session, shifted, meta).index.tracks[0]!
+    expect(track.chunks[0]).toMatchObject({ start: 4, end: 6, timestampOffset: 4 })
+  })
+
   it('names the files as stores, in the order their bytes are laid out', () => {
     const composed = historyIndexOf(session, pieces, meta)
     expect(composed.index.stores).toEqual([

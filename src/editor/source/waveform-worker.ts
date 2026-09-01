@@ -26,7 +26,10 @@ export type ToWaveformWorker = {
   /** Seconds of sound to fold before a slice is posted. */
   sliceSeconds: number
   /** One entry per continuous stretch of material, in time order. */
-  runs: Array<{ start: number; segments: ArrayBuffer[] }>
+  runs: Array<{
+    start: number
+    segments: Array<{ bytes: ArrayBuffer; timestampOffset?: number }>
+  }>
 }
 
 export type FromWaveformWorker =
@@ -47,18 +50,21 @@ interface Packet {
 function packetsOf(
   job: ToWaveformWorker,
   defaults: Map<number, SampleDefaults>,
-  run: { segments: ArrayBuffer[] },
+  run: { segments: Array<{ bytes: ArrayBuffer; timestampOffset?: number }> },
 ): Packet[] {
   const packets: Packet[] = []
 
-  for (const buffer of run.segments) {
-    const segment = new Uint8Array(buffer)
+  for (const placed of run.segments) {
+    const segment = new Uint8Array(placed.bytes)
+    const timestampOffset = placed.timestampOffset ?? 0
     for (const track of samplesInSegment(segment, defaults)) {
       if (track.trackId !== job.trackId) continue
       for (const sample of track.samples) {
         packets.push({
           bytes: segment.subarray(sample.at, sample.at + sample.size),
-          timestamp: Math.round((sample.dts / job.timescale) * MICROSECONDS),
+          timestamp: Math.round(
+            (sample.dts / job.timescale + timestampOffset) * MICROSECONDS,
+          ),
           duration: Math.round((sample.duration / job.timescale) * MICROSECONDS),
         })
       }
@@ -82,7 +88,10 @@ async function readRun(
   setup: AudioDecoderSetup,
   job: ToWaveformWorker,
   defaults: Map<number, SampleDefaults>,
-  run: { start: number; segments: ArrayBuffer[] },
+  run: {
+    start: number
+    segments: Array<{ bytes: ArrayBuffer; timestampOffset?: number }>
+  },
   post: (peaks: Peaks) => void,
 ): Promise<void> {
   let builder: PeakBuilder | null = null

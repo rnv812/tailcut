@@ -53,6 +53,9 @@ export function assembleEncoded(
               sync: sample.sync,
             })),
             skipTicks: audio.track.skipTicks,
+            ...(audio.track.delayTicks === undefined
+              ? {}
+              : { delayTicks: audio.track.delayTicks }),
           },
         ]
       : []),

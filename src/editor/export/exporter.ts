@@ -50,7 +50,13 @@ async function inputOf(
   return {
     kind,
     initBytes,
-    segments: segments.map((bytes, at) => ({ bytes, at: chunks[at]!.source })),
+    segments: segments.map((bytes, at) => ({
+      bytes,
+      at: chunks[at]!.source,
+      ...(chunks[at]!.timestampOffset === undefined
+        ? {}
+        : { timestampOffset: chunks[at]!.timestampOffset }),
+    })),
   }
 }
 

@@ -13,7 +13,13 @@ import { ByteMap, clipSourceOf, type SourceTrackInput } from './source'
  * exactly the same segments.
  */
 function inputsOf(track: MuxTrack, map: ByteMap): SourceTrackInput[] {
-  const segments = track.segments.map((bytes) => ({ bytes, at: map.place(bytes) }))
+  const segments = track.segments.map((bytes, index) => ({
+    bytes,
+    at: map.place(bytes),
+    ...(track.timestampOffsets?.[index]
+      ? { timestampOffset: track.timestampOffsets[index] }
+      : {}),
+  }))
   const inputs: SourceTrackInput[] = []
 
   if (videoSampleEntry(track.initBytes)) {

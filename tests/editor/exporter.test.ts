@@ -430,6 +430,35 @@ describe('openClipSource', () => {
     expect(bytes.byteLength).toBe(first.length)
   })
 
+  it('keeps SourceBuffer timestamp offsets on samples used by export', async () => {
+    const repeated = SEGMENTS[0]!
+    const reader = await snapshotFrom({
+      page,
+      tracks: [
+        {
+          ...capturedTrack,
+          chunks: [
+            { start: 0, end: 2, bytes: repeated },
+            { start: 2, end: 4, bytes: repeated.slice(), timestampOffset: 2 },
+          ],
+        },
+      ],
+    })
+    const source = (await openClipSource(reader, materialOf(reader.index)))!
+
+    // Both chunks carry identical raw decode times. The SourceBuffer placed the second at two
+    // seconds, and the snapshot is the only place the editor can recover that fact. Dropping the
+    // offset while opening the export source makes all 48 samples collide with the first chunk;
+    // the overlap filter then erases the entire second half before a clip can be planned from it.
+    expect(source.video.samples).toHaveLength(96)
+    expect(source.video.dropped).toBe(0)
+    expect(source.video.samples[48]!.dts).toBe(2 * source.video.timescale)
+
+    const plan = planOf(source, clip({ in: 2, out: 4 }))
+    expect(plan.duration).toBeCloseTo(2, 6)
+    expect(plan.tracks[0]!.samples[0]!.source).toEqual(source.video.samples[48]!.source)
+  })
+
   it('cuts an ordinary complete file, where there are no fragments to walk', async () => {
     // The material most sites actually deliver. Left to the fragmented path this comes back null,
     // the Export button never leaves its disabled state, and the tab shows a preview of a

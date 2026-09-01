@@ -62,6 +62,7 @@ function pointer(type: string, pointerId = 7): PointerEvent {
 function mount(input: {
   index: number
   endMode: 'stop' | 'loop'
+  playbackRange?: { in: number; out: number }
   playing?: boolean
   volume?: number
   muted?: boolean
@@ -88,7 +89,7 @@ function mount(input: {
       playing={input.playing ?? true}
       rate={1}
       note=""
-      playbackRange={range}
+      playbackRange={input.playbackRange ?? range}
       endMode={input.endMode}
       volume={input.volume ?? 0.75}
       muted={input.muted ?? false}
@@ -460,5 +461,26 @@ describe('Player playback boundary', () => {
     expect(play).toHaveBeenCalledTimes(plays)
     expect(requestFrame).toHaveBeenCalledTimes(requests)
     expect(cancelFrame).not.toHaveBeenCalled()
+  })
+
+  it('does not seek back when a second frame is reported before the first render effect', async () => {
+    const onSeek = vi.fn()
+    const whole = { in: 10, out: 23 }
+    mount({ index: 2, endMode: 'stop', playbackRange: whole, onSeek })
+    await effects()
+    const video = host.querySelector<HTMLVideoElement>('video')!
+
+    video.currentTime = 3
+    fire(3)
+    mount({ index: 3, endMode: 'stop', playbackRange: whole, onSeek })
+
+    // Playback reaches the next frame before the passive controlled-index effect above runs.
+    // A single mutable reported index now names frame four; frame three must still be recognised
+    // as playback feedback instead of seeking the element back across the seam.
+    video.currentTime = 4
+    fire(4)
+    await effects()
+
+    expect(video.currentTime).toBe(4)
   })
 })

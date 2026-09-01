@@ -73,6 +73,13 @@ describe('materialOf', () => {
     expect(chunk!.bytes.byteLength, 'the editor does not load bytes into the map').toBe(0)
   })
 
+  it('restores SourceBuffer placement metadata with the chunk', () => {
+    const index = indexOf([track('t0', 'video', 'video:avc1:640x480', [[8, 10]])])
+    index.tracks[0]!.chunks[0]!.timestampOffset = 8
+
+    expect(materialOf(index).video!.runs[0]!.chunks[0]!.timestampOffset).toBe(8)
+  })
+
   it('finds the picture and the sound by their kinds', () => {
     const index = indexOf([
       track('t0', 'audio', 'audio:mp4a:0x0', [[0, 4]]),

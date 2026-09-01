@@ -10,6 +10,8 @@ import type { Located, TrackKind } from '../../shared/types'
 export interface SourceSegment {
   bytes: Uint8Array
   at: Located
+  /** SourceBuffer timeline shift in seconds for this segment. */
+  timestampOffset?: number
 }
 
 export interface SourceTrackInput {
@@ -47,7 +49,13 @@ export function sourceTrackOf(input: SourceTrackInput): SourceTrack | null {
   // Sample defaults live in the trex of the init, and a packager is free to state them nowhere
   // else. Ours is one of those: the sound it rewrites out of WebM carries no flags in its truns.
   const run = sampleRunOf({
-    segments: input.segments.map((segment) => ({ bytes: segment.bytes, source: segment.at })),
+    segments: input.segments.map((segment) => ({
+      bytes: segment.bytes,
+      source: segment.at,
+      ...(segment.timestampOffset
+        ? { decodeTimeOffset: Math.round(segment.timestampOffset * declared.timescale) }
+        : {}),
+    })),
     trackId: entry.trackId,
     kind: input.kind,
     defaults: trackDefaults(input.initBytes),

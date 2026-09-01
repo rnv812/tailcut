@@ -115,7 +115,12 @@ export function historyIndexOf(
 
   const tracks: SnapshotTrack[] = []
   for (const track of session.tracks) {
-    const chunks: Array<{ start: number; end: number; data: Located }> = []
+    const chunks: Array<{
+      start: number
+      end: number
+      data: Located
+      timestampOffset?: number
+    }> = []
 
     for (const piece of ordered) {
       for (const part of piece.parts) {
@@ -124,6 +129,9 @@ export function historyIndexOf(
           start: part.start,
           end: part.end,
           data: placed(piece.file, part.at, part.length),
+          ...(part.timestampOffset === undefined
+            ? {}
+            : { timestampOffset: part.timestampOffset }),
         })
       }
     }

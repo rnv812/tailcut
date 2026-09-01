@@ -445,13 +445,11 @@ describe('planPreview', () => {
     expect(video.samples[0]!.sync).toBe(true)
   })
 
-  it('hides nothing at the head of a sound that starts after the picture', () => {
+  it('keeps silence at the head of sound that starts after the picture', () => {
     // The preview asks for the picture's own span, and the sound of a recording whose first
     // second of packets never arrived begins a second behind it. The entry point of the sound
     // then lies in front of the packet it enters at, and there is nothing at its head to hide.
-    // A skip below zero is not harmless the way a skip of zero is: no edit list is written
-    // either way, so sync is unhurt, but `presentationTicks` subtracts it — and subtracting a
-    // negative inflates the tkhd, the mvhd and `plan.duration` past the material that is there.
+    // There is no sound to hide, but there is a real second of silence to preserve before it.
     const samples = whole.audio!.samples.filter((sample) => sample.dts >= whole.audio!.timescale)
     const late: ClipSource = { video: whole.video, audio: { ...whole.audio!, samples } }
     const plan = planPreview(late)
@@ -460,10 +458,9 @@ describe('planPreview', () => {
     expect(late.audio!.samples[0]!.dts).toBe(45056) // a second in, to the nearest packet
     expect(audio.samples).toHaveLength(216)
     expect(audio.skipTicks).toBe(0)
-    expect(presentationTicks(audio)).toBe(220568)
-    // Five seconds of packets cannot state six seconds of presentation, whatever the picture
-    // beside them runs for.
-    expect(presentationTicks(audio) / audio.timescale).toBeLessThanOrEqual(plan.duration)
+    expect(audio.delayTicks).toBe(44_032)
+    expect(presentationTicks(audio)).toBe(264600)
+    expect(presentationTicks(audio) / audio.timescale).toBeCloseTo(plan.duration, 9)
   })
 })
 
@@ -617,6 +614,51 @@ describe('planClip', () => {
     // 56149 (1.25 s plus the priming) − 51200 (the dts of the packet four before).
     expect(audio.skipTicks).toBe(4949)
     expect(presentationTicks(audio)).toBe(209475)
+  })
+
+  it('does not take sound warm-up from the run before a recording gap', () => {
+    const sourceAudio = holed.audio!
+    const resumed = sourceAudio.samples.find((sample, index, samples) => {
+      const previous = samples[index - 1]
+      return previous !== undefined && sample.dts > previous.dts + previous.duration
+    })!
+    const audio = trackByKind(
+      planClip(holed, { in: 4, out: 5.5, sound: true }).tracks,
+      'audio',
+    )
+
+    // The requested instant is less than four packets into the resumed run. Walking four packets
+    // back without respecting the discontinuity takes one from the old run, then asks the edit
+    // list to hide the two-second hole. That skip is longer than the planned sound itself, so the
+    // exported clip has no audible presentation even though the editor preview does.
+    expect(audio.samples[0]!.source).toEqual(resumed.source)
+    expect(audio.skipTicks).toBeLessThan(
+      audio.samples.reduce((ticks, sample) => ticks + sample.duration, 0),
+    )
+    expect(presentationTicks(audio)).toBeGreaterThan(0)
+  })
+
+  it('keeps a resumed sound run late when it begins after the resumed picture', () => {
+    const video = madeTrack('video', 1000, 100, [
+      { at: 0, count: 4 },
+      { at: 1000, count: 4 },
+    ])
+    const sourceAudio = madeTrack('audio', 1000, 100, [
+      { at: 0, count: 4 },
+      { at: 1100, count: 4 },
+    ])
+    const audio = trackByKind(
+      planClip({ video, audio: sourceAudio }, { in: 1, out: 1.4, sound: true }).tracks,
+      'audio',
+    )
+
+    // At the clip head the picture has resumed, while the first packet of the new sound run is
+    // still 100 ms away. The packet before the recording gap is not decoder warm-up for that run,
+    // and moving the future packet to movie time zero would put the sound 100 ms early. The plan
+    // therefore names the future run and carries its silent lead for the edit list to state.
+    expect(audio.samples[0]!.source).toEqual(sourceAudio.samples[4]!.source)
+    expect(audio).toMatchObject({ delayTicks: 100 })
+    expect(presentationTicks(audio)).toBe(400)
   })
 
   it('puts both tracks at the same instant at the head', () => {

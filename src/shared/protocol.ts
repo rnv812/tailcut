@@ -89,7 +89,15 @@ export interface EditResult {
 }
 
 export type PageToBridge =
-  | { type: 'tc:append'; sourceId: string; bufferId: string; mime: string; bytes: ArrayBuffer }
+  | {
+      type: 'tc:append'
+      sourceId: string
+      bufferId: string
+      mime: string
+      bytes: ArrayBuffer
+      /** SourceBuffer timeline shift in force when these bytes were appended. */
+      timestampOffset?: number
+    }
   /** objectUrl ties a MediaSource to a particular <video> on the page */
   | { type: 'tc:source'; sourceId: string; objectUrl: string }
   /**
@@ -597,7 +605,9 @@ export function guarding<M extends { type: string }>(checks: Checks<M>) {
 const named = (message: Record<string, unknown>): boolean => typeof message.key === 'string'
 
 export const isPageToBridge = guarding<PageToBridge>({
-  'tc:append': () => true,
+  'tc:append': (message) =>
+    message.timestampOffset === undefined ||
+    (typeof message.timestampOffset === 'number' && Number.isFinite(message.timestampOffset)),
   'tc:source': () => true,
   'tc:worker': () => true,
   'tc:duration': () => true,
