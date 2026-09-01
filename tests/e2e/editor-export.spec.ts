@@ -185,7 +185,13 @@ test('cuts two clips, one of them across a hole, and writes both to disk', async
     const sound = frameTimes(across!, 'a')
     expect(picture).toHaveLength(26)
     expect(sound.length).toBeGreaterThan(0)
-    expect(Number(second.format.duration)).toBeCloseTo(picture[picture.length - 1]! + FRAME, 2)
+    const duration = Number(second.format.duration)
+    const lastPicture = picture.at(-1)!
+    // FFprobe versions disagree on whether the format summary includes the final sample's
+    // duration when an edit list ends on that sample. Both readings must cover its presentation
+    // timestamp, and neither may invent more than the one frame the sample itself occupies.
+    expect(duration).toBeGreaterThanOrEqual(lastPicture - 0.001)
+    expect(duration).toBeLessThanOrEqual(lastPicture + FRAME + 0.001)
 
     // The invariants that outlive the counts. The seam is under a frame and a half — the two
     // seconds that were cut out are gone, not shortened — and the only wider step is the one
