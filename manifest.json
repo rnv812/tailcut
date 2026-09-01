@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "tailcut",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minimum_chrome_version": "120",
   "description": "Turn already-buffered web video into precise MP4 clips or animated WebP",
   "incognito": "split",
