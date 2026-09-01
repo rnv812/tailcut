@@ -302,7 +302,11 @@ function decodableVideo(track: SourceTrack): DecodableTrack {
   let waitingForSync = false
 
   for (const sample of track.samples) {
-    if (previousEnd !== null && sample.dts > previousEnd) waitingForSync = true
+    // Fragment timestamps are integral ticks. A packager that rounds the two sides of a boundary
+    // independently can put the next sample one tick after the previous end without omitting a
+    // coded frame. Twitch does this on a microsecond clock; treating that quantisation as lost
+    // decoder state discarded almost two seconds of predicted frames at every affected GOP.
+    if (previousEnd !== null && sample.dts > previousEnd + 1) waitingForSync = true
     if (!waitingForSync || sample.sync) {
       samples.push(sample)
       waitingForSync = false

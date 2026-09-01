@@ -596,6 +596,25 @@ describe('planClip', () => {
     expect(sources).toContainEqual(secondEntry.source)
   })
 
+  it('keeps a prediction chain across a one-tick segment rounding seam', () => {
+    const duration = 16_683
+    const video = madeTrack('video', 1_000_000, duration, [{ at: 0, count: 4 }])
+    video.samples = video.samples.map((sample, index) => ({
+      ...sample,
+      dts: sample.dts + (index === 0 ? 0 : 1),
+      pts: sample.pts + (index === 0 ? 0 : 1),
+      sync: index === 0 || index === 3,
+    }))
+
+    const planned = trackByKind(planPreview({ video }).tracks, 'video')
+
+    // Twitch's microsecond clock rounds a fragment boundary one tick forward. No coded frame is
+    // missing there, so the two predicted frames before the next IDR remain decodable material.
+    expect(planned.samples.map((sample) => sample.source)).toEqual(
+      video.samples.map((sample) => sample.source),
+    )
+  })
+
   it('drops sound that resumes before the picture can decode after a gap', () => {
     // The second picture run begins at 1.0 s, but its first decodable frame is the sync sample at
     // 1.2 s. Sound resumes at 1.0 s as well. Keeping those first two packets lets them play under

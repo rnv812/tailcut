@@ -50,12 +50,17 @@ test('records and plays a real Twitch stream without timeline jumps', async () =
 
     await editor.evaluate(() => {
       const state = window as unknown as {
-        tcTwitchFrames?: Array<{ wall: number; media: number; current: number }>
+        tcTwitchFrames?: Array<{ wall: number; media: number; current: number; frame: number }>
       }
       const video = document.querySelector('video')!
       state.tcTwitchFrames = []
       const collect = (wall: number, metadata: VideoFrameCallbackMetadata): void => {
-        state.tcTwitchFrames!.push({ wall, media: metadata.mediaTime, current: video.currentTime })
+        state.tcTwitchFrames!.push({
+          wall,
+          media: metadata.mediaTime,
+          current: video.currentTime,
+          frame: Number(document.querySelector('[data-testid="frame"]')?.textContent),
+        })
         if (state.tcTwitchFrames!.length < 600) video.requestVideoFrameCallback(collect)
       }
       video.requestVideoFrameCallback(collect)
@@ -66,17 +71,32 @@ test('records and plays a real Twitch stream without timeline jumps', async () =
     const played = await editor.evaluate(
       () =>
         (window as unknown as {
-          tcTwitchFrames: Array<{ wall: number; media: number; current: number }>
+          tcTwitchFrames: Array<{ wall: number; media: number; current: number; frame: number }>
         }).tcTwitchFrames,
     )
-    const jumps = played.slice(1).flatMap((sample, index) => {
+    const clockJumps = played.slice(1).flatMap((sample, index) => {
       const previous = played[index]!
       const wall = (sample.wall - previous.wall) / 1_000
       const media = sample.media - previous.media
-      return media - wall > 0.15 || media < 0 ? [{ index: index + 1, wall, media }] : []
+      const current = sample.current - previous.current
+      return media - wall > 0.15 || media < 0 || current - wall > 0.15 || current < 0
+        ? [{ index: index + 1, wall, media, current }]
+        : []
     })
-    console.log(`Twitch preview jumps: ${JSON.stringify(jumps.slice(0, 30))}`)
-    expect(jumps).toEqual([])
+    const caretJumps = played.slice(1).flatMap((sample, index) => {
+      const previous = played[index]!
+      const media = sample.media - previous.media
+      const frames = sample.frame - previous.frame
+      // A delayed callback advances both clocks. The original Twitch defect instead advanced the
+      // source-frame caret by almost a GOP while the monitor clock moved less than 250 ms.
+      return Number.isFinite(frames) && frames > 30 && media < 0.25
+        ? [{ index: index + 1, media, frames }]
+        : []
+    })
+    console.log(`Twitch preview clock jumps: ${JSON.stringify(clockJumps.slice(0, 30))}`)
+    console.log(`Twitch preview caret jumps: ${JSON.stringify(caretJumps.slice(0, 30))}`)
+    expect(clockJumps).toEqual([])
+    expect(caretJumps).toEqual([])
   } catch (cause) {
     console.log(`Twitch page console: ${messages.slice(-50).join('\n')}`)
     throw cause
