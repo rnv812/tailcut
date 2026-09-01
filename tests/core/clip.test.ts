@@ -255,12 +255,13 @@ describe('forcesEncoder', () => {
     expect(forcesEncoder(clip(), false, true)).toBe(true)
   })
 
-  it('leaves a clip with none of them on the copying path', () => {
-    // The default clip: no rectangle, an MP4, the coded frames as they are.
+  it('copies only an MP4 whose first kept picture is independently decodable', () => {
+    // The default clip: no rectangle, an MP4, and a sync sample at its first kept picture.
     expect(forcesEncoder(clip(), true, false)).toBe(false)
-    // A start off a key frame is not by itself a reason: without `rewriteHead` the copying path
-    // hides the head with an edit list, which is what stages 2 and 3 have always done.
-    expect(forcesEncoder(clip(), false, false)).toBe(false)
+    // An edit list can hide the run-up in Chrome, but Windows Media Player presents it. Exact
+    // portable output therefore cannot copy an off-keyframe start, even when a legacy settings
+    // record says not to rewrite the head.
+    expect(forcesEncoder(clip(), false, false)).toBe(true)
     // And the setting on its own is not one either, when the clip starts on a key frame.
     expect(forcesEncoder(clip(), true, true)).toBe(false)
   })

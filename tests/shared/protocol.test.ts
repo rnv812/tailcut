@@ -154,6 +154,12 @@ describe('isPageToBridge', () => {
     expect(isPageToBridge({ ...append, timestampOffset: Number.POSITIVE_INFINITY })).toBe(false)
     expect(isPageToBridge({ ...append, timestampOffset: '12.5' })).toBe(false)
   })
+
+  it('accepts only the sequence-mode marker the hook emits', () => {
+    expect(isPageToBridge({ ...append, sequence: true })).toBe(true)
+    expect(isPageToBridge({ ...append, sequence: false })).toBe(false)
+    expect(isPageToBridge({ ...append, sequence: 'sequence' })).toBe(false)
+  })
 })
 
 /** Requests of the popup and the service worker to the content script of a tab. */

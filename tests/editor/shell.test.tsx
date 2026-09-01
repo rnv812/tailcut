@@ -677,11 +677,14 @@ describe('the editor shell', () => {
     await settled()
 
     button('crop-ratio-1:1').click()
-    await until(() => exportHarness.codecCalls.length === 1, 'the crop geometry was not probed')
+    await until(
+      () => exportHarness.codecCalls.some(({ width, height }) => width === 240 && height === 240),
+      'the crop geometry was not probed',
+    )
 
     expect(
       exportHarness.codecCalls.map(({ width, height, framerate }) => `${width}x${height}@${framerate}`),
-    ).toEqual(['240x240@25'])
+    ).toEqual(['320x240@25', '240x240@25'])
   })
 
   it('keeps one pending codec question for the life of the tab', async () => {
@@ -757,7 +760,7 @@ describe('the editor shell', () => {
     expect(button('export-selected').disabled).toBe(false)
   })
 
-  it('normalizes a legacy optimized clip to automatic copy without losing edits', () => {
+  it('normalizes a legacy optimized clip without losing edits or exact-start encoding', () => {
     const legacy = automaticClip({
       id: 'legacy',
       name: 'Legacy',
@@ -771,7 +774,7 @@ describe('the editor shell', () => {
     })
 
     expect(legacy).toMatchObject({ mode: 'original', in: 1, out: 2, crop: null, sound: false })
-    expect(forcesEncoder(legacy, false, false)).toBe(false)
+    expect(forcesEncoder(legacy, false, false)).toBe(true)
   })
 
   it('answers the keyboard from the tab and not from the player', async () => {
@@ -1182,7 +1185,7 @@ describe('the editor shell', () => {
     })
 
     try {
-      show(await cuttable())
+      show({ ...(await cuttable()), preview: previewOf({ width: 320, height: 240 }) })
 
       // The panel is up before the recording has been read, and says which of the two it is
       // waiting on: there is no clip yet, and there is nothing indexed to cut one out of.

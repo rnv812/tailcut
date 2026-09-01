@@ -33,6 +33,7 @@ type FromWorker =
       mime: string
       bytes: ArrayBuffer
       timestampOffset?: number
+      sequence?: true
     }
 
 export interface ShimConfig {
@@ -240,6 +241,7 @@ function workerShim(config: ShimConfig): void {
           bytes = new ArrayBuffer(view.byteLength)
           new Uint8Array(bytes).set(new Uint8Array(view.buffer, view.byteOffset, view.byteLength))
         }
+        let sequence = false
         const report = (): void => {
           let timestampOffset: number | undefined
           try {
@@ -257,13 +259,13 @@ function workerShim(config: ShimConfig): void {
                 mime: tracked.mime,
                 bytes,
                 ...(timestampOffset === undefined ? {} : { timestampOffset }),
+                ...(sequence ? { sequence: true as const } : {}),
               },
               [bytes],
             )
           })
         }
 
-        let sequence = false
         try {
           sequence = this.mode === 'sequence'
         } catch {
@@ -498,6 +500,7 @@ export function installWorkerHook(send: Send): void {
         ...(message.timestampOffset === undefined
           ? {}
           : { timestampOffset: message.timestampOffset }),
+        ...(message.sequence ? { sequence: true as const } : {}),
       },
       [message.bytes],
     )

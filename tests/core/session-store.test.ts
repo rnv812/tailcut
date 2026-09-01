@@ -235,6 +235,44 @@ describe('SessionStore', () => {
     expect(selectMaterial(store.list()[0]!)[0]!.timestampOffsets).toEqual([0, 2])
   })
 
+  it('places every sequence-mode fragment carried by one append', () => {
+    const store = new SessionStore()
+    const repeated = moof(1, 0, 2, 12_288)
+    const twice = new Uint8Array(repeated.byteLength * 2)
+    twice.set(repeated, 0)
+    twice.set(repeated, repeated.byteLength)
+
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: twice, timestampOffset: 2, sequence: true })
+
+    const chunks = only(store.list()[0]!).map.runs()[0]!.chunks
+    expect(chunks.map(shapeOf)).toEqual([
+      [0, 2, repeated.byteLength],
+      [2, 4, repeated.byteLength],
+    ])
+    expect(selectMaterial(store.list()[0]!)[0]!.timestampOffsets).toEqual([0, 2])
+  })
+
+  it('preserves a small source-timestamp gap inside one sequence append', () => {
+    const store = new SessionStore()
+    const first = moof(1, 0, 2, 12_288)
+    const secondStart = 2 * 12_288 + 737
+    const second = moof(1, secondStart, 2, 12_288)
+    const together = new Uint8Array(first.byteLength + second.byteLength)
+    together.set(first, 0)
+    together.set(second, first.byteLength)
+
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: together, sequence: true })
+
+    const chunks = only(store.list()[0]!).map.runs().flatMap((run) => run.chunks)
+    expect(chunks).toHaveLength(2)
+    expect(chunks[0]!.start).toBe(0)
+    expect(chunks[0]!.end).toBe(2)
+    expect(chunks[1]!.start).toBeCloseTo(secondStart / 12_288, 8)
+    expect(chunks[1]!.end).toBeCloseTo(secondStart / 12_288 + 2, 8)
+  })
+
   it('ignores a fragment without an init instead of breaking the parse', () => {
     const store = new SessionStore()
     store.append({ ...page, bytes: seg1 })

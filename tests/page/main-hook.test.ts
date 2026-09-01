@@ -266,7 +266,10 @@ describe('segment copy', () => {
     sourceBuffer.appendBuffer(segment(64))
     await flush()
 
-    expect(page.of('tc:append')[0]!.message).toMatchObject({ timestampOffset: 7.5 })
+    expect(page.of('tc:append')[0]!.message).toMatchObject({
+      timestampOffset: 7.5,
+      sequence: true,
+    })
   })
 
   it('does not detach the page buffer so a bare ArrayBuffer can be appended again', async () => {

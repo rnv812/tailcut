@@ -178,8 +178,18 @@ const clip = (over: Partial<Clip> = {}): Clip => ({
   ...over,
 })
 
-const requests = (source: Parameters<typeof requestsFor>[0], clips: readonly Clip[]) =>
-  requestsFor(source, clips, EMPTY_CONTEXT, new Map(), false)
+const requests = (source: Parameters<typeof requestsFor>[0], clips: readonly Clip[]) => {
+  // These tests hold naming, reading and copy assembly rather than path selection. Declare their
+  // chosen starts as sync samples so the copy premise is explicit under automatic exact starts.
+  const starts = Float64Array.from(clips.map((one) => one.in))
+  return requestsFor(
+    source,
+    clips,
+    { ...EMPTY_CONTEXT, frames: starts, keyframes: starts },
+    new Map(),
+    false,
+  )
+}
 
 const copyPlan = (request: ExportRequest) => {
   if (request.path.kind !== 'copy') throw new Error('the fixture did not take the copy path')
@@ -752,7 +762,14 @@ describe('encodeIo', () => {
     const reader = await fileSnapshot()
     const source = (await openClipSource(reader, materialOf(reader.index)))!
     const ctx = contextOf(source, 10)
-    const request = requestsFor(source, [clip({ in: 0, out: 2 })], ctx, new Map(), false)[0]!
+    const start = ctx.keyframes[0]!
+    const request = requestsFor(
+      source,
+      [clip({ in: start, out: Math.min(ctx.duration, start + 2) })],
+      ctx,
+      new Map(),
+      false,
+    )[0]!
     const read = vi.spyOn(reader, 'bytesOf')
     const fakes = integrationCodecs()
     const makeSurface = vi.fn(integrationSurface)

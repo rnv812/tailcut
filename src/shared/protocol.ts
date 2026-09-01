@@ -97,6 +97,8 @@ export type PageToBridge =
       bytes: ArrayBuffer
       /** SourceBuffer timeline shift in force when these bytes were appended. */
       timestampOffset?: number
+      /** The offset above was derived by MSE sequence mode after processing this append. */
+      sequence?: true
     }
   /** objectUrl ties a MediaSource to a particular <video> on the page */
   | { type: 'tc:source'; sourceId: string; objectUrl: string }
@@ -606,8 +608,9 @@ const named = (message: Record<string, unknown>): boolean => typeof message.key 
 
 export const isPageToBridge = guarding<PageToBridge>({
   'tc:append': (message) =>
-    message.timestampOffset === undefined ||
-    (typeof message.timestampOffset === 'number' && Number.isFinite(message.timestampOffset)),
+    (message.timestampOffset === undefined ||
+      (typeof message.timestampOffset === 'number' && Number.isFinite(message.timestampOffset))) &&
+    (message.sequence === undefined || message.sequence === true),
   'tc:source': () => true,
   'tc:worker': () => true,
   'tc:duration': () => true,

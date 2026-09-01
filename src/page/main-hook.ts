@@ -166,6 +166,7 @@ SourceBuffer.prototype.appendBuffer = function (data: BufferSource): void {
   // segment copy. These are boolean reads beside a WeakMap lookup already performed.
   if (tracked && !refused && !paused) {
     const bytes = copyOf(data)
+    let sequence = false
     const report = (): void => {
       // In segments mode MSE uses the value already present at appendBuffer. In sequence mode it
       // derives a new one while processing the segment, so updateend is the first point where the
@@ -187,6 +188,7 @@ SourceBuffer.prototype.appendBuffer = function (data: BufferSource): void {
             mime: tracked.mime,
             bytes,
             ...(timestampOffset === undefined ? {} : { timestampOffset }),
+            ...(sequence ? { sequence: true as const } : {}),
           },
           // Transfer the copy we own to avoid another pass over every segment.
           [bytes],
@@ -194,7 +196,6 @@ SourceBuffer.prototype.appendBuffer = function (data: BufferSource): void {
       })
     }
 
-    let sequence = false
     try {
       sequence = this.mode === 'sequence'
     } catch {

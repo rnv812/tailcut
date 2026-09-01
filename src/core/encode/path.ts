@@ -33,6 +33,18 @@ export type ClipPath =
 export type BlockedReason = 'no-encoder' | 'no-material'
 
 /**
+ * Whether copying can begin without adding new coded preroll.
+ *
+ * A sync sample is independently decodable. The first picture of the available source is safe
+ * too: copying from there preserves the source's own leading edit instead of inventing another
+ * long edit for an arbitrary cut. This keeps a whole recording on the zero-overhead path while
+ * still encoding a cut made inside a group of pictures for portable playback.
+ */
+export function startsAtCopyBoundary(at: number, ctx: EditContext): boolean {
+  return ctx.keyframes.includes(at) || at === ctx.frames[0]
+}
+
+/**
  * The path, and never null: every clip has an answer, including "nothing here can do this".
  *
  * `ctx.keyframes.includes` — `Float64Array` has `includes`, and exact equality is right here:
@@ -46,7 +58,7 @@ export function pathFor(
   rewriteHead: boolean,
 ): ClipPath {
   const request = { in: clip.in, out: clip.out, sound: clip.sound }
-  const startsOnKeyframe = ctx.keyframes.includes(clip.in)
+  const startsOnKeyframe = startsAtCopyBoundary(clip.in, ctx)
   const watched = soundUnderPicture(source)
 
   if (!forcesEncoder(clip, startsOnKeyframe, rewriteHead)) {

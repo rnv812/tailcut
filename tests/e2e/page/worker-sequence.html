@@ -23,7 +23,14 @@
 
         try {
           await append(event.data.init)
-          for (let pass = 0; pass < 3; pass++) await append(event.data.segment.slice(0))
+          if (event.data.batch) {
+            const twice = new Uint8Array(event.data.segment.byteLength * 2)
+            twice.set(new Uint8Array(event.data.segment), 0)
+            twice.set(new Uint8Array(event.data.segment), event.data.segment.byteLength)
+            await append(twice)
+          } else {
+            for (let pass = 0; pass < 3; pass++) await append(event.data.segment.slice(0))
+          }
           self.postMessage({ type: 'done' })
         } catch (error) {
           self.postMessage({ type: 'failed', error: String(error) })
@@ -44,6 +51,9 @@
       if (event.data.type === 'done') window.allAppended = true
       if (event.data.type === 'failed') window.workerError = event.data.error
     })
-    worker.postMessage({ type: 'play', init, segment }, [init, segment])
+    worker.postMessage(
+      { type: 'play', init, segment, batch: new URL(location.href).searchParams.has('batch') },
+      [init, segment],
+    )
   })()
 </script>

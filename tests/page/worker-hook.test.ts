@@ -324,7 +324,7 @@ describe('the shim inside the page worker', () => {
     await Promise.resolve()
 
     const append = sent.find((item) => item.message.type === 'tc:append')!
-    expect(append.message).toMatchObject({ timestampOffset: 7.5 })
+    expect(append.message).toMatchObject({ timestampOffset: 7.5, sequence: true })
   })
 
   it('copies the segment before appendBuffer returns, and sends it in a microtask', async () => {

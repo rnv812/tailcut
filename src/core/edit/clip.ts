@@ -28,14 +28,17 @@ export interface Clip {
  *
  * Four reasons, and every one of them is a fact about the clip rather than a preference: a crop
  * changes the picture, WebP is not a container the coded frames can be moved into, `optimize` is
- * the request itself, and a start that is not on a sync sample can only be made exact by writing
- * the head again, which the user requests with `rewriteHead` and gets nowhere else.
+ * the request itself, and a start that is not on a sync sample can only be made exact and portable
+ * by encoding. Copying the preceding group and hiding it with an edit list is valid MP4, but both
+ * Chromium and Windows' standard player have been measured presenting that hidden AV1 run-up.
+ * `rewriteHead` remains in the signature while old settings records still carry it; correctness
+ * no longer depends on that obsolete preference.
  */
-export function forcesEncoder(clip: Clip, startsOnKeyframe: boolean, rewriteHead: boolean): boolean {
+export function forcesEncoder(clip: Clip, startsOnKeyframe: boolean, _rewriteHead: boolean): boolean {
   if (clip.crop !== null) return true
   if (clip.format === 'webp') return true
   if (clip.mode === 'optimize') return true
-  return rewriteHead && !startsOnKeyframe
+  return !startsOnKeyframe
 }
 
 export interface Marker {

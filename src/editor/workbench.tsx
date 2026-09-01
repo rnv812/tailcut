@@ -7,7 +7,7 @@ import { chooseCodec, type Choice } from '../core/encode/codec'
 import { geometryOf } from '../core/encode/crop'
 import { estimateFor } from '../core/encode/estimate'
 import { EMPTY_PACE, notePace, type PaceBook } from '../core/encode/pace'
-import { pathFor } from '../core/encode/path'
+import { pathFor, startsAtCopyBoundary } from '../core/encode/path'
 import { planFrames } from '../core/encode/plan'
 import { EMPTY_QUEUE, type Queue } from '../core/export/queue'
 import { createRunner } from '../core/export/run'
@@ -340,7 +340,7 @@ function OpenWorkbench({
     () =>
       new Map(
         exportClips
-          .filter((clip) => forcesEncoder(clip, ctx.keyframes.includes(clip.in), rewriteHead))
+          .filter((clip) => forcesEncoder(clip, startsAtCopyBoundary(clip.in, ctx), rewriteHead))
           .filter((clip) => clip.format !== 'webp')
           .map((clip) => {
             const geometry = geometryOf(clip.crop, ctx.frameSize, ctx.fps)
@@ -357,7 +357,7 @@ function OpenWorkbench({
       selectedForExport.format !== 'webp' &&
       forcesEncoder(
         selectedForExport,
-        ctx.keyframes.includes(selectedForExport.in),
+        startsAtCopyBoundary(selectedForExport.in, ctx),
         rewriteHead,
       ) &&
       !choices.has(

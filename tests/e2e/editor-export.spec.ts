@@ -22,7 +22,8 @@ const FRAME = 1 / FPS
  * The material as it really is — all three segments, including the one the page never appended.
  *
  * This is the yardstick for frame accuracy: what the editor calls second 1.5 of the session has
- * to be, byte for byte, the frame ffmpeg finds at second 1.5 here.
+ * to be the frame ffmpeg finds at second 1.5 here. An arbitrary start is encoded for portable
+ * playback, so comparison below allows compression noise but not a neighbouring frame.
  */
 function reference(): string {
   const parts = [
@@ -43,6 +44,13 @@ function widestStep(times: number[]): number {
   let widest = 0
   for (let i = 1; i < times.length; i++) widest = Math.max(widest, times[i]! - times[i - 1]!)
   return widest
+}
+
+function meanDifference(left: Buffer, right: Buffer): number {
+  expect(left.byteLength).toBe(right.byteLength)
+  let total = 0
+  for (let at = 0; at < left.byteLength; at++) total += Math.abs(left[at]! - right[at]!)
+  return total / left.byteLength
 }
 
 test('cuts two clips, one of them across a hole, and writes both to disk', async () => {
@@ -118,6 +126,19 @@ test('cuts two clips, one of them across a hole, and writes both to disk', async
      * for nothing else; here the second is converted directly to a frame number.
      */
     const sourceFrame = (at: number): Buffer => frameByIndex(source, Math.round(at * FPS))
+    const expectFrame = (file: string, index: number, at: number): void => {
+      const actual = frameByIndex(file, index)
+      const wanted = meanDifference(actual, sourceFrame(at))
+      const neighbour = Math.min(
+        meanDifference(actual, sourceFrame(at - FRAME)),
+        meanDifference(actual, sourceFrame(at + FRAME)),
+      )
+      expect(
+        wanted,
+        `frame ${index}: wanted ${wanted.toFixed(3)}, neighbour ${neighbour.toFixed(3)}`,
+      ).toBeLessThan(neighbour)
+      expect(wanted, `frame ${index} differs by ${wanted.toFixed(3)} channels`).toBeLessThan(15)
+    }
 
     // The clip that lies wholly inside the first run: a second of picture asked for, and its
     // first frame is the frame the user pointed at and not the key frame before it.
@@ -140,10 +161,10 @@ test('cuts two clips, one of them across a hole, and writes both to disk', async
 
     // Frames 12, 35 and 36 of the recording. Checked against the fixture with ffmpeg before it
     // was written down: `eq(n,12)` is the frame the recording shows at second 0.5.
-    expect(frameByIndex(inside!, 0).equals(sourceFrame(0.5))).toBe(true)
-    expect(frameByIndex(inside!, 23).equals(sourceFrame(0.5 + 23 * FRAME))).toBe(true)
+    expectFrame(inside!, 0, 0.5)
+    expectFrame(inside!, 23, 0.5 + 23 * FRAME)
     // The one frame past the out point, named rather than left to be discovered.
-    expect(frameByIndex(inside!, 24).equals(sourceFrame(1.5))).toBe(true)
+    expectFrame(inside!, 24, 1.5)
 
     // The clip across the hole: twelve frames from before it, fourteen from after, and no two
     // seconds of hole between them. The two tracks were pulled back by the smaller of the two
@@ -176,14 +197,14 @@ test('cuts two clips, one of them across a hole, and writes both to disk', async
     expect(sound.at(-1)).toBeGreaterThan(0.9)
 
     // Frames 36 and 47 of the recording — the last twelve before the hole.
-    expect(frameByIndex(across!, 0).equals(sourceFrame(1.5))).toBe(true)
-    expect(frameByIndex(across!, 11).equals(sourceFrame(1.5 + 11 * FRAME))).toBe(true)
+    expectFrame(across!, 0, 1.5)
+    expectFrame(across!, 11, 1.5 + 11 * FRAME)
     // The other side of the seam: frame twelve of the clip is second four of the recording, which
     // is frame 96 — the hole is gone and the numbers on the two sides of it are two seconds apart.
-    expect(frameByIndex(across!, 12).equals(sourceFrame(4))).toBe(true)
-    expect(frameByIndex(across!, 23).equals(sourceFrame(4 + 11 * FRAME))).toBe(true)
+    expectFrame(across!, 12, 4)
+    expectFrame(across!, 23, 4 + 11 * FRAME)
     // And the frame at the out point itself — frame 108 — which is where the extra two came from.
-    expect(frameByIndex(across!, 24).equals(sourceFrame(4.5))).toBe(true)
+    expectFrame(across!, 24, 4.5)
 
     // Read through by a decoder and not only by a parser: material described wrongly gets past
     // the headers and past a frame count, and turns into words on stderr only here.

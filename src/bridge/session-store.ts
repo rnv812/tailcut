@@ -256,6 +256,8 @@ export interface AppendInput {
   bytes: Uint8Array
   /** SourceBuffer timeline shift in seconds when this append was accepted. */
   timestampOffset?: number
+  /** The offset was derived by SourceBuffer sequence mode after processing the append. */
+  sequence?: true
   now: number
   /**
    * The type that SourceBuffer was opened with, as the page spelled it. Only the ingest boundary
@@ -1076,6 +1078,13 @@ export class SessionStore {
     // inside a segment and have to find its place again by the next header — and by then the
     // init segment of that buffer is long past. Where the material goes is settled below, once
     // there is a whole segment to place.
+    const media: Uint8Array[] = []
+    const takeMedia = (): void => {
+      if (media.length === 0) return
+      this.take(input, media)
+      media.length = 0
+    }
+
     for (const unit of this.streamOf(input).push(input.bytes)) {
       // Protection, read out of the segment itself. It is asked before anything else is, because
       // the answer is about the page and not about this stream: what has already been collected
@@ -1086,6 +1095,7 @@ export class SessionStore {
       }
 
       if (unit.kind === 'init') {
+        takeMedia()
         // An init in a container or a codec the ingest boundary will not take opens no track, and
         // the segments behind it then land nowhere. Better that than a track that cannot be saved
         // — but the loss is written down, because a file short of a whole kind of media must not
@@ -1096,8 +1106,9 @@ export class SessionStore {
         continue
       }
 
-      this.take(input, unit.bytes)
+      media.push(unit.bytes)
     }
+    takeMedia()
   }
 
   /**
@@ -1399,7 +1410,7 @@ export class SessionStore {
    * A segment before its init is a normal thing: the page may have started playing before the
    * bridge stood up. There is nowhere to put it, and that is not an error.
    */
-  private take(input: AppendInput, bytes: Uint8Array): void {
+  private take(input: AppendInput, bytes: readonly Uint8Array[]): void {
     const source = this.sources.get(input.sourceId)
     // A buffer whose init never arrived: a second player on the page whose beginning we missed,
     // or a stream in a container the parser does not read. Dumping its segments into a
@@ -1408,15 +1419,54 @@ export class SessionStore {
     const header = representation === undefined ? undefined : source?.headers.get(representation)
     if (!source || !header) return
 
-    const timestampOffset =
+    const finalOffset =
       typeof input.timestampOffset === 'number' && Number.isFinite(input.timestampOffset)
         ? input.timestampOffset
         : 0
-    const chunk = header.convert
-      ? convertedChunk(header.convert, bytes, timestampOffset)
-      : isoChunk(header, bytes, timestampOffset)
-    if (!chunk) return
+    const chunks = bytes.flatMap((one) => {
+      const chunk = header.convert
+        ? convertedChunk(header.convert, one)
+        : isoChunk(header, one)
+      return chunk ? [chunk] : []
+    })
+    if (chunks.length === 0) return
 
+    const offsets = new Array<number>(chunks.length).fill(finalOffset)
+    if (input.sequence) {
+      // Sequence mode may process several complete media segments from one appendBuffer call.
+      // MSE exposes only the offset of the last one after updateend. Walk backwards over the raw
+      // decode spans to recover the placement of every segment before it. Applying the final
+      // offset to all of them gives repeated-timestamp fragments one start and PtsMap keeps only
+      // the last: observed on Twitch as a regular forward jump in an otherwise smooth preview.
+      for (let at = chunks.length - 2; at >= 0; at--) {
+        const current = chunks[at]!
+        const next = chunks[at + 1]!
+        // Continuous timestamps, including the small jitter MSE tolerates inside one coded-frame
+        // group, keep one offset and keep their gap. A timestamp reset or overlap is where
+        // sequence mode advances the next segment to the end of the current one.
+        offsets[at] =
+          next.start <= current.end
+            ? offsets[at + 1]! + next.start - current.end
+            : offsets[at + 1]!
+      }
+    }
+
+    for (const [at, raw] of chunks.entries()) {
+      const timestampOffset = offsets[at]!
+      const chunk =
+        timestampOffset === 0
+          ? raw
+          : {
+              ...raw,
+              start: raw.start + timestampOffset,
+              end: raw.end + timestampOffset,
+              timestampOffset,
+            }
+      this.keep(input, source, header, chunk)
+    }
+  }
+
+  private keep(input: AppendInput, source: SourceState, header: TrackHeader, chunk: Chunk): void {
     if (this.rejected.has(input.sourceId)) {
       // A rejection of a confirmed session is a freeze and nothing is recorded under it;
       // a rejection of a source that has not earned its life yet is a doubt, and the material

@@ -83,6 +83,12 @@ describe('pathFor', () => {
     expect(path.kind === 'copy' && path.plan.tracks[0]?.kind).toBe('video')
   })
 
+  it('copies from the first available picture even when its source edit is not a sync sample', () => {
+    const sourceStart = { ...ctx, keyframes: new Float64Array() }
+
+    expect(pathFor(clip({ in: ctx.frames[0] }), source, sourceStart, null, false).kind).toBe('copy')
+  })
+
   it('drops sound prefetched through a picture gap on the copy path', () => {
     const made = (track: SourceTrack, at: readonly number[]): SourceTrack => ({
       ...track,
@@ -150,11 +156,15 @@ describe('pathFor', () => {
     expect(pathFor(clip({ mode: 'optimize' }), source, ctx, choice, false).kind).toBe('encode')
   })
 
-  it('encodes a non-keyframe head when rewriting heads is enabled', () => {
+  it('encodes a non-keyframe head so ordinary players do not expose copied preroll', () => {
     const between = clip({ in: 1.5 })
 
     expect(pathFor(between, source, ctx, choice, true).kind).toBe('encode')
-    expect(pathFor(between, source, ctx, choice, false).kind).toBe('copy')
+    expect(pathFor(between, source, ctx, choice, false).kind).toBe('encode')
+    expect(pathFor(between, source, ctx, null, false)).toMatchObject({
+      kind: 'blocked',
+      reason: 'no-encoder',
+    })
     expect(pathFor(clip(), source, ctx, null, true).kind).toBe('copy')
   })
 

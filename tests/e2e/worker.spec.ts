@@ -20,6 +20,7 @@ const CSP_PAGE = 'https://tailcut.test/csp-worker'
 const EARLY_PAGE = 'https://tailcut.test/worker-early'
 const OFFSET_PAGE = 'https://tailcut.test/worker-offset'
 const SEQUENCE_PAGE = 'https://tailcut.test/worker-sequence'
+const SEQUENCE_BATCH_PAGE = 'https://tailcut.test/worker-sequence?batch=1'
 /** A worker address of another origin: the browser refuses it, and so must the hook. */
 const FOREIGN_WORKER = 'https://elsewhere.example/js/url-worker.js'
 
@@ -647,6 +648,40 @@ test('the editor follows SourceBuffer sequence mode placement', async () => {
     await expect.soft(editor.getByTestId('duration')).toHaveText('0:06')
     await expect.soft(editor.getByTestId('gaps')).toHaveText('0 gaps')
     await expect.soft(editor.getByTestId('frame-count')).toHaveText('144')
+  } finally {
+    await close(context)
+  }
+})
+
+test('sequence mode places every media segment carried by one append', async () => {
+  test.setTimeout(45_000)
+  const { context, page, extensionId, log } = await open(
+    SEQUENCE_BATCH_PAGE,
+    'worker-sequence.html',
+  )
+  await playerDone(page)
+
+  try {
+    const state = await page.evaluate(() => ({
+      error: (window as unknown as { workerError?: string }).workerError ?? null,
+      buffered: (() => {
+        const video = document.querySelector('video')!
+        return video.buffered.length
+          ? [video.buffered.start(0), video.buffered.end(video.buffered.length - 1)]
+          : null
+      })(),
+    }))
+    expect(state.error, `the worker sequence player failed; console: ${log()}`).toBeNull()
+    expect(state.buffered?.[0]).toBeCloseTo(0, 6)
+    expect(state.buffered?.[1]).toBeCloseTo(4, 5)
+
+    await page.evaluate(() => document.querySelector('video')!.play())
+    await page.waitForTimeout(5_000)
+
+    const { editor } = await clickEdit(context, page, extensionId)
+    await expect.soft(editor.getByTestId('duration')).toHaveText('0:04')
+    await expect.soft(editor.getByTestId('gaps')).toHaveText('0 gaps')
+    await expect.soft(editor.getByTestId('frame-count')).toHaveText('96')
   } finally {
     await close(context)
   }

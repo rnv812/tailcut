@@ -368,7 +368,7 @@ function streamStarts(file: string): Map<TrackKind, number> {
 async function timingOf(from: string, out: string): Promise<{ firstVideoPts: number; skew: number }> {
   const { context, editor } = await openClip(from, out)
   try {
-    const saved = await exportClipWith(editor, { encode: true })
+    const saved = await exportClipWith(editor)
     const firstVideoPts = packetPts(saved.file)[0]!
     const starts = streamStarts(saved.file)
     return {
@@ -630,7 +630,7 @@ test('cuts the selected pixels instead of scaling the whole picture into the cro
   }
 })
 
-test('starts encoded picture at zero and in step with sound at and between keyframes', async () => {
+test('starts an automatic export at zero and in step with sound at and between keyframes', async () => {
   test.setTimeout(300_000)
   const keyframe = await timingOf('00:00:02:00', '00:00:04:00')
   const midGroup = await timingOf('00:00:03:00', '00:00:05:00')
@@ -704,24 +704,22 @@ test('cancels the real encoder after Writing while a copy beside it still saves'
 
 test('runs three copies beside one encode without either lane blocking the other', async () => {
   test.setTimeout(240_000)
-  const { context, editor } = await openClip('00:00:00:00', '00:00:06:00')
+  const { context, editor } = await openClip('00:00:00:00', '00:00:08:00')
 
   try {
-    await splitAt(editor, '00:00:01:00', 2)
-    await splitAt(editor, '00:00:02:00', 3)
-    await splitAt(editor, '00:00:03:00', 4)
-    await splitAt(editor, '00:00:04:00', 5)
-    await splitAt(editor, '00:00:05:00', 6)
-    await editor.getByTestId('clip-go-c5').click()
-    await placeFullFrameCrop(editor)
-    await editor.getByTestId('clip-go-c6').click()
+    // The source has a sync sample every two seconds. Keep three clips on the copy path and put
+    // only the fourth through the encoder, so this remains a direct test of both queue lanes.
+    await splitAt(editor, '00:00:02:00', 2)
+    await splitAt(editor, '00:00:04:00', 3)
+    await splitAt(editor, '00:00:06:00', 4)
+    await editor.getByTestId('clip-go-c4').click()
     await placeFullFrameCrop(editor)
     await expect(editor.getByTestId('export-all')).toBeEnabled()
 
     await observeLanePeaks(editor)
-    await collectDownloads(editor, 6, () => editor.getByTestId('export-all').click(), 180_000)
-    await expect(editor.getByTestId('job')).toHaveCount(6)
-    await expect(editor.getByTestId('job-state')).toHaveText(Array(6).fill('Saved'))
+    await collectDownloads(editor, 4, () => editor.getByTestId('export-all').click(), 180_000)
+    await expect(editor.getByTestId('job')).toHaveCount(4)
+    await expect(editor.getByTestId('job-state')).toHaveText(Array(4).fill('Saved'))
 
     expect(await lanePeaks(editor)).toEqual({ copy: 3, encode: 1 })
   } finally {
