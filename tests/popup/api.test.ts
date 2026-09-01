@@ -15,6 +15,7 @@ let totals = { id: 'totals', bytes: 0, cappedBytes: 0, fullAt: 0 }
 let indexRefuses = false
 const pinned: Array<[string, boolean]> = []
 const stamped: Array<[string, number]> = []
+const thumbnailBlobs = new Map<string, Blob>()
 
 let stored: Settings = DEFAULTS
 const written: Settings[] = []
@@ -35,6 +36,7 @@ vi.mock('../../src/shared/history-db', () => ({
   setDeleted: async (id: string, at: number) => {
     stamped.push([id, at])
   },
+  historyThumbnailById: async (id: string) => thumbnailBlobs.get(id) ?? null,
 }))
 
 vi.mock('../../src/shared/settings-store', () => ({
@@ -93,6 +95,9 @@ const savesIn = (sent: Sent[]): Sent[] =>
 const editsIn = (sent: Sent[]): Sent[] =>
   sent.filter((item) => (item.message as { type?: string }).type === 'tc:edit')
 
+const thumbnailsIn = (sent: Sent[]): Sent[] =>
+  sent.filter((item) => (item.message as { type?: string }).type === 'tc:thumbnail')
+
 /** A snapshot name in the shape the bridge mints them: a randomUUID and nothing else. */
 const SNAPSHOT = '0f2c7d1e-4b0a-4a3f-9c2e-9b5a1d6f8c31'
 
@@ -136,6 +141,7 @@ function installChrome(
     listReply?: unknown
     saveReply?: unknown
     editReply?: unknown
+    thumbnailReply?: unknown
     /** The frames of a tab that cannot be enumerated at all: chrome.scripting refuses. */
     blindToFrames?: boolean
   } = {},
@@ -151,6 +157,10 @@ function installChrome(
   let saveReply: unknown = 'saveReply' in options ? options.saveReply : { ok: true }
   let editReply: unknown =
     'editReply' in options ? options.editReply : { ok: true, snapshotId: SNAPSHOT }
+  let thumbnailReply: unknown =
+    'thumbnailReply' in options
+      ? options.thumbnailReply
+      : { ok: true, dataUrl: 'data:image/webp;base64,UklGRg==' }
   let failure: Error | null = null
 
   /** Tabs the popup opened: the editor over a snapshot, and the editor over the history. */
@@ -185,6 +195,7 @@ function installChrome(
         if (silent.has(opts.frameId ?? TOP)) return new Promise(() => {})
         if ((message as { type?: string }).type === 'tc:save') return saveReply
         if ((message as { type?: string }).type === 'tc:edit') return editReply
+        if ((message as { type?: string }).type === 'tc:thumbnail') return thumbnailReply
         const reply = frames[opts.frameId ?? TOP]
         // A frame with no content script in it: Chrome finds nobody to deliver to and rejects.
         if (reply === undefined) throw new Error('Could not establish connection.')
@@ -214,6 +225,9 @@ function installChrome(
     setEditReply: (value: unknown) => {
       editReply = value
     },
+    setThumbnailReply: (value: unknown) => {
+      thumbnailReply = value
+    },
   }
 }
 
@@ -230,6 +244,7 @@ beforeEach(() => {
   indexRefuses = false
   pinned.length = 0
   stamped.length = 0
+  thumbnailBlobs.clear()
   stored = DEFAULTS
   written.length = 0
 })
@@ -582,6 +597,36 @@ describe('saveAll', () => {
   })
 })
 
+describe('sessionThumbnail', () => {
+  it('asks the frame that listed the session and returns its local WebP', async () => {
+    const chrome = installChrome({
+      frames: { [TOP]: { sessions: [summary] }, [EMBED]: { sessions: [embedded] } },
+    })
+    const { listSessions, sessionThumbnail } = await importApi()
+    await listSessions()
+
+    await expect(sessionThumbnail(embedded.key)).resolves.toBe(
+      'data:image/webp;base64,UklGRg==',
+    )
+    expect(thumbnailsIn(chrome.sent)).toEqual([
+      {
+        tabId: 7,
+        message: { type: 'tc:thumbnail', key: embedded.key },
+        options: { frameId: EMBED },
+      },
+    ])
+  })
+
+  it('treats a missing, malformed, or unreachable preview as optional', async () => {
+    const chrome = installChrome({ thumbnailReply: { ok: true, dataUrl: 'https://remote.example/x' } })
+    const { sessionThumbnail } = await importApi()
+
+    await expect(sessionThumbnail(summary.key)).resolves.toBeNull()
+    chrome.breakTab()
+    await expect(sessionThumbnail(summary.key)).resolves.toBeNull()
+  })
+})
+
 /**
  * The freeze travels the same road as the save and has to be addressed the same way.
  *
@@ -806,6 +851,21 @@ const indexRow = (over: Record<string, unknown> = {}) => ({
 })
 
 describe('the history the popup shows', () => {
+  it('adds a bounded local WebP URL only to the row that owns it', async () => {
+    indexed = [indexRow(), indexRow({ id: 'h2', key: 'k2' })]
+    thumbnailBlobs.set(
+      'h1',
+      new Blob([Uint8Array.of(0x52, 0x49, 0x46, 0x46)], { type: 'image/webp' }),
+    )
+    installChrome()
+    const { historyRows } = await importApi()
+
+    const rows = await historyRows()
+
+    expect(rows[0]!.thumbnailUrl).toBe('data:image/webp;base64,UklGRg==')
+    expect(rows[1]!.thumbnailUrl).toBeUndefined()
+  })
+
   it('takes its rows out of the index and asks for a page of them', async () => {
     indexed = [indexRow(), indexRow({ id: 'h2', key: 'k2', title: 'The day before' })]
     installChrome()

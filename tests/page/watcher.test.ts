@@ -35,7 +35,7 @@ function ranges(...pairs: Array<[number, number]>) {
  * player that is currently playing; overrides create unwanted layouts.
  */
 function fakeVideo(overrides: Record<string, unknown> = {}) {
-  return {
+  const element = {
     // What tells a picture from a soundtrack: the watcher takes both under watch and judges only
     // the first of them.
     localName: 'video',
@@ -50,6 +50,9 @@ function fakeVideo(overrides: Record<string, unknown> = {}) {
     readyState: 4,
     isConnected: true,
     mediaKeys: null,
+    ariaLabel: '',
+    title: '',
+    parentElement: null,
     /** Unknown until the metadata has arrived — which is what a media element reports as NaN. */
     duration: NaN,
     buffered: ranges(),
@@ -64,6 +67,14 @@ function fakeVideo(overrides: Record<string, unknown> = {}) {
       map.set(type, [...(map.get(type) ?? []), handler])
     },
     ...overrides,
+  }
+  return {
+    ...element,
+    getAttribute(name: string): string | null {
+      if (name === 'aria-label') return String((this as FakeVideo).ariaLabel || '') || null
+      if (name === 'title') return String((this as FakeVideo).title || '') || null
+      return null
+    },
   }
 }
 
@@ -238,6 +249,8 @@ async function startWatcher(...stored: [unknown?]) {
   const plain: PlainSource[] = []
   /** Every soundtrack the watcher has reported, in the order the reports went out. */
   const sounds: SoundSource[] = []
+  /** Source-scoped titles reported for visible playing videos. */
+  const media: Array<{ sourceId: string; title: string }> = []
   /**
    * Both kinds of report in one list, tagged. A plain source and the verdict about it are two
    * messages about one thing, and the order they leave in is part of what is under test: a bridge
@@ -261,6 +274,7 @@ async function startWatcher(...stored: [unknown?]) {
       order.push(`sound ${source.sourceId}`)
     },
     (sourceId, widthPx) => players.push({ sourceId, widthPx }),
+    (description) => media.push(description),
   )
 
   // The live copy answers the defaults until the first read of storage comes back, a turn or two
@@ -276,6 +290,7 @@ async function startWatcher(...stored: [unknown?]) {
     encrypted,
     plain,
     sounds,
+    media,
     order,
     /** Moves a setting the way the settings page does, from another document. */
     async setSettings(edit: (current: Settings) => Settings): Promise<void> {
@@ -1211,6 +1226,54 @@ describe('the watcher and a page that plays its sound apart from its picture', (
     // earned: the page did play its sound apart, and a torn-down element does not unmake that.
     expect(watcher.sounds).toHaveLength(1)
     expect(watcher.seen).toEqual([{ sourceId: CLIP_ID, verdict: 'promote' }])
+  })
+})
+
+describe('source-scoped media titles', () => {
+  it('reports the accessible name of each visible playing video only once', async () => {
+    const watcher = await startWatcher()
+    stand(plainVideo({ ariaLabel: 'First feed item' }))
+    stand(
+      plainVideo({
+        src: 'https://cdn.example/second.mp4',
+        currentSrc: 'https://cdn.example/second.mp4',
+        ariaLabel: 'Second feed item',
+      }),
+    )
+
+    tick(10)
+
+    expect(watcher.media).toEqual([
+      { sourceId: CLIP_ID, title: 'First feed item' },
+      { sourceId: 'plain:https://cdn.example/second.mp4', title: 'Second feed item' },
+    ])
+  })
+
+  it('reports a changed title when a feed reuses the same player', async () => {
+    const watcher = await startWatcher()
+    const video = plainVideo({ ariaLabel: 'First feed item' })
+    stand(video)
+    tick()
+
+    video.ariaLabel = 'Second feed item'
+    tick(10)
+
+    expect(watcher.media).toEqual([
+      { sourceId: CLIP_ID, title: 'First feed item' },
+      { sourceId: CLIP_ID, title: 'Second feed item' },
+    ])
+  })
+
+  it('retries a title that appeared after the initial bounded polls', async () => {
+    const watcher = await startWatcher()
+    const video = plainVideo()
+    stand(video)
+    tick(7)
+
+    video.ariaLabel = 'Late feed item'
+    tick(10)
+
+    expect(watcher.media).toEqual([{ sourceId: CLIP_ID, title: 'Late feed item' }])
   })
 })
 

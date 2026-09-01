@@ -406,6 +406,13 @@ startWatching(
     await ensureBridge()
     tellBridge({ type: 'tc:player', sourceId, widthPx })
   },
+  // A title taken from the media element or its bounded local card, and therefore belonging to
+  // this source alone. A feed keeps one tab title while every video inside it needs its own name.
+  async ({ sourceId, title }) => {
+    const url = location.href
+    await ensureBridge()
+    tellBridge({ type: 'tc:media', sourceId, title, url })
+  },
 )
 
 // Which stream an element is playing, when the stream comes out of a worker and has no address to

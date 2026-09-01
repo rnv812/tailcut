@@ -4,6 +4,7 @@ import {
   listTabSessions,
   pauseInFrame,
   saveInFrame,
+  thumbnailInFrame,
   type FramedSession,
 } from '../shared/frames'
 import { hostOf } from '../shared/format'
@@ -18,7 +19,13 @@ import type {
 } from '../shared/protocol'
 // The index of what is on disk, read here and nowhere else in the popup: the markup is handed
 // rows, and what a row is made of is this file's business.
-import { listSessions as listHistory, readTotals, setDeleted, setPinned } from '../shared/history-db'
+import {
+  historyThumbnailById,
+  listSessions as listHistory,
+  readTotals,
+  setDeleted,
+  setPinned,
+} from '../shared/history-db'
 import { siteAllows } from '../shared/settings'
 import { readSettings, writeSettings } from '../shared/settings-store'
 
@@ -161,6 +168,27 @@ export async function saveAll(key: string): Promise<SaveResult> {
   }
 }
 
+/** Reads one optional local preview from the frame that owns the live session. */
+export async function sessionThumbnail(key: string): Promise<string | null> {
+  const tabId = await targetTabId()
+  if (tabId === undefined) return null
+  const frameId = listed.find((session) => session.key === key)?.frameId ?? MAIN_FRAME
+
+  try {
+    const result = await thumbnailInFrame(tabId, frameId, key)
+    const dataUrl = result?.ok === true ? result.dataUrl : ''
+    if (
+      dataUrl.length > 262_144 ||
+      !/^data:image\/webp;base64,[A-Za-z0-9+/]+={0,2}$/.test(dataUrl)
+    ) {
+      return null
+    }
+    return dataUrl
+  } catch {
+    return null
+  }
+}
+
 /**
  * Asks the tab to freeze the session and write it out. What comes back is the name of the
  * snapshot; the editor is opened by the popup, because a tab is opened from the extension and
@@ -203,6 +231,21 @@ export interface HistoryRow {
   bytes: number
   lastSeenAt: number
   pinned: boolean
+  /** A small local image, absent on recordings made before previews existed. */
+  thumbnailUrl?: string
+}
+
+async function thumbnailDataUrl(blob: Blob | null): Promise<string | undefined> {
+  if (!blob || blob.type !== 'image/webp' || blob.size === 0 || blob.size > 512 * 1024) {
+    return undefined
+  }
+
+  const bytes = new Uint8Array(await blob.arrayBuffer())
+  let binary = ''
+  for (let at = 0; at < bytes.length; at += 32_768) {
+    binary += String.fromCharCode(...bytes.subarray(at, at + 32_768))
+  }
+  return `data:image/webp;base64,${btoa(binary)}`
 }
 
 /**
@@ -219,16 +262,24 @@ export async function historyRows(limit = 20): Promise<HistoryRow[]> {
     // those rows rejoin retention and quota eviction instead of becoming permanent disk use with
     // no control that can reverse it.
     await Promise.all(sessions.filter((session) => session.pinned).map((session) => setPinned(session.id, false)))
-    return sessions.map((session) => ({
-      id: session.id,
-      key: session.key,
-      title: session.title,
-      url: session.url,
-      seconds: session.seconds,
-      bytes: session.bytes,
-      lastSeenAt: session.lastSeenAt,
-      pinned: false,
-    }))
+    return await Promise.all(
+      sessions.map(async (session) => {
+        const thumbnailUrl = await thumbnailDataUrl(
+          await historyThumbnailById(session.id).catch(() => null),
+        )
+        return {
+          id: session.id,
+          key: session.key,
+          title: session.title,
+          url: session.url,
+          seconds: session.seconds,
+          bytes: session.bytes,
+          lastSeenAt: session.lastSeenAt,
+          pinned: false,
+          ...(thumbnailUrl ? { thumbnailUrl } : {}),
+        }
+      }),
+    )
   } catch {
     // No index yet, or a store the browser would not open. An empty history is what nothing
     // looks like, and it is not worth a message beside the recording of this page.

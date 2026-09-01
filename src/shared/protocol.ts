@@ -159,6 +159,7 @@ export interface BridgeConnect {
  */
 export type ContentToBridge =
   | { type: 'tc:context'; url: string; title: string }
+  | { type: 'tc:media'; sourceId: string; title: string; url: string }
   | {
       type: 'tc:verdict'
       sourceId: string
@@ -508,6 +509,7 @@ export type ExtensionToTab =
   | { type: 'tc:list' }
   | { type: 'tc:save'; key: string }
   | { type: 'tc:edit'; key: string }
+  | { type: 'tc:thumbnail'; key: string }
   /**
    * Stop, or start again, recording in this frame — until the page is reloaded.
    *
@@ -559,6 +561,11 @@ export interface PauseResult {
   paused: boolean
 }
 
+/** One optional local preview. Missing codec support is an ordinary empty answer. */
+export type ThumbnailResult =
+  | { ok: true; dataUrl: string }
+  | { ok: false }
+
 /**
  * The answer to each kind of request, by the kind that asked for it.
  *
@@ -570,6 +577,7 @@ interface AnswerTo {
   'tc:list': SessionList
   'tc:save': SaveResult
   'tc:edit': EditResult
+  'tc:thumbnail': ThumbnailResult
   'tc:pause': PauseResult
 }
 
@@ -627,6 +635,12 @@ export const isBridgeConnect = guarding<BridgeConnect>({
 export const isContentToBridge = guarding<ContentToBridge>({
   'tc:context': (message) =>
     typeof message.url === 'string' && typeof message.title === 'string',
+  'tc:media': (message) =>
+    typeof message.sourceId === 'string' &&
+    typeof message.title === 'string' &&
+    Array.from(message.title).length <= 240 &&
+    typeof message.url === 'string' &&
+    message.url.length <= 8_192,
   'tc:verdict': (message) =>
     typeof message.sourceId === 'string' &&
     (message.verdict === 'reject' ||
@@ -646,6 +660,7 @@ export const isExtensionToTab = guarding<ExtensionToTab>({
   'tc:list': () => true,
   'tc:save': named,
   'tc:edit': named,
+  'tc:thumbnail': named,
   /** The one message of this union carrying a claim rather than an address. */
   'tc:pause': (message) => typeof message.on === 'boolean',
 })

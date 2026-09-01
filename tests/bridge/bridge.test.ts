@@ -418,6 +418,7 @@ function installWindow(referrer = REFERRER, stored?: unknown) {
     'tc:plain',
     'tc:sound',
     'tc:context',
+    'tc:media',
     'tc:verdict',
     'tc:player',
     'tc:encrypted',
@@ -425,6 +426,7 @@ function installWindow(referrer = REFERRER, stored?: unknown) {
     'tc:list',
     'tc:save',
     'tc:edit',
+    'tc:thumbnail',
     'tc:pause',
   ])
 
@@ -542,6 +544,13 @@ function installWindow(referrer = REFERRER, stored?: unknown) {
       for (let turn = 0; turn < 8; turn++) await Promise.resolve()
       return reply
     },
+    /** Asks for the optional local preview without building or saving the whole file. */
+    async thumbnail(key: string): Promise<ReturnType<typeof port>> {
+      const reply = port()
+      deliver({ type: 'tc:thumbnail', key }, { ports: [reply] })
+      for (let turn = 0; turn < 32; turn++) await Promise.resolve()
+      return reply
+    },
     /** Snapshots that reached the storage, in the order they were written. */
     writes,
     /** The storage refuses the write: no quota left, a handle it would not open. */
@@ -616,6 +625,53 @@ function installHost(file: Uint8Array = plainBytes) {
       refusing = true
     },
   }
+}
+
+/** A real request boundary around a deterministic one-frame browser codec. */
+function installThumbnailCodec() {
+  let decodes = 0
+  const webp = Uint8Array.of(0x52, 0x49, 0x46, 0x46)
+
+  class TestFrame {
+    readonly displayWidth = 320
+    readonly displayHeight = 240
+    close(): void {}
+  }
+
+  class TestDecoder {
+    static async isConfigSupported(config: VideoDecoderConfig) {
+      return { supported: true, config }
+    }
+
+    constructor(private readonly callbacks: VideoDecoderInit) {}
+    configure(): void {}
+    decode(): void {
+      decodes += 1
+    }
+    async flush(): Promise<void> {
+      this.callbacks.output(new TestFrame() as unknown as VideoFrame)
+    }
+    close(): void {}
+  }
+
+  class TestChunk {
+    constructor(readonly init: EncodedVideoChunkInit) {}
+  }
+
+  class TestCanvas {
+    constructor(readonly width: number, readonly height: number) {}
+    getContext(): { drawImage(): void } {
+      return { drawImage: () => undefined }
+    }
+    async convertToBlob(): Promise<Blob> {
+      return new Blob([webp], { type: 'image/webp' })
+    }
+  }
+
+  vi.stubGlobal('VideoDecoder', TestDecoder)
+  vi.stubGlobal('EncodedVideoChunk', TestChunk)
+  vi.stubGlobal('OffscreenCanvas', TestCanvas)
+  return { decodes: () => decodes, dataUrl: `data:image/webp;base64,${btoa(String.fromCharCode(...webp))}` }
 }
 
 /**
@@ -837,6 +893,21 @@ describe('the bridge puts segments into the session registry', () => {
     // The name is read off the session at the moment of saving, and this is the whole point of
     // the title reaching it at all.
     expect(win.downloads[0]!.filename).toBe('夜の放送.mp4')
+  })
+
+  it('keeps a source-scoped feed title over the generic page title', async () => {
+    const win = await loadBridge()
+    win.context(PAGE_URL, 'TikTok - Make Your Day')
+    win.deliver({
+      type: 'tc:media',
+      sourceId: 's1',
+      title: 'First feed item',
+      url: PAGE_URL,
+    })
+    win.append(initBytes, 's1')
+    win.context(PAGE_URL, 'TikTok - Make Your Day')
+
+    expect(await win.list()).toMatchObject([{ title: 'First feed item' }])
   })
 
   it('ignores a context whose fields are not strings', async () => {
@@ -2563,6 +2634,63 @@ describe('the frame keeps the buffer length and the memory ceiling on its own cl
   })
 })
 
+describe('the bridge makes a thumbnail only when it is asked for', () => {
+  it('answers an unknown session without touching a decoder', async () => {
+    const win = await loadBridge()
+    win.context()
+
+    const reply = await win.thumbnail('no such session')
+
+    expect(reply.received).toEqual([{ ok: false }])
+  })
+
+  it('decodes one local frame and reuses it on the next popup opening', async () => {
+    const codec = installThumbnailCodec()
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+    const key = keyFor(PAGE_URL)
+
+    const first = await win.thumbnail(key)
+    const second = await win.thumbnail(key)
+
+    expect(first.received).toEqual([{ ok: true, dataUrl: codec.dataUrl }])
+    expect(second.received).toEqual(first.received)
+    expect(codec.decodes()).toBe(1)
+  })
+
+  it('retries history persistence from the cached image without decoding again', async () => {
+    const codec = installThumbnailCodec()
+    const NativeBlob = Blob
+    let blobs = 0
+    vi.stubGlobal(
+      'Blob',
+      class extends NativeBlob {
+        constructor(parts?: BlobPart[], options?: BlobPropertyBag) {
+          super(parts, options)
+          blobs++
+        }
+      },
+    )
+    const win = await loadBridge()
+    win.context()
+    win.append(initBytes)
+    win.append(seg1Bytes)
+    const key = keyFor(PAGE_URL)
+
+    await win.thumbnail(key)
+    for (let turn = 0; turn < 4; turn++) await Promise.resolve()
+    await win.thumbnail(key)
+    for (let turn = 0; turn < 4; turn++) await Promise.resolve()
+
+    // First request: one WebP from the canvas and one independent Blob handed to history.
+    // Second request: no canvas work, but another history attempt because its row may now exist.
+    expect(blobs).toBe(3)
+    expect(codec.decodes()).toBe(1)
+  })
+})
+
 /**
  * One request of each kind the popup can send.
  *
@@ -2573,6 +2701,7 @@ const everyRequest: { [K in ExtensionToTab['type']]: Extract<ExtensionToTab, { t
   'tc:list': { type: 'tc:list' },
   'tc:save': { type: 'tc:save', key: keyFor(PAGE_URL) },
   'tc:edit': { type: 'tc:edit', key: keyFor(PAGE_URL) },
+  'tc:thumbnail': { type: 'tc:thumbnail', key: keyFor(PAGE_URL) },
   'tc:pause': { type: 'tc:pause', on: true },
 }
 

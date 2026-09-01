@@ -162,6 +162,8 @@ interface StoredSession extends Session {
   sources: Set<string>
   /** Triage has granted the session its life: a later rejection freezes it instead of erasing. */
   confirmed: boolean
+  /** The title came from this media element, not from the title shared by the whole page. */
+  sourceTitle: boolean
 }
 
 /** What the registry remembers about one MediaSource. */
@@ -199,7 +201,7 @@ interface SourceState {
 
 /**
  * The material of a source whose rejection has not been settled yet: taken out of the registry
- * and kept out of sight, and given back whole the moment the verdict turns.
+ * and kept out of sight, and given back the moment the verdict turns.
  *
  * This is the probation buffer. A rejection of a source that has not earned
  * its life yet is a doubt and not a freeze: what is at stake is the whole recording, because the
@@ -225,6 +227,8 @@ interface Probation {
   material: Map<string, HeldTrack>
   /** Weight of what has arrived since the rejection: what the review is measured against. */
   bytes: number
+  /** Actual media bytes retained in `material`, including what arrived before the rejection. */
+  retainedBytes: number
 }
 
 /** One stream's worth of what a source set aside: what it is, and what was collected of it. */
@@ -239,11 +243,17 @@ interface HeldTrack {
  * A cap and not a budget: a verdict that is going to turn turns within a poll or two of the
  * watcher, half a second apart, and the couple of segments that arrive meanwhile are far below
  * this. What it stops is the other case — a banner, a hover preview, a page whose material is
- * refused for DRM — from being held for as long as the page is open. Material that outlasts the
- * review is not the misreading of a moment: the rejection stands, and the source goes back to
- * costing nothing at all.
+ * refused for DRM — from growing for as long as the page is open. Once the cap is reached, the
+ * source stops growing but keeps its bounded beginning. One first bounded chunk of a media kind
+ * that starts later is admitted too, so picture reaching the cap cannot turn an otherwise whole
+ * recording silent. Feed players often preload the whole item while it is off-screen and append
+ * nothing after it becomes visible, so deleting that beginning would make the later promotion
+ * permanently empty.
  */
 export const MAX_PROBATION_BYTES = 8 * 1024 * 1024
+
+/** Fixed aggregate ceiling for all undecided sources in one frame. */
+export const MAX_TOTAL_PROBATION_BYTES = 32 * 1024 * 1024
 
 /** Where the page stood when material arrived: what a session opened for it is signed with. */
 interface PageContext {
@@ -939,6 +949,12 @@ export interface SessionRekeyed {
   page: { url: string; title: string }
 }
 
+/** A source-scoped title changed after, or before, its session was opened. */
+export interface SessionDescribed {
+  key: string
+  title: string
+}
+
 export interface StoreOptions {
   openPlain?: PlainOpener
   openSound?: SoundOpener
@@ -964,6 +980,8 @@ export interface StoreOptions {
    * writes the history has to move with it — see HistoryWriter.rekey.
    */
   onRekey?: (event: SessionRekeyed) => void
+  /** Persistent history mirrors a source title without waiting for another media segment. */
+  onDescribe?: (event: SessionDescribed) => void
 }
 
 /** Everything the registry keeps about one ordinary file the page is playing. */
@@ -1029,8 +1047,10 @@ export class SessionStore {
   private promoted = new Set<string>()
   /** sourceId → the material set aside while its rejection is under review; see Probation. */
   private probation = new Map<string, Probation>()
-  /** Sources whose rejection outlasted the review: nothing of them is kept any more. */
+  /** Sources evicted from probation by an aggregate or configured memory ceiling. */
   private screenedOut = new Set<string>()
+  /** Actual bytes retained across `probation`; kept incrementally on the append hot path. */
+  private probationHeldBytes = 0
   /**
    * sourceId → the length its page stated for it, kept apart from the source itself.
    *
@@ -1051,6 +1071,8 @@ export class SessionStore {
   private soundSources = new Map<string, SoundState>()
   /** Ordinary picture source → the soundtrack sources explicitly observed beside it. */
   private pairedSounds = new Map<string, Set<string>>()
+  /** sourceId → presentation read from that media element rather than from the whole page. */
+  private mediaTitles = new Map<string, { title: string; url: string }>()
   /** Reads of the tables now in flight: what settled() waits on. */
   private reads = new Set<Promise<void>>()
   private readonly openPlain?: PlainOpener
@@ -1058,6 +1080,7 @@ export class SessionStore {
   private readonly onFileRead?: () => void
   private readonly onChunk?: (event: ChunkStored) => void
   private readonly onRekey?: (event: SessionRekeyed) => void
+  private readonly onDescribe?: (event: SessionDescribed) => void
 
   constructor(options: StoreOptions = {}) {
     this.openPlain = options.openPlain
@@ -1065,6 +1088,18 @@ export class SessionStore {
     this.onFileRead = options.onFileRead
     this.onChunk = options.onChunk
     this.onRekey = options.onRekey
+    this.onDescribe = options.onDescribe
+  }
+
+  /** Gives one media source its own name, independently of the title shared by the whole tab. */
+  describeMedia(sourceId: string, description: { title: string; url: string }): void {
+    const title = description.title.trim()
+    if (!title) return
+    this.mediaTitles.set(sourceId, { title, url: normalizeUrl(description.url) })
+
+    for (const session of this.sessions.values()) {
+      if (session.sources.has(sourceId)) this.applyMediaTitle(session, sourceId)
+    }
   }
 
   /**
@@ -1450,6 +1485,7 @@ export class SessionStore {
       ...(state.soundLost ? { soundLost: true } : {}),
     }
     session.sources.add(state.sourceId)
+    this.applyMediaTitle(session, state.sourceId)
     if (this.promoted.has(state.sourceId)) session.confirmed = true
     if (state.page.now > session.lastSeenAt) session.lastSeenAt = state.page.now
     this.sessions.set(key, session)
@@ -1649,8 +1685,9 @@ export class SessionStore {
    * out of sight until triage settles which kind of rejection it was.
    *
    * Nothing of what is set aside can be listed or saved. What it costs is bounded — see
-   * MAX_PROBATION_BYTES: material that outlasts the review is dropped for good, and the source
-   * keeps nothing more while the verdict stands.
+   * MAX_PROBATION_BYTES: each media kind stops growing at the cap, apart from the first bounded
+   * chunk of a kind that starts later. Its bounded beginning remains available if the verdict
+   * turns, and the aggregate ceiling remains absolute.
    */
   private setAside(input: AppendInput, header: TrackHeader, chunk: Chunk): void {
     if (this.screenedOut.has(input.sourceId)) return
@@ -1664,21 +1701,72 @@ export class SessionStore {
         lastSeenAt: input.now,
         material: new Map(),
         bytes: 0,
+        retainedBytes: 0,
       }
       this.probation.set(input.sourceId, held)
     }
 
-    held.bytes += chunk.bytes.byteLength
-    if (held.bytes > MAX_PROBATION_BYTES) {
-      this.probation.delete(input.sourceId)
+    const bytes = chunk.bytes.byteLength
+    if (held.bytes + bytes > MAX_PROBATION_BYTES) {
+      const kindsAlreadyHeld = new Set<TrackKind>()
+      for (const track of held.material.values()) {
+        for (const kind of track.header.kinds) kindsAlreadyHeld.add(kind)
+      }
+      const firstChunkOfLateKind =
+        bytes <= MAX_PROBATION_BYTES &&
+        header.kinds.some((kind) => !kindsAlreadyHeld.has(kind))
+      if (!firstChunkOfLateKind) {
+        // Stop copying this kind, but keep the decodable beginning already gathered. A feed can
+        // preload the whole off-screen item and emit nothing after it becomes visible; deleting
+        // the prefix here made that later promotion permanently empty. Sound commonly starts
+        // after picture, so its first bounded chunk is still admitted below.
+        if (held.retainedBytes === 0) this.forgetProbation(input.sourceId)
+        return
+      }
+    }
+    if (!this.makeProbationRoom(input.sourceId, bytes)) {
       this.screenedOut.add(input.sourceId)
       return
     }
+
+    held.bytes += bytes
+    held.retainedBytes += bytes
+    this.probationHeldBytes += bytes
 
     const under = held.material.get(header.representation)
     if (under) under.chunks.push(chunk)
     else held.material.set(header.representation, { header, chunks: [chunk] })
     held.lastSeenAt = input.now
+  }
+
+  /** Removes one retained doubt and keeps the aggregate counter exact. */
+  private forgetProbation(sourceId: string): Probation | undefined {
+    const held = this.probation.get(sourceId)
+    if (!held) return undefined
+    this.probation.delete(sourceId)
+    this.probationHeldBytes = Math.max(0, this.probationHeldBytes - held.retainedBytes)
+    return held
+  }
+
+  /** Makes room for the newest undecided item by evicting older ones, never by growing memory. */
+  private makeProbationRoom(sourceId: string, bytes: number): boolean {
+    while (this.probationHeldBytes + bytes > MAX_TOTAL_PROBATION_BYTES) {
+      let oldest: { sourceId: string; held: Probation } | undefined
+      for (const [candidateId, candidate] of this.probation) {
+        if (candidateId === sourceId) continue
+        if (
+          !oldest ||
+          candidate.lastSeenAt < oldest.held.lastSeenAt ||
+          (candidate.lastSeenAt === oldest.held.lastSeenAt && candidateId < oldest.sourceId)
+        ) {
+          oldest = { sourceId: candidateId, held: candidate }
+        }
+      }
+      if (!oldest) return false
+      this.forgetProbation(oldest.sourceId)
+      this.screenedOut.add(oldest.sourceId)
+    }
+    return true
   }
 
   /**
@@ -1751,7 +1839,7 @@ export class SessionStore {
 
     const normalized = normalizeUrl(url)
     for (const session of this.sessions.values()) {
-      if (normalizeUrl(session.url) === normalized) session.title = title
+      if (normalizeUrl(session.url) === normalized && !session.sourceTitle) session.title = title
     }
   }
 
@@ -1877,7 +1965,7 @@ export class SessionStore {
 
   /** Weight of everything this frame is holding in memory, across every session. */
   heldBytes(): number {
-    let bytes = 0
+    let bytes = this.probationHeldBytes
     for (const session of this.sessions.values()) {
       for (const track of session.tracks) bytes += track.map.totalBytes()
     }
@@ -1911,6 +1999,18 @@ export class SessionStore {
    * the frame either way.
    */
   dropOverCeiling(ceilingBytes: number, now: number): void {
+    // Undecided material is the first thing to yield under the frame's configured ceiling. It is
+    // not user-visible yet, while every listed session has already survived the admission test.
+    while (this.heldBytes() > ceilingBytes && this.probation.size > 0) {
+      let oldest: { sourceId: string; at: number } | undefined
+      for (const [sourceId, held] of this.probation) {
+        if (!oldest || held.lastSeenAt < oldest.at) oldest = { sourceId, at: held.lastSeenAt }
+      }
+      if (!oldest) break
+      this.forgetProbation(oldest.sourceId)
+      this.screenedOut.add(oldest.sourceId)
+    }
+
     const over = this.heldBytes() - ceilingBytes
     if (over <= 0) return
 
@@ -2028,6 +2128,7 @@ export class SessionStore {
     this.plainSources.clear()
     this.soundSources.clear()
     this.probation.clear()
+    this.probationHeldBytes = 0
     this.rejected.clear()
     this.promoted.clear()
     this.screenedOut.clear()
@@ -2122,7 +2223,17 @@ export class SessionStore {
     if (session.sources.size > 0) return
 
     this.sessions.delete(session.key)
-    this.probation.set(sourceId, probationOf(session))
+    const held = probationOf(session)
+    this.forgetProbation(sourceId)
+    if (
+      held.retainedBytes <= MAX_TOTAL_PROBATION_BYTES &&
+      this.makeProbationRoom(sourceId, held.retainedBytes)
+    ) {
+      this.probation.set(sourceId, held)
+      this.probationHeldBytes += held.retainedBytes
+    } else {
+      this.screenedOut.add(sourceId)
+    }
   }
 
   /**
@@ -2217,14 +2328,15 @@ export class SessionStore {
 
     const held = this.probation.get(sourceId)
     if (!held) {
-      // Nothing was set aside — the rejection came before the first segment, or outlasted the
-      // review. The source simply takes its place in whatever session it was feeding again.
+      // Nothing was set aside — the rejection came before the first segment, or a memory ceiling
+      // evicted its probation. The source simply takes its place in whatever session it was
+      // feeding again.
       const current = this.sessions.get(source.key)
       if (current) this.join(current, sourceId)
       return current
     }
 
-    this.probation.delete(sourceId)
+    this.forgetProbation(sourceId)
     const session = this.bind(source, sourceId, {
       url: held.url,
       title: held.title,
@@ -2328,7 +2440,7 @@ export class SessionStore {
       // has, and the video it belonged to is one the page has scrolled past.
       this.promoted.delete(input.sourceId)
       this.screenedOut.delete(input.sourceId)
-      this.probation.delete(input.sourceId)
+      this.forgetProbation(input.sourceId)
 
       // The stated length stays, alone of everything here. A page that reuses one MediaSource for
       // its next video states the length of that one too, and it arrives when it arrives;
@@ -2405,6 +2517,7 @@ export class SessionStore {
    */
   private join(session: StoredSession, sourceId: string): void {
     session.sources.add(sourceId)
+    this.applyMediaTitle(session, sourceId)
     if (this.promoted.has(sourceId)) session.confirmed = true
     // What was measured of this player before the session existed is a measurement of this very
     // video: see sawPlayer. The one place a source starts feeding a session, whichever of the
@@ -2438,20 +2551,36 @@ export class SessionStore {
       widthPx: 0,
       sources: new Set(),
       confirmed: false,
+      sourceTitle: false,
     }
+  }
+
+  /** Applies a pending source title once, and tells persistence only when something changed. */
+  private applyMediaTitle(session: StoredSession, sourceId: string): void {
+    const description = this.mediaTitles.get(sourceId)
+    if (!description || description.url !== normalizeUrl(session.url)) return
+    const { title } = description
+    if (session.sourceTitle && session.title === title) return
+    session.title = title
+    session.sourceTitle = true
+    this.onDescribe?.({ key: session.key, title })
   }
 }
 
 /** A session taken out of the registry, in the form its source holds it while under review. */
 function probationOf(session: StoredSession): Probation {
   const material = new Map<string, HeldTrack>()
+  let retainedBytes = 0
 
   for (const track of session.tracks) {
     // The map stays behind with the session that is leaving; what goes aside is the header and
     // the segments themselves, and they are put on a map again when the verdict turns.
     const { map, ...header } = track
     const chunks: Chunk[] = []
-    for (const run of map.runs()) chunks.push(...run.chunks)
+    for (const run of map.runs()) {
+      chunks.push(...run.chunks)
+      for (const chunk of run.chunks) retainedBytes += chunk.bytes.byteLength
+    }
     // A track with nothing under it is nothing to set aside: its header is on the source that
     // opened it, and it is from there that a track of it is opened again.
     if (chunks.length) material.set(header.representation, { header, chunks })
@@ -2467,6 +2596,7 @@ function probationOf(session: StoredSession): Probation {
     // it: the cap is there to bound how long a page can keep appending to a rejection that is
     // never going to turn.
     bytes: 0,
+    retainedBytes,
   }
 }
 

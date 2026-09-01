@@ -4,6 +4,7 @@ import type {
   SaveResult,
   SessionList,
   SessionSummary,
+  ThumbnailResult,
 } from './protocol'
 
 /**
@@ -196,6 +197,16 @@ export function saveInFrame(
   key: string,
 ): Promise<SaveResult | undefined> {
   const request: ExtensionToTab = { type: 'tc:save', key }
+  return chrome.tabs.sendMessage(tabId, request, { frameId })
+}
+
+/** Asks one frame for one optional, locally decoded preview of a listed session. */
+export function thumbnailInFrame(
+  tabId: number,
+  frameId: number,
+  key: string,
+): Promise<ThumbnailResult | undefined> {
+  const request: ExtensionToTab = { type: 'tc:thumbnail', key }
   return chrome.tabs.sendMessage(tabId, request, { frameId })
 }
 

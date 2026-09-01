@@ -166,6 +166,7 @@ describe('isPageToBridge', () => {
 const tabRequests: [string, ExtensionToTab][] = [
   ['a list request', { type: 'tc:list' }],
   ['a save request', { type: 'tc:save', key: 'https://site.example/watch|avc1|inf' }],
+  ['a thumbnail request', { type: 'tc:thumbnail', key: 'https://site.example/watch|avc1|inf' }],
 ]
 
 describe('isExtensionToTab', () => {
@@ -185,6 +186,8 @@ describe('isExtensionToTab', () => {
     ["somebody else's type", { type: 'tc:ping' }],
     ['a save without a key', { type: 'tc:save' }],
     ['a save with a non-string key', { type: 'tc:save', key: 42 }],
+    ['a thumbnail without a key', { type: 'tc:thumbnail' }],
+    ['a thumbnail with a non-string key', { type: 'tc:thumbnail', key: 42 }],
     // The one request of this union that carries a claim rather than an address, and the claim is
     // what it is acted on: a pause with nothing in it would be read as "start recording again" by
     // every reader that takes `on` for a boolean.
@@ -287,6 +290,7 @@ const everyExtensionToTab: { [K in ExtensionToTab['type']]: Extract<ExtensionToT
   'tc:list': { type: 'tc:list' },
   'tc:save': { type: 'tc:save', key: 'https://site.example/watch|avc1|inf' },
   'tc:edit': { type: 'tc:edit', key: 'https://site.example/watch|avc1|inf' },
+  'tc:thumbnail': { type: 'tc:thumbnail', key: 'https://site.example/watch|avc1|inf' },
   'tc:pause': { type: 'tc:pause', on: true },
 }
 
@@ -294,6 +298,12 @@ const everyContentToBridge: {
   [K in ContentToBridge['type']]: Extract<ContentToBridge, { type: K }>
 } = {
   'tc:context': { type: 'tc:context', url: 'https://site.example/watch', title: 'Clip' },
+  'tc:media': {
+    type: 'tc:media',
+    sourceId: 's1',
+    title: 'A feed item',
+    url: 'https://site.example/feed/1',
+  },
   'tc:verdict': { type: 'tc:verdict', sourceId: 's1', verdict: 'promote' },
   'tc:player': { type: 'tc:player', sourceId: 's1', widthPx: 1280 },
   'tc:encrypted': { type: 'tc:encrypted' },
@@ -337,6 +347,25 @@ describe('the authenticated bridge control channel', () => {
     expect(isContentToBridge({ type: 'tc:verdict', sourceId: 's1', verdict: 'drop' })).toBe(false)
     expect(isContentToBridge({ type: 'tc:player', sourceId: 's1', widthPx: '1280' })).toBe(false)
     expect(isContentToBridge({ type: 'tc:context', url: 'https://site.example', title: 42 })).toBe(
+      false,
+    )
+    expect(
+      isContentToBridge({
+        type: 'tc:media',
+        sourceId: 's1',
+        title: 42,
+        url: 'https://site.example/feed/1',
+      }),
+    ).toBe(false)
+    expect(
+      isContentToBridge({
+        type: 'tc:media',
+        sourceId: 's1',
+        title: 'x'.repeat(241),
+        url: 'https://site.example/feed/1',
+      }),
+    ).toBe(false)
+    expect(isContentToBridge({ type: 'tc:media', sourceId: 's1', title: 'A feed item' })).toBe(
       false,
     )
   })

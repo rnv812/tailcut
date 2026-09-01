@@ -12,13 +12,21 @@ function titleText(text: string | null | undefined): string {
   return Array.from(compact).slice(0, MAX_TITLE_CODE_POINTS).join('')
 }
 
-function tokens(element: Element, attribute: string): string[] {
-  return (element.getAttribute(attribute) ?? '').split(/\s+/u).filter(Boolean)
+function attribute(element: Element, name: string): string | null {
+  try {
+    return element.getAttribute?.(name) ?? null
+  } catch {
+    return null
+  }
+}
+
+function tokens(element: Element, name: string): string[] {
+  return (attribute(element, name) ?? '').split(/\s+/u).filter(Boolean)
 }
 
 function isMediaContainer(element: Element): boolean {
   const tag = element.localName.toLowerCase()
-  if (tag === 'article' || tag === 'figure' || element.getAttribute('role') === 'article') {
+  if (tag === 'article' || tag === 'figure' || attribute(element, 'role') === 'article') {
     return true
   }
 
@@ -35,7 +43,7 @@ function isStructuredCaption(element: Element): boolean {
 }
 
 function isHeading(element: Element): boolean {
-  return /^h[1-6]$/u.test(element.localName.toLowerCase()) || element.getAttribute('role') === 'heading'
+  return /^h[1-6]$/u.test(element.localName.toLowerCase()) || attribute(element, 'role') === 'heading'
 }
 
 /**
@@ -68,30 +76,30 @@ function captionWithin(container: Element): string {
   return paragraph || heading
 }
 
-function labelledTitle(video: HTMLVideoElement): string {
+function labelledTitle(video: HTMLMediaElement): string {
   const ids = tokens(video, 'aria-labelledby').slice(0, MAX_LABEL_IDS)
   if (ids.length === 0) return ''
 
-  const root = video.getRootNode() as Document | ShadowRoot
-  return titleText(ids.map((id) => root.getElementById(id)?.textContent ?? '').join(' '))
+  const root = video.getRootNode?.() as Document | ShadowRoot | undefined
+  return titleText(ids.map((id) => root?.getElementById(id)?.textContent ?? '').join(' '))
 }
 
 /**
  * Derives a title scoped to one video. The optional fallback is supplied by the caller only when
  * it knows that a page-wide title, such as Media Session metadata, belongs to this one player.
  */
-export function mediaTitleOf(video: HTMLVideoElement, fallbackTitle = ''): string {
+export function mediaTitleOf(video: HTMLMediaElement, fallbackTitle = ''): string {
   const labelled = labelledTitle(video)
   if (labelled) return labelled
 
-  const own = titleText(video.ariaLabel || video.getAttribute('aria-label') || video.title)
+  const own = titleText(video.ariaLabel || attribute(video, 'aria-label') || video.title)
   if (own) return own
 
   let ancestor = video.parentElement
   for (let distance = 0; ancestor && distance < MAX_ANCESTORS; distance++) {
     if (isMediaContainer(ancestor)) {
       const containerTitle = titleText(
-        ancestor.getAttribute('aria-label') || ancestor.getAttribute('title'),
+        attribute(ancestor, 'aria-label') || attribute(ancestor, 'title'),
       )
       return containerTitle || captionWithin(ancestor) || titleText(fallbackTitle)
     }

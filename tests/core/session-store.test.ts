@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
   MAX_PROBATION_BYTES,
+  MAX_TOTAL_PROBATION_BYTES,
   SessionStore,
   selectMaterial,
   summarize,
@@ -418,6 +419,52 @@ describe('SessionStore: what ends up in a session', () => {
     // Without this the popup signs the session "Untitled" and the saved file is named after
     // nothing, though the page has been telling its title all along.
     expect(store.list()[0]!.title).toBe('Real title')
+  })
+
+  it('uses a source-scoped feed title and keeps it over the generic tab title', () => {
+    const store = new SessionStore()
+
+    store.describeMedia(page.sourceId, { title: 'First feed item', url: page.url })
+    store.append({ ...page, title: 'TikTok - Make Your Day', bytes: init })
+    store.pageIsAt(page.url, 'TikTok - Make Your Day')
+
+    expect(store.list()[0]!.title).toBe('First feed item')
+  })
+
+  it('does not carry a source title into the next page played by the reused source', () => {
+    const store = new SessionStore()
+    store.describeMedia(page.sourceId, { title: 'First feed item', url: page.url })
+    store.append({ ...page, title: 'Generic feed', bytes: init })
+
+    const next = {
+      ...page,
+      url: 'https://site.example/watch?v=next',
+      title: 'Next generic page',
+      bufferId: 'b2',
+    }
+    store.append({ ...next, bytes: init })
+
+    expect(store.list().find((session) => session.url === page.url)?.title).toBe('First feed item')
+    expect(store.list().find((session) => session.url === next.url)?.title).toBe('Next generic page')
+  })
+
+  it('renames only the session fed by the described source', () => {
+    const store = new SessionStore()
+    const other = {
+      ...page,
+      sourceId: 's2',
+      url: 'https://site.example/watch?v=other',
+      title: 'Generic site title',
+    }
+
+    store.append({ ...page, title: 'Generic site title', bytes: init })
+    store.append({ ...other, bytes: init })
+    store.describeMedia(page.sourceId, { title: 'First feed item', url: page.url })
+
+    expect(store.list().find((session) => session.url === page.url)?.title).toBe('First feed item')
+    expect(store.list().find((session) => session.url === other.url)?.title).toBe(
+      'Generic site title',
+    )
   })
 
   it('recognises the address of a retitled session through the referral marks', () => {
@@ -1553,25 +1600,107 @@ describe('SessionStore: triage verdicts', () => {
     expect(store.list()).toEqual([])
   })
 
-  it('keeps nothing of a rejection that stands', () => {
+  it('keeps a capped beginning when an invisible preload is promoted after buffering ends', () => {
+    const store = new SessionStore()
+    store.dropPending('s1')
+    store.append({ ...page, bytes: init })
+
+    const enough = Math.ceil(MAX_PROBATION_BYTES / videoSegs[0]!.byteLength) + 1
+    for (let i = 0; i < enough; i++) store.append({ ...page, bytes: videoSegs[0]! })
+
+    expect(store.heldBytes()).toBeGreaterThan(MAX_PROBATION_BYTES - videoSegs[0]!.byteLength)
+    expect(store.heldBytes()).toBeLessThanOrEqual(MAX_PROBATION_BYTES)
+
+    // A feed may preload the whole off-screen item, so promotion can be the last event it emits.
+    // The bounded prefix must already be enough to make that watched item available.
+    store.promotePending('s1')
+
+    expect(store.list()).toHaveLength(1)
+    expect(only(store.list()[0]!).map.totalBytes()).toBeGreaterThan(0)
+  })
+
+  it('keeps the first late soundtrack segment after the picture fills probation', () => {
+    const store = new SessionStore()
+    const sound = { ...page, bufferId: 'b2' }
+    store.dropPending('s1')
+    store.append({ ...page, bytes: init })
+    store.append({ ...sound, bytes: audioInit })
+
+    // The three fixture sizes fill the cap to within ten bytes. The first sound fragment cannot
+    // fit in the ordinary remainder, so only the bounded late-kind allowance can preserve it.
+    for (let i = 0; i < 57; i++) store.append({ ...page, bytes: videoSegs[0]! })
+    for (let i = 0; i < 3; i++) store.append({ ...page, bytes: videoSegs[1]! })
+    for (let i = 0; i < 53; i++) store.append({ ...page, bytes: videoSegs[2]! })
+    store.append({ ...sound, bytes: audioSegs[0]! })
+
+    store.promotePending('s1')
+    const session = store.list()[0]!
+    expect(session.tracks.find((track) => track.kinds.includes('video'))?.map.totalBytes()).toBeGreaterThan(0)
+    expect(session.tracks.find((track) => track.kinds.includes('audio'))?.map.totalBytes()).toBeGreaterThan(0)
+  })
+
+  it('counts the bytes held for an undecided source as memory in use', () => {
+    const store = new SessionStore()
+    store.dropPending('s1')
+    store.append({ ...page, bytes: init })
+    store.append({ ...page, bytes: videoSegs[0]! })
+
+    expect(store.heldBytes()).toBe(videoSegs[0]!.byteLength)
+  })
+
+  it('bounds all invisible preloads together and preserves the newest one', () => {
+    const store = new SessionStore()
+    const count = Math.ceil(MAX_TOTAL_PROBATION_BYTES / videoSegs[0]!.byteLength) + 2
+
+    for (let item = 1; item <= count; item++) {
+      const sourceId = `s${item}`
+      const input = {
+        ...page,
+        sourceId,
+        bufferId: `b${item}`,
+        url: `https://site.example/feed/${item}`,
+        now: page.now + item,
+      }
+      store.dropPending(sourceId)
+      store.append({ ...input, bytes: init })
+      store.append({ ...input, bytes: videoSegs[0]! })
+    }
+
+    expect(store.heldBytes()).toBeGreaterThan(
+      MAX_TOTAL_PROBATION_BYTES - videoSegs[0]!.byteLength,
+    )
+    expect(store.heldBytes()).toBeLessThanOrEqual(MAX_TOTAL_PROBATION_BYTES)
+
+    store.promotePending('s1')
+    expect(store.list().find((session) => session.url.endsWith('/1'))).toBeUndefined()
+    store.promotePending(`s${count}`)
+    expect(store.list().find((session) => session.url.endsWith(`/${count}`))).toBeDefined()
+  })
+
+  it('stops a standing rejection at the cap and restores its bounded beginning', () => {
     const store = new SessionStore()
     store.append({ ...page, bytes: init })
     store.dropPending('s1')
 
     // The hook in the MAIN world knows nothing of verdicts and copies to the last, and a banner
     // plays for as long as the page is open. What is set aside while the verdict is under review
-    // is bounded: material that outlasts the review is not the misreading of a moment, and the
-    // source goes back to costing nothing.
+    // is bounded: once it reaches the cap the source stops growing, but the retained beginning
+    // remains useful if a feed promotes the item without appending anything else.
     const enough = Math.ceil(MAX_PROBATION_BYTES / videoSegs[0]!.byteLength) + 1
     for (let i = 0; i < enough; i++) store.append({ ...page, bytes: videoSegs[0]! })
 
-    store.resumePending('s1')
     expect(store.list()).toEqual([])
+    store.resumePending('s1')
+    expect(store.list()).toHaveLength(1)
+    expect(only(store.list()[0]!).map.runs()[0]!.chunks.map(shapeOf)).toEqual([
+      [0, 2, videoSegs[0]!.byteLength],
+    ])
 
-    // The material is gone; the reading of the stream is not. A source screened out for minutes
-    // and brought back records from that moment on, without waiting for an init that never comes.
+    // The reading of the stream continues. A source held at the cap for minutes and brought back
+    // records from that moment on without waiting for another init that may never come.
     store.append({ ...page, bytes: videoSegs[1]! })
     expect(only(store.list()[0]!).map.runs()[0]!.chunks.map(shapeOf)).toEqual([
+      [0, 2, videoSegs[0]!.byteLength],
       [2, 4, videoSegs[1]!.byteLength],
     ])
   })
@@ -2990,6 +3119,25 @@ describe('trimming and the memory ceiling', () => {
     store.dropOverCeiling(store.heldBytes() + 1, page.now)
 
     expect(store.get(session.key)).toBeDefined()
+  })
+
+  it('takes undecided material before a visible recording under the configured ceiling', () => {
+    const store = new SessionStore()
+    const visible = watch(store, { sourceId: 's1', url: 'https://a.example/x' }, 4)
+    store.promotePending('s1')
+    const visibleBytes = store.heldBytes()
+    const hidden = { ...page, sourceId: 's2', bufferId: 'b2', url: 'https://b.example/y' }
+    store.dropPending('s2')
+    store.append({ ...hidden, bytes: init })
+    store.append({ ...hidden, bytes: videoSegs[0]! })
+
+    expect(store.heldBytes()).toBeGreaterThan(visibleBytes)
+    store.dropOverCeiling(visibleBytes, page.now)
+
+    expect(store.get(visible.key)).toBeDefined()
+    expect(store.heldBytes()).toBeLessThanOrEqual(visibleBytes)
+    store.promotePending('s2')
+    expect(store.list().find((session) => session.url === hidden.url)).toBeUndefined()
   })
 
   it('goes on recording into a session the ceiling took, from the next segment on', () => {

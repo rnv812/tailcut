@@ -1,5 +1,6 @@
 import { sanitizeFileName } from '../core/export/naming'
 import { planSnapshot, type SnapshotMeta } from '../core/snapshot/build'
+import { thumbnailOf } from '../core/thumbnail'
 import {
   bridgeCapabilityKey,
   isBridgeCapability,
@@ -17,6 +18,7 @@ import {
   type SaveResult,
   type SessionList,
   type SessionSummary,
+  type ThumbnailResult,
 } from '../shared/protocol'
 import { memoryCeilingFor, siteAllows, termsAccepted } from '../shared/settings'
 import { liveSettings } from '../shared/settings-store'
@@ -31,12 +33,16 @@ import {
   type Session,
 } from './session-store'
 import {
+  describeSession,
   openSession,
   recordPiece,
   recordSnapshot,
   renameSession,
+  storeHistoryThumbnail,
 } from '../shared/history-db'
 import { writeSnapshot } from './snapshot-writer'
+import { liveThumbnailRuntime } from './thumbnail-runtime'
+import { thumbnailSourceOf } from './thumbnail-source'
 import { writeSaveFile } from './write'
 
 const writeHistoryPiece = historyWorker()
@@ -53,6 +59,8 @@ const history = new HistoryWriter({
   // The one thing about a live session the writer asks for at the moment a piece lands. Why it is
   // asked then, and why the stamp the chunks carry is kept beside the answer, is in HistoryIo.
   liveWidth: (key) => store.widthOf(key),
+  describe: (key, details) =>
+    describeSession(key, details).catch(() => undefined),
   rename: (id, event) =>
     renameSession(id, event.to, event.page)
       .then(() => undefined)
@@ -90,6 +98,7 @@ const store = new SessionStore({
   // The key of a session changes while it is being recorded, and what is on disk is
   // addressed by it. Without this the disk would keep the halves apart.
   onRekey: (event) => history.rekey(event),
+  onDescribe: (event) => history.describe(event),
 })
 
 /**
@@ -451,6 +460,8 @@ function replyTo(request: ExtensionToTab): Promise<BridgeAnswer> {
     // this page being closed — which is the whole reason the snapshot exists.
     case 'tc:edit':
       return freeze(request.key)
+    case 'tc:thumbnail':
+      return thumbnail(request.key)
     // The quick switch of the popup: this page, this visit. It overrides the mode in one
     // direction only — a page the settings do not record is not started by it — because the
     // switch says "stop", and a button that could turn recording on where the settings say no
@@ -458,6 +469,61 @@ function replyTo(request: ExtensionToTab): Promise<BridgeAnswer> {
     case 'tc:pause':
       return Promise.resolve(pause(request.on))
   }
+}
+
+interface CachedThumbnail {
+  result?: Extract<ThumbnailResult, { ok: true }>
+  bytes?: Uint8Array
+  pending?: Promise<ThumbnailResult>
+}
+
+/** Successful previews stay with their live session; failed attempts may succeed as it grows. */
+const thumbnails = new WeakMap<Session, CachedThumbnail>()
+
+/** Makes one small preview on demand. Failure never changes or hides the recording itself. */
+function thumbnail(key: string): Promise<ThumbnailResult> {
+  const session = store.get(key)
+  if (!session) return Promise.resolve({ ok: false })
+
+  let cached = thumbnails.get(session)
+  if (cached?.result) {
+    if (cached.bytes) persistThumbnail(key, cached.bytes)
+    return Promise.resolve(cached.result)
+  }
+  if (cached?.pending) return cached.pending
+
+  const source = thumbnailSourceOf(session)
+  if (!source) return Promise.resolve({ ok: false })
+  cached ??= {}
+  thumbnails.set(session, cached)
+
+  cached.pending = thumbnailOf(source, liveThumbnailRuntime())
+    .then((bytes): ThumbnailResult => {
+      if (!bytes) return { ok: false }
+
+      let binary = ''
+      for (const byte of bytes) binary += String.fromCharCode(byte)
+      const result = { ok: true, dataUrl: `data:image/webp;base64,${btoa(binary)}` } as const
+      cached.result = result
+      cached.bytes = bytes
+      persistThumbnail(key, bytes)
+      return result
+    })
+    .finally(() => {
+      cached.pending = undefined
+    })
+  return cached.pending
+}
+
+/** Best-effort and repeatable: a history row may land after the first popup request. */
+function persistThumbnail(key: string, bytes: Uint8Array): void {
+  // History owns its copy. The popup should not wait for IndexedDB after the image is ready, and
+  // a session with disk history disabled simply has no row for this call to update. Repeating the
+  // request is safe and closes the race with the history writer's two-second batch.
+  void storeHistoryThumbnail(
+    key,
+    new Blob([bytes.slice().buffer], { type: 'image/webp' }),
+  ).catch(() => undefined)
 }
 
 /** The quick switch, applied. Answered with the state and not with "done": see PauseResult. */
@@ -610,6 +676,11 @@ function receiveControl(event: MessageEvent): void {
       // The address decides whether anything is recorded here, so the answer is worked out when the
       // address arrives and again whenever it changes — never before it, and never on a timer.
       applyRecordingMode()
+      return
+    }
+
+    if (data.type === 'tc:media') {
+      store.describeMedia(data.sourceId, { title: data.title, url: data.url })
       return
     }
 

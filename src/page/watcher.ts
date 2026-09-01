@@ -1,9 +1,12 @@
 import { triage, type TriageVerdict, type VideoSignals } from '../core/triage'
 import { liveSettings } from '../shared/settings-store'
 import type { PlainSource, SoundSource } from '../shared/protocol'
+import { mediaTitleOf } from './media-title'
 
 /** How often each <video>'s signals are reevaluated. */
 const POLL_INTERVAL_MS = 500
+/** A named or initially unnamed active source is checked again every five seconds. */
+const MEDIA_TITLE_RETRY_POLLS = 10
 
 interface Watched {
   element: HTMLMediaElement
@@ -164,6 +167,9 @@ export type Tell = (sourceId: string, verdict: TriageVerdict) => void
  * full screen and put back into the corner says it twice, and that is the whole of it.
  */
 export type Measured = (sourceId: string, widthPx: number) => void
+
+/** A title that belongs to one media source rather than to the page around it. */
+export type MediaTold = (description: { sourceId: string; title: string }) => void
 
 /** What one element has to say about the file it is playing. */
 interface Speaker {
@@ -373,6 +379,8 @@ export function startWatching(
    * signal goes on looking exactly as it did.
    */
   onPlayer: Measured = () => {},
+  /** Source-scoped presentation, sent once when a visible playing video can be named safely. */
+  onMedia: MediaTold = () => {},
 ): void {
   /**
    * The live detection settings.
@@ -402,6 +410,10 @@ export function startWatching(
   const soundPictures = new Map<string, string>()
   /** Pictures known to have played with a separate soundtrack; the source-scoped triage signal. */
   const picturesWithSound = new Set<string>()
+  /** Sources already named, and bounded retries for a caption that is still being rendered. */
+  const mediaTold = new Map<string, string>()
+  const mediaAttempts = new Map<string, number>()
+  let mediaPoll = 0
 
   /** Shadow roots already under observation: a weak set, so a detached tree can still be freed. */
   const observed = new WeakSet<ShadowRoot>()
@@ -480,6 +492,7 @@ export function startWatching(
   }
 
   const tick = () => {
+    mediaPoll++
     discover()
     const now = performance.now()
     /** Streams an element of the page is playing right now: everything else is out of reach. */
@@ -532,6 +545,30 @@ export function startWatching(
       const pictureSourceId = [...playingPictures][0]!
       soundPictures.set(playingSounds[0]!.sourceId, pictureSourceId)
       picturesWithSound.add(pictureSourceId)
+    }
+
+    const activeMedia = new Map<
+      string,
+      { element: HTMLMediaElement; playedSeconds: number }
+    >()
+    for (const [element, measured] of measurements) {
+      if (!measured.signals.playing || !measured.signals.visible) continue
+      const sourceId = sourceIdOf(element) ?? measured.plain?.sourceId
+      if (!sourceId) continue
+      const standing = activeMedia.get(sourceId)
+      if (!standing || measured.signals.playedSeconds > standing.playedSeconds) {
+        activeMedia.set(sourceId, { element, playedSeconds: measured.signals.playedSeconds })
+      }
+    }
+    for (const [sourceId, media] of activeMedia) {
+      const attempts = mediaAttempts.get(sourceId) ?? 0
+      if (attempts >= 6 && mediaPoll % MEDIA_TITLE_RETRY_POLLS !== 0) continue
+
+      const title = mediaTitleOf(media.element)
+      mediaAttempts.set(sourceId, title ? 6 : Math.min(6, attempts + 1))
+      if (!title || mediaTold.get(sourceId) === title) continue
+      mediaTold.set(sourceId, title)
+      onMedia({ sourceId, title })
     }
 
     for (const [sourceId, sound] of sounds) {
