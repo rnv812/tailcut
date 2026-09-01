@@ -36,6 +36,7 @@ function fakeIo(overrides: Partial<HistoryIo> = {}) {
     event: ChunkStored
   }> = []
   const renamed: Array<[string, string]> = []
+  const described: Array<[string, { title: string }]> = []
   let clock = 1_700_000_000_000
   const sweeps: number[] = []
 
@@ -55,6 +56,10 @@ function fakeIo(overrides: Partial<HistoryIo> = {}) {
     rename: async (id, event) => {
       renamed.push([id, event.to])
     },
+    describe: async (key, details) => {
+      described.push([key, details])
+      await overrides.describe?.(key, details)
+    },
     sweep: () => {
       sweeps.push(clock)
       overrides.sweep?.()
@@ -62,7 +67,7 @@ function fakeIo(overrides: Partial<HistoryIo> = {}) {
     now: () => (overrides.now ? overrides.now() : clock),
   }
 
-  return { io, written, rows, renamed, sweeps, tick: (ms: number) => (clock += ms) }
+  return { io, written, rows, renamed, described, sweeps, tick: (ms: number) => (clock += ms) }
 }
 
 /** The merge key of the session covered by this suite. */
@@ -112,6 +117,62 @@ const facts = ({ initBytes: _bytes, ...track }: ChunkStored['track']) => track
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 describe('HistoryWriter', () => {
+  it('uses a source title that arrives while material is still pending', async () => {
+    const { io, rows, described } = fakeIo()
+    const writer = new HistoryWriter(io)
+
+    writer.take(event(0, 1_000))
+    writer.describe({ key: KEY, title: 'The feed item' })
+    writer.flushAll()
+    await settle()
+
+    expect(rows[0]!.event.page.title).toBe('The feed item')
+    expect(described).toEqual([[KEY, { title: 'The feed item' }]])
+  })
+
+  it('waits for an opening row before applying a source title to it', async () => {
+    const order: string[] = []
+    let entered!: () => void
+    let release!: () => void
+    const opening = new Promise<void>((resolve) => (entered = resolve))
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const { io } = fakeIo({
+      open: async () => {
+        order.push('open')
+        entered()
+        await held
+        return 'sess-1'
+      },
+      record: async () => {
+        order.push('record')
+      },
+      describe: async () => {
+        order.push('describe')
+      },
+    })
+    const writer = new HistoryWriter(io)
+
+    writer.take(event(0, HISTORY_BATCH_BYTES))
+    await opening
+    writer.describe({ key: KEY, title: 'The feed item' })
+    release()
+    await settle()
+
+    expect(order).toEqual(['open', 'record', 'describe'])
+  })
+
+  it('applies a source title after the final piece has landed', async () => {
+    const { io, described } = fakeIo()
+    const writer = new HistoryWriter(io)
+
+    writer.take(event(0, HISTORY_BATCH_BYTES))
+    await settle()
+    writer.describe({ key: KEY, title: 'The final title' })
+    await settle()
+
+    expect(described).toEqual([[KEY, { title: 'The final title' }]])
+  })
+
   it('holds material back until the batch is full', async () => {
     const { io, written } = fakeIo()
     const writer = new HistoryWriter(io)

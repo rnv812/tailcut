@@ -266,6 +266,38 @@ test('a session moves to the key it is now known by, and refuses one that is tak
   })
 })
 
+test('a late source title finds its session by key and ignores an absent row', async () => {
+  await overIndex(async (reader) => {
+    const got = await reader.evaluate(
+      async (input) => {
+        const address = '/shared/history-db.js'
+        const database: typeof import('../../src/shared/history-db') = await import(address)
+
+        const id = await database.openSession('one', {
+          ...input.page,
+          createdAt: 1_000,
+          lastSeenAt: 2_000,
+        })
+        await database.recordPiece(id, input.piece, [], {
+          page: { ...input.page, lastSeenAt: 3_000 },
+          widthPx: 0,
+        })
+
+        await database.describeSession('one', { title: 'The feed item' })
+        const described = await database.sessionById(id)
+        await database.describeSession('no-such-key', { title: 'Nobody' })
+        const afterAbsent = await database.listSessions(Number.MAX_SAFE_INTEGER, true)
+
+        return { id, described, afterAbsent }
+      },
+      { page: PAGE, piece: piece('aaaaaaaa-000000.tcm', 0, 2, 1_016) },
+    )
+
+    expect(got.described!.title).toBe('The feed item')
+    expect(got.afterAbsent.map((row) => row.id)).toEqual([got.id])
+  })
+})
+
 test('the marks a user leaves on a session, and the order the rows come back in', async () => {
   await overIndex(async (reader) => {
     const got = await reader.evaluate(

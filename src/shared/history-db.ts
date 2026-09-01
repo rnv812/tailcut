@@ -410,6 +410,22 @@ export async function renameSession(
   return true
 }
 
+/** Updates facts learned after the media session was opened, addressed by its merge key. */
+export async function describeSession(key: string, details: { title: string }): Promise<void> {
+  const db = await openHistoryDb()
+  const tx = transaction(db, [SESSIONS], 'readwrite')
+  const sessions = tx.objectStore(SESSIONS)
+  const row = (await promised(sessions.index('key').get(key))) as HistorySessionRow | undefined
+
+  if (!row || !details.title) {
+    tx.abort()
+    return
+  }
+
+  await promised(sessions.put({ ...row, title: details.title }))
+  await finished(tx)
+}
+
 /**
  * Sessions newest first, the deleted ones and the empty ones left out.
  *

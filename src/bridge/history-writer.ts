@@ -73,6 +73,8 @@ export interface HistoryIo {
    * that signs it keeps the key it was gathered under.
    */
   liveWidth(key: string): number
+  /** A late source-scoped description of the session, found by its merge key. */
+  describe(key: string, details: { title: string }): Promise<void>
   /** The session on disk is known by another merge key from now on; the row moves, the files do not. */
   rename(id: string, event: SessionRekeyed): Promise<void>
   /** Storage is full and somebody has to make room. */
@@ -196,6 +198,23 @@ export class HistoryWriter {
     if (!pending.timer) {
       pending.timer = setTimeout(() => this.flush(event.key), HISTORY_TAIL_MS)
     }
+  }
+
+  /** Gives a session the title of its media element, even when its final piece has already landed. */
+  describe(event: { key: string; title: string }): void {
+    const pending = this.pending.get(event.key)
+    if (pending) {
+      pending.sample = {
+        ...pending.sample,
+        page: { ...pending.sample.page, title: event.title },
+      }
+    }
+
+    // On the same queue as opening and recording. If a batch is inside `open` now, the row exists
+    // before this runs; if no batch has started yet, the updated sample opens it under this title.
+    this.queue = this.queue
+      .then(() => this.io.describe(event.key, { title: event.title }))
+      .catch(() => undefined)
   }
 
   /**
