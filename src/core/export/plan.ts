@@ -256,12 +256,15 @@ export function planClip(source: ClipSource, request: ClipRequest): ExportPlan {
         }
   const seams = seamsOf(decodable)
   const tracks: PlannedTrack[] = []
+  const alignedIn = firstDecodableIn(videoSource, request.in)
+  const alignedRequest =
+    alignedIn === request.in ? request : { ...request, in: alignedIn }
 
-  const video = planTrack(decodable.video, request, seams)
+  const video = planTrack(decodable.video, alignedRequest, seams)
   if (video) tracks.push(video)
 
   if (request.sound && decodable.audio && video) {
-    const audio = planTrack(decodable.audio, request, seams)
+    const audio = planTrack(decodable.audio, alignedRequest, seams)
     if (audio) tracks.push(audio)
   }
 
@@ -276,6 +279,23 @@ export function planClip(source: ClipSource, request: ClipRequest): ExportPlan {
     duration: lead ? presentationTicks(lead) / lead.timescale : 0,
     bytes,
   }
+}
+
+/**
+ * The requested entry, advanced only when the recording begins inside an undecodable GOP.
+ *
+ * `firstFrame` falls forward to the first retained sync sample when no sync sample exists at or
+ * before the requested picture. Sound has to enter at that same source instant. Leaving it at the
+ * original request retimes pre-IDR audio to zero while the picture begins at the IDR, so the sound
+ * lags by exactly the discarded head of the group in every player.
+ */
+function firstDecodableIn(track: SourceTrack, requested: number): number {
+  const ticks = Math.round(requested * track.timescale) + track.editOffset
+  const enters = shownAt(track, ticks)
+  const head = track.samples[firstFrame(track, enters)]
+  if (!head?.sync || head.pts <= enters) return requested
+
+  return (head.pts - track.editOffset) / track.timescale
 }
 
 /**

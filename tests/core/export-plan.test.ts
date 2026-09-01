@@ -570,10 +570,10 @@ describe('planClip', () => {
     expect(video.samples[0]!.sync).toBe(true)
     expect(video.samples[0]!.source).toEqual(syncs[0]!.source)
     expect(video.samples).toHaveLength(48)
-    // The entry point lies before the first decodable frame, so there is nothing left to hide.
-    expect(video.skipTicks).toBe(0)
-    expect(presentationTicks(video)).toBe(25600)
-    expect(plan.duration).toBeCloseTo(25600 / 12288, 9)
+    // The edit hides the sync frame's reorder delay so the first decodable picture starts at zero.
+    expect(video.skipTicks).toBe(syncs[0]!.pts - syncs[0]!.dts)
+    expect(presentationTicks(video)).toBe(24576)
+    expect(plan.duration).toBeCloseTo(24576 / 12288, 9)
   })
 
   it('resumes every retained run at a sync sample after a decode-time gap', () => {
@@ -613,6 +613,35 @@ describe('planClip', () => {
     expect(planned.samples.map((sample) => sample.source)).toEqual(
       video.samples.map((sample) => sample.source),
     )
+  })
+
+  it('starts sound with the first decodable picture when recording begins inside a group', () => {
+    const complete = madeTrack('video', 1000, 100, [{ at: 0, count: 13 }])
+    const video = {
+      ...complete,
+      // Capture begins at 0.3 s, inside a prediction chain whose first retained IDR is at 1.0 s.
+      samples: complete.samples
+        .slice(3)
+        .map((sample) => ({ ...sample, pts: sample.pts + 20, sync: sample.dts === 1000 })),
+    }
+    const audio = madeTrack('audio', 1000, 100, [{ at: 0, count: 13 }])
+
+    const plan = planPreview({ video, audio })
+    const picture = trackByKind(plan.tracks, 'video')
+    const sound = trackByKind(plan.tracks, 'audio')
+    const pictureDuration = presentationTicks(picture) / picture.timescale
+    const soundDuration = presentationTicks(sound) / sound.timescale
+    const soundHead = audio.samples.find(
+      (sample) => sample.source.at === sound.samples[0]!.source.at,
+    )!
+    const firstAudible =
+      (soundHead.dts + sound.skipTicks - audio.editOffset) / audio.timescale
+    const entry =
+      (video.samples.find((sample) => sample.sync)!.pts - video.editOffset) / video.timescale
+
+    expect(picture.samples[0]!.source).toEqual(video.samples.find((sample) => sample.sync)!.source)
+    expect(firstAudible).toBe(entry)
+    expect(Math.abs(soundDuration - pictureDuration)).toBeLessThanOrEqual(0.1)
   })
 
   it('drops sound that resumes before the picture can decode after a gap', () => {
