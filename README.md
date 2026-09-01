@@ -49,6 +49,12 @@ It is not a screen recorder and it does not start a second download of a streami
 
 Crop and optimize only when needed. Free crop and 16:9, 9:16, 1:1 and 4:5 frames are available per clip. MP4 re-encoding uses WebCodecs; animated WebP uses the browser's canvas encoder.
 
+## Editor preview
+
+<p align="center">
+  <img src="assets/tailcut/demo.png" alt="tailcut editor with video preview, clip settings, transport controls, waveform and timeline" width="100%">
+</p>
+
 ## How it works
 
 1. **Watch a video normally.** Recording is enabled on all sites by default. The default detector qualifies a visible player after six seconds of active playback.
