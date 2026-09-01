@@ -429,6 +429,221 @@ test('pieces and whole sessions go out with the volume they took', async () => {
   })
 })
 
+test('a thumbnail is stored once off the hot row and leaves with its session', async () => {
+  await overIndex(async (reader) => {
+    const got = await reader.evaluate(
+      async (input) => {
+        const address = '/shared/history-db.js'
+        const database: typeof import('../../src/shared/history-db') = await import(address)
+
+        const id = await database.openSession('one', {
+          ...input.page,
+          createdAt: 1_000,
+          lastSeenAt: 2_000,
+        })
+        const webp = new Blob([Uint8Array.from(input.webp)], { type: 'image/webp' })
+        // Opening a merge-key row precedes its first media write. A preview alone must not turn
+        // that empty bookkeeping row into history or leave a thumbnail no OPFS session can own.
+        await database.storeHistoryThumbnail('one', webp)
+        await database.recordPiece(id, input.piece, [], {
+          page: { ...input.page, lastSeenAt: 3_000 },
+          widthPx: 0,
+        })
+
+        await database.storeHistoryThumbnail('missing-key', webp)
+        await database.storeHistoryThumbnail('one', new Blob([], { type: 'image/webp' }))
+        await database.storeHistoryThumbnail(
+          'one',
+          new Blob([Uint8Array.of(9, 9, 9)], { type: 'image/png' }),
+        )
+        await database.storeHistoryThumbnail(
+          'one',
+          new Blob([new Uint8Array(database.MAX_HISTORY_THUMBNAIL_BYTES + 1)], {
+            type: 'image/webp',
+          }),
+        )
+        const before = {
+          row: await database.sessionById(id),
+          totals: await database.readTotals(),
+        }
+
+        await database.storeHistoryThumbnail('one', webp)
+        // The first picture is the durable identity. A late duplicate must neither replace it nor
+        // add its weight a second time.
+        await database.storeHistoryThumbnail(
+          'one',
+          new Blob([Uint8Array.of(8, 8, 8, 8, 8, 8, 8)], { type: 'image/webp' }),
+        )
+
+        const stored = await database.historyThumbnailById(id)
+        const missing = await database.historyThumbnailById('no-such-session')
+        const withThumbnail = {
+          row: await database.sessionById(id),
+          totals: await database.readTotals(),
+          type: stored?.type ?? '',
+          bytes: stored ? [...new Uint8Array(await stored.arrayBuffer())] : null,
+          missing,
+        }
+
+        // Piece eviction must leave the thumbnail and its weight. Whole-session deletion then
+        // takes both rows and subtracts the combined session weight once.
+        await database.dropPieceRows(id, [input.piece.file])
+        const afterPiece = {
+          row: await database.sessionById(id),
+          totals: await database.readTotals(),
+          thumbnail: (await database.historyThumbnailById(id))?.size ?? null,
+          visible: await database.listSessions(),
+          hidden: await database.listSessions(Number.MAX_SAFE_INTEGER, true),
+        }
+        await database.dropSessionRows(id)
+        const afterSession = {
+          row: await database.sessionById(id),
+          totals: await database.readTotals(),
+          thumbnail: await database.historyThumbnailById(id),
+        }
+        await database.dropSessionRows(id)
+        const afterDuplicateDrop = await database.readTotals()
+
+        return { id, before, withThumbnail, afterPiece, afterSession, afterDuplicateDrop }
+      },
+      {
+        page: PAGE,
+        piece: piece('aaaaaaaa-000000.tcm', 0, 2, 1_016),
+        webp: [0x52, 0x49, 0x46, 0x46, 0x01, 0x02],
+      },
+    )
+
+    expect(got.before.row!.bytes).toBe(1_016)
+    expect(got.before.totals.bytes).toBe(1_016)
+
+    expect(got.withThumbnail.type).toBe('image/webp')
+    expect(got.withThumbnail.bytes).toEqual([0x52, 0x49, 0x46, 0x46, 0x01, 0x02])
+    expect(got.withThumbnail.missing).toBeNull()
+    expect(got.withThumbnail.row!.bytes).toBe(1_016 + 6)
+    expect(got.withThumbnail.totals.bytes).toBe(1_016 + 6)
+
+    expect(got.afterPiece.row!.bytes).toBe(6)
+    expect(got.afterPiece.totals.bytes).toBe(6)
+    expect(got.afterPiece.thumbnail).toBe(6)
+    expect(got.afterPiece.visible, 'a thumbnail-only row appeared as a recording').toEqual([])
+    expect(got.afterPiece.hidden.map((row) => row.id)).toEqual([got.id])
+    expect(got.afterSession.row).toBeUndefined()
+    expect(got.afterSession.thumbnail).toBeNull()
+    expect(got.afterSession.totals.bytes).toBe(0)
+    expect(got.afterDuplicateDrop).toEqual(got.afterSession.totals)
+  })
+})
+
+test('a version one database upgrades without changing its old rows', async () => {
+  await overIndex(async (reader) => {
+    const got = await reader.evaluate(
+      async (input) => {
+        const seedVersionOne = async (): Promise<void> => {
+          await new Promise<void>((resolve, reject) => {
+            const request = indexedDB.deleteDatabase(input.name)
+            request.onerror = () => reject(request.error)
+            request.onsuccess = () => resolve()
+          })
+
+          await new Promise<void>((resolve, reject) => {
+            const request = indexedDB.open(input.name, 1)
+            request.onupgradeneeded = () => {
+              const db = request.result
+              const sessions = db.createObjectStore('sessions', { keyPath: 'id' })
+              sessions.createIndex('key', 'key', { unique: true })
+              sessions.createIndex('lastSeenAt', 'lastSeenAt')
+              const pieces = db.createObjectStore('pieces', { keyPath: ['sessionId', 'file'] })
+              pieces.createIndex('sessionId', 'sessionId')
+              db.createObjectStore('snapshots', { keyPath: 'id' })
+              db.createObjectStore('totals', { keyPath: 'id' })
+            }
+            request.onerror = () => reject(request.error)
+            request.onsuccess = () => {
+              const db = request.result
+              const tx = db.transaction(['sessions', 'totals'], 'readwrite')
+              tx.objectStore('sessions').put({
+                id: 'legacy-id',
+                key: 'legacy-key',
+                url: input.page.url,
+                title: input.page.title,
+                createdAt: 1_000,
+                lastSeenAt: 2_000,
+                pinned: false,
+                usedAt: 0,
+                deletedAt: 0,
+                bytes: 100,
+                covered: [{ start: 0, end: 1 }],
+                seconds: 1,
+                widthPx: 640,
+                sound: false,
+                tracks: [],
+              })
+              tx.objectStore('totals').put({
+                id: 'totals',
+                bytes: 100,
+                cappedBytes: 0,
+                fullAt: 0,
+              })
+              tx.onerror = () => reject(tx.error)
+              tx.onabort = () => reject(tx.error)
+              tx.oncomplete = () => {
+                db.close()
+                resolve()
+              }
+            }
+          })
+        }
+
+        // The extension worker may finish its one startup repair between delete success and this
+        // page's v1 open, recreating v2. Once that startup pass has finished it does not repeat;
+        // delete and seed again so the upgrade fixture is not a scheduler race.
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            await seedVersionOne()
+            break
+          } catch (cause) {
+            if (!(cause instanceof DOMException) || cause.name !== 'VersionError' || attempt > 0) {
+              throw cause
+            }
+          }
+        }
+
+        const address = '/shared/history-db.js'
+        const database: typeof import('../../src/shared/history-db') = await import(address)
+        const before = await database.historyThumbnailById('legacy-id')
+        await database.storeHistoryThumbnail(
+          'legacy-key',
+          new Blob([Uint8Array.of(0x52, 0x49, 0x46, 0x46)], { type: 'image/webp' }),
+        )
+        const db = await database.openHistoryDb()
+        const row = await database.sessionById('legacy-id')
+        const totals = await database.readTotals()
+        const thumbnail = await database.historyThumbnailById('legacy-id')
+
+        return {
+          version: db.version,
+          stores: [...db.objectStoreNames],
+          before,
+          row,
+          totals,
+          type: thumbnail?.type ?? '',
+          bytes: thumbnail ? [...new Uint8Array(await thumbnail.arrayBuffer())] : null,
+        }
+      },
+      { name: DB_NAME, page: PAGE },
+    )
+
+    expect(DB_VERSION).toBe(2)
+    expect(got.version).toBe(2)
+    expect(got.stores).toContain('thumbnails')
+    expect(got.before).toBeNull()
+    expect(got.row).toMatchObject({ id: 'legacy-id', key: 'legacy-key', bytes: 104, seconds: 1 })
+    expect(got.totals.bytes).toBe(104)
+    expect(got.type).toBe('image/webp')
+    expect(got.bytes).toEqual([0x52, 0x49, 0x46, 0x46])
+  })
+})
+
 test('a refusal to take more lowers the ceiling, and a fresh start forgets it', async () => {
   await overIndex(async (reader) => {
     const got = await reader.evaluate(

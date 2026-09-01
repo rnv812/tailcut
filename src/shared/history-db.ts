@@ -15,12 +15,16 @@ import type { HistoryPiece, HistoryTrack } from '../core/history/layout'
  * nothing.
  */
 export const DB_NAME = 'tailcut-history'
-export const DB_VERSION = 1
+export const DB_VERSION = 2
 
 export const SESSIONS = 'sessions'
 export const PIECES = 'pieces'
 export const SNAPSHOTS = 'snapshots'
+export const THUMBNAILS = 'thumbnails'
 export const TOTALS = 'totals'
+
+/** Far above a 168 px WebP, but finite if a broken local caller hands this API another file. */
+export const MAX_HISTORY_THUMBNAIL_BYTES = 512 * 1024
 
 /** The one row of the totals store: the occupied volume, kept as a running sum. */
 export const TOTALS_KEY = 'totals'
@@ -66,6 +70,12 @@ export interface SnapshotRow {
   capturedAt: number
   bytes: number
   title: string
+}
+
+/** Kept apart from the session row because every history listing reads that row. */
+export interface HistoryThumbnailRow {
+  sessionId: string
+  blob: Blob
 }
 
 export interface TotalsRow {
@@ -122,6 +132,9 @@ export function openHistoryDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(SNAPSHOTS)) {
         db.createObjectStore(SNAPSHOTS, { keyPath: 'id' })
+      }
+      if (!db.objectStoreNames.contains(THUMBNAILS)) {
+        db.createObjectStore(THUMBNAILS, { keyPath: 'sessionId' })
       }
       if (!db.objectStoreNames.contains(TOTALS)) {
         db.createObjectStore(TOTALS, { keyPath: 'id' })
@@ -454,7 +467,9 @@ export async function listSessions(
       // batch and its first piece has not landed — or that piece never will, because the write
       // was refused. Listed, the popup would show a recording of nothing, and every count of the
       // sessions on disk would be off by whatever is being gathered right now.
-      if (includeHidden || (!row.deletedAt && row.bytes > 0)) rows.push(row)
+      // Thumbnail bytes belong in storage accounting, but a thumbnail is not a recording. Media
+      // contributes covered seconds; without any, this remains an internal row for the sweeper.
+      if (includeHidden || (!row.deletedAt && row.seconds > 0)) rows.push(row)
       cursor.continue()
     }
   })
@@ -472,6 +487,64 @@ export async function piecesOf(id: string): Promise<HistoryPieceRow[]> {
   const db = await openHistoryDb()
   const tx = transaction(db, [PIECES], 'readonly')
   return (await promised(tx.objectStore(PIECES).index('sessionId').getAll(id))) as HistoryPieceRow[]
+}
+
+/**
+ * Persists the first small local preview made for a session.
+ *
+ * Addressed by merge key because the live session does not know its durable id. The Blob stays in
+ * its own store so listing history never clones picture bytes into the popup. Blob, session and
+ * total move in one transaction: a duplicate or a crash can add its weight neither twice nor
+ * halfway. This API accepts bytes only; it never follows a URL or fetches anything remotely.
+ */
+export async function storeHistoryThumbnail(key: string, blob: Blob): Promise<void> {
+  if (
+    !key ||
+    blob.type !== 'image/webp' ||
+    blob.size === 0 ||
+    blob.size > MAX_HISTORY_THUMBNAIL_BYTES
+  ) {
+    return
+  }
+
+  const db = await openHistoryDb()
+  const tx = transaction(db, [SESSIONS, THUMBNAILS, TOTALS], 'readwrite')
+  const sessions = tx.objectStore(SESSIONS)
+  const session = (await promised(sessions.index('key').get(key))) as
+    | HistorySessionRow
+    | undefined
+  // The row is opened before its first media piece lands. A thumbnail cannot be the fact that
+  // makes an empty row visible, and without media there may be no OPFS session directory for the
+  // sweeper to remove before dropping these rows.
+  if (!session || !(session.seconds > 0)) {
+    tx.abort()
+    return
+  }
+
+  const thumbnails = tx.objectStore(THUMBNAILS)
+  if ((await promised(thumbnails.getKey(session.id))) !== undefined) {
+    tx.abort()
+    return
+  }
+
+  const row: HistoryThumbnailRow = { sessionId: session.id, blob }
+  await promised(thumbnails.add(row))
+  await promised(sessions.put({ ...session, bytes: session.bytes + blob.size }))
+  await addTotals(tx, blob.size)
+  await finished(tx)
+}
+
+/** Reads a local preview by the durable identity carried by history and the popup. */
+export async function historyThumbnailById(id: string): Promise<Blob | null> {
+  if (!id) return null
+
+  const db = await openHistoryDb()
+  const tx = transaction(db, [THUMBNAILS], 'readonly')
+  const row = (await promised(tx.objectStore(THUMBNAILS).get(id))) as
+    | HistoryThumbnailRow
+    | undefined
+  const blob = row?.blob
+  return blob instanceof Blob && blob.type === 'image/webp' && blob.size > 0 ? blob : null
 }
 
 async function patch(id: string, edit: (row: HistorySessionRow) => HistorySessionRow): Promise<void> {
@@ -494,7 +567,7 @@ export const setUsed = (id: string, usedAt: number) => patch(id, (row) => ({ ...
 /** Takes the rows of a session out; the files are the sweeper's business. */
 export async function dropSessionRows(id: string): Promise<void> {
   const db = await openHistoryDb()
-  const tx = transaction(db, [SESSIONS, PIECES, TOTALS], 'readwrite')
+  const tx = transaction(db, [SESSIONS, PIECES, THUMBNAILS, TOTALS], 'readwrite')
   const sessions = tx.objectStore(SESSIONS)
   const row = (await promised(sessions.get(id))) as HistorySessionRow | undefined
   if (!row) {
@@ -507,6 +580,7 @@ export async function dropSessionRows(id: string): Promise<void> {
   for (const key of (await promised(pieces.index('sessionId').getAllKeys(id))) as IDBValidKey[]) {
     await promised(pieces.delete(key))
   }
+  await promised(tx.objectStore(THUMBNAILS).delete(id))
   await addTotals(tx, -row.bytes)
   await finished(tx)
 }
