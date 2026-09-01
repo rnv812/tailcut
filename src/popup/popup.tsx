@@ -19,6 +19,7 @@ import {
   pageUrl,
   pauseThisTab,
   saveAll,
+  sessionThumbnail,
   setSiteRecorded,
   siteSwitch,
   storageInUse,
@@ -171,6 +172,98 @@ function complaintFor(failure: SaveResult): string {
 /** How long the undo of a deletion stays on screen. The sweeper waits longer than this. */
 const UNDO_MS = 6_000
 
+const THUMBNAIL_PLACEHOLDER = '../assets/tailcut/svg/mark-light.svg'
+
+/** Only previews made by this extension may cause an image read from the popup. */
+function localThumbnail(url: string | null | undefined): string | null {
+  if (!url) return null
+  if (url.startsWith('blob:')) return url
+  return /^data:image\/webp;base64,[A-Za-z0-9+/]+={0,2}$/u.test(url) ? url : null
+}
+
+const MAX_ACTIVE_THUMBNAILS = 2
+
+interface ThumbnailJob {
+  key: string
+  cancelled: boolean
+  resolve: (url: string | null) => void
+}
+
+let activeThumbnails = 0
+const thumbnailQueue: ThumbnailJob[] = []
+
+function drainThumbnailQueue(): void {
+  while (activeThumbnails < MAX_ACTIVE_THUMBNAILS) {
+    const job = thumbnailQueue.shift()
+    if (!job) return
+    if (job.cancelled) {
+      job.resolve(null)
+      continue
+    }
+
+    activeThumbnails += 1
+    void sessionThumbnail(job.key)
+      .then(job.resolve, () => job.resolve(null))
+      .finally(() => {
+        activeThumbnails -= 1
+        drainThumbnailQueue()
+      })
+  }
+}
+
+/** One FIFO place in the shared two-decoder budget of this popup document. */
+function queuedThumbnail(key: string): { result: Promise<string | null>; cancel(): void } {
+  let settle = (_url: string | null): void => undefined
+  const result = new Promise<string | null>((resolve) => { settle = resolve })
+  const job: ThumbnailJob = { key, cancelled: false, resolve: settle }
+  thumbnailQueue.push(job)
+  drainThumbnailQueue()
+
+  return {
+    result,
+    cancel() {
+      job.cancelled = true
+      const waiting = thumbnailQueue.indexOf(job)
+      if (waiting < 0) return
+      thumbnailQueue.splice(waiting, 1)
+      job.resolve(null)
+    },
+  }
+}
+
+function ThumbnailPreview(props: { url?: string | null; testId: string }) {
+  const url = localThumbnail(props.url)
+  return (
+    <img
+      class={`row-thumbnail${url ? '' : ' thumbnail-placeholder'}`}
+      data-testid={props.testId}
+      src={url ?? THUMBNAIL_PLACEHOLDER}
+      width="72"
+      height="48"
+      alt=""
+      aria-hidden="true"
+    />
+  )
+}
+
+/** A live preview starts as the stable local mark and is requested only after the row rendered. */
+function LiveThumbnailPreview(props: { session: SessionSummary; testId: string }) {
+  const [loaded, setLoaded] = useState<{ key: string; url: string | null } | null>(null)
+
+  useEffect(() => {
+    let current = true
+    const request = queuedThumbnail(props.session.key)
+    void request.result.then((url) => current && setLoaded({ key: props.session.key, url }))
+    return () => {
+      current = false
+      request.cancel()
+    }
+  }, [props.session.key])
+
+  const url = loaded?.key === props.session.key ? loaded.url : null
+  return <ThumbnailPreview url={url} testId={props.testId} />
+}
+
 /** A compact live recording keeps its place and exposes its own actions instead of becoming the
  * large current card when clicked. */
 function LiveSessionRow({ session }: { session: SessionSummary }) {
@@ -201,6 +294,7 @@ function LiveSessionRow({ session }: { session: SessionSummary }) {
 
   return (
     <div class="row session-row" data-testid="session">
+      <LiveThumbnailPreview session={session} testId="session-thumbnail" />
       <button
         class="session-open"
         data-testid="session-open"
@@ -272,6 +366,10 @@ function History(props: {
 
       {shown.map((row) => (
         <div class="row history-row" data-testid="history-row" key={row.id}>
+          <ThumbnailPreview
+            url={row.thumbnailUrl}
+            testId="history-thumbnail"
+          />
           <button
             class="history-open"
             data-testid="history-open"
@@ -657,17 +755,22 @@ function Popup() {
       <section class="recordings" data-testid="recordings">
         <h2 class="section-heading">Recordings</h2>
       <div class="pad current-recording">
-        <div class="title" data-testid="title">
-          {current.title || UNTITLED}
-        </div>
-        <div class="muted host" data-testid="host">
-          {hostOf(current.url)}
-        </div>
-        <div class="meta">
-          <span data-testid="duration">{formatDuration(current.duration)}</span>
-          <span class="muted" data-testid="bytes">
-            {formatBytes(current.bytes)}
-          </span>
+        <div class="current-summary">
+          <LiveThumbnailPreview session={current} testId="current-thumbnail" />
+          <div class="current-copy">
+            <div class="title" data-testid="title">
+              {current.title || UNTITLED}
+            </div>
+            <div class="muted host" data-testid="host">
+              {hostOf(current.url)}
+            </div>
+            <div class="meta">
+              <span data-testid="duration">{formatDuration(current.duration)}</span>
+              <span class="muted" data-testid="bytes">
+                {formatBytes(current.bytes)}
+              </span>
+            </div>
+          </div>
         </div>
         {omitted && (
           <div class="omits" data-testid="omits">

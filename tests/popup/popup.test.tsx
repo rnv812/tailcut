@@ -71,6 +71,18 @@ vi.mock('../../src/shared/history-db', () => ({
       .slice(0, limit)
       .map(asStored)
   },
+  historyThumbnailById: async (id: string) => {
+    const url = rows.find((row) => row.id === id)?.thumbnailUrl
+    const encoded = url?.startsWith('data:image/webp;base64,')
+      ? url.slice('data:image/webp;base64,'.length)
+      : ''
+    if (!encoded) return null
+    const binary = atob(encoded)
+    return new Blob(
+      [Uint8Array.from(binary, (character) => character.charCodeAt(0))],
+      { type: 'image/webp' },
+    )
+  },
   readTotals: async () => {
     storageReads += 1
     return {
@@ -148,6 +160,9 @@ const row: HistoryRow = {
   pinned: false,
 }
 
+const WEBP_URL = 'data:image/webp;base64,UklGRg=='
+const THUMBNAIL_PLACEHOLDER = '../assets/tailcut/svg/mark-light.svg'
+
 const OTHER_SNAPSHOT = '1f2c7d1e-4b0a-4a3f-9c2e-9b5a1d6f8c32'
 
 type Sent = { tabId: number; message: unknown }
@@ -163,6 +178,8 @@ const sent: Sent[] = []
 /** The answer of the tab: a list of summaries, or silence — the tab has not answered yet. */
 type Reply = {
   sessions: SessionSummary[]
+  /** Local preview answer by live session key; `hold` leaves the request in flight. */
+  thumbnails?: Record<string, string | null | 'hold'>
   /** The tab says this page holds a player the extension could not reach. */
   unreachable?: boolean
   /** The tab says a file this page was watching could not be read. */
@@ -180,6 +197,7 @@ type Reply = {
  */
 function installChrome(reply: Reply) {
   const created: Array<{ url: string; windowId?: number }> = []
+  const heldThumbnails = new Map<string, Array<(reply: unknown) => void>>()
   // The save answer is mutable: the same popup saves more than once, and the second attempt may
   // well go through where the first did not.
   let saveReply: unknown = (reply === 'silent' ? undefined : reply.save) ?? { ok: true }
@@ -220,6 +238,16 @@ function installChrome(reply: Reply) {
         sent.push({ tabId, message })
         const type = (message as { type?: string }).type
         if (type === 'tc:save') return Promise.resolve(saveReply)
+        if (type === 'tc:thumbnail') {
+          const key = (message as { key: string }).key
+          const answer = reply === 'silent' ? null : (reply.thumbnails?.[key] ?? null)
+          if (answer === 'hold') {
+            return new Promise((resolve) => {
+              heldThumbnails.set(key, [...(heldThumbnails.get(key) ?? []), resolve])
+            })
+          }
+          return Promise.resolve(answer ? { ok: true, dataUrl: answer } : { ok: false })
+        }
         // A freeze that never answers: the popup has to keep its buttons closed, not spin.
         if (type === 'tc:edit') return holdEdit ? new Promise(() => {}) : Promise.resolve(editReply)
         // Silence from the tab is not a refusal: the promise simply never settles, and the popup
@@ -250,6 +278,12 @@ function installChrome(reply: Reply) {
     },
     holdEditReply: () => {
       holdEdit = true
+    },
+    resolveThumbnail: (key: string, dataUrl: string | null) => {
+      for (const resolve of heldThumbnails.get(key) ?? []) {
+        resolve(dataUrl ? { ok: true, dataUrl } : { ok: false })
+      }
+      heldThumbnails.delete(key)
     },
   }
 }
@@ -283,6 +317,8 @@ const allAt = (testId: string) => [...document.body.querySelectorAll(`[data-test
 const textAt = (testId: string) => at(testId)?.textContent ?? null
 const bodyText = () => document.body.textContent?.trim() ?? ''
 const saveButton = () => document.body.querySelector<HTMLButtonElement>('[data-testid="save"]')!
+const withoutThumbnails = (items: Sent[]) =>
+  items.filter(({ message }) => (message as { type?: string }).type !== 'tc:thumbnail')
 
 /** Clicks an element and lets the popup redraw on what follows. */
 async function click(element: Element): Promise<void> {
@@ -642,10 +678,121 @@ describe('the popup', () => {
 
     // The key of the session shown and the key of the session saved are one and the same: let
     // them diverge and the button would save the neighbouring track of the same page.
-    expect(sent.map((item) => item.message)).toEqual([
+    expect(withoutThumbnails(sent).map((item) => item.message)).toEqual([
       { type: 'tc:list' },
       { type: 'tc:save', key: fresh.key },
     ])
+  })
+})
+
+describe('thumbnail previews', () => {
+  it('shows a placeholder first and lazily fills every live preview after render', async () => {
+    const chrome = await mount({
+      sessions: [fresh, older],
+      thumbnails: { [fresh.key]: 'hold', [older.key]: WEBP_URL },
+    })
+    await flush()
+
+    const current = at('current-thumbnail') as HTMLImageElement
+    const compact = at('session-thumbnail') as HTMLImageElement
+    expect(current.getAttribute('src')).toBe(THUMBNAIL_PLACEHOLDER)
+    expect(compact.getAttribute('src')).toBe(WEBP_URL)
+    expect([current, compact].map((image) => [image.width, image.height])).toEqual([
+      [72, 48],
+      [72, 48],
+    ])
+    expect([current, compact].map((image) => image.getAttribute('alt'))).toEqual(['', ''])
+    expect([current, compact].map((image) => image.getAttribute('aria-hidden'))).toEqual([
+      'true',
+      'true',
+    ])
+    expect(
+      sent
+        .map(({ message }) => message as { type?: string; key?: string })
+        .filter(({ type }) => type === 'tc:thumbnail')
+        .map(({ key }) => key),
+    ).toEqual([fresh.key, older.key])
+
+    chrome.resolveThumbnail(fresh.key, WEBP_URL)
+    await flush()
+    expect((at('current-thumbnail') as HTMLImageElement).getAttribute('src')).toBe(WEBP_URL)
+  })
+
+  it('uses stored local thumbnails synchronously and refuses remote image URLs', async () => {
+    const storedPreview: HistoryRow & { thumbnailUrl: string } = {
+      ...row,
+      thumbnailUrl: WEBP_URL,
+    }
+    const withoutPreview: HistoryRow = {
+      ...row,
+      id: 'h2',
+      key: 'https://old.example/no-preview|avc1|60',
+      title: 'No preview',
+    }
+    const remotePreview: HistoryRow & { thumbnailUrl: string } = {
+      ...row,
+      id: 'h3',
+      key: 'https://old.example/remote-preview|avc1|30',
+      title: 'Remote preview',
+      thumbnailUrl: 'https://remote.example/thumbnail.webp',
+    }
+    rows = [storedPreview, withoutPreview, remotePreview]
+
+    await draw()
+    await flush()
+
+    const previews = allAt('history-thumbnail') as HTMLImageElement[]
+    expect(previews.map((image) => image.getAttribute('src'))).toEqual([
+      WEBP_URL,
+      THUMBNAIL_PLACEHOLDER,
+      THUMBNAIL_PLACEHOLDER,
+    ])
+    expect(previews.every((image) => image.getAttribute('alt') === '')).toBe(true)
+    expect(
+      sent
+        .map(({ message }) => message as { type?: string; key?: string })
+        .filter(({ type }) => type === 'tc:thumbnail')
+        .map(({ key }) => key),
+    ).toEqual([fresh.key])
+  })
+
+  it('runs no more than two live thumbnail decodes at once', async () => {
+    const third: SessionSummary = {
+      ...older,
+      key: 'https://third.example/watch|avc1|30',
+      title: 'Third session',
+    }
+    const fourth: SessionSummary = {
+      ...older,
+      key: 'https://fourth.example/watch|avc1|20',
+      title: 'Fourth session',
+    }
+    const chrome = await mount({
+      sessions: [fresh, older, third, fourth],
+      thumbnails: {
+        [fresh.key]: 'hold',
+        [older.key]: 'hold',
+        [third.key]: 'hold',
+        [fourth.key]: 'hold',
+      },
+    })
+    await flush()
+
+    const requestedKeys = () =>
+      sent
+        .map(({ message }) => message as { type?: string; key?: string })
+        .filter(({ type }) => type === 'tc:thumbnail')
+        .map(({ key }) => key)
+
+    expect(requestedKeys()).toEqual([fresh.key, older.key])
+
+    chrome.resolveThumbnail(fresh.key, null)
+    await flush()
+    expect(requestedKeys()).toEqual([fresh.key, older.key, third.key])
+
+    chrome.resolveThumbnail(older.key, null)
+    await flush()
+    expect(requestedKeys()).toEqual([fresh.key, older.key, third.key, fourth.key])
   })
 })
 
@@ -675,7 +822,7 @@ describe('the popup and the other sessions of the page', () => {
 
     await click(allAt('session-open')[0]!)
 
-    expect(chrome.sent.map((item) => item.message)).toEqual([
+    expect(withoutThumbnails(chrome.sent).map((item) => item.message)).toEqual([
       { type: 'tc:list' },
       { type: 'tc:edit', key: older.key },
     ])
@@ -695,7 +842,7 @@ describe('the popup and the other sessions of the page', () => {
 
     await click(allAt('session-save')[0]!)
 
-    expect(sent.map((item) => item.message)).toEqual([
+    expect(withoutThumbnails(sent).map((item) => item.message)).toEqual([
       { type: 'tc:list' },
       { type: 'tc:save', key: older.key },
     ])
@@ -1047,7 +1194,9 @@ describe('history', () => {
     await settle()
     // A message to the tab and nothing stored: a pause is about this page until it is reloaded,
     // and a setting that outlived the tab it was meant for would be a switch nobody can find.
-    expect(sent.at(-1)).toMatchObject({ message: { type: 'tc:pause', on: true } })
+    expect(withoutThumbnails(sent).at(-1)).toMatchObject({
+      message: { type: 'tc:pause', on: true },
+    })
     expect(written).toHaveLength(0)
   })
 })
@@ -1102,7 +1251,9 @@ describe('the history and the switches under it', () => {
     document.querySelector<HTMLButtonElement>('[data-testid="pause-tab"]')!.click()
     await settle()
 
-    expect(sent.at(-1)).toMatchObject({ message: { type: 'tc:pause', on: false } })
+    expect(withoutThumbnails(sent).at(-1)).toMatchObject({
+      message: { type: 'tc:pause', on: false },
+    })
   })
 
   it('keeps the rows the user did not delete', async () => {
