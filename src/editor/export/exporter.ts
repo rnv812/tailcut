@@ -5,6 +5,7 @@ import { runtimeChoices, type Choice, type EncodeGeometry } from '../../core/enc
 import { geometryOf } from '../../core/encode/crop'
 import { framesOf, pathFor } from '../../core/encode/path'
 import { contentTypeOf, fileNameOf, uniqueNames } from '../../core/export/naming'
+import { compatibleMp4 } from '../../core/export/compatible'
 import {
   planClip,
   soundUnderPicture,
@@ -175,6 +176,9 @@ export function downloadIo(reader: SnapshotReader, options: SaveOptions = {}): E
 
   return {
     read: (at) => reader.bytesOf(at),
+    prepare: (file, name, stale) => name.toLowerCase().endsWith('.mp4')
+      ? compatibleMp4(file, stale)
+      : Promise.resolve(file),
 
     /**
      * This io copies and saves; it does not encode, and it says so rather than answering nothing.

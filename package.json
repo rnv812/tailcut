@@ -1,6 +1,6 @@
 {
   "name": "tailcut",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Turn already-buffered web video into precise MP4 clips or animated WebP",
   "scripts": {
     "test": "vitest run",
@@ -33,6 +33,8 @@
     "vitest": "^4.1.11"
   },
   "dependencies": {
+    "@mediabunny/aac-encoder": "1.55.6",
+    "mediabunny": "1.55.6",
     "preact": "^10.29.8"
   }
 }

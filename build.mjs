@@ -1,6 +1,37 @@
 import * as esbuild from 'esbuild'
-import { cp, mkdir, rm } from 'node:fs/promises'
+import { cp, mkdir, readFile, rm } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
+import path from 'node:path'
+
+/** MV3 workers must come from the extension package, rather than a generated blob URL. */
+const packagedAacWorker = {
+  name: 'packaged-aac-worker',
+  setup(build) {
+    build.onLoad({ filter: /mediabunny-aac-encoder\.mjs$/ }, async ({ path: file }) => {
+      const code = await readFile(file, 'utf8')
+      const start = code.indexOf('// inline-worker:')
+      const end = code.indexOf('// packages/aac-encoder/src/encoder.ts', start)
+      const factory = code.slice(start, end).match(/function (\w+)\(\) \{\s*return inlineWorker/)
+      if (start < 0 || end < 0 || !factory) throw new Error('The AAC worker bundle layout changed.')
+      return {
+        contents: code.slice(0, start) +
+          `function ${factory[1]}() { return new Worker(chrome.runtime.getURL('shared/aac-worker.js')); }\n` +
+          code.slice(end),
+        loader: 'js',
+      }
+    })
+    build.onResolve({ filter: /^\.\.\/build\/aac$/ }, () => ({
+      path: path.resolve('node_modules/@mediabunny/aac-encoder/dist/modules/build/aac.js'),
+    }))
+    build.onLoad({ filter: /aac-encoder\/dist\/modules\/build\/aac\.js$/ }, async ({ path: file }) => ({
+      // The published module mixes CommonJS exports with import.meta. Restore its ESM export.
+      contents: (await readFile(file, 'utf8'))
+        .replace('Object.defineProperty(exports, "__esModule", { value: true });', '')
+        .replace('exports.default = Module;', 'export default Module;'),
+      loader: 'js',
+    }))
+  },
+}
 
 /**
  * Output syntax. This matches the manifest's `minimum_chrome_version`: Chrome will not install
@@ -24,6 +55,11 @@ export const ENTRIES = [
   { entryPoints: { 'bridge/history-worker': 'src/bridge/history-worker.ts' }, format: 'iife' },
   { entryPoints: { 'shared/history-db': 'src/shared/history-db.ts' }, format: 'esm' },
   { entryPoints: { 'shared/settings-store': 'src/shared/settings-store.ts' }, format: 'esm' },
+  { entryPoints: { 'shared/convert-mp4': 'src/shared/convert-mp4.ts' }, format: 'esm' },
+  {
+    entryPoints: { 'shared/aac-worker': 'node_modules/@mediabunny/aac-encoder/src/encode.worker.ts' },
+    format: 'iife',
+  },
   { entryPoints: { 'popup/popup': 'src/popup/popup.tsx' }, format: 'esm' },
   { entryPoints: { 'options/options': 'src/options/options.tsx' }, format: 'esm' },
   { entryPoints: { 'editor/main': 'src/editor/main.tsx' }, format: 'esm' },
@@ -39,6 +75,7 @@ export function buildOptions(dev) {
     target: TARGET,
     logLevel: 'info',
     outdir: 'dist',
+    plugins: [packagedAacWorker],
     ...entry,
   }))
 }
@@ -68,6 +105,10 @@ export async function build({ dev = false, watch = false } = {}) {
   }
   await cp('assets/tailcut/svg/mark-light.svg', 'dist/assets/tailcut/svg/mark-light.svg')
   await cp('src/shared/theme.css', 'dist/shared/theme.css')
+  await mkdir('dist/licenses', { recursive: true })
+  await cp('node_modules/mediabunny/LICENSE', 'dist/licenses/mediabunny-MPL-2.0.txt')
+  await cp('node_modules/@mediabunny/aac-encoder/README.md', 'dist/licenses/aac-encoder-source.md')
+  await cp('licenses', 'dist/licenses', { recursive: true })
 
   if (watch) {
     await Promise.all(contexts.map((c) => c.watch()))

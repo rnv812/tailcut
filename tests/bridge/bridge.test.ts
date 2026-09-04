@@ -528,8 +528,7 @@ function installWindow(referrer = REFERRER, stored?: unknown) {
     async save(key: string): Promise<ReturnType<typeof port>> {
       const reply = port()
       deliver({ type: 'tc:save', key }, { ports: [reply] })
-      await Promise.resolve()
-      await Promise.resolve()
+      for (let turn = 0; turn < 12 && !reply.received.length; turn++) await Promise.resolve()
       return reply
     },
     /**
@@ -1803,8 +1802,7 @@ describe('the bridge saves what it collected as a file', () => {
     expect(() => win.deliver({ type: 'tc:save', key: keyFor(PAGE_URL) })).not.toThrow()
     // The build is awaited inside the bridge, so the download starts a microtask later; what is
     // under test is that nobody threw for want of somebody to answer.
-    await Promise.resolve()
-    await Promise.resolve()
+    for (let turn = 0; turn < 12 && !win.downloads.length; turn++) await Promise.resolve()
     expect(win.downloads, 'the download did not start').toHaveLength(1)
   })
 

@@ -1,4 +1,5 @@
 import { assembleMp4 } from '../core/export/assemble'
+import { compatibleMp4 } from '../core/export/compatible'
 import { planRanges, readsFor } from '../core/export/ranges'
 import { saveAllMp4 } from '../core/export/save'
 import { bytesFrom } from '../core/export/source'
@@ -25,7 +26,7 @@ import type { SaveSource } from './session-store'
 export async function writeSaveFile(source: SaveSource): Promise<Uint8Array | null> {
   if (source.kind === 'captured') {
     const file = saveAllMp4(source.tracks)
-    return file.byteLength > 0 ? file : null
+    return file.byteLength > 0 ? compatibleMp4(file) : null
   }
 
   const plan = source.plan
@@ -49,5 +50,5 @@ export async function writeSaveFile(source: SaveSource): Promise<Uint8Array | nu
     return null
   }
 
-  return assembleMp4(plan, bytesFrom(reads, buffers))
+  return compatibleMp4(assembleMp4(plan, bytesFrom(reads, buffers)))
 }

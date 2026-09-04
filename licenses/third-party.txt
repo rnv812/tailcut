@@ -1,0 +1,13 @@
+Mediabunny and @mediabunny/aac-encoder 1.55.6
+Copyright (c) 2026-present, Vanilagy and contributors.
+Licensed under the Mozilla Public License 2.0, included in mediabunny-MPL-2.0.txt.
+Source: https://github.com/Vanilagy/mediabunny/tree/v1.55.6
+
+The AAC worker includes FFmpeg's AAC encoder, licensed under LGPL 2.1 or later.
+The license is included in LGPL-2.1.txt.
+FFmpeg source: https://github.com/FFmpeg/FFmpeg
+AAC build instructions are included in aac-encoder-source.md.
+
+Tailcut's build.mjs packages the AAC worker as a local extension script and restores
+the published WASM module's ESM export. These build adaptations are available with
+Tailcut's source: https://github.com/rnv812/tailcut

@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test'
 import {
   decodeFile,
+  frameTimes,
   launchWithExtension,
   openPopupOn,
   probeFile,
@@ -45,8 +46,8 @@ async function saveTheOther(player: Page, popup: Page): Promise<string> {
  * A SourceBuffer is handed a byte stream and not a list of segments, so the segments are put back
  * together inside the registry — and that reassembly is per buffer. One for the page, or one per
  * media source, and four streams arriving at once would be spliced into one another: a picture
- * assembled out of somebody else's sound. The two players are told apart by their codecs, so a
- * single byte of one landing in the other's file shows up as a stream that has no business there.
+ * assembled out of somebody else's sound. Their different lengths distinguish the exports
+ * after both source codec combinations have been converted to H.264/AAC.
  */
 test('two players on one page save as two files, neither holding the other', async () => {
   test.setTimeout(TIMEOUT_MS)
@@ -80,25 +81,22 @@ test('two players on one page save as two files, neither holding the other', asy
   const first = await saveAll(page, popup)
   const second = await saveTheOther(page, popup)
 
-  const byCodec = new Map(
-    [first, second].map((file) => [streamsOf(file).map((s) => s[1]).join('+'), file]),
+  const byFrames = new Map(
+    [first, second].map((file) => [framesOf(file)[0]!, file]),
   )
 
-  // Two files, and in each of them exactly the two streams its own player fed. Material crossing
-  // from one to the other shows up here as a third stream or as a codec that has no business in
-  // that file.
-  expect([...byCodec.keys()].sort()).toEqual(['h264+aac', 'vp9+opus'])
+  expect([...byFrames.keys()].sort((a, b) => a - b)).toEqual([96, 144])
 
-  const alpha = byCodec.get('h264+aac')!
-  const beta = byCodec.get('vp9+opus')!
+  const alpha = byFrames.get(144)!
+  const beta = byFrames.get(96)!
 
   expect(streamsOf(alpha)).toEqual([
     ['video', 'h264'],
     ['audio', 'aac'],
   ])
   expect(streamsOf(beta)).toEqual([
-    ['video', 'vp9'],
-    ['audio', 'opus'],
+    ['video', 'h264'],
+    ['audio', 'aac'],
   ])
 
   // Every frame the page fed that player, and not one frame more: 144 of picture at 24 a second
@@ -106,14 +104,12 @@ test('two players on one page save as two files, neither holding the other', asy
   // the sound, which is the priming of the encoder and is hidden by the edit list.
   expect(framesOf(alpha)).toEqual([144, 259])
 
-  // The vp9 track runs four seconds against six of Opus, so four is what the two cover at once —
-  // 96 frames of picture, and the sound that lies inside those four seconds: 199 packets of 20
-  // milliseconds, running to 3.98. The segment of sound after that one begins at 3.98 and ends
-  // at 5.98, so the clip holds a hundredth of it; taken whole it would have carried the file two
-  // seconds past the end of the picture.
-  const [betaPicture, betaSound] = framesOf(beta)
+  // The second picture runs four seconds against six of sound. Conversion must retain
+  // only the sound beneath those four seconds, without borrowing the first player's tail.
+  const [betaPicture] = framesOf(beta)
   expect(betaPicture).toBe(96)
-  expect(betaSound).toBe(199)
+  expect(frameTimes(beta, 'a').at(-1)).toBeGreaterThan(3.9)
+  expect(frameTimes(beta, 'a').at(-1)).toBeLessThan(4.05)
 
   // Neither file merely opens: both are decoded frame by frame without a word of complaint.
   decodeFile(alpha)

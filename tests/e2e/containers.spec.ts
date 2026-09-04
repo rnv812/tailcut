@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test'
 import {
   decodeFile,
+  frameTimes,
   launchWithExtension,
   openPopupOn,
   playInBrowser,
@@ -64,11 +65,11 @@ test('a clip whose sound came in WebM saves as one file that plays', async () =>
 
   expect(probed.streams.map((stream) => [stream.codec_type, stream.codec_name])).toEqual([
     ['video', 'h264'],
-    ['audio', 'opus'],
+    ['audio', 'aac'],
   ])
-  // Everything the page loaded, both tracks whole: 144 frames of picture at 24 a second, and 300
-  // Opus packets of 20 milliseconds each.
-  expect(probed.streams.map((stream) => Number(stream.nb_read_frames))).toEqual([144, 300])
+  // Picture is copied; sound is converted from Opus to AAC for editing applications.
+  expect(Number(probed.streams[0]!.nb_read_frames)).toBe(144)
+  expect(frameTimes(file, 'a').at(-1)).toBeCloseTo(6, 1)
 
   const seconds = Number(probed.format.duration)
   expect(seconds).toBeGreaterThan(5.9)

@@ -105,6 +105,47 @@ function fakeIo(overrides: Partial<TestIo> = {}): TestIo {
   }
 }
 
+describe('export preparation', () => {
+  it.each(['copy', 'encode'] as const)('saves the prepared %s bytes and reports their size', async (kind) => {
+    const prepared = new Uint8Array([1, 2, 3, 4])
+    const prepare = vi.fn(async () => prepared)
+    const io = fakeIo({ prepare, encode: async () => new Uint8Array([8]) })
+    const runner = createRunner(io)
+    const path: ClipPath = kind === 'copy'
+      ? { kind, plan: planFor(0, 1) }
+      : { kind, plan: planFrames(source, { in: 0, out: 1, sound: false }, null, 24)!, choice: encodingChoice }
+    runner.enqueue([pathRequest('c1', path)])
+    await runner.settled()
+    expect(prepare).toHaveBeenCalledOnce()
+    expect(io.saved).toEqual([{ fileName: 'c1.mp4', bytes: prepared.length }])
+    expect(runner.queue().jobs[0]).toMatchObject({ state: 'done', bytes: prepared.length })
+  })
+
+  it('can cancel while compatibility conversion is running', async () => {
+    let release!: (file: Uint8Array) => void
+    const prepare = vi.fn(() => new Promise<Uint8Array>((resolve) => { release = resolve }))
+    const io = fakeIo({ prepare })
+    const runner = createRunner(io)
+    runner.enqueue([request('c1', planFor(0, 1))])
+    await turn()
+    expect(prepare).toHaveBeenCalledOnce()
+    runner.cancel(runner.queue().jobs[0]!.id)
+    release(new Uint8Array([1]))
+    await runner.settled()
+    expect(io.saved).toEqual([])
+    expect(runner.queue().jobs[0]!.state).toBe('cancelled')
+  })
+
+  it('reports conversion failure without saving an incompatible file', async () => {
+    const io = fakeIo({ prepare: async () => { throw new Error('Cannot encode AAC') } })
+    const runner = createRunner(io)
+    runner.enqueue([request('c1', planFor(0, 1))])
+    await runner.settled()
+    expect(io.saved).toEqual([])
+    expect(runner.queue().jobs[0]).toMatchObject({ state: 'failed', error: 'Cannot encode AAC' })
+  })
+})
+
 /** A turn of the event loop, which drains whatever number of awaits the runner takes. */
 const turn = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
 

@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { audioSampleEntry, videoSampleEntry } from '../../src/core/iso/entry'
 import {
   decodeFile,
+  frameTimes,
   launchWithExtension,
   openPopupOn,
   playInBrowser,
@@ -67,20 +68,14 @@ test('a clip whose picture came in WebM saves as one file that plays', async () 
   const probed = probeFile(file)
 
   expect(probed.streams.map((stream) => [stream.codec_type, stream.codec_name])).toEqual([
-    ['video', 'vp9'],
-    ['audio', 'opus'],
+    ['video', 'h264'],
+    ['audio', 'aac'],
   ])
-  // Everything the page loaded, both tracks whole: 60 frames of picture at 10 a second, and 300
-  // Opus packets of 20 milliseconds each.
-  expect(probed.streams.map((stream) => Number(stream.nb_read_frames))).toEqual([60, 300])
+  expect(Number(probed.streams[0]!.nb_read_frames)).toBe(60)
+  expect(frameTimes(file, 'a').at(-1)).toBeCloseTo(6, 1)
   expect(probed.streams[0]!.width).toBe(256)
   expect(probed.streams[0]!.height).toBe(144)
-  // What the decoder found the frames to be. ffprobe reads these out of the bitstream and not out
-  // of the vpcC, so they are not a check on the box — they are the other half of one: the box says
-  // profile 0, eight bits, 4:2:0, and this is the material agreeing with it. The box itself is
-  // pinned byte for byte in tests/core/vp9.test.ts, and that it is well formed is what the media
-  // source at the end of this test insists on.
-  expect(probed.streams[0]!.profile).toBe('Profile 0')
+  // The decoded output remains eight-bit 4:2:0 after conversion to H.264.
   expect(probed.streams[0]!.pix_fmt).toBe('yuv420p')
 
   const seconds = Number(probed.format.duration)
@@ -123,14 +118,14 @@ test('a clip whose picture came in WebM saves as one file that plays', async () 
 
   const picture = videoSampleEntry(saved)
   expect(picture, 'the saved file has no picture sample entry at all').not.toBeNull()
-  expect(picture!.format).toBe('vp09')
-  expect([...picture!.children.keys()], 'the vp09 entry does not carry its vpcC').toContain('vpcC')
+  expect(picture!.format).toBe('avc1')
+  expect([...picture!.children.keys()], 'the H.264 entry does not carry its avcC').toContain('avcC')
   expect([picture!.codedWidth, picture!.codedHeight]).toEqual([256, 144])
 
   const sound = audioSampleEntry(saved)
   expect(sound, 'the saved file has no sound sample entry at all').not.toBeNull()
-  expect(sound!.format).toBe('Opus')
-  expect([...sound!.children.keys()], 'the Opus entry does not carry its dOps').toContain('dOps')
+  expect(sound!.format).toBe('mp4a')
+  expect([...sound!.children.keys()], 'the AAC entry does not carry its esds').toContain('esds')
 
   await context.close()
 })

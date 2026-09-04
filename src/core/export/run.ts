@@ -69,6 +69,12 @@ export interface ExportRequest {
 export interface ExportIo {
   read(at: Located): Promise<Uint8Array>
   save(file: Uint8Array, fileName: string): Promise<void>
+  /** Final format conversion, still cancellable and before Chrome owns the download. */
+  prepare?(
+    file: Uint8Array,
+    fileName: string,
+    stale: () => boolean,
+  ): Promise<Uint8Array | null>
   /**
    * The re-encoding path, whole: it reads its own material, sample by sample, and hands back the
    * file. The runner does not read for it, because reading every slice first and holding them all
@@ -244,7 +250,7 @@ export function createRunner(io: ExportIo, options: RunnerOptions = {}): ExportR
 
       if (path.kind !== 'copy') {
         const total = framesOf(path) ?? 0
-        const file = await io.encode(
+        let file = await io.encode(
           request,
           (frames) => {
             if (!stale()) emit({ type: 'progress', id: job.id, done: frames, total })
@@ -253,6 +259,9 @@ export function createRunner(io: ExportIo, options: RunnerOptions = {}): ExportR
         )
         // Called off: `encode` answers null rather than a half file, and the row has already been
         // rebuilt by `cancel`. Nothing to report and nothing to save.
+        if (file === null || stale()) return
+
+        if (io.prepare) file = await io.prepare(file, request.fileName, stale)
         if (file === null || stale()) return
 
         handedOver.add(job.id)
@@ -300,8 +309,11 @@ export function createRunner(io: ExportIo, options: RunnerOptions = {}): ExportR
       // told synchronously, so the last thing the loop reported is a place a call-off can land.
       if (stale()) return
 
-      const file = assembleMp4(path.plan, bytesFrom(slices, buffers))
+      let file: Uint8Array | null = assembleMp4(path.plan, bytesFrom(slices, buffers))
       if (!file.byteLength) throw new Error(EMPTY_CLIP)
+
+      if (io.prepare) file = await io.prepare(file, request.fileName, stale)
+      if (file === null || stale()) return
 
       handedOver.add(job.id)
       await io.save(file, request.fileName)

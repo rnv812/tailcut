@@ -238,8 +238,8 @@ for (const [layout, file] of [
  * with pixels out of the picture decoder and bytes out of the sound one.
  */
 for (const [name, file, codecs] of [
-  ['VP9 and Opus', 'watched.webm', ['vp9', 'opus']],
-  ['VP8 and Vorbis', 'watched-vp8.webm', ['vp8', 'vorbis']],
+  ['VP9 and Opus', 'watched.webm', ['h264', 'aac']],
+  ['VP8 and Vorbis', 'watched-vp8.webm', ['h264', 'aac']],
 ] as const) {
   test(`saves a whole Matroska of ${name}`, async () => {
     test.setTimeout(150_000)

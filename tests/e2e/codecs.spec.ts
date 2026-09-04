@@ -121,7 +121,7 @@ const VORBIS: Feed = {
 interface Case {
   name: string
   feeds: Feed[]
-  /** [codec_type, codec_name] per stream, in the order the file must hold them. */
+  /** Source [codec_type, codec_name] per stream, in the order the export must retain them. */
   streams: Array<[string, string]>
   /** Frames of each of those streams, all of the material the page loaded. */
   frames: number[]
@@ -362,7 +362,8 @@ for (const scenario of CASES) {
     // And the boxes read back out of it. A file a browser will play is not yet a file that says
     // what is in it: a sample entry with no description of its codec gets past the headers, past
     // a frame count and past playback, because the decoder takes what it needs from the frames.
-    const describes = describesCodec(new Uint8Array(await readFile(file)))
+    const savedBytes = new Uint8Array(await readFile(file))
+    const describes = describesCodec(savedBytes)
 
     rows.push({
       name: scenario.name,
@@ -377,8 +378,23 @@ for (const scenario of CASES) {
 
     expect(facts.probeStatus, facts.probeStderr).toBe(0)
     expect(facts.probeStderr, 'ffprobe complains about reading the saved file').toBe('')
-    expect(facts.streams.map((s) => [s.codec_type, s.codec_name])).toEqual(scenario.streams)
-    expect(facts.streams.map((s) => Number(s.nb_read_frames))).toEqual(scenario.frames)
+    const outputCodecs = scenario.streams.map(([kind, codec]) => [kind,
+      ['av1', 'vp9', 'vp8'].includes(codec) ? 'h264'
+        : ['opus', 'vorbis'].includes(codec) ? 'aac' : codec,
+    ])
+    expect(facts.streams.map((s) => [s.codec_type, s.codec_name])).toEqual(outputCodecs)
+    for (const [index, stream] of facts.streams.entries()) {
+      if (['opus', 'vorbis'].includes(scenario.streams[index]![1])) {
+        // AAC packets contain 1024 samples. Check retained sound duration across the change
+        // in packet size, rather than requiring the original Opus/Vorbis packet count.
+        const sampleRate = audioSampleEntry(savedBytes)!.sampleRate
+        const seconds = Number(stream.nb_read_frames) * 1024 / sampleRate
+        expect(seconds).toBeGreaterThan(scenario.seconds[0])
+        expect(seconds).toBeLessThan(scenario.seconds[1])
+      } else {
+        expect(Number(stream.nb_read_frames)).toBe(scenario.frames[index])
+      }
+    }
     expect(facts.duration).toBeGreaterThan(scenario.seconds[0])
     expect(facts.duration).toBeLessThan(scenario.seconds[1])
 
