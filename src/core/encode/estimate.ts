@@ -88,7 +88,7 @@ export function estimateFor(input: EstimateInput): Estimate {
     // The rate goes in as well as the rectangle: an animation of a ten-frame-a-second recording
     // runs at ten, and a geometry that said fifteen would be a number the panel could not stand
     // behind (see `webpGeometry`).
-    const geometry = webpGeometry(path.plan.crop ?? path.plan.geometry, path.plan.geometry.framerate)
+    const geometry = webpGeometry(path.plan.crop ?? path.plan.geometry, path.plan.geometry.framerate, path.options)
     const frames = framesOf(path) ?? 0
     return {
       kind: 'webp',

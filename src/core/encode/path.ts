@@ -2,7 +2,7 @@ import { forcesEncoder, type Clip } from '../edit/clip'
 import type { EditContext } from '../edit/context'
 import { planClip, soundUnderPicture, type ClipSource, type ExportPlan } from '../export/plan'
 import type { JobKind } from '../export/queue'
-import { keptForRate, WEBP_FPS } from '../webp/timing'
+import { keptForRate, webpGeometry, type WebpOptions } from '../webp/timing'
 import type { Choice, EncodeGeometry, EncodingChoice } from './codec'
 import { geometryOf } from './crop'
 import { planFrames, type FramePlan } from './plan'
@@ -18,7 +18,7 @@ import { planFrames, type FramePlan } from './plan'
 export type ClipPath =
   | { kind: 'copy'; plan: ExportPlan }
   | { kind: 'encode'; plan: FramePlan; choice: EncodingChoice }
-  | { kind: 'webp'; plan: FramePlan }
+  | { kind: 'webp'; plan: FramePlan; options?: WebpOptions }
   | { kind: 'blocked'; reason: BlockedReason; geometry: EncodeGeometry }
 
 /**
@@ -74,7 +74,7 @@ export function pathFor(
     }
   }
 
-  if (clip.format === 'webp') return { kind: 'webp', plan }
+  if (clip.format === 'webp') return { kind: 'webp', plan, options: clip.webp }
   if (!choice || choice.kind === 'none') {
     return { kind: 'blocked', reason: 'no-encoder', geometry: plan.geometry }
   }
@@ -88,7 +88,7 @@ export const laneOf = (path: ClipPath): JobKind => (path.kind === 'copy' ? 'copy
 /**
  * Frames this path will write, or undefined for one that counts in bytes.
  *
- * An animation may write fewer than it decodes: `WEBP_FPS` is a **ceiling**, so a recording made
+ * An animation may write fewer than it decodes: the selected FPS is a **ceiling**, so a recording made
  * faster than that is thinned and one made slower keeps every frame. Either way the number in the
  * queue row is the number of frames that reach the file, and it is counted by the same call that
  * chooses them, so the row and the file cannot disagree.
@@ -96,7 +96,8 @@ export const laneOf = (path: ClipPath): JobKind => (path.kind === 'copy' ? 'copy
 export const framesOf = (path: ClipPath): number | undefined => {
   if (path.kind === 'encode') return path.plan.kept
   if (path.kind === 'webp') {
-    return keptForRate(path.plan.kept, path.plan.geometry.framerate, WEBP_FPS).length
+    const geometry = webpGeometry(path.plan.crop ?? path.plan.geometry, path.plan.geometry.framerate, path.options)
+    return keptForRate(path.plan.kept, path.plan.geometry.framerate, geometry.framerate).length
   }
   return undefined
 }

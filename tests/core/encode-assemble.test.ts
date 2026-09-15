@@ -124,7 +124,8 @@ const codedFrames: OutSample[] = plannedVideo.samples.map((sample) => ({
 }))
 
 const picture: EncodedVideo = {
-  sampleEntry: codedSampleEntry('avc1', avcC, plannedVideo.width, plannedVideo.height),
+  sampleEntry: codedSampleEntry('avc1', avcC, plannedVideo.width, plannedVideo.height,
+    { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', fullRange: false }),
   width: plannedVideo.width,
   height: plannedVideo.height,
   timescale: plannedVideo.timescale,
@@ -364,7 +365,7 @@ describe('assembleEncoded', () => {
     expect(coded(file, 144).byteLength, 'a frame past the end of the recording').toBe(0)
   })
 
-  it('says which colour it is in, where the file it was copied from says nothing', () => {
+  it('retains explicitly supplied colour metadata in the assembled file', () => {
     const file = writeTemp('encode-coloured.mp4', assembleEncoded(picture, null))
 
     // The defect the colour box exists for, measured on these two files rather than argued.

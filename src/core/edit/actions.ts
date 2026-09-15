@@ -1,4 +1,5 @@
 import type { ExportFormat } from '../../shared/settings'
+import { DEFAULT_WEBP, validWebpOptions, type WebpOptions } from '../webp/timing'
 import { normalizeCrop, ratioCrop, type Crop, type CropRatio } from '../encode/crop'
 import { boundaryIndexAt, boundaryTime, quantize, shiftBy } from '../timeline/grid'
 import {
@@ -52,6 +53,7 @@ export type Action =
   | { type: 'applyCropToAll' }
   | { type: 'setFormat'; id: string; format: ExportFormat }
   | { type: 'setMode'; id: string; mode: ClipMode }
+  | { type: 'setWebp'; id: string; options: WebpOptions }
 
 /** Returns the project itself when every field is what it already was. */
 function withUi(project: Project, ui: Partial<Ui>): Project {
@@ -354,6 +356,14 @@ export function reduce(project: Project, action: Action, ctx: EditContext): Proj
       return replaceClip(project, clip.id, { ...clip, format: action.format })
     }
 
+    case 'setWebp': {
+      const clip = clipById(project.doc, action.id)
+      if (!clip || !validWebpOptions(action.options)) return project
+      const current = clip.webp ?? DEFAULT_WEBP
+      if (current.maxSide === action.options.maxSide && current.fps === action.options.fps) return project
+      return replaceClip(project, clip.id, { ...clip, webp: { ...action.options } })
+    }
+
     case 'setMode': {
       const clip = clipById(project.doc, action.id)
       if (!clip || clip.mode === action.mode) return project
@@ -474,6 +484,7 @@ const MODES: { [T in Action['type']]: ModeFor<T> } = {
   applyCropToAll: STEP,
   setFormat: STEP,
   setMode: STEP,
+  setWebp: STEP,
 
   // A drag of the crop handles is a flood like a trim: hundreds of events, one press of Ctrl+Z.
   // The key is the clip, not the handle — a frame moved and then resized is one act of framing.

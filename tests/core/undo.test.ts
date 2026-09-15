@@ -31,6 +31,7 @@ interface Sample {
 }
 
 const SAMPLES: Record<Action['type'], Sample> = {
+  setWebp: { before: [{ type: 'addClip' }], action: { type: 'setWebp', id: 'c1', options: { maxSide: 1280, fps: 24 } } },
   seek: { before: [], action: seek(1) },
   step: { before: [seek(1)], action: { type: 'step', frames: 1 } },
   skip: { before: [seek(1)], action: { type: 'skip', seconds: 1 } },

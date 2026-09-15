@@ -1,6 +1,6 @@
 import type { FramePlan } from '../../core/encode/plan'
 import { packAnimation, type AnimationFrame } from '../../core/webp/riff'
-import { frameDurations, keptForRate, webpGeometry, WEBP_FPS, WEBP_QUALITY } from '../../core/webp/timing'
+import { frameDurations, keptForRate, webpGeometry, WEBP_QUALITY, type WebpOptions } from '../../core/webp/timing'
 import { decodedFrames, type Codecs, type FrameSource } from './frames'
 
 /**
@@ -78,7 +78,7 @@ function shownTicks(plan: FramePlan): { ticks: number[]; end: number } {
  *
  * The frame loop is `decodedFrames` like everything else on this path, so cropping, back-pressure
  * and cancellation are not written twice. What is here and nowhere else is the thinning — an
- * animation runs at `WEBP_FPS` **at most**, and a recording slower than that keeps every frame —
+ * animation runs at the selected FPS **at most**, and a recording slower than that keeps every frame —
  * and the durations, which come off the kept frames' own times rather than off a constant rate.
  * A constant rate is the bug this function was written twice for: fifteen frames a second laid
  * over a ten-frame-a-second recording plays ten seconds of material in 6.667.
@@ -89,10 +89,11 @@ export async function encodeWebp(
   codecs: Codecs,
   surface: Surface,
   onFrames: (frames: number) => void,
+  options?: WebpOptions,
 ): Promise<Uint8Array | null> {
-  const geometry = webpGeometry(plan.crop ?? plan.geometry, plan.geometry.framerate)
+  const geometry = webpGeometry(plan.crop ?? plan.geometry, plan.geometry.framerate, options)
   // Positions in the stream, which arrives in presentation order — the order an animation plays.
-  const kept = keptForRate(plan.kept, plan.geometry.framerate, WEBP_FPS)
+  const kept = keptForRate(plan.kept, plan.geometry.framerate, geometry.framerate)
   const keep = new Set(kept)
   const shown = shownTicks(plan)
   const durations = frameDurations(
@@ -191,8 +192,9 @@ export async function probeWebpBytes(
   source: FrameSource,
   codecs: Codecs,
   surface: Surface,
+  options?: WebpOptions,
 ): Promise<number | null> {
-  const geometry = webpGeometry(plan.crop ?? plan.geometry, plan.geometry.framerate)
+  const geometry = webpGeometry(plan.crop ?? plan.geometry, plan.geometry.framerate, options)
   surface.resize(geometry.width, geometry.height)
 
   const sizes: number[] = []
@@ -213,6 +215,6 @@ export async function probeWebpBytes(
 
   const average = sizes.reduce((sum, size) => sum + size, 0) / sizes.length
   const perFrame = average - STILL_HEADER_BYTES - STILL_RIFF_BYTES + ANMF_ENVELOPE_BYTES
-  const frames = keptForRate(plan.kept, plan.geometry.framerate, WEBP_FPS).length
+  const frames = keptForRate(plan.kept, plan.geometry.framerate, geometry.framerate).length
   return Math.max(0, Math.round(perFrame * frames + ANIMATION_HEADER_BYTES))
 }

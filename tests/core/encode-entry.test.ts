@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { COLOUR_BT709_LIMITED, codedSampleEntry } from '../../src/core/encode/entry'
+import { codedSampleEntry } from '../../src/core/encode/entry'
 import { videoSampleEntry } from '../../src/core/iso/entry'
 import { boxBody, boxesIn, topLevelBoxes } from '../../src/core/iso/reader'
 
@@ -14,6 +14,8 @@ import { boxBody, boxesIn, topLevelBoxes } from '../../src/core/iso/reader'
  * is the one that has to find the children again — and it finds them at a fixed offset, which is
  * exactly the claim a wrong field run would break.
  */
+
+const BT709 = { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', fullRange: false } as const
 
 const read = (path: string): Uint8Array => new Uint8Array(readFileSync(path))
 
@@ -56,7 +58,7 @@ describe('codedSampleEntry', () => {
     expect(avcC.byteLength).toBeGreaterThan(7)
     expect(avcC[0], 'configurationVersion of a real avcC').toBe(1)
 
-    const entry = codedSampleEntry('avc1', avcC, 1280, 720)
+    const entry = codedSampleEntry('avc1', avcC, 1280, 720, BT709)
     const boxes = topLevelBoxes(entry)
     expect(boxes.map((box) => box.type)).toEqual(['avc1'])
 
@@ -96,7 +98,7 @@ describe('codedSampleEntry', () => {
     // branch would be describing an HEVC stream with an AVC configuration in it.
     expect(hvcC).not.toEqual(avcC)
 
-    const entry = codedSampleEntry('hvc1', hvcC, 3840, 2160)
+    const entry = codedSampleEntry('hvc1', hvcC, 3840, 2160, BT709)
     expect(topLevelBoxes(entry).map((box) => box.type)).toEqual(['hvc1'])
 
     const children = childrenOf(entry)
@@ -104,12 +106,12 @@ describe('codedSampleEntry', () => {
     expect(boxBody(entry, children[0]!)).toEqual(hvcC)
   })
 
-  it('carries the colour box on every rung, saying BT.709 and limited range', () => {
+  it('writes BT.709 limited when reported by either encoder', () => {
     for (const [format, description] of [
       ['avc1', avcC],
       ['hvc1', hvcC],
     ] as const) {
-      const entry = codedSampleEntry(format, description, 640, 360)
+      const entry = codedSampleEntry(format, description, 640, 360, BT709)
       const colour = childrenOf(entry).find((box) => box.type === 'colr')
       expect(colour, `${format} without a colour box`).toBeDefined()
 
@@ -124,16 +126,11 @@ describe('codedSampleEntry', () => {
       // encoder actually wrote.
       expect(view.getUint8(10)).toBe(0)
 
-      // And it is the exported box itself, so that a reader of the constant and a reader of the
-      // file are reading the same bytes.
-      expect(entry.subarray(colour!.start, colour!.start + colour!.size)).toEqual(
-        COLOUR_BT709_LIMITED,
-      )
     }
   })
 
   it('states its own length, and fills it exactly', () => {
-    const entry = codedSampleEntry('avc1', avcC, 320, 240)
+    const entry = codedSampleEntry('avc1', avcC, 320, 240, BT709)
 
     // The size field is how a reader steps from this entry to whatever follows it in the stsd.
     // An entry that understates it hands the next reader the tail of itself as a box header.
@@ -153,11 +150,11 @@ describe('codedSampleEntry', () => {
   it('refuses to describe a track whose configuration never arrived', () => {
     // A file with an avcC of no bytes in it opens in nothing. Failing here names the job that
     // went wrong; writing it hands the user a file that looks finished and plays as nothing.
-    expect(() => codedSampleEntry('avc1', new Uint8Array(0), 320, 240)).toThrow(
+    expect(() => codedSampleEntry('avc1', new Uint8Array(0), 320, 240, BT709)).toThrow(
       /no decoder configuration/i,
     )
-    expect(() => codedSampleEntry('hvc1', new Uint8Array(0), 320, 240)).toThrow()
+    expect(() => codedSampleEntry('hvc1', new Uint8Array(0), 320, 240, BT709)).toThrow()
     // The premise: the same call with a record in hand goes through.
-    expect(() => codedSampleEntry('avc1', avcC, 320, 240)).not.toThrow()
+    expect(() => codedSampleEntry('avc1', avcC, 320, 240, BT709)).not.toThrow()
   })
 })

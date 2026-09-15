@@ -1,24 +1,27 @@
 import type { EncodeGeometry } from '../encode/codec'
 
-/**
- * The most frames a second an animation is written at.
- *
- * A ceiling and not a rate: a recording slower than this keeps every frame and is written at its
- * own speed (see `frameDurations`). Not because browsers clamp short durations — measured, they
- * do not: a 17 ms frame plays as 17 ms and ninety of them last a second and a half. Because the
- * bytes grow strictly linearly with the rate, and this is a format that already costs seven to
- * ten times what the same clip costs as MP4. Fifteen is where a loop still reads as motion.
- */
+/** Default maximum frame rate; slower sources retain their own rate. */
 export const WEBP_FPS = 15
 
-/**
- * The longest side an animation is written at.
- *
- * The same reason and the same measurement: bytes go with pixels, and a minute of 1080p as
- * animated WebP is a file nobody wanted. Cropping smaller than this is honoured as it is; a
- * larger picture is fitted into it, and the panel says the size it will actually write.
- */
+/** Default longest side, adjustable per clip. */
 export const WEBP_MAX_SIDE = 640
+
+export interface WebpOptions {
+  /** Fit inside this longest side, preserving the crop's aspect ratio without upscaling. */
+  maxSide: number
+  /** Maximum output frame rate. Slower recordings retain their own frame rate. */
+  fps: number
+}
+
+export const DEFAULT_WEBP: Readonly<WebpOptions> = { maxSide: WEBP_MAX_SIDE, fps: WEBP_FPS }
+export const WEBP_SIDE_LIMIT = 16383
+// Frame durations <= 10 ms have implementation-defined playback in WebP (RFC 9649).
+export const WEBP_FPS_LIMIT = 60
+
+export function validWebpOptions(options: WebpOptions): boolean {
+  return Number.isInteger(options.maxSide) && options.maxSide >= 1 && options.maxSide <= WEBP_SIDE_LIMIT &&
+    Number.isFinite(options.fps) && options.fps >= 1 && options.fps <= WEBP_FPS_LIMIT
+}
 
 /**
  * The quality `convertToBlob` is asked for — and the ceiling it must stay under.
@@ -33,7 +36,7 @@ export const WEBP_QUALITY = 0.75
  * How long each written frame is shown, in whole milliseconds, off the source's own clock.
  *
  * **The rate is not a constant and must never be treated as one.** An animation is written at
- * `WEBP_FPS` *at most*; a recording made at ten frames a second keeps all of them and has to be
+ * the selected frame rate *at most*; a recording made at ten frames a second keeps all of them and has to be
  * written at ten, and spacing them at fifteen would play the clip a third too fast — measured,
  * ten seconds of material read back as 6.667 s. So the times come from the frames themselves:
  * `ticks` is the presentation time of every frame the animation writes, ascending, in the
@@ -90,12 +93,14 @@ export function keptForRate(sourceFrames: number, sourceFps: number, fps: number
 export function webpGeometry(
   crop: { width: number; height: number },
   sourceFramerate: number,
+  options: WebpOptions = DEFAULT_WEBP,
 ): EncodeGeometry {
+  if (!validWebpOptions(options)) throw new Error('Invalid WebP size or frame rate.')
   const longest = Math.max(crop.width, crop.height)
-  const scale = longest > WEBP_MAX_SIDE ? WEBP_MAX_SIDE / longest : 1
+  const scale = Math.min(1, options.maxSide / longest)
   return {
     width: Math.max(1, Math.round(crop.width * scale)),
     height: Math.max(1, Math.round(crop.height * scale)),
-    framerate: sourceFramerate > 0 ? Math.min(WEBP_FPS, sourceFramerate) : WEBP_FPS,
+    framerate: sourceFramerate > 0 ? Math.min(options.fps, sourceFramerate) : options.fps,
   }
 }

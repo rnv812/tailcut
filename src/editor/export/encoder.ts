@@ -71,6 +71,7 @@ export async function encodeToTrack(
 
   const emitted: Array<{ bytes: Uint8Array; sync: boolean; timestamp: number }> = []
   let description: Uint8Array | null = null
+  let colorSpace: VideoColorSpaceInit | undefined
   let failed: Error | null = null
   const encodingFailure = (cause: unknown): Error =>
     codecFailure('encode', plan.decoder.codec, choice.config.codec, cause)
@@ -81,6 +82,7 @@ export async function encodeToTrack(
       chunk(chunk, metadata) {
         const config = metadata?.decoderConfig
         if (config?.description && !description) {
+          colorSpace = config.colorSpace
           const raw = config.description
           description =
             raw instanceof Uint8Array ? new Uint8Array(raw) : new Uint8Array(raw as ArrayBuffer)
@@ -167,6 +169,7 @@ export async function encodeToTrack(
           description,
           plan.geometry.width,
           plan.geometry.height,
+          colorSpace,
         ),
         width: plan.geometry.width,
         height: plan.geometry.height,

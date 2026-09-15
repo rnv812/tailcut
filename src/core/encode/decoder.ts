@@ -1,4 +1,5 @@
 import { boxBody, boxesIn } from '../iso/reader'
+import { readColour } from './colour'
 
 /**
  * How the decoder is configured for material this program recorded, out of the bytes that
@@ -26,7 +27,11 @@ export function decoderConfigOf(sampleEntry: Uint8Array): VideoDecoderConfig | n
     if (!children.has(child.type)) children.set(child.type, boxBody(sampleEntry, child))
   }
 
-  const size = { codedWidth: view.getUint16(32), codedHeight: view.getUint16(34) }
+  const colorSpace = readColour(children.get('colr'))
+  const size = {
+    codedWidth: view.getUint16(32), codedHeight: view.getUint16(34),
+    ...(colorSpace ? { colorSpace } : {}),
+  }
 
   const avcC = children.get('avcC')
   if (avcC && avcC.byteLength >= 4) {

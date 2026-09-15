@@ -170,6 +170,7 @@
   button:hover:not(:disabled) { border-color: #5a5f6c; background: var(--tc-surface-hover); }
   button:disabled { opacity: 0.45; }
   select,
+  input[type='number'],
   input[type='text'] {
     min-height: 30px;
     border: 1px solid var(--tc-border-strong);
@@ -378,7 +379,7 @@
   .tc-clip-options { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; align-items: end; margin-top: 8px; }
   .tc-clip-options .option { margin: 0; }
   .tc-clip-select { display: grid; gap: 4px; }
-  .tc-clip-select select { width: 100%; min-width: 0; }
+  .tc-clip-select select, .tc-clip-select input { width: 100%; min-width: 0; box-sizing: border-box; }
   .tc-clip-sound { min-height: 30px; }
   .tc-clip-options button { min-height: 27px; padding: 3px 8px; }
   .tc-clip-note { margin: 7px 0 0; color: var(--tc-warning); font-size: 11px; }

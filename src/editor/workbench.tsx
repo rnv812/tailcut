@@ -112,9 +112,9 @@ export function selectClipFromBin(
 }
 
 /**
- * What a measured WebP weight is about: this clip, this frame, this length.
+ * The WebP probe cache includes the clip, crop, range, resolution and frame rate.
  *
- * Keyed by all three and not by the id alone. The probe encodes real frames of the rectangle it
+ * Every export setting is part of the key. The probe encodes real frames of the rectangle it
  * was given, so a rectangle the user moved makes the old number a number about a different
  * picture — and a map keyed by the id would go on showing it for the life of the tab.
  */
@@ -122,7 +122,7 @@ const probeKey = (clip: Clip): string => {
   const frame = clip.crop
     ? `${clip.crop.x},${clip.crop.y},${clip.crop.width},${clip.crop.height}`
     : 'full'
-  return `${clip.id}:${frame}:${clip.in}:${clip.out}`
+  return `${clip.id}:${frame}:${clip.in}:${clip.out}:${clip.webp?.maxSide}:${clip.webp?.fps}`
 }
 
 function TrackLine({ track }: { track: MaterialTrack }) {
@@ -435,6 +435,7 @@ function OpenWorkbench({
           { read: (at) => reader.bytesOf(at), stale: () => !live },
           liveCodecs(),
           liveSurface(),
+          selected.webp,
         ),
       )
       .then((bytes) => {

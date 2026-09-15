@@ -11,6 +11,30 @@ import {
 import type { Codecs, FrameSource } from '../../src/editor/export/frames'
 
 const TIMESCALE = 30_000
+
+it('exports custom WebP geometry and frame count without changing the duration', async () => {
+  const plan = planOf(60, 30, { width: 1920, height: 1080 })
+  const surface = fakeSurface()
+  const progress: number[] = []
+  const file = await encodeWebp(plan, sourceOf(), fakeCodecs().codecs, surface,
+    frames => progress.push(frames), { maxSide: 1280, fps: 24 })
+  expect(surface.sizes).toEqual([{ width: 1280, height: 720 }])
+  expect(surface.stillCalls).toBe(48)
+  expect(progress.at(-1)).toBe(48)
+  const frames = chunksOf(file!).filter(chunk => chunk.tag === 'ANMF')
+  expect(frames).toHaveLength(48)
+  const duration = frames.reduce((sum, chunk) => sum + file![chunk.at + 12]! +
+    (file![chunk.at + 13]! << 8) + (file![chunk.at + 14]! << 16), 0)
+  expect(duration).toBe(2000)
+})
+
+it('probes at the requested resolution and prices the requested frame rate', async () => {
+  const plan = planOf(60, 30, { width: 1920, height: 1080 })
+  const surface = fakeSurface()
+  const bytes = await probeWebpBytes(plan, sourceOf(), fakeCodecs().codecs, surface, { maxSide: 1280, fps: 30 })
+  expect(surface.sizes).toEqual([{ width: 1280, height: 720 }])
+  expect(bytes).toBe((600 - 482 - 12 + 24) * 60 + 44)
+})
 const ascii = (text: string): number[] => [...text].map((character) => character.charCodeAt(0))
 const u32 = (value: number): number[] => [
   value & 0xff,

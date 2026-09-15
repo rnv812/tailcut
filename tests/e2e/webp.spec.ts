@@ -20,6 +20,45 @@ const EXPECTED_FRAMES = 100
 const EXPECTED_DURATION_MS = 10_000
 const CROP = { x: 6, y: 4, width: 120, height: 64 }
 
+test('saves WebP using the selected size and FPS, with undo and original size', async ({}, testInfo) => {
+  test.setTimeout(120_000)
+  const { context, editor } = await openTenSecondClip()
+  try {
+    await editor.getByTestId('format-c1').selectOption('webp')
+    await editor.getByTestId('webp-size-c1').fill('160')
+    await editor.getByTestId('webp-size-c1').press('Enter')
+    await editor.getByTestId('webp-fps-c1').fill('5')
+    await editor.getByTestId('webp-fps-c1').press('Enter')
+    await expect(editor.getByTestId('webp-output-c1')).toContainText('160 × 90 · 5 fps')
+    await editor.keyboard.press('Control+z')
+    await expect(editor.getByTestId('webp-fps-c1')).toHaveValue('10')
+    await editor.keyboard.press('Control+Shift+z')
+    await expect(editor.getByTestId('webp-fps-c1')).toHaveValue('5')
+    await expect(editor.getByTestId('estimate')).toContainText('as an animation')
+    await editor.screenshot({ path: testInfo.outputPath('webp-options.png') })
+    const saved = await exportClipWith(editor, { format: 'webp' })
+    const file = readFileSync(saved.file)
+    const frames = chunksOf(file).filter(chunk => chunk.tag === 'ANMF')
+    expect(frames).toHaveLength(50)
+    const facts = await editor.evaluate(async data => {
+      const decoder = new ImageDecoder({ data: new Uint8Array(data), type: 'image/webp' })
+      await decoder.tracks.ready
+      const last = await decoder.decode({ frameIndex: 49 })
+      try {
+        return { width: last.image.displayWidth, height: last.image.displayHeight,
+          duration: last.image.timestamp + (last.image.duration ?? 0) }
+      } finally { last.image.close(); decoder.close() }
+    }, Array.from(file))
+    expect(facts).toEqual({ width: 160, height: 90, duration: 10_000_000 })
+    await editor.getByTestId('webp-original-c1').click()
+    await expect(editor.getByTestId('webp-output-c1')).toContainText('256 × 144 · 5 fps')
+    await editor.getByTestId('format-c1').selectOption('mp4')
+    await expect(editor.getByTestId('webp-options-c1')).toHaveCount(0)
+    await editor.getByTestId('format-c1').selectOption('webp')
+    await expect(editor.getByTestId('webp-fps-c1')).toHaveValue('5')
+  } finally { await context.close() }
+})
+
 interface AnimationFacts {
   declared: number
   decoded: number

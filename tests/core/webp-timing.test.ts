@@ -10,6 +10,23 @@ import {
 const sum = (values: readonly number[]): number => values.reduce((total, value) => total + value, 0)
 
 describe('animated WebP timing', () => {
+  it('uses custom resolution and frame rate while preserving proportions and source limits', () => {
+    expect(webpGeometry({ width: 1920, height: 1080 }, 60, { maxSide: 1280, fps: 30 }))
+      .toEqual({ width: 1280, height: 720, framerate: 30 })
+    expect(webpGeometry({ width: 1080, height: 1920 }, 24, { maxSide: 1920, fps: 60 }))
+      .toEqual({ width: 1080, height: 1920, framerate: 24 })
+    expect(webpGeometry({ width: 320, height: 180 }, 10, { maxSide: 1920, fps: 30 }))
+      .toEqual({ width: 320, height: 180, framerate: 10 })
+  })
+
+  it('rejects invalid settings before allocating an export surface', () => {
+    for (const maxSide of [0, -1, 12.5, NaN, Infinity, 16384]) {
+      expect(() => webpGeometry({ width: 100, height: 100 }, 30, { maxSide, fps: 15 })).toThrow()
+    }
+    for (const fps of [0, -1, NaN, Infinity, 61]) {
+      expect(() => webpGeometry({ width: 100, height: 100 }, 30, { maxSide: 640, fps })).toThrow()
+    }
+  })
   it('keeps every frame of material recorded below the ceiling and preserves its ten seconds', () => {
     const kept = keptForRate(100, 10, WEBP_FPS)
     const ticks = kept.map((index) => index)

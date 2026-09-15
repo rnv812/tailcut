@@ -268,11 +268,12 @@ export function encodeIo(
           codecs,
           surface(),
           report,
+          path.options,
         )
         if (file && !stale()) {
           onPace(
             'webp',
-            webpGeometry(path.plan.crop ?? path.plan.geometry, path.plan.geometry.framerate),
+            webpGeometry(path.plan.crop ?? path.plan.geometry, path.plan.geometry.framerate, path.options),
             framesOf(path) ?? 0,
             performance.now() - started,
           )

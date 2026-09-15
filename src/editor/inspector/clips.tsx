@@ -7,6 +7,7 @@ import { formatTimecode } from '../../core/timeline/timecode'
 import type { ExportFormat } from '../../shared/settings'
 import { Icon } from '../icon'
 import { TimecodeField } from './timecode-field'
+import { WebpControls } from './webp'
 
 export interface ClipsProps {
   doc: Doc
@@ -301,6 +302,7 @@ export function Clips({
                 </label>
 
               </div>
+              {clip.format === 'webp' && <WebpControls key={clip.id} clip={clip} ctx={ctx} dispatch={dispatch} />}
             </section>
 
           </li>

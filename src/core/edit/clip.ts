@@ -1,4 +1,5 @@
 import type { ExportFormat } from '../../shared/settings'
+import type { WebpOptions } from '../webp/timing'
 import type { Crop } from '../encode/crop'
 import { applyTemplate } from '../export/naming'
 import { boundaryIndexAt, quantize, shiftBy } from '../timeline/grid'
@@ -19,6 +20,7 @@ export interface Clip {
   /** Rectangle of the source picture retained by this clip, or the whole picture. */
   crop: Crop | null
   format: ExportFormat
+  webp?: WebpOptions
   /** `original` copies coded frames; `optimize` encodes them again at a smaller target. */
   mode: ClipMode
 }
