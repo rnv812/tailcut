@@ -20,16 +20,25 @@ import { samplesInMovie } from '../../src/core/iso/movie'
 import { videoSampleEntry } from '../../src/core/iso/entry'
 import { assembleMp4 } from '../../src/core/export/assemble'
 import { clipSourceFrom, movieTracksOf } from '../../src/core/export/source'
-import type { ClipSource } from '../../src/core/export/plan'
+import { planClip, type ClipSource } from '../../src/core/export/plan'
+import { saveAllMp4 } from '../../src/core/export/save'
+import { ENCODED_AS_VP9 } from '../../src/core/export/compatible'
+import { exportTrack } from '../support/export-fixture'
 import { NO_ENCODER, createRunner } from '../../src/core/export/run'
 import { framesOf, laneOf } from '../../src/core/encode/path'
 import { geometryOf } from '../../src/core/encode/crop'
 import { webpGeometry } from '../../src/core/webp/timing'
 import type { Clip } from '../../src/core/edit/clip'
 import { EMPTY_CONTEXT, type EditContext } from '../../src/core/edit/context'
-import type { EncodeGeometry, EncodingChoice } from '../../src/core/encode/codec'
+import {
+  ladderFor,
+  vp9Level,
+  type EncodeGeometry,
+  type EncodingChoice,
+} from '../../src/core/encode/codec'
 import type { ExportRequest } from '../../src/core/export/run'
 import type { Codecs } from '../../src/editor/export/frames'
+import { CodecFailure } from '../../src/editor/export/failure'
 import type { Surface } from '../../src/editor/export/webp'
 
 const read = (path: string): Uint8Array => new Uint8Array(readFileSync(`tests/fixtures/${path}`))
@@ -52,6 +61,34 @@ const SEGMENTS = [1, 2, 3].map((n) => read(`h264/chunk-stream0-0000${n}.m4s`))
  * path that only knows about fragments is a path that cannot export most of the web.
  */
 const WHOLE = read('plain/whole.mp4')
+
+/** The listeners of the stubbed `chrome.downloads.onChanged`, shared by every stub below. */
+const changeListeners = new Set<(delta: { id: number; state?: { current: string } }) => void>()
+
+/** What Chrome says once a download is on the disk. */
+const finished = (id: number): void => {
+  setTimeout(() => changeListeners.forEach((listener) => listener({ id, state: { current: 'complete' } })), 0)
+}
+
+/** Chrome's downloads, finishing every download a moment after answering with its id. */
+function finishingDownloads(asked: Array<Record<string, unknown>>, id = 7) {
+  return {
+    download: (options: Record<string, unknown>, done: (id: number) => void) => {
+      asked.push(options)
+      done(id)
+      finished(id)
+    },
+    onChanged: {
+      addListener: (listener: (delta: { id: number }) => void) => changeListeners.add(listener),
+      removeListener: (listener: (delta: { id: number }) => void) => changeListeners.delete(listener),
+    },
+    onErased: { addListener: () => undefined, removeListener: () => undefined },
+  }
+}
+
+/** YouTube's pair in an mp4, and the pair Premiere imports. */
+const VP9_FILE = saveAllMp4([exportTrack('webm', 0, 'webm'), exportTrack('webm', 1, 'webm')])
+const H264_FILE = WHOLE
 
 /**
  * One buffer carrying both kinds, as a page that muxes its own material sends them.
@@ -325,7 +362,12 @@ interface IntegrationCodecs {
 
 /** Enough WebCodecs to exercise the exporter seam without constructing a browser object. */
 const integrationCodecs = (
-  behavior: { failHardware?: boolean; rejectUnnormalized?: boolean } = {},
+  behavior: {
+    failHardware?: boolean
+    rejectUnnormalized?: boolean
+    /** An encoder that refuses this configuration, with this error — or null to take it. */
+    refuse?: (config: VideoEncoderConfig) => Error | null
+  } = {},
 ): IntegrationCodecs => {
   const avcC = videoSampleEntry(INIT)!.children.get('avcC')!
   const fakes: IntegrationCodecs = {
@@ -379,6 +421,11 @@ const integrationCodecs = (
             on.error(error)
             return
           }
+          const refused = behavior.refuse?.(config)
+          if (refused) {
+            on.error(refused)
+            return
+          }
           const bytes = Uint8Array.of(0, 0, 0, 1, fakes.encoded & 0xff)
           on.chunk(
             {
@@ -388,7 +435,10 @@ const integrationCodecs = (
               copyTo: (target: Uint8Array) => target.set(bytes),
             } as unknown as EncodedVideoChunk,
             first
-              ? ({ decoderConfig: { codec: 'avc1.42001e', description: avcC } } as EncodedVideoChunkMetadata)
+              ? ((config.codec.startsWith('vp09')
+                  // libvpx's account of itself: a codec string, and no description at all.
+                  ? { decoderConfig: { codec: config.codec } }
+                  : { decoderConfig: { codec: 'avc1.42001e', description: avcC } }) as EncodedVideoChunkMetadata)
               : undefined,
           )
           first = false
@@ -735,15 +785,7 @@ describe('encodeIo', () => {
       blobs.push(blob as Blob)
       return 'blob:webp'
     })
-    vi.stubGlobal('chrome', {
-      downloads: {
-        download: (options: Record<string, unknown>, done: (id: number) => void) => {
-          downloads.push(options)
-          done(7)
-        },
-      },
-      runtime: { lastError: undefined },
-    })
+    vi.stubGlobal('chrome', { downloads: finishingDownloads(downloads), runtime: { lastError: undefined } })
     const saved: number[] = []
     const io = encodeIo({} as SnapshotReader, integrationCodecs().codecs, integrationSurface, {
       askWhere: true,
@@ -920,6 +962,103 @@ describe('encodeIo', () => {
     expect(parseInit(file!)!.tracks.map(({ codec }) => codec)).toEqual(['avc1'])
   })
 
+  /** Yandex Browser, as measured: no OpenH264, and a hardware encoder that says yes and is not. */
+  const openH264Missing = (config: VideoEncoderConfig): Error | null => {
+    if (config.codec.startsWith('vp09')) return null
+    const error = new Error(
+      config.hardwareAcceleration === 'prefer-hardware'
+        ? 'Encoder creation error.'
+        : 'Encoder initialization error. (Failed to create OpenH264 encoder.)',
+    )
+    error.name = 'OperationError'
+    return error
+  }
+
+  const ladderChoice = (geometry: EncodeGeometry, kind: string): EncodingChoice =>
+    ladderFor(geometry, { codec: 'h264', quality: 'medium' })
+      .find((rung) => rung.choice.kind === kind)!.choice as EncodingChoice
+
+  it('falls through every H.264 rung to VP9 in MP4 when the browser has no H.264 encoder', async () => {
+    const reader = await fileSnapshot()
+    const source = (await openClipSource(reader, materialOf(reader.index)))!
+    const ctx = contextOf(source, 10)
+    const asked = clip({ in: 0, out: 2, mode: 'optimize', sound: false })
+    const geometry = geometryOf(asked.crop, ctx.frameSize, ctx.fps)
+    const request = requestsFor(
+      source,
+      [asked],
+      ctx,
+      new Map([[geometryKey(geometry), ladderChoice(geometry, 'h264-hw')]]),
+      false,
+    )[0]!
+    const fakes = integrationCodecs({ refuse: openH264Missing })
+
+    const file = await encodeIo(reader, fakes.codecs, integrationSurface, {
+      onPace: () => undefined,
+    }).encode(request, () => undefined, () => false)
+
+    expect(fakes.encoderConfigs.map((config) => [config.codec, config.hardwareAcceleration])).toEqual([
+      ['avc1.64001e', 'prefer-hardware'],
+      ['avc1.64001e', 'prefer-software'],
+      [`vp09.00.${vp9Level(geometry)}.08`, 'prefer-software'],
+    ])
+    expect(parseInit(file!)!.tracks.map(({ codec }) => codec)).toEqual(['vp09'])
+  })
+
+  it('names every rung that failed, not only the last one, when nothing could encode', async () => {
+    const reader = await fileSnapshot()
+    const source = (await openClipSource(reader, materialOf(reader.index)))!
+    const ctx = contextOf(source, 10)
+    const asked = clip({ in: 0, out: 2, mode: 'optimize', sound: false })
+    const geometry = geometryOf(asked.crop, ctx.frameSize, ctx.fps)
+    const request = requestsFor(
+      source,
+      [asked],
+      ctx,
+      new Map([[geometryKey(geometry), ladderChoice(geometry, 'h264-hw')]]),
+      false,
+    )[0]!
+    const fakes = integrationCodecs({
+      refuse: (config) => {
+        if (!config.codec.startsWith('vp09')) return openH264Missing(config)
+        const error = new Error('Encoder initialization error.')
+        error.name = 'OperationError'
+        return error
+      },
+    })
+
+    const failure = await encodeIo(reader, fakes.codecs, integrationSurface, {
+      onPace: () => undefined,
+    }).encode(request, () => undefined, () => false).catch((error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(CodecFailure)
+    expect((failure as CodecFailure).stage).toBe('encode')
+    expect((failure as Error).message).toBe(
+      'Encoding avc1.4d400b failed on every encoder tried: ' +
+        'avc1.64001e (hardware): OperationError: Encoder creation error.; ' +
+        'avc1.64001e (software): OperationError: Encoder initialization error. (Failed to create OpenH264 encoder.); ' +
+        `vp09.00.${vp9Level(geometry)}.08 (software): OperationError: Encoder initialization error.`,
+    )
+
+    // A header that declares a wider picture than the samples are coded at: the encoders were
+    // configured for a picture the browser was never asked about, and the failure says so.
+    const declared = { ...ctx, frameSize: { width: ctx.frameSize.width + 80, height: ctx.frameSize.height } }
+    const wide = geometryOf(asked.crop, declared.frameSize, declared.fps)
+    const unasked = requestsFor(
+      source,
+      [asked],
+      declared,
+      new Map([[geometryKey(wide), ladderChoice(wide, 'h264-hw')]]),
+      false,
+    )[0]!
+    const second = await encodeIo(reader, integrationCodecs({ refuse: () => new Error('No.') }).codecs,
+      integrationSurface, { onPace: () => undefined },
+    ).encode(unasked, () => undefined, () => false).catch((error: unknown) => error)
+    expect((second as Error).message).toMatch(
+      new RegExp(`\\(the browser was asked about ${wide.width}×${wide.height}; this clip is coded at ${geometry.width}×${geometry.height}\\)$`),
+    )
+  })
+
   it('reports every WebP frame without reading the clip sound and records WebP pace', async () => {
     const reader = await fileSnapshot()
     const source = (await openClipSource(reader, materialOf(reader.index)))!
@@ -1038,12 +1177,14 @@ describe('downloadIo', () => {
     const asked: Array<{ url: string; filename: string }> = []
     vi.stubGlobal('chrome', {
       downloads: {
+        ...finishingDownloads(asked as unknown as Array<Record<string, unknown>>),
         download: (
           options: { url: string; filename: string },
           done: (id: number | undefined) => void,
         ) => {
           asked.push(options)
           done(id)
+          if (id !== undefined) finished(id)
         },
       },
       runtime: { lastError: id === undefined ? { message: 'refused' } : undefined },
@@ -1185,5 +1326,159 @@ describe('downloadIo', () => {
     await expect(
       downloadIo({} as SnapshotReader).save(new Uint8Array([1, 2, 3]), 'Cats.mp4'),
     ).rejects.toThrow(/refused to save/)
+  })
+
+  it('says what the browser said when it refused', async () => {
+    // lastError is the only account of what went wrong — a name the file system will not take,
+    // a downloads folder that is gone — and it used to be read and thrown away.
+    stubDownloads(undefined)
+
+    await expect(
+      downloadIo({} as SnapshotReader).save(new Uint8Array([1]), 'Cats.mp4'),
+    ).rejects.toThrow('The browser refused to save the file: refused')
+  })
+})
+
+describe('downloadIo and the Save dialog', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  type Delta = { id: number; state?: { current: string }; error?: { current: string } }
+
+  /**
+   * Chrome as it behaves with `saveAs`: the call answers with an id as soon as the item exists,
+   * which is before the dialog has even opened, and what the user did with the dialog arrives
+   * later through `onChanged` (Chromium: DownloadManagerImpl runs the start callback right after
+   * creating the item, and target determination — the dialog — comes after the file is set up).
+   */
+  const stubDialog = () => {
+    const listeners = new Set<(delta: Delta) => void>()
+    const erasers = new Set<(id: number) => void>()
+    vi.stubGlobal('chrome', {
+      downloads: {
+        download: (_options: unknown, done: (id: number) => void) => done(7),
+        onChanged: {
+          addListener: (listener: (delta: Delta) => void) => listeners.add(listener),
+          removeListener: (listener: (delta: Delta) => void) => listeners.delete(listener),
+        },
+        onErased: {
+          addListener: (listener: (id: number) => void) => erasers.add(listener),
+          removeListener: (listener: (id: number) => void) => erasers.delete(listener),
+        },
+      },
+      runtime: { lastError: undefined },
+    })
+    return {
+      change: (delta: Delta) => [...listeners].forEach((listener) => listener(delta)),
+      erase: (id: number) => [...erasers].forEach((listener) => listener(id)),
+      listening: () => listeners.size + erasers.size,
+    }
+  }
+
+  it('does not call a clip saved while the dialog is still open', async () => {
+    const chrome = stubDialog()
+    const saved: number[] = []
+    let settled = false
+    const saving = downloadIo({} as SnapshotReader, { askWhere: true, onSaved: () => saved.push(1) })
+      .save(new Uint8Array([1]), 'Cats.mp4')
+      .then(() => { settled = true })
+
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(settled, 'the row said Saved before the user chose where').toBe(false)
+    expect(saved).toEqual([])
+
+    chrome.change({ id: 99, state: { current: 'complete' } })
+    chrome.change({ id: 7, state: { current: 'complete' } })
+    await saving
+    expect(saved).toEqual([1])
+    expect(chrome.listening(), 'the listener outlived its download').toBe(0)
+  })
+
+  it('fails a clip whose Save dialog was cancelled, and says nothing of it being saved', async () => {
+    const chrome = stubDialog()
+    const saved: number[] = []
+    const saving = downloadIo({} as SnapshotReader, { askWhere: true, onSaved: () => saved.push(1) })
+      .save(new Uint8Array([1]), 'Cats.mp4')
+
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    chrome.change({ id: 7, state: { current: 'interrupted' }, error: { current: 'USER_CANCELED' } })
+
+    await expect(saving).rejects.toThrow('The Save dialog was closed without saving the file.')
+    expect(saved).toEqual([])
+    expect(chrome.listening()).toBe(0)
+  })
+
+  it('fails a clip whose download was erased before it finished, rather than waiting for ever', async () => {
+    const chrome = stubDialog()
+    const saving = downloadIo({} as SnapshotReader, { askWhere: true }).save(new Uint8Array([1]), 'Cats.mp4')
+
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    chrome.erase(99)
+    chrome.erase(7)
+
+    await expect(saving).rejects.toThrow('The download was removed before it finished.')
+    expect(chrome.listening(), 'a listener outlived its download').toBe(0)
+  })
+
+  it('names what interrupted a download the user did not cancel', async () => {
+    const chrome = stubDialog()
+    const saving = downloadIo({} as SnapshotReader, { askWhere: true }).save(new Uint8Array([1]), 'Cats.mp4')
+
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    chrome.change({ id: 7, state: { current: 'interrupted' }, error: { current: 'FILE_NO_SPACE' } })
+
+    await expect(saving).rejects.toThrow('FILE_NO_SPACE')
+  })
+})
+
+describe('downloadIo and the encode lane', () => {
+  const vp9 = clipSourceFrom(movieTracksOf(VP9_FILE, VP9_FILE.byteLength))!
+  const h264 = clipSourceFrom(movieTracksOf(H264_FILE, H264_FILE.byteLength))!
+  const copyOf = (source: ClipSource, fileName: string): ExportRequest => ({
+    clipId: 'c',
+    name: 'c',
+    fileName,
+    path: { kind: 'copy', plan: planClip(source, { in: 0, out: 1, sound: true }) },
+  })
+
+  it('counts a VP9 copy into an mp4 as the heavy work it is', () => {
+    expect(downloadIo({} as SnapshotReader).converts!(copyOf(vp9, 'Cats.mp4'))).toBe(true)
+  })
+
+  it('leaves an H.264 copy in the lane of the copies', () => {
+    expect(downloadIo({} as SnapshotReader).converts!(copyOf(h264, 'Cats.mp4'))).toBe(false)
+  })
+})
+
+describe('downloadIo and the VP9 it encoded itself', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const encodeOf = (source: ClipSource): ExportRequest => ({
+    clipId: 'c',
+    name: 'c',
+    fileName: 'Cats.mp4',
+    path: { kind: 'encode', plan: planClip(source, { in: 0, out: 1, sound: true }) },
+  } as unknown as ExportRequest)
+
+  it('saves the VP9 of the last encoder rung as it is, and says why it is VP9', async () => {
+    // VP9 out of the encode lane is the rung below every H.264 encoder: there is no H.264 to
+    // convert it to here, and where there were, converting would be a second lossy encode.
+    const getURL = vi.fn(() => 'chrome-extension://x/shared/convert-mp4.js')
+    vi.stubGlobal('chrome', { runtime: { getURL } })
+    const vp9 = clipSourceFrom(movieTracksOf(VP9_FILE, VP9_FILE.byteLength))!
+
+    const prepared = await downloadIo({} as SnapshotReader).prepare!(
+      VP9_FILE,
+      'Cats.mp4',
+      () => false,
+      encodeOf(vp9),
+    )
+
+    expect(prepared!.file).toBe(VP9_FILE)
+    expect(prepared!.note).toBe(ENCODED_AS_VP9)
+    expect(getURL, 'the converter was loaded for a file it must not touch').not.toHaveBeenCalled()
   })
 })

@@ -739,6 +739,62 @@ describe('planClip', () => {
     expect(presentationTicks(audio)).toBe(400)
   })
 
+  it('hides the priming of sound that enters after the clip does, behind its delay', () => {
+    // A complete file whose sound starts half a second after its picture (an empty edit of 500)
+    // and whose first 21 ticks are encoder priming (media_time 21). Delaying by the distance to
+    // the first packet alone put that content in place but played the priming in front of it.
+    const video = madeTrack('video', 1000, 100, [{ at: 0, count: 50 }])
+    const sound = { ...madeTrack('audio', 1000, 100, [{ at: 0, count: 45 }]), editOffset: 21, emptyEdit: 500 }
+    const audio = trackByKind(planClip({ video, audio: sound }, { in: 0, out: 4, sound: true }).tracks, 'audio')
+
+    expect(audio.skipTicks).toBe(21)
+    expect(audio.delayTicks).toBe(500)
+  })
+
+  it('counts the silent lead of the sound on the timeline the seam has already closed', () => {
+    // A seek: picture 0–10 s and 20–25 s, the sound 0–9.5 s and 20.3–25 s, and a clip from 9.8 s,
+    // just in front of the seam. The picture shows 0.2 s of its first run and then its second
+    // run, pulled ten seconds forward to meet it; the sound has nothing at the entry point and
+    // resumes 0.3 s after the picture does — half a second into the clip. Measured on the raw
+    // source clock, its lead counted the whole hole the picture had just closed: 10.5 s of
+    // silence in front of sound that belongs half a second in, in the copy and the re-encode
+    // alike, since both state the delay the plan hands them.
+    const video = madeTrack('video', 1000, 100, [
+      { at: 0, count: 100 },
+      { at: 20_000, count: 50 },
+    ])
+    const sound = madeTrack('audio', 1000, 100, [
+      { at: 0, count: 95 },
+      { at: 20_300, count: 47 },
+    ])
+    const plan = planClip({ video, audio: sound }, { in: 9.8, out: 22, sound: true })
+    const picture = trackByKind(plan.tracks, 'video')
+    const audio = trackByKind(plan.tracks, 'audio')
+
+    expect(seamsOf({ video, audio: sound })).toEqual([{ from: 10, to: 20, pull: 10 }])
+    expect(picture.skipTicks).toBe(0)
+    expect(audio.samples[0]!.source).toEqual(sound.samples[95]!.source)
+    expect(audio.skipTicks).toBe(0)
+    expect(audio.delayTicks).toBe(500)
+    // And the sound ends where the picture does, not ten seconds past it.
+    expect(presentationTicks(audio)).toBe(presentationTicks(picture))
+
+    // The same seek with the sound resuming at 19.7 s: its hole is still the wider, the seam
+    // still pulls ten seconds, and its first packet lands 0.1 s in front of the head of the clip.
+    // Nothing to delay then; the tenth of a second is run-up, and hidden.
+    const early = madeTrack('audio', 1000, 100, [
+      { at: 0, count: 95 },
+      { at: 19_700, count: 53 },
+    ])
+    const ahead = trackByKind(
+      planClip({ video, audio: early }, { in: 9.8, out: 22, sound: true }).tracks,
+      'audio',
+    )
+    expect(ahead.samples[0]!.source).toEqual(early.samples[95]!.source)
+    expect(ahead.delayTicks).toBeUndefined()
+    expect(ahead.skipTicks).toBe(100)
+  })
+
   it('puts both tracks at the same instant at the head', () => {
     // The invariant behind both entry points: whatever each track hides, what is left starts at
     // the instant that was asked for. The difference between the two is what a viewer hears as
@@ -1132,6 +1188,31 @@ describe('planClip', () => {
 
     expect(recorded(video, 48) - lands(frames, 48)).toBeCloseTo(2, 9)
     expect(recorded(audio, 38) - lands(packets, 38)).toBeCloseTo(2, 9)
+  })
+
+  it('writes no sound track for a clip the sound does not reach', () => {
+    // "Never fewer than one sample" is a rule for the picture, which states the clip. Applied to
+    // the sound it wrote packets into a clip that has no sound at all: sound that ended before
+    // the in point came out as the warm-up and the last packet, hidden by an edit of no length
+    // — which mediabunny ignores, so a later conversion put 100 ms of stray sound at the head;
+    // sound that starts after the out point came out as one packet behind a silence longer than
+    // the clip, and lengthened the movie to reach it.
+    const video = madeTrack('video', 1000, 100, [{ at: 0, count: 100 }])
+    const ended = madeTrack('audio', 1000, 20, [{ at: 0, count: 250 }])
+    const after = madeTrack('audio', 1000, 20, [{ at: 9_000, count: 50 }])
+
+    for (const audio of [ended, after]) {
+      const plan = planClip({ video, audio }, { in: 6, out: 8, sound: true })
+      expect(plan.tracks.map((track) => track.kind)).toEqual(['video'])
+      expect(plan.duration).toBeCloseTo(2, 9)
+      expect(plan.bytes).toBe(20 * 64)
+    }
+
+    // A clip the sound reaches by a single packet at either end keeps it.
+    const reaching = (audio: SourceTrack) =>
+      planClip({ video, audio }, { in: 4.99, out: 9.01, sound: true }).tracks.map((t) => t.kind)
+    expect(reaching(ended)).toEqual(['video', 'audio'])
+    expect(reaching(after)).toEqual(['video', 'audio'])
   })
 
   it('drops the sound when the clip asks for none', () => {

@@ -130,6 +130,12 @@ function fakeCodecs(
     failAfter?: number
     hangOnFlush?: boolean
     normalizeReject?: boolean
+    /** A decoder that fails every chunk under this configuration — HEVC asked for in software. */
+    refuse?: (config: VideoDecoderConfig) => boolean
+    /** Give the fake an `isConfigSupported`, answering by this rule. */
+    supports?: (config: VideoDecoderConfig) => boolean
+    /** Have the crop of this frame (by place) throw, as `new VideoFrame` does on a bad rectangle. */
+    cutThrows?: number
   } = {},
 ): Fakes {
   const emit = options.emit ?? 'on-flush'
@@ -167,7 +173,12 @@ function fakeCodecs(
       const emitOne = (): void => {
         const frame = made(owed.shift()!, 'decoded')
         fakes.decoded.push(frame)
-        on.frame(frame as unknown as VideoFrame)
+        // As WebCodecs calls an output callback: what it throws is reported to nobody.
+        try {
+          on.frame(frame as unknown as VideoFrame)
+        } catch {
+          /* swallowed, as the browser swallows it */
+        }
       }
 
       /** A decoder that hands back what it owes newest first: an order, and not the one it was fed. */
@@ -175,9 +186,18 @@ function fakeCodecs(
         if (options.scramble) owed.reverse()
       }
 
+      const refused = options.refuse?.(config) ?? false
+
       return {
         decode(chunk) {
           decodes += 1
+          if (refused) {
+            broken = true
+            const error = new Error('Decoder initialization error.')
+            error.name = 'NotSupportedError'
+            on.error(error)
+            return
+          }
           if (decodes === options.failAfter) {
             broken = true
             const error = new Error('Encoding error.')
@@ -246,8 +266,16 @@ function fakeCodecs(
       return out as unknown as VideoFrame
     },
 
+    ...(options.supports
+      ? { decoderSupported: async (config: VideoDecoderConfig) => options.supports!(config) }
+      : {}),
+
     cut(frame, crop) {
       const from = frame as unknown as FakeFrame
+      if (fakes.cuts.length === options.cutThrows) {
+        fakes.cuts.push({ frame: from, crop })
+        throw new TypeError('Invalid visibleRect.')
+      }
       fakes.cuts.push({ frame: from, crop })
       const out = made(from.timestamp, 'cut')
       fakes.cutOut.push(out)
@@ -659,12 +687,14 @@ describe('decodedFrames: when it ends early', () => {
     // nothing in the walk itself is in a position to notice. This one is only ever seen after the
     // flush, and it is a throw too — a job that quietly produced no frames would be written out
     // as an empty file.
-    const dead = fakeCodecs({ emit: 'drip', failAfter: 1 })
+    // (A decoder that dies before its first frame is first given a second chance without the
+    // demand for software — see the case below — so this one refuses both.)
+    const dead = fakeCodecs({ emit: 'drip', refuse: () => true })
     await expect(collect(plan, sourceOf(), dead.codecs)).rejects.toThrow(
-      'Decoding avc1.4d400d failed (EncodingError): Encoding error.',
+      'Decoding avc1.4d400d failed (NotSupportedError): Decoder initialization error.',
     )
     expect(dead.decoded).toEqual([])
-    expect(dead.decoderClosed).toBe(1)
+    expect(dead.decoderClosed).toBe(2)
   })
 
   it('stops reading the material the moment the job is called off', async () => {
@@ -691,6 +721,75 @@ describe('decodedFrames: when it ends early', () => {
     expect(source.reads).toEqual(plan.frames.slice(0, read).map((frame) => frame.source))
     expect(fakes.decoderClosed).toBe(1)
     for (const frame of fakes.produced) expect(frame.closed).toBe(1)
+  })
+})
+
+const softwareOnly = (config: VideoDecoderConfig): boolean =>
+  config.hardwareAcceleration === 'prefer-software'
+
+describe('decodedFrames: material Chrome has no software decoder for', () => {
+  it('asks once more without the demand for software when the decoder dies before its first frame', async () => {
+    // HEVC: Chrome decodes it only through the platform, so `prefer-software` is refused.
+    const plan = planOf(12)
+    const fakes = fakeCodecs({ emit: 'drip', refuse: softwareOnly })
+
+    const out = await collect(plan, sourceOf(), fakes.codecs, (frame) => frame.close())
+
+    expect(out.map((frame) => frame.timestamp)).toEqual(
+      plan.frames.map((frame) => usOf(frame.pts)),
+    )
+    expect(fakes.configs.map((config) => config.hardwareAcceleration)).toEqual([
+      'prefer-software',
+      'no-preference',
+    ])
+    // The second decoder was handed the clip from its first chunk: a decoder starts at a key.
+    expect(fakes.chunks.filter((chunk) => chunk.type === 'key')[1]!.timestamp).toBe(0)
+    expect(fakes.decoderClosed).toBe(2)
+    for (const frame of fakes.produced) expect(frame.closed).toBe(1)
+  })
+
+  it('goes straight to no-preference where the browser says software cannot do it', async () => {
+    const plan = planOf(6)
+    const fakes = fakeCodecs({ emit: 'drip', supports: (config) => !softwareOnly(config) })
+
+    const out = await collect(plan, sourceOf(), fakes.codecs, (frame) => frame.close())
+
+    expect(out).toHaveLength(plan.kept)
+    expect(fakes.configs.map((config) => config.hardwareAcceleration)).toEqual(['no-preference'])
+  })
+
+  it('keeps software decoding wherever it works, which is where it was measured faster', async () => {
+    const plan = planOf(6)
+    const fakes = fakeCodecs({ emit: 'drip', supports: () => true })
+    await collect(plan, sourceOf(), fakes.codecs, (frame) => frame.close())
+    expect(fakes.configs.map((config) => config.hardwareAcceleration)).toEqual(['prefer-software'])
+  })
+
+  it('does not start over once frames have gone out: a second walk would hand them out twice', async () => {
+    const plan = planOf(12)
+    const fakes = fakeCodecs({ emit: 'drip', failAfter: 10 })
+    await expect(
+      collect(plan, sourceOf(), fakes.codecs, (frame) => frame.close()),
+    ).rejects.toThrow('Decoding avc1.4d400d failed (EncodingError): Encoding error.')
+    expect(fakes.configs).toHaveLength(1)
+  })
+})
+
+describe('decodedFrames: a crop that cannot be cut', () => {
+  it('fails the walk with a name instead of losing the frame inside the decoder callback', async () => {
+    // `new VideoFrame(frame, { visibleRect })` throws a TypeError for a rectangle the decoded
+    // frame cannot hold. Thrown inside the decoder's output callback it would go nowhere, and
+    // the frame would simply be missing from the clip.
+    const crop = { x: 0, y: 0, width: 160, height: 120 }
+    const plan = planOf(8, { crop })
+    const fakes = fakeCodecs({ emit: 'drip', cutThrows: 2 })
+
+    await expect(
+      collect(plan, sourceOf(), fakes.codecs, (frame) => frame.close()),
+    ).rejects.toThrow(/Cropping a decoded frame to 160×120 at 0,0 failed \(TypeError\): Invalid visibleRect/)
+    expect(fakes.decoderClosed).toBe(1)
+    for (const frame of fakes.produced) expect(frame.closed).toBe(1)
+    for (const { frame } of fakes.cuts) expect(frame.closed).toBe(1)
   })
 })
 

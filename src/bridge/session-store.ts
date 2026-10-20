@@ -13,7 +13,7 @@ import {
   type SegmentConverter,
 } from '../core/container'
 import { SegmentStream } from '../core/stream'
-import { PtsMap } from '../core/timeline/map'
+import { PtsMap, type LanedChunk } from '../core/timeline/map'
 import { evictionOrder, victimsFor, type Valued } from '../core/history/value'
 import { durationToken, normalizeUrl, sessionKey } from '../core/session-key'
 import {
@@ -375,8 +375,27 @@ function mainTracks(session: Session): Track[] {
     if (best && !chosen.includes(best)) chosen.push(best)
   }
 
-  return chosen
+  // A kind with an init and no fragment empties the intersection below, and for the moments
+  // between a second buffer's init and its first segment that is the honest answer. It stops
+  // being one once the other kind has run well past those moments: a page that opens a buffer
+  // for sound and never feeds it — a muted preview, a player that settled on a muxed rendition
+  // — otherwise gave Save all an empty file for any length of picture, while the editor, which
+  // passes over a track that holds nothing, opened the very same session as a silent film.
+  const held = Math.max(0, ...chosen.map((track) => track.map.duration()))
+  return held >= EMPTY_KIND_GRACE_SECONDS
+    ? chosen.filter((track) => track.map.duration() > 0)
+    : chosen
 }
+
+/**
+ * How much of one kind a session holds before a kind with not a fragment is taken as not coming.
+ *
+ * Players fetch the two kinds side by side, a segment of one beside a segment of the other, so
+ * the first piece of sound is expected within a segment or two of the picture — a few seconds.
+ * Ten is comfortably past that and still short of most recordings someone saves on purpose; the
+ * shorter ones keep the old answer, which is nothing rather than a film that may yet get sound.
+ */
+const EMPTY_KIND_GRACE_SECONDS = 10
 
 /**
  * The stretches of time where every chosen track has material at once, in order.
@@ -762,12 +781,18 @@ function isoChunk(track: TrackHeader, bytes: Uint8Array, timestampOffset = 0): C
   if (!(declared.timescale > 0)) return null
 
   const start = fragment.baseMediaDecodeTime / declared.timescale + timestampOffset
-  return {
+  const chunk: LanedChunk = {
     start,
     end: start + fragment.duration / declared.timescale,
     bytes,
     ...(timestampOffset === 0 ? {} : { timestampOffset }),
   }
+  // A muxed buffer may be fed each of its tracks in moofs of their own, and then a fragment of
+  // picture and one of sound start on the same instant. Marked with the track of their (first)
+  // traf, the map keeps both instead of taking the second for a copy of the first; a moof
+  // carrying every track names the first of them each time, so a re-watch is still one piece.
+  if (track.info.tracks.length > 1) chunk.trackId = fragment.trackId
+  return chunk
 }
 
 /**

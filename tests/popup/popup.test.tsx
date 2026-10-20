@@ -1369,3 +1369,76 @@ describe('the history and the switches under it', () => {
     expect(at('site-off'), 'a reason was given for a switch that works').toBeNull()
   })
 })
+
+describe('the popup and a file saved in its original codecs', () => {
+  const note = 'Saved with the original VP9/Opus — Premiere cannot import it: this browser has no H.264 encoder.'
+
+  it('says what was saved, and that Premiere cannot import it', async () => {
+    // Yandex Browser has no H.264 encoder, so a YouTube recording cannot be made importable.
+    // It is saved all the same, and this is the one place left to say what came out.
+    await mount({ sessions: [fresh], save: { ok: true, note } })
+
+    await click(saveButton())
+
+    expect(textAt('save-note')).toBe(note)
+    expect(at('error'), 'a saved file was called a failure').toBeNull()
+  })
+
+  it('says it on the row of another recording too', async () => {
+    await mount({ sessions: [fresh, older], save: { ok: true, note } })
+
+    await click(allAt('session-save')[0]!)
+
+    expect(textAt('session-save-note')).toBe(note)
+  })
+
+  it('stays quiet about a file that came out as asked', async () => {
+    await mount({ sessions: [fresh], save: { ok: true } })
+
+    await click(saveButton())
+
+    expect(at('save-note')).toBeNull()
+  })
+})
+
+describe('the popup and a file that could not be made', () => {
+  it('does not blame Chrome for what Chrome was never asked', async () => {
+    await mount({
+      sessions: [fresh],
+      save: { ok: false, reason: 'failed', detail: 'the recorded material could not be read' },
+    })
+
+    await click(saveButton())
+
+    const said = textAt('error')!
+    expect(said).toContain('the recorded material could not be read')
+    expect(said).not.toContain('Chrome')
+    expect(said, 'the error object leaked into the sentence').not.toContain('Error:')
+  })
+})
+
+describe('Edit that broke', () => {
+  const editButton = () => document.body.querySelector<HTMLButtonElement>('[data-testid="edit"]')!
+
+  it('says what broke rather than putting up an empty alert', async () => {
+    // A handler that threw used to answer "refused", which no edit declares: the popup looked it
+    // up, found nothing, and drew an alert with no words in it.
+    const chrome = await mount({ sessions: [fresh] })
+    chrome.setEditReply({ ok: false, reason: 'failed', detail: 'the snapshot writer broke' })
+
+    await click(editButton())
+
+    const said = textAt('edit-error')!
+    expect(said).toContain('Could not open the editor')
+    expect(said).toContain('the snapshot writer broke')
+  })
+
+  it('has words even for a reason this popup does not know', async () => {
+    const chrome = await mount({ sessions: [fresh] })
+    chrome.setEditReply({ ok: false, reason: 'refused' } as never)
+
+    await click(editButton())
+
+    expect(textAt('edit-error')!.length).toBeGreaterThan(0)
+  })
+})

@@ -3,11 +3,16 @@ import {
   BITS_PER_PIXEL,
   QUANTIZERS,
   avcLevelHex,
+  VP9_QUANTIZERS,
   bitrateFor,
   cacheKeyOf,
+  choiceAt,
   chooseCodec,
   hevcLevelIdc,
   ladderFor,
+  qualityOf,
+  runtimeChoices,
+  vp9Level,
   type EncodeGeometry,
   type EncodingChoice,
   type LadderOptions,
@@ -301,8 +306,8 @@ describe('chooseCodec', () => {
     expect(encodable.config.hardwareAcceleration).toBe('prefer-software')
     expect(encodable.config.bitrateMode).toBe('constant')
     // Both hardware rungs were asked and refused before it: the software rung is where the
-    // ladder ended, not where it started.
-    expect(asked.asked).toEqual(keysOf(HD, { codec: 'auto', quality: 'high' }))
+    // ladder ended, not where it started — and VP9 beneath it was never a question.
+    expect(asked.asked).toEqual(keysOf(HD, { codec: 'auto', quality: 'high' }).slice(0, -1))
   })
 
   it('answers "no encoder" rather than throwing, and names everything it tried', async () => {
@@ -318,6 +323,7 @@ describe('chooseCodec', () => {
         'avc1.640028|1920x1080@30|prefer-hardware|quantizer|default',
         'hev1.1.6.L120.B0|1920x1080@30|prefer-hardware|quantizer|default',
         'avc1.640028|1920x1080@30|prefer-software|constant|6220800',
+        'vp09.00.40.08|1920x1080@30|prefer-software|quantizer|default',
       ],
     })
     expect(asked.asked).toEqual(choice.kind === 'none' ? choice.tried : [])
@@ -331,6 +337,7 @@ describe('chooseCodec', () => {
       'avc1.640033|3840x2160@30|prefer-hardware|quantizer|default',
       'hev1.1.6.L150.B0|3840x2160@30|prefer-hardware|quantizer|default',
       'avc1.640033|3840x2160@30|prefer-software|constant|24883200',
+      'vp09.00.50.08|3840x2160@30|prefer-software|quantizer|default',
     ])
     // The bug this is here for: with a hardcoded 4.0 both H.264 rungs are refused at 4K and the
     // clip is told there is no encoder on a machine that encodes 4K.
@@ -409,11 +416,156 @@ describe('chooseCodec', () => {
     expect(keysOf(HD, { codec: 'h264', quality: 'low' })).toEqual([
       'avc1.640028|1920x1080@30|prefer-hardware|quantizer|default',
       'avc1.640028|1920x1080@30|prefer-software|constant|2799360',
+      'vp09.00.40.08|1920x1080@30|prefer-software|quantizer|default',
     ])
     expect(keysOf(HD, { codec: 'hevc', quality: 'high' })).toEqual([
       'hev1.1.6.L120.B0|1920x1080@30|prefer-hardware|quantizer|default',
       'avc1.640028|1920x1080@30|prefer-hardware|quantizer|default',
       'avc1.640028|1920x1080@30|prefer-software|constant|6220800',
+      'vp09.00.40.08|1920x1080@30|prefer-software|quantizer|default',
     ])
+  })
+})
+
+/** A browser with libvpx and nothing else: Yandex Browser, which ships without OpenH264. */
+const vp9Only = (candidate: VideoEncoderConfig): boolean => candidate.codec.startsWith('vp09')
+
+describe('the VP9 rung', () => {
+  it('spells profile 0, eight bits, and the level the picture and its rate need', () => {
+    // 230 400 samples and 6.9 million a second: under 2.1's 245 760 and 9 216 000.
+    expect(vp9Level(geometry(640, 360, 30))).toBe('21')
+    expect(vp9Level(geometry(1280, 720, 30))).toBe('31')
+    // 1080p fits 4.0 by size at either rate; at 60 it is the samples a second that move it.
+    expect(vp9Level(HD)).toBe('40')
+    expect(vp9Level(geometry(1920, 1080, 60))).toBe('41')
+    expect(vp9Level(UHD)).toBe('50')
+    expect(vp9Level(geometry(3840, 2160, 60))).toBe('51')
+    // The longest side is a limit of its own: 4200 × 64 is few samples and past 4.0's 4160.
+    expect(vp9Level(geometry(4200, 64, 30))).toBe('50')
+    expect(vp9Level(geometry(128, 72, 30))).toBe('10')
+  })
+
+  it('is the last rung of every ladder, and asks libvpx for a quantizer', () => {
+    for (const options of [
+      { codec: 'auto', quality: 'high' },
+      { codec: 'auto', quality: 'low' },
+      { codec: 'hevc', quality: 'medium' },
+      { codec: 'h264', quality: 'high' },
+    ] as LadderOptions[]) {
+      const last = ladderFor(HD, options).at(-1)!
+      expect(last.config).toEqual({
+        codec: 'vp09.00.40.08',
+        width: 1920,
+        height: 1080,
+        framerate: 30,
+        hardwareAcceleration: 'prefer-software',
+        bitrateMode: 'quantizer',
+        latencyMode: 'quality',
+      })
+      expect(last.choice).toMatchObject({
+        kind: 'vp9-sw',
+        control: 'quantizer',
+        quantizer: VP9_QUANTIZERS[options.quality],
+      })
+    }
+  })
+
+  it('is what a browser with no H.264 or HEVC encoder lands on, instead of no encoder', async () => {
+    const asked = probeOf(vp9Only)
+    const choice = await chooseCodec(HD, asked.probe, { codec: 'auto', quality: 'medium' })
+
+    expect(choice).toMatchObject({ kind: 'vp9-sw', quantizer: VP9_QUANTIZERS.medium })
+    // Every H.264 and HEVC rung was asked first: VP9 is where the ladder ended.
+    expect(asked.asked).toEqual(keysOf(HD, { codec: 'auto', quality: 'medium' }))
+  })
+
+  it('has three quantizers on libvpx’s 0–63 scale, a halving apart', () => {
+    expect(VP9_QUANTIZERS).toEqual({ high: 26, medium: 34, low: 42 })
+    for (const level of ['high', 'medium', 'low'] as ExportQuality[]) {
+      expect(VP9_QUANTIZERS[level]).toBeGreaterThanOrEqual(0)
+      expect(VP9_QUANTIZERS[level]).toBeLessThanOrEqual(63)
+    }
+    expect(VP9_QUANTIZERS.medium - VP9_QUANTIZERS.high).toBeGreaterThanOrEqual(8)
+    expect(VP9_QUANTIZERS.low - VP9_QUANTIZERS.medium).toBeGreaterThanOrEqual(8)
+  })
+})
+
+describe('runtimeChoices', () => {
+  const rungOf = (kind: string, options: LadderOptions, g = HD): EncodingChoice =>
+    ladderFor(g, options).find((rung) => rung.choice.kind === kind)!.choice as EncodingChoice
+
+  it('falls from software H.264 to VP9 when OpenH264 cannot be created', () => {
+    const first = rungOf('h264-sw', { codec: 'auto', quality: 'medium' })
+    const chain = runtimeChoices(first, HD)
+
+    expect(chain.map((one) => one.kind)).toEqual(['h264-sw', 'vp9-sw'])
+    // At the quality the software rung was chosen at, recovered from its bitrate.
+    expect(chain[1]).toMatchObject({ quantizer: VP9_QUANTIZERS.medium })
+    expect(chain[1]!.config.codec).toBe('vp09.00.40.08')
+  })
+
+  it('keeps every rung below the probed one, down to VP9, and nothing above it', () => {
+    const quality = 'low'
+    expect(runtimeChoices(rungOf('hevc-hw', { codec: 'hevc', quality }), HD).map((one) => one.kind))
+      .toEqual(['hevc-hw', 'h264-hw', 'h264-sw', 'vp9-sw'])
+    expect(runtimeChoices(rungOf('h264-hw', { codec: 'auto', quality }), HD).map((one) => one.kind))
+      .toEqual(['h264-hw', 'h264-sw', 'vp9-sw'])
+    expect(runtimeChoices(rungOf('vp9-sw', { codec: 'auto', quality }), HD).map((one) => one.kind))
+      .toEqual(['vp9-sw'])
+    for (const one of runtimeChoices(rungOf('hevc-hw', { codec: 'hevc', quality }), HD).slice(1)) {
+      expect(qualityOf(one)).toBe(quality)
+    }
+  })
+
+  it('leaves a choice it did not make alone, having nothing to translate it to', () => {
+    const made: EncodingChoice = {
+      kind: 'h264-sw',
+      config: { codec: 'avc1.42001e', width: 320, height: 240, framerate: 24, bitrate: 800_000 },
+      control: 'fixed-bitrate',
+      bitrate: 800_000,
+    }
+    expect(qualityOf(made)).toBeNull()
+    expect(runtimeChoices(made, geometry(320, 240, 24))).toEqual([made])
+  })
+})
+
+describe('choiceAt', () => {
+  it('is the choice itself when it is already about that picture', () => {
+    const choice = ladderFor(HD, { codec: 'auto', quality: 'high' })[0]!.choice as EncodingChoice
+    expect(choiceAt(choice, HD)).toBe(choice)
+  })
+
+  it('re-derives size, level and bitrate for the picture the frames are actually cut to', () => {
+    // The probe was asked about the size the track header declares; the samples are coded at
+    // 1440 × 1080, which is what the frames are cut to and what the encoder must be told.
+    const coded = geometry(1440, 1080, 30)
+    for (const kind of ['h264-hw', 'h264-sw', 'vp9-sw']) {
+      const probed = ladderFor(UHD, { codec: 'h264', quality: 'medium' })
+        .find((rung) => rung.choice.kind === kind)!.choice as EncodingChoice
+      const expected = ladderFor(coded, { codec: 'h264', quality: 'medium' })
+        .find((rung) => rung.choice.kind === kind)!.choice
+      expect(choiceAt(probed, coded)).toEqual(expected)
+    }
+    const hevc = ladderFor(UHD, { codec: 'hevc', quality: 'low' })[0]!.choice as EncodingChoice
+    expect(choiceAt(hevc, coded).config.codec).toBe('hev1.1.6.L120.B0')
+  })
+
+  it('moves the level of a hand-made choice and scales its bitrate with the pixel rate', () => {
+    const made: EncodingChoice = {
+      kind: 'h264-sw',
+      config: { codec: 'avc1.42001e', width: 320, height: 240, framerate: 24, bitrate: 800_000 },
+      control: 'fixed-bitrate',
+      bitrate: 800_000,
+    }
+    const moved = choiceAt(made, geometry(640, 480, 24))
+    expect(moved).toMatchObject({ bitrate: 3_200_000 })
+    expect(moved.config).toMatchObject({
+      codec: 'avc1.42001e',
+      width: 640,
+      height: 480,
+      framerate: 24,
+      bitrate: 3_200_000,
+    })
+    expect(choiceAt(made, geometry(1920, 1080, 30)).config.codec).toBe('avc1.420028')
   })
 })

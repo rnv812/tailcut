@@ -85,6 +85,21 @@ describe('encode estimate', () => {
     }
   })
 
+  it('names the VP9 rung and invents no weight for its constant quality either', () => {
+    const vp9: EncodingChoice = {
+      kind: 'vp9-sw',
+      config: { codec: 'vp09.00.40.08', ...GEOMETRY },
+      control: 'quantizer',
+      quantizer: 34,
+    }
+    expect(estimateFor(input(encodePath(vp9)))).toMatchObject({
+      kind: 'encode',
+      rung: 'vp9-sw',
+      bytes: null,
+      sourceBytes: SOURCE_BYTES,
+    })
+  })
+
   it('derives the software rung floor from bitrate and clip duration', () => {
     const estimate = estimateFor(
       input(encodePath(software(800_000)), { duration: 12 }),

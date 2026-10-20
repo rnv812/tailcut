@@ -1,6 +1,20 @@
 import type { FramePlan } from '../../core/encode/plan'
-import { packAnimation, type AnimationFrame } from '../../core/webp/riff'
-import { frameDurations, keptForRate, webpGeometry, WEBP_QUALITY, type WebpOptions } from '../../core/webp/timing'
+import {
+  ANIMATION_HEADER_BYTES,
+  anmfBytesOf,
+  imageChunksOf,
+  packAnimation,
+  type AnimationFrame,
+} from '../../core/webp/riff'
+import {
+  frameDurations,
+  keptForRate,
+  webpGeometry,
+  webpTooLarge,
+  WEBP_MAX_BYTES,
+  WEBP_QUALITY,
+  type WebpOptions,
+} from '../../core/webp/timing'
 import { decodedFrames, type Codecs, type FrameSource } from './frames'
 
 /**
@@ -15,11 +29,26 @@ export const STILL_HEADER_BYTES = 482
 const STILL_RIFF_BYTES = 12
 /** The ANMF chunk header and its frame rectangle before the still's image chunks. */
 const ANMF_ENVELOPE_BYTES = 24
-/** RIFF/WEBP + VP8X + ANIM around every animation: 12 + 18 + 14. */
-const ANIMATION_HEADER_BYTES = 44
 
 /** Frames the weight probe encodes for real. Three: one is the title card, five is a wait. */
 const PROBE_FRAMES = 3
+
+/**
+ * Frames written before the animation's weight is projected from them: two seconds at the
+ * default rate, and at 4K a few seconds of work against the minutes the whole would take.
+ */
+const PROJECT_AFTER_FRAMES = 30
+
+/**
+ * How far over the ceiling a projection must land before it is believed.
+ *
+ * Twice, because the opening of a clip is not the clip: a still title card weighs a fifth of a
+ * moving crowd, and a projection off the card would refuse a clip that fits. Twice over is the
+ * case this is for — "Original size" at sixty frames a second on 4K, several gigabytes against
+ * one — and anything nearer the line is settled by the count of what was actually written,
+ * which stops the work the moment it passes.
+ */
+const PROJECTION_MARGIN = 2
 
 /**
  * Somewhere to draw a frame and get a still back.
@@ -90,6 +119,7 @@ export async function encodeWebp(
   surface: Surface,
   onFrames: (frames: number) => void,
   options?: WebpOptions,
+  ceiling = WEBP_MAX_BYTES,
 ): Promise<Uint8Array | null> {
   const geometry = webpGeometry(plan.crop ?? plan.geometry, plan.geometry.framerate, options)
   // Positions in the stream, which arrives in presentation order — the order an animation plays.
@@ -106,6 +136,8 @@ export async function encodeWebp(
 
   const frames: AnimationFrame[] = []
   let seen = 0
+  // The file as it stands, counted as `packAnimation` will allocate it: exact, not estimated.
+  let written = ANIMATION_HEADER_BYTES
 
   for await (const frame of decodedFrames(plan, source, codecs)) {
     const at = seen
@@ -117,11 +149,23 @@ export async function encodeWebp(
       if (source.stale()) break
       if (!keep.has(at)) continue
       surface.draw(frame)
-      frames.push({
-        bytes: await surface.still(WEBP_QUALITY),
-        durationMs: durations[frames.length] ?? 0,
-      })
+      const bytes = await surface.still(WEBP_QUALITY)
+      frames.push({ bytes, durationMs: durations[frames.length] ?? 0 })
+      written += anmfBytesOf(imageChunksOf(bytes))
       onFrames(frames.length)
+
+      // Every still is held until the last one is in, and the file is made of all of them at
+      // once, so a weight nobody asked for is not a slow export but a tab out of memory minutes
+      // in, or a file past what the format can say. Refused here, in words that say what to
+      // change, rather than there in words that do not.
+      const perFrame = (written - ANIMATION_HEADER_BYTES) / frames.length
+      const projected = ANIMATION_HEADER_BYTES + perFrame * kept.length
+      const refusal =
+        webpTooLarge(written, true, ceiling) ??
+        (frames.length >= PROJECT_AFTER_FRAMES && projected > ceiling * PROJECTION_MARGIN
+          ? webpTooLarge(projected, false, ceiling)
+          : null)
+      if (refusal) throw new Error(refusal)
     } finally {
       // Always, and immediately. A held frame is a buffer the collector does not count.
       frame.close()

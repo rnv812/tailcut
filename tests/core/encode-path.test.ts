@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import type { EncodingChoice } from '../../src/core/encode/codec'
+import { bitrateFor, ladderFor, type EncodingChoice } from '../../src/core/encode/codec'
 import { framesOf, laneOf, pathFor } from '../../src/core/encode/path'
 import type { Clip } from '../../src/core/edit/clip'
 import type { EditContext } from '../../src/core/edit/context'
@@ -219,5 +219,29 @@ describe('pathFor', () => {
     expect(framesOf(webp)).toBeLessThan(webp.kind === 'webp' ? webp.plan.kept : 0)
     expect(framesOf(copied)).toBeUndefined()
     expect(framesOf(blocked)).toBeUndefined()
+  })
+
+  it('encodes at the size the samples are coded in, and says when the probe was asked another', () => {
+    // A track header declaring 400 × 240 for samples coded at 320 × 240. The tab probes the
+    // header's size (`geometryOf(clip.crop, ctx.frameSize, …)`); the frames are cut to the coded
+    // one. An encoder configured with the first and fed the second would scale every frame.
+    const declared: EditContext = { ...ctx, frameSize: { width: 400, height: 240 } }
+    const probed = ladderFor({ width: 400, height: 240, framerate: 24 }, { codec: 'h264', quality: 'high' })
+      .find((rung) => rung.choice.kind === 'h264-sw')!.choice
+
+    const path = pathFor(clip({ mode: 'optimize' }), source, declared, probed, false)
+    if (path.kind !== 'encode') throw new Error('the clip did not take the encode path')
+
+    const coded = { width: 320, height: 240, framerate: 24 }
+    expect(path.plan.geometry).toEqual(coded)
+    expect(path.choice.config).toMatchObject({ width: 320, height: 240, framerate: 24 })
+    expect(path.choice).toMatchObject({ kind: 'h264-sw', bitrate: bitrateFor(coded, 'high') })
+    // Honest about it: nobody asked the browser about this picture.
+    expect(path.probedAt).toEqual({ width: 400, height: 240, framerate: 24 })
+
+    // And silent where the two agree.
+    const agreed = pathFor(clip({ mode: 'optimize' }), source, ctx, choice, false)
+    expect(agreed.kind === 'encode' && agreed.probedAt).toBeUndefined()
+    expect(agreed.kind === 'encode' && agreed.choice).toBe(choice)
   })
 })

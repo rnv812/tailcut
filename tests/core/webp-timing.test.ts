@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
   WEBP_FPS,
+  WEBP_MAX_BYTES,
   WEBP_QUALITY,
+  webpTooLarge,
   frameDurations,
   keptForRate,
   webpGeometry,
@@ -105,5 +107,17 @@ describe('animated WebP timing', () => {
   it('uses the measured lossy quality below the lossless switch', () => {
     expect(WEBP_QUALITY).toBe(0.75)
     expect(WEBP_QUALITY).toBeLessThan(1)
+  })
+})
+
+describe('webpTooLarge', () => {
+  it('says nothing up to the ceiling and what to change past it', () => {
+    expect(webpTooLarge(WEBP_MAX_BYTES)).toBeNull()
+    expect(webpTooLarge(0)).toBeNull()
+    expect(webpTooLarge(3.2 * 1024 ** 3)).toBe(
+      'This animation would weigh about 3.20 GB, more than the 1.00 GB one WebP can be put ' +
+        'together from here. Lower the longest side or the frames per second, or shorten the clip.',
+    )
+    expect(webpTooLarge(WEBP_MAX_BYTES + 1, true)).toMatch(/^This animation came to more than 1\.00 GB/)
   })
 })

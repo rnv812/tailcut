@@ -4,12 +4,16 @@ import { createHash } from 'node:crypto'
 import { sessionKey } from '../../src/core/session-key'
 import { boxBody, childBoxes, topLevelBoxes } from '../../src/core/iso/reader'
 import { movieTracksOf } from '../../src/core/export/source'
+import { saveAllMp4 } from '../../src/core/export/save'
+import { videoSampleEntry } from '../../src/core/iso/entry'
+import { exportTrack } from '../support/export-fixture'
 import { bridgeCapabilityKey, isSnapshotId, snapshotPath } from '../../src/shared/protocol'
 import { decodeFooter, decodeIndex, FOOTER_BYTES } from '../../src/core/snapshot/format'
 import type {
   BridgeToPage,
   EditResult,
   ExtensionToTab,
+  SaveResult,
   SessionList,
   SessionSummary,
 } from '../../src/shared/protocol'
@@ -1710,7 +1714,7 @@ describe('the bridge saves what it collected as a file', () => {
     const reply = await win.save(keyFor(PAGE_URL, ['avc1', 'mp4a']))
 
     expect(reply.received).toEqual([
-      { ok: false, reason: 'refused', detail: 'the recorded material could not be read' },
+      { ok: false, reason: 'failed', detail: 'the recorded material could not be read' },
     ])
     expect(win.downloads, 'the bridge downloaded a file of nothing').toEqual([])
   })
@@ -2246,7 +2250,64 @@ describe('the bridge and a page playing an ordinary file', () => {
     })
   })
 
-  it('answers a save it cannot read with a refusal and not with an empty session', async () => {
+  /**
+   * An ordinary mp4 of VP9 and Opus, in a browser that cannot make H.264 of it.
+   *
+   * Yandex Browser is built without an H.264 encoder, and in this test there is no converter to
+   * load at all: the conversion fails either way. The save used to fail with it, which lost the
+   * clip to make a point about Premiere; Edit used to fail too, for a conversion the editor never
+   * needed — it reads VP9 as readily as H.264, and re-exports every clip anyway.
+   */
+  describe('a VP9 file this browser cannot convert', () => {
+    const vp9File = saveAllMp4([exportTrack('webm', 0, 'webm'), exportTrack('webm', 1, 'webm')])
+
+    const watchingVp9 = async () => {
+      installHost(vp9File)
+      const win = await loadBridge()
+      win.context()
+      win.deliver(plain())
+      win.deliver({ type: 'tc:verdict', sourceId: SOURCE, verdict: 'promote' })
+      await settle()
+      const runtime = (globalThis as unknown as { chrome: { runtime: { getURL(path: string): string } } })
+        .chrome.runtime
+      const original = runtime.getURL
+      const loaded: string[] = []
+      runtime.getURL = (path) => {
+        loaded.push(path)
+        return original(path)
+      }
+      return { win, key: (await win.list())[0]!.key, loaded }
+    }
+
+    it('saves it in its own codecs and says Premiere cannot import it', async () => {
+      const { win, key } = await watchingVp9()
+
+      const reply = await win.save(key)
+      await settle()
+
+      expect(win.downloads, 'the clip was lost to the conversion').toHaveLength(1)
+      const answer = reply.received[0] as SaveResult
+      expect(answer.ok).toBe(true)
+      expect(answer.note).toMatch(/^Saved with the original VP9\/Opus — Premiere cannot import it: /)
+      expect(videoSampleEntry(await win.savedBytes())!.format).toBe('vp09')
+    })
+
+    it('freezes it for the editor as it is, without converting it first', async () => {
+      const { win, key, loaded } = await watchingVp9()
+
+      const reply = await win.edit(key)
+      await settle()
+
+      expect(reply.received[0]).toMatchObject({ ok: true })
+      expect(loaded, 'Edit loaded the converter').not.toContain('shared/convert-mp4.js')
+      const index = indexOf(win.writes[0]!.bytes)
+      const whole = index.tracks[0]!.whole!
+      const file = win.writes[0]!.bytes.subarray(whole.at, whole.at + whole.length)
+      expect(videoSampleEntry(file)!.format).toBe('vp09')
+    })
+  })
+
+  it('answers a save it cannot read as a failure to make the file, not as an empty session', async () => {
     const host = installHost()
     const win = await loadBridge()
     win.context()
@@ -2258,7 +2319,8 @@ describe('the bridge and a page playing an ordinary file', () => {
     const key = (await win.list())[0]!.key
     // The host goes away between the listing and the button — an expired signed URL, a session
     // that ended. The recording is still there and what failed was fetching it, so the words are
-    // those of a refused download and not those of an empty session.
+    // those of a file that could not be made — neither an empty session nor a refusal by Chrome,
+    // which was never asked.
     host.refuse()
 
     const reply = await win.save(key)
@@ -2266,7 +2328,7 @@ describe('the bridge and a page playing an ordinary file', () => {
 
     expect(win.downloads).toEqual([])
     expect(reply.received).toEqual([
-      { ok: false, reason: 'refused', detail: 'the file could not be read' },
+      { ok: false, reason: 'failed', detail: 'the file could not be read' },
     ])
   })
 })
@@ -2740,7 +2802,7 @@ describe('a request that came with a port is answered', () => {
     await settled()
 
     expect(reply.received).toHaveLength(1)
-    expect(reply.received[0]).toMatchObject({ ok: false, reason: 'refused' })
+    expect(reply.received[0]).toMatchObject({ ok: false, reason: 'failed', detail: 'downloads are unavailable' })
   })
 })
 

@@ -6,6 +6,8 @@
  * around them, and it is the whole of what the format costs us.
  */
 
+import { formatBytes } from '../../shared/format'
+
 const ascii = (text: string): number[] => [...text].map((c) => c.charCodeAt(0))
 const u32 = (n: number): number[] => [n & 255, (n >>> 8) & 255, (n >>> 16) & 255, (n >>> 24) & 255]
 const u24 = (n: number): number[] => [n & 255, (n >>> 8) & 255, (n >>> 16) & 255]
@@ -75,24 +77,30 @@ function hasAlpha(image: readonly ImageChunk[]): boolean {
   return image.some((part) => part.tag === 'VP8L' && (part.body[4]! & 0x10) !== 0)
 }
 
-function chunk(name: string, body: Uint8Array): Uint8Array {
-  const out = new Uint8Array(8 + body.length + (body.length & 1))
-  out.set(ascii(name), 0)
-  out.set(u32(body.length), 4)
-  out.set(body, 8)
-  return out
-}
+/** A payload length with the padding byte RIFF puts after an odd one. */
+const padded = (size: number): number => size + (size & 1)
 
-function concat(parts: Uint8Array[]): Uint8Array {
-  let total = 0
-  for (const part of parts) total += part.length
-  const out = new Uint8Array(total)
-  let at = 0
-  for (const part of parts) {
-    out.set(part, at)
-    at += part.length
-  }
-  return out
+/** The frame rectangle, duration and flags at the head of every ANMF payload. */
+const ANMF_HEAD_BYTES = 16
+
+/** RIFF/WEBP + VP8X + ANIM around every animation: 12 + 18 + 14. */
+export const ANIMATION_HEADER_BYTES = 44
+
+/**
+ * The largest file the format can say the size of: the RIFF size field is 32 bits and counts
+ * from byte 8, and RFC 9649 caps it at 2³² − 10, so a whole file is at most 4 GiB less two bytes.
+ */
+export const WEBP_FILE_LIMIT = 2 ** 32 - 10 + 8
+
+/**
+ * What one frame lays into the animation, in bytes: its whole ANMF chunk.
+ *
+ * Exported so that an encoder can count the file while it is still being made — the same number
+ * `packAnimation` allocates, and not an estimate of it. The payload is always even (sixteen bytes
+ * of head and every inner chunk padded), so the ANMF itself needs no padding.
+ */
+export function anmfBytesOf(image: readonly ImageChunk[]): number {
+  return 8 + ANMF_HEAD_BYTES + image.reduce((sum, part) => sum + 8 + padded(part.body.length), 0)
 }
 
 export interface AnimationFrame {
@@ -122,35 +130,60 @@ export function packAnimation(options: {
   loop?: number
   background?: number
 }): Uint8Array {
-  const parts: Uint8Array[] = []
   const images = options.frames.map((frame) => imageChunksOf(frame.bytes))
+  const total = images.reduce((sum, image) => sum + anmfBytesOf(image), ANIMATION_HEADER_BYTES)
+
+  // Counted before a byte is allocated, and refused rather than wrapped: `u32` keeps the low 32
+  // bits of whatever it is given, so a file of 4.2 GB would say it was some 200 MB long and every
+  // reader would stop there — a file that saves and does not open.
+  if (total > WEBP_FILE_LIMIT) {
+    throw new Error(
+      `An animated WebP holds at most 4 GB, and these frames come to ${formatBytes(total)}.`,
+    )
+  }
+
+  // One allocation, the size of the file, written front to back. Chunk by chunk and joined
+  // afterwards, the same bytes were copied three times over — each image into its chunk, each
+  // frame into the payload, the payload into the file — and at the end of a long clip that was
+  // three copies of the animation in memory on top of the stills they came from.
+  const file = new Uint8Array(total)
+  let at = 0
+  const put = (bytes: ArrayLike<number>): void => {
+    file.set(bytes, at)
+    at += bytes.length
+  }
+  const head = (tag: string, size: number): void => {
+    put(ascii(tag))
+    put(u32(size))
+  }
+
+  head('RIFF', total - 8)
+  put(ascii('WEBP'))
 
   // The ICCP flag in particular must stay clear — the profile the browser put on every still is
   // not in this file, and claiming it would be a lie a reader acts on. Alpha is different: its
   // payload crosses into the animation, so the outer header must declare it when any frame has it.
-  parts.push(
-    chunk(
-      'VP8X',
-      new Uint8Array([
-        0x02 | (images.some(hasAlpha) ? 0x10 : 0),
-        0,
-        0,
-        0,
-        ...u24(options.width - 1),
-        ...u24(options.height - 1),
-      ]),
-    ),
-  )
-  parts.push(chunk('ANIM', new Uint8Array([...u32(options.background ?? 0), ...u16(options.loop ?? 0)])))
+  head('VP8X', 10)
+  put([
+    0x02 | (images.some(hasAlpha) ? 0x10 : 0),
+    0,
+    0,
+    0,
+    ...u24(options.width - 1),
+    ...u24(options.height - 1),
+  ])
+  head('ANIM', 6)
+  put([...u32(options.background ?? 0), ...u16(options.loop ?? 0)])
 
-  for (const [at, frame] of options.frames.entries()) {
-    const image = images[at]!
+  for (const [index, frame] of options.frames.entries()) {
+    const image = images[index]!
     const [width, height] = sizeOf(image)
     const x = frame.x ?? 0
     const y = frame.y ?? 0
     if (x & 1 || y & 1) throw new Error('ANMF offsets are stored halved and must be even.')
 
-    const head = new Uint8Array([
+    head('ANMF', anmfBytesOf(image) - 8)
+    put([
       ...u24(x >> 1),
       ...u24(y >> 1),
       ...u24(width - 1),
@@ -161,15 +194,14 @@ export function packAnimation(options: {
       (frame.blend ? 0 : 2) | (frame.dispose ? 1 : 0),
     ])
 
-    parts.push(chunk('ANMF', concat([head, ...image.map((c) => chunk(c.tag, c.body))])))
+    for (const part of image) {
+      head(part.tag, part.body.length)
+      put(part.body)
+      // The padding byte is already zero: the file was allocated that way.
+      at += part.body.length & 1
+    }
   }
 
-  const payload = concat(parts)
-  const file = new Uint8Array(12 + payload.length)
-  file.set(ascii('RIFF'), 0)
-  file.set(u32(4 + payload.length), 4)
-  file.set(ascii('WEBP'), 8)
-  file.set(payload, 12)
   return file
 }
 

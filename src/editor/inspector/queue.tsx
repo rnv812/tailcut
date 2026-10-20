@@ -33,7 +33,9 @@ export interface ExportQueueProps {
  * Four kinds of answer, because there are four kinds of truth here (see the convention table).
  * A copy is exact. The software rung is a floor, so "no smaller than". The hardware rungs promise
  * a picture and not a size, so the only number is the weight of the material itself, and the
- * sentence says what is known about the file: it comes out under that. WebP is measured on real
+ * sentence says what is known about the file: it comes out under that. The VP9 rung promises a
+ * picture too, and what it says first is the format, because that is what changes for the person
+ * holding the file. WebP is measured on real
  * frames of this clip and says nothing at all until the probe has answered.
  *
  * `none` is silent on purpose: there is no file to weigh.
@@ -44,6 +46,12 @@ function weightNote(estimate: Estimate): string | null {
       return `Selected clip: about ${formatBytes(estimate.bytes)}, copied from the recording as it is.`
 
     case 'encode':
+      // The one rung whose file is a different kind of file, and so the one where the format is
+      // the news and the weight is not: a person who takes clips into an editor has to know
+      // before pressing Export that this one may not open there.
+      if (estimate.rung === 'vp9-sw') {
+        return `Selected clip: ${formatBytes(estimate.sourceBytes)} in the recording. This browser has no H.264 encoder, so the clip is written as VP9 in MP4 — browsers and VLC play it, QuickTime and some editors do not. Constant quality promises a picture, not a size.`
+      }
       return estimate.bytes === null
         ? `Selected clip: ${formatBytes(estimate.sourceBytes)} in the recording, and smaller than that once re-encoded — constant quality promises a picture, not a size.`
         : `Selected clip: no smaller than ${formatBytes(estimate.bytes)}, against ${formatBytes(estimate.sourceBytes)} in the recording.`
@@ -93,6 +101,14 @@ function Row({
         </span>
       )}
       {job.state === 'done' && <span class="muted">{formatBytes(job.bytes)}</span>}
+      {job.state === 'done' && job.note && (
+        // Saved, and not quite as asked: an mp4 that kept codecs Premiere cannot import because
+        // this browser could not convert them. Not an error — the file is on the disk and plays —
+        // so not in the error's colour either, but said where the user is looking.
+        <span class="tc-job-note" data-testid="job-note">
+          {job.note}
+        </span>
+      )}
       {job.state === 'queued' && job.kind === 'encode' && (
         // Said out loud because it is the one thing about this queue that surprises: a clip that
         // needs the encoder waits for the one before it, while a copy beside it does not wait at

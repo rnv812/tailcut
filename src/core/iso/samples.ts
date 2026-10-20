@@ -50,16 +50,62 @@ export function trackDefaults(init: Uint8Array): Map<number, SampleDefaults> {
  * −1, calls the track unoffset and loses exactly the priming or the reordering delay this
  * function exists to carry.
  *
- * What is not read is the length of the empty edit itself — a stretch of presentation with no
- * material under it, counted in ticks of the movie rather than of the track. This program has no
- * place to put one: its timeline is `(pts − editOffset) / timescale` throughout, so a leading
- * blank moves every frame of a track by the same amount and cancels out of every cut made in
- * those seconds. It would not cancel between two tracks whose empty edits differ, and no material
- * measured on any site so far writes one at all.
+ * What is not read here is the length of the empty edit itself — a stretch of presentation with
+ * no material under it, counted in ticks of the movie rather than of the track. That is
+ * `emptyEdit`, a number of its own, because the two mean opposite things: this one hides
+ * material at the head, that one holds the head back before any material starts.
  */
 export function editOffset(init: Uint8Array, trackId: number): number {
+  for (const edit of editsOf(init, trackId)) {
+    // −1 is the negative media_time the format allows, and it is not a place in the material:
+    // it is an empty edit, a hole held at the head before the media starts. Taken as an offset
+    // it would shift every frame of the table the wrong way by a tick — and the table is what
+    // the cut, the readout and the grid read. The entry behind it is the one to answer with.
+    if (edit.media >= 0) return edit.media
+  }
+
+  return 0
+}
+
+/**
+ * How long the presentation of a track is held empty before its material begins, in its ticks.
+ *
+ * The leading empty edits of its list, added up — the entries with media_time −1 in front of the
+ * first one that names a place in the material — and converted from the ticks of the movie they
+ * are counted in to the ticks of the track. A muxer writes one wherever a stream starts after
+ * the others: ffmpeg with `-itsoffset`, a camera whose sound starts a few frames late, any file
+ * cut out of a longer one. A track with such a list begins that much after the head of the
+ * movie, and a reader that keeps the media_time and drops this plays it that much early against
+ * the other tracks — 453 ms on the fixture that measures it.
+ *
+ * Empty edits behind the first real one are not a head and are not counted: this program keeps
+ * one timeline per track, and a hole in the middle of a presentation is a seam it has no way to
+ * state.
+ */
+export function emptyEdit(init: Uint8Array, trackId: number, timescale: number): number {
+  const movie = movieTimescale(init)
+  if (!(movie > 0) || !(timescale > 0)) return 0
+
+  let held = 0
+  for (const edit of editsOf(init, trackId)) {
+    if (edit.media >= 0) break
+    held += edit.duration
+  }
+
+  return Math.round((held * timescale) / movie)
+}
+
+interface Edit {
+  /** segment_duration, in ticks of the movie. */
+  duration: number
+  /** media_time, in ticks of the track; −1 for an empty edit. */
+  media: number
+}
+
+/** The entries of the edit list of one track, as far as the box really holds them. */
+function editsOf(init: Uint8Array, trackId: number): Edit[] {
   const moov = topLevelBoxes(init).find((b) => b.type === 'moov')
-  if (!moov) return 0
+  if (!moov) return []
 
   for (const trak of childBoxes(init, moov).filter((b) => b.type === 'trak')) {
     const parts = childBoxes(init, trak)
@@ -68,34 +114,44 @@ export function editOffset(init: Uint8Array, trackId: number): number {
 
     const edts = parts.find((b) => b.type === 'edts')
     const elst = edts && childBoxes(init, edts).find((b) => b.type === 'elst')
-    if (!elst) return 0
+    if (!elst) return []
 
     const view = viewOf(init, elst)
-    if (view.byteLength < 8) return 0
+    if (view.byteLength < 8) return []
 
     // Version 1 states segment_duration and media_time in 64 bits apiece; version 0 in 32. Both
     // put a media_rate of four bytes behind the pair.
     const wide = view.getUint8(0) === 1
     const width = wide ? 20 : 12
     const count = view.getUint32(4)
+    const edits: Edit[] = []
 
     for (let i = 0; i < count; i++) {
       const at = 8 + i * width
       // entry_count is four bytes of a foreign file and may promise more than the box holds.
       if (at + width > view.byteLength) break
 
-      const media = wide ? Number(view.getBigInt64(at + 8)) : view.getInt32(at + 4)
-      // −1 is the negative media_time the format allows, and it is not a place in the material:
-      // it is an empty edit, a hole held at the head before the media starts. Taken as an offset
-      // it would shift every frame of the table the wrong way by a tick — and the table is what
-      // the cut, the readout and the grid read. The entry behind it is the one to answer with.
-      if (media >= 0) return media
+      edits.push({
+        duration: wide ? Number(view.getBigUint64(at)) : view.getUint32(at),
+        media: wide ? Number(view.getBigInt64(at + 8)) : view.getInt32(at + 4),
+      })
     }
 
-    return 0
+    return edits
   }
 
-  return 0
+  return []
+}
+
+/** The timescale of the mvhd, which segment_duration is counted in; zero where there is none. */
+function movieTimescale(init: Uint8Array): number {
+  const mvhd = findBox(init, ['moov', 'mvhd'])
+  if (!mvhd) return 0
+  const view = viewOf(init, mvhd)
+  // Version and flags, then creation and modification times: four bytes apiece in version 0,
+  // eight in version 1.
+  const at = view.byteLength > 0 && view.getUint8(0) === 1 ? 20 : 12
+  return at + 4 <= view.byteLength ? view.getUint32(at) : 0
 }
 
 function viewOf(data: Uint8Array, box: Box): DataView {
@@ -399,6 +455,10 @@ export interface SampleRunInput {
    * cut from takes it as that one. The frame table does not, and the difference is deliberate:
    * the index has an init in hand that describes exactly this representation, while the table is
    * asked for a numbered track and answers about that number or about nothing.
+   *
+   * Only for an init of one track. "The only traf of the segment" is not "the only track it
+   * could be about" once the init describes two: a muxed stream with a moof per track sends one
+   * traf per segment, and every second one is the other track's (see `sourceTrackOf`).
    */
   loneTrack?: boolean
   /** Bitstream verdict for a video sample; null leaves the container's sample flag in force. */

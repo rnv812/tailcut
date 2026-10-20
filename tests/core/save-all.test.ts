@@ -335,6 +335,39 @@ describe('Save all, written as an ordinary mp4', () => {
     decode(file)
   })
 
+  it('keeps the tracks of a muxed buffer apart when every moof holds one of them', () => {
+    // ffmpeg's separate_moof, and the way Bento4 packs a muxed stream: one init of two traks, and
+    // a moof of its own for each track, so every segment holds one traf and only its track_ID
+    // says whose it is. Read as "the lone traf of the segment", the sound swallowed the picture's
+    // fragments and the picture the sound's: a picture of 188 frames and 18.9 seconds out of six,
+    // AAC packets decoded as H.264, and ffmpeg complaining of invalid NAL units all the way.
+    //
+    // Handed to the writer as one buffer of segments and not through the session registry, whose
+    // map has a question of its own about two fragments of one buffer starting on the same tick.
+    const file = onDisk(
+      'save-muxed-separate.mp4',
+      saveAllMp4([
+        {
+          initBytes: load('muxed-separate/init-stream0.m4s'),
+          segments: [1, 2, 3, 4, 5, 6].map((n) => load(`muxed-separate/chunk-stream0-0000${n}.m4s`)),
+        },
+      ]),
+    )
+    const saved = probe(file)
+
+    expect(saved.streams.map((s) => [s.codec_type, s.codec_name])).toEqual([
+      ['video', 'h264'],
+      ['audio', 'aac'],
+    ])
+    expect(Number(saved.streams[0]!.nb_read_packets)).toBe(60)
+    // Cut to the six seconds of the picture: the 131 packets of 6.2 seconds, less what runs past.
+    expect(Number(saved.streams[1]!.nb_read_packets)).toBeGreaterThanOrEqual(131 - 2 - SOUND_SLACK_PACKETS)
+    expect(Number(saved.streams[1]!.nb_read_packets)).toBeLessThanOrEqual(131)
+    for (const stream of saved.streams) expect(Number(stream.start_time)).toBe(0)
+    expect(Number(saved.format.duration)).toBeCloseTo(6, 1)
+    decode(file)
+  })
+
   it('joins every picture run even when sound was buffered through its hole', () => {
     const video = { ...H264.video, segments: [H264.video.segments[0]!, H264.video.segments[2]!] }
     const material = recorded([video, H264.audio])

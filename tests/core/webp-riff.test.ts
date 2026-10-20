@@ -249,6 +249,24 @@ describe('packAnimation', () => {
   })
 })
 
+describe('packAnimation past the format', () => {
+  it('refuses a file larger than the 32-bit RIFF size can say instead of wrapping it', () => {
+    // One mebibyte still laid four thousand and ninety-seven times: the same array every time, so
+    // the test holds one megabyte and asks for four gigabytes. Wrapped, the size field would have
+    // claimed some megabytes and every reader would have stopped there.
+    const body = new Uint8Array(1024 * 1024 - 20)
+    body.set(vp8(16, 16))
+    const still = webp([[...ascii('VP8 '), ...u32(body.length)]])
+    const whole = new Uint8Array(still.length + body.length)
+    whole.set(still)
+    whole.set(body, still.length)
+    new DataView(whole.buffer).setUint32(4, whole.length - 8, true)
+    const frames = new Array<AnimationFrame>(4097).fill(frame(whole))
+
+    expect(() => packAnimation({ width: 16, height: 16, frames })).toThrow(/4 GB/)
+  })
+})
+
 describe('sizeOf', () => {
   it('reads a VP8 keyframe size', () => {
     expect(sizeOf([{ tag: 'VP8 ', body: Uint8Array.from(vp8(641, 361)) }])).toEqual([641, 361])

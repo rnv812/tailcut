@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { locateMovie, type RangeRead } from '../../src/core/iso/locate'
 import { assembleMp4 } from '../../src/core/export/assemble'
-import { planClip } from '../../src/core/export/plan'
+import { planClip, planPreview } from '../../src/core/export/plan'
 import { planRanges, readsFor } from '../../src/core/export/ranges'
 import { bytesFrom, clipSourceFrom, movieTracksOf } from '../../src/core/export/source'
 import { decodeWarnings, frameAt, frameByPlaying, probeFile, writeTemp } from '../support/media'
@@ -221,6 +221,65 @@ describe('readsFor', () => {
     expect(readsFor([at(0, 0)])).toEqual([])
     expect(readsFor([])).toEqual([])
     expect(readEfficiency([], [])).toBe(1)
+  })
+})
+
+describe('a complete file whose sound starts after its picture', () => {
+  // The sound trak opens its edit list with an empty edit of 453 ms of the movie and then names
+  // media_time zero (tools/make-fixtures.sh): the sound is held silent for that long, and every
+  // player starts it there — ffprobe reports a start_time of 0.453016 for it on the source.
+  const late = read('tests/fixtures/plain/sound-late.mp4')
+  const startOf = (bytes: Uint8Array, name: string) =>
+    probeFile(writeTemp(name, bytes)).probed!.streams.map((stream) => Number(stream.start_time))
+
+  it('carries the empty edit at the head of the sound into the track it indexes', async () => {
+    const { tracks } = await openPlain(late)
+
+    expect(startOf(late, 'sound-late-source.mp4')).toEqual([0, 0.453016])
+    expect(tracks.map((track) => [track.kind, track.editOffset, track.emptyEdit])).toEqual([
+      ['video', 2048, undefined],
+      // 453 ticks of a movie counted in thousandths, in ticks of 22050.
+      ['audio', 0, 9989],
+    ])
+  })
+
+  it('starts the sound of the whole file where the source starts it', async () => {
+    // Dropped, the empty edit cost the sound its half second: the saved file and every clip had
+    // it begin with the picture, 453 ms ahead of where it was recorded.
+    const { source } = await openPlain(late)
+    const plan = planPreview(source)
+    const audio = plan.tracks.find((track) => track.kind === 'audio')!
+
+    expect(audio.delayTicks).toBe(9989)
+    expect(audio.skipTicks).toBe(0)
+    const [picture, sound] = startOf(
+      assembleMp4(plan, (at) => late.subarray(at.at, at.at + at.length)),
+      'sound-late-whole.mp4',
+    )
+    expect(picture).toBe(0)
+    expect(sound).toBeCloseTo(0.453016, 3)
+  })
+
+  it('enters the sound of a clip at the instant of the source the picture enters at', async () => {
+    // Inside the silence: the clip opens 0.2 s in and the sound follows 0.253 s later.
+    const { source } = await openPlain(late)
+    const early = planClip(source, { in: 0.2, out: 3, sound: true })
+    const [, held] = startOf(
+      assembleMp4(early, (at) => late.subarray(at.at, at.at + at.length)),
+      'sound-late-early.mp4',
+    )
+    expect(held).toBeCloseTo(0.253, 3)
+
+    // Past it: the sound is cut at 1 s of the presentation, which is 0.547 s into its material —
+    // not at 1 s of material, which is 1.453 s of the presentation and 453 ms ahead of the picture.
+    const clip = planClip(source, { in: 1, out: 3, sound: true })
+    const audio = clip.tracks.find((track) => track.kind === 'audio')!
+    const head = source.audio!.samples.find((sample) => sample.source.at === audio.samples[0]!.source.at)!
+    expect(audio.delayTicks).toBeUndefined()
+    expect((head.dts + audio.skipTicks - source.audio!.editOffset) / audio.timescale).toBeCloseTo(
+      1 - 9989 / 22050,
+      6,
+    )
   })
 })
 

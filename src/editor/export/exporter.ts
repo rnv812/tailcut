@@ -5,7 +5,8 @@ import { runtimeChoices, type Choice, type EncodeGeometry } from '../../core/enc
 import { geometryOf } from '../../core/encode/crop'
 import { framesOf, pathFor } from '../../core/encode/path'
 import { contentTypeOf, fileNameOf, uniqueNames } from '../../core/export/naming'
-import { compatibleMp4 } from '../../core/export/compatible'
+import { ENCODED_AS_VP9, compatibleMp4, convertsPicture } from '../../core/export/compatible'
+import { videoSampleEntry } from '../../core/iso/entry'
 import {
   planClip,
   soundUnderPicture,
@@ -25,7 +26,12 @@ import type { SnapshotReader } from '../../core/snapshot/read'
 import { webpGeometry } from '../../core/webp/timing'
 import type { TrackKind } from '../../shared/types'
 import { encodeToTrack } from './encoder'
-import { CodecFailure, unexpectedFrameFormat } from './failure'
+import {
+  CodecFailure,
+  exhaustedFailure,
+  unexpectedFrameFormat,
+  type FailedAttempt,
+} from './failure'
 import type { Codecs, FrameSource } from './frames'
 import { encodeWebp, type Surface } from './webp'
 
@@ -170,15 +176,90 @@ export interface SaveOptions {
   onSaved?: () => void
 }
 
+const isMp4 = (name: string): boolean => name.toLowerCase().endsWith('.mp4')
+
+/** The one thing Chrome says when the user closes the Save dialog. */
+const USER_CANCELED = 'USER_CANCELED'
+
+/**
+ * How one download ends, heard through `chrome.downloads.onChanged`.
+ *
+ * Changes are kept from the moment this is called, before there is an id to match them to, and
+ * the ones of other downloads are dropped once the id is known. Settles on `complete`, and fails
+ * on `interrupted` — in words of its own when the interruption was the user closing the dialog.
+ */
+function watchDownload(): { of(id: number): Promise<void>; stop(): void } {
+  type Delta = chrome.downloads.DownloadDelta
+  const early: Delta[] = []
+  let heard: ((delta: Delta) => void) | null = null
+  const listener = (delta: Delta): void => {
+    if (heard) heard(delta)
+    else early.push(delta)
+  }
+  // An item erased from the list before it ended never reports `interrupted`, and without this
+  // the row would say "Writing" for ever with Cancel refused, the file being the browser's.
+  const erased: number[] = []
+  let gone: ((id: number) => void) | null = null
+  const eraser = (id: number): void => {
+    if (gone) gone(id)
+    else erased.push(id)
+  }
+  chrome.downloads.onChanged.addListener(listener)
+  chrome.downloads.onErased.addListener(eraser)
+  const stop = (): void => {
+    chrome.downloads.onChanged.removeListener(listener)
+    chrome.downloads.onErased.removeListener(eraser)
+  }
+
+  return {
+    stop,
+    of: (id) =>
+      new Promise<void>((resolve, reject) => {
+        heard = (delta) => {
+          if (delta.id !== id) return
+          const state = delta.state?.current
+          if (state === 'complete') {
+            stop()
+            resolve()
+          } else if (state === 'interrupted') {
+            stop()
+            const error = delta.error?.current
+            reject(new Error(error === USER_CANCELED
+              ? 'The Save dialog was closed without saving the file.'
+              : `The download was interrupted: ${error ?? 'the browser gave no reason'}.`))
+          }
+        }
+        gone = (erasedId) => {
+          if (erasedId !== id) return
+          stop()
+          reject(new Error('The download was removed before it finished.'))
+        }
+        for (const delta of early.splice(0)) heard(delta)
+        for (const erasedId of erased.splice(0)) gone(erasedId)
+      }),
+  }
+}
+
 /** The snapshot for reading and Chrome for writing: the only two places the editor touches. */
 export function downloadIo(reader: SnapshotReader, options: SaveOptions = {}): ExportIo {
   const askWhere = options.askWhere ?? false
 
   return {
     read: (at) => reader.bytesOf(at),
-    prepare: (file, name, stale) => name.toLowerCase().endsWith('.mp4')
-      ? compatibleMp4(file, stale)
-      : Promise.resolve(file),
+    prepare: (file, name, stale, request) => {
+      if (!isMp4(name)) return Promise.resolve({ file })
+      // VP9 out of the encode lane is the last rung of the ladder, written because no H.264
+      // encoder worked here. Converting it would be a second lossy encode at best, and on the
+      // browser it exists for there is no H.264 to convert to; the row says what it is instead.
+      if (request.path.kind !== 'copy' && videoSampleEntry(file)?.format === 'vp09') {
+        return Promise.resolve({ file, note: ENCODED_AS_VP9 })
+      }
+      return compatibleMp4(file, stale)
+    },
+    // The copy whose picture `prepare` will decode and encode whole. An encode's own output is
+    // H.264 already, and it is in the encode lane anyway.
+    converts: (request) =>
+      request.path.kind === 'copy' && isMp4(request.fileName) && convertsPicture(request.path.plan),
 
     /**
      * This io copies and saves; it does not encode, and it says so rather than answering nothing.
@@ -197,6 +278,14 @@ export function downloadIo(reader: SnapshotReader, options: SaveOptions = {}): E
           new Blob([file as Uint8Array<ArrayBuffer>], { type: contentTypeOf(name) }),
         )
 
+        // With the dialog up, the id below is no answer yet. Chrome calls back as soon as the
+        // download item exists — Chromium runs the start callback straight after creating it,
+        // and the dialog is part of choosing the target, which comes after — so a cancelled
+        // dialog used to mark the row "Saved" and count the recording as used over a file that
+        // was never written. What the user did with the dialog arrives through `onChanged`, and
+        // the listener goes up before the call so that not one change can slip past it.
+        const outcome = askWhere ? watchDownload() : null
+
         chrome.downloads.download(
           {
             url,
@@ -208,16 +297,39 @@ export function downloadIo(reader: SnapshotReader, options: SaveOptions = {}): E
           },
           (id) => {
             const failed = id === undefined
-            // The failure has to be read, or Chrome writes about it to the console itself.
-            if (failed) void chrome.runtime.lastError
+            // The failure has to be read, or Chrome writes about it to the console itself — and
+            // it is the only account of what went wrong, so it goes on the row.
+            const said = failed ? chrome.runtime.lastError?.message : undefined
 
-            setTimeout(() => URL.revokeObjectURL(url), failed ? 0 : REVOKE_DELAY_MS)
             if (failed) {
-              reject(new Error('The browser refused to save the file.'))
+              outcome?.stop()
+              setTimeout(() => URL.revokeObjectURL(url), 0)
+              reject(new Error(said
+                ? `The browser refused to save the file: ${said}`
+                : 'The browser refused to save the file.'))
               return
             }
-            options.onSaved?.()
-            resolve()
+
+            if (!outcome) {
+              setTimeout(() => URL.revokeObjectURL(url), REVOKE_DELAY_MS)
+              options.onSaved?.()
+              resolve()
+              return
+            }
+
+            // Held until the download is over rather than for the minute above: a dialog can
+            // stay open for longer than that, and the address is all Chrome has to read from.
+            outcome.of(id).then(
+              () => {
+                URL.revokeObjectURL(url)
+                options.onSaved?.()
+                resolve()
+              },
+              (error: unknown) => {
+                URL.revokeObjectURL(url)
+                reject(error)
+              },
+            )
           },
         )
       }),
@@ -282,9 +394,12 @@ export function encodeIo(
       }
 
       let result = null
-      let lastFailure: CodecFailure | null = null
+      // Every rung's own last failure, in the order they were tried: the message names them all
+      // (see `exhaustedFailure`), because the last refusal alone hides the ones before it.
+      const failures: FailedAttempt[] = []
       for (const choice of runtimeChoices(path.choice, path.plan.geometry)) {
         let normalizeFrames = false
+        let failure: CodecFailure | null = null
         for (;;) {
           try {
             result = await encodeToTrack(
@@ -298,7 +413,7 @@ export function encodeIo(
             break
           } catch (error) {
             if (!(error instanceof CodecFailure) || error.stage !== 'encode') throw error
-            lastFailure = error
+            failure = error
             if (!normalizeFrames && unexpectedFrameFormat(error)) {
               normalizeFrames = true
               continue
@@ -307,9 +422,24 @@ export function encodeIo(
           }
         }
         if (result || stale()) break
+        if (failure) {
+          failures.push({
+            codec: choice.config.codec,
+            where: choice.kind === 'hevc-hw' || choice.kind === 'h264-hw' ? 'hardware' : 'software',
+            failure,
+          })
+        }
       }
       if (stale()) return null
-      if (!result && lastFailure) throw lastFailure
+      if (!result && failures.length) {
+        // The browser was asked about one picture and the encoders were configured for another
+        // (see `ClipPath.probedAt`): said, because it is the first thing to suspect.
+        const probed = path.probedAt
+        const note = probed
+          ? ` (the browser was asked about ${probed.width}×${probed.height}; this clip is coded at ${path.plan.geometry.width}×${path.plan.geometry.height})`
+          : ''
+        throw exhaustedFailure(path.plan.decoder.codec, failures, note)
+      }
       if (!result) return null
 
       // Pace is the encoder's pace, not the audio muxer's. It is reported only after the complete

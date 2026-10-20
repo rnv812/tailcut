@@ -8,6 +8,7 @@ import {
   videoSampleEntry,
 } from '../../src/core/iso/entry'
 import { ingestInit } from '../../src/core/container'
+import { audioDecoderConfig } from '../../src/core/codec/audio'
 import { findBox, boxBody } from '../../src/core/iso/reader'
 import { boxOf, fullBoxOf, u32, u64, zeroes } from '../../src/core/iso/writer'
 
@@ -113,7 +114,79 @@ describe('audioSampleEntry', () => {
   it('answers null for an init with no sound in it', () => {
     expect(audioSampleEntry(h264Video)).toBeNull()
   })
+
+  it('reads past the extra fields of a QuickTime sound entry of version 1 and 2', () => {
+    // QuickTime numbers its sound entries in the two bytes ISO BMFF calls reserved, and versions
+    // one and two put 16 and 36 bytes of their own behind the 28 every entry has. Read at the
+    // fixed offset, the walk for child boxes starts inside those fields: no esds is found, the
+    // AAC track has no decoder configuration, and the export takes it for a sound to convert.
+    const ordinary = audioSampleEntry(h264Audio)!
+    const esds = ordinary.children.get('esds')!
+
+    const v1 = audioSampleEntry(quickTimeSound(ordinary.bytes, 1))!
+    expect([v1.format, v1.channels, v1.sampleRate]).toEqual(['mp4a', 2, 44100])
+    expect([...v1.children.keys()]).toEqual(['esds', 'btrt'])
+    expect(v1.children.get('esds')).toEqual(esds)
+    expect(audioDecoderConfig(v1)).toEqual(audioDecoderConfig(ordinary))
+
+    // Version 2 keeps placeholders in the fields of version 0 — three channels, 65536 Hz — and
+    // states the real numbers in its own: the rate as a float64, the channels as 32 bits.
+    const v2 = audioSampleEntry(quickTimeSound(ordinary.bytes, 2))!
+    expect([v2.format, v2.channels, v2.sampleRate]).toEqual(['mp4a', 2, 44100])
+    expect(v2.children.get('esds')).toEqual(esds)
+    expect(audioDecoderConfig(v2)).toEqual(audioDecoderConfig(ordinary))
+
+    // ISO's own AudioSampleEntryV1 states entry_version 1 in the very same two bytes and adds no
+    // field at all; it is told apart by the version of the stsd that holds it, which is 1.
+    const isoV1 = quickTimeSound(ordinary.bytes, 1, 'iso')
+    const read = audioSampleEntry(isoV1)!
+    expect([read.channels, read.sampleRate, [...read.children.keys()]]).toEqual([2, 44100, ['esds', 'btrt']])
+  })
 })
+
+/**
+ * A one-track init holding the sound entry of `entry` rewritten as QuickTime writes it — or, for
+ * `iso`, as ISO's AudioSampleEntryV1, which states the version and adds nothing behind it.
+ *
+ * The 28 bytes of the ordinary entry stay where they are with the version stated in them, and the
+ * fields of that version follow before the child boxes: four counts of 32 bits in version 1, and
+ * in version 2 a size, the rate as a float64, the channel count and five words of layout.
+ */
+function quickTimeSound(entry: Uint8Array, version: 1 | 2, layout: 'quicktime' | 'iso' = 'quicktime'): Uint8Array {
+  const fields = entry.slice(8, 36)
+  const view = new DataView(fields.buffer)
+  const channels = view.getUint16(16)
+  const rate = view.getUint32(24) >>> 16
+  view.setUint16(8, version)
+
+  let extra: Uint8Array
+  if (layout === 'iso') {
+    extra = new Uint8Array(0)
+  } else if (version === 1) {
+    extra = u32(1024, 0, 2 * channels, 2)
+  } else {
+    // The version-0 fields of a version-2 entry are fixed placeholders.
+    view.setUint16(16, 3)
+    view.setUint16(18, 16)
+    view.setUint16(20, 0xfffe)
+    view.setUint32(24, 0x00010000)
+    extra = new Uint8Array(36)
+    const tail = new DataView(extra.buffer)
+    tail.setUint32(0, 72)
+    tail.setFloat64(4, rate)
+    tail.setUint32(12, channels)
+    tail.setUint32(16, 0x7f000000)
+  }
+
+  const rebuilt = boxOf('mp4a', fields, extra, entry.subarray(36))
+  const tkhd = fullBoxOf('tkhd', 0, 3, u32(0, 0, 1, 0, 0), zeroes(60))
+  const hdlr = fullBoxOf('hdlr', 0, 0, u32(0), new TextEncoder().encode('soun'), zeroes(13))
+  const stsd = fullBoxOf('stsd', layout === 'iso' ? 1 : 0, 0, u32(1), rebuilt)
+  return boxOf(
+    'moov',
+    boxOf('trak', tkhd, boxOf('mdia', hdlr, boxOf('minf', boxOf('stbl', stsd)))),
+  )
+}
 
 describe('sampleEntryBytes', () => {
   it('hands back the entry exactly as the stsd holds it', () => {

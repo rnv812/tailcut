@@ -37,3 +37,39 @@ export function codecFailure(
 
   return new CodecFailure(stage, name, message, `${operation} failed (${name}): ${message}`)
 }
+
+/** One encoder that was tried and failed: the codec it was asked for, where it ran, and why. */
+export interface FailedAttempt {
+  codec: string
+  where: 'hardware' | 'software'
+  failure: CodecFailure
+}
+
+/**
+ * Every encoder that failed, in one sentence — the last failure alone is not the story.
+ *
+ * Measured on the browser this exists for: Yandex on Windows has a hardware H.264 encoder that
+ * answers the probe yes and then fails, and no OpenH264 behind it. Told only the last refusal, the
+ * user read "Failed to create OpenH264 encoder" and nothing about the hardware encoder that went
+ * first, nor anything that would tell the two machines apart. One attempt keeps the plain form of
+ * `codecFailure`, so nothing changes for the common case; the cause fields are the last
+ * attempt's, so a caller that inspects them still sees a real browser failure.
+ */
+export function exhaustedFailure(
+  sourceCodec: string,
+  attempts: readonly FailedAttempt[],
+  note = '',
+): CodecFailure {
+  const last = attempts[attempts.length - 1]!
+  if (attempts.length === 1 && !note) return last.failure
+
+  const each = attempts.map(
+    ({ codec, where, failure }) =>
+      `${codec} (${where}): ${failure.causeName}: ${failure.causeMessage}`,
+  )
+  const message =
+    attempts.length === 1
+      ? `${last.failure.message}${note}`
+      : `Encoding ${sourceCodec} failed on every encoder tried: ${each.join('; ')}${note}`
+  return new CodecFailure('encode', last.failure.causeName, last.failure.causeMessage, message)
+}

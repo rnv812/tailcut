@@ -71,10 +71,13 @@ export function isSnapshotId(value: string): boolean {
 }
 
 /**
- * What the bridge answers tc:edit with. A refusal says which of the four it is, because they ask
- * four different things of the user: `gone` — the session is no longer on the page, `empty` — it
+ * What the bridge answers tc:edit with. A refusal says which of the five it is, because they ask
+ * five different things of the user: `gone` — the session is no longer on the page, `empty` — it
  * holds nothing to cut yet, `unread` — its material is a file on somebody's server that could not
- * be fetched, `storage` — the browser would not take the snapshot.
+ * be fetched, `storage` — the browser would not take the snapshot, `failed` — the freeze itself
+ * broke, and what broke is in `detail`. The last is the answer of a handler that threw; it used to
+ * go out as `refused`, a word of the save that this type does not declare, and the popup drew an
+ * empty alert over it.
  *
  * `unread` belongs to the one kind of session whose material is not in the frame already. A
  * capture holds its bytes; an ordinary file is copied into the snapshot at the moment of the
@@ -82,10 +85,14 @@ export function isSnapshotId(value: string): boolean {
  * host that stopped answering. Told apart from `storage` because they blame different machines,
  * and from `empty` because the recording is there and it was the fetching that failed.
  */
+export type EditFailure = 'gone' | 'empty' | 'unread' | 'storage' | 'failed'
+
 export interface EditResult {
   ok: boolean
   snapshotId?: string
-  reason?: 'gone' | 'empty' | 'unread' | 'storage'
+  reason?: EditFailure
+  /** What broke, on `failed`; absent otherwise. */
+  detail?: string
 }
 
 export type PageToBridge =
@@ -543,16 +550,24 @@ export type TabToExtension = FrameRecording
  * - `empty` — the session is there and holds nothing a file could be cut from yet: a stream that
  *   opened and loaded nothing, or a second buffer that has not brought its first fragment.
  * - `refused` — Chrome would not start the download. What it said about it is in `detail`.
+ * - `failed` — no file could be made to hand Chrome: the material could not be read, or the
+ *   writer broke. What went wrong is in `detail`. Told apart from `refused` because it is not
+ *   Chrome's doing, and "Chrome would not save the file" over it sent the user to the wrong place.
  */
-export type SaveFailure = 'gone' | 'empty' | 'refused'
+export type SaveFailure = 'gone' | 'empty' | 'refused' | 'failed'
 
 /** What the bridge answers tc:save with. */
 export interface SaveResult {
   ok: boolean
   /** Absent when the file was saved. */
   reason?: SaveFailure
-  /** What Chrome answered when it refused; absent when it said nothing, and on the other two. */
+  /** What Chrome, or the writer, said about the failure; absent when nothing was said. */
   detail?: string
+  /**
+   * On a saved file, what the user has to know about it: the file kept codecs Premiere cannot
+   * import, because this browser could not convert them, and why.
+   */
+  note?: string
 }
 
 /** What the bridge answers tc:pause with: the state this frame is in now, not an acknowledgement. */

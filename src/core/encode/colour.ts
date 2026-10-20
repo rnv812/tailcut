@@ -27,12 +27,30 @@ export function readColour(body: Uint8Array | undefined): VideoColorSpaceInit | 
   }
 }
 
+/**
+ * The H.273 numbers of a WebCodecs colour space, with 2 — "unspecified" — for anything it does not
+ * name. Shared by the colr box below and the vpcC of an encoded VP9 track, which states the same
+ * three numbers in a record of its own.
+ */
+export function colourCodes(colour: VideoColorSpaceInit | undefined): {
+  primaries: number
+  transfer: number
+  matrix: number
+  fullRange: boolean
+} {
+  return {
+    primaries: colour?.primaries ? PRIMARIES[colour.primaries] ?? 2 : 2,
+    transfer: colour?.transfer ? TRANSFER[colour.transfer] ?? 2 : 2,
+    matrix: colour?.matrix ? MATRIX[colour.matrix] ?? 2 : 2,
+    fullRange: colour?.fullRange === true,
+  }
+}
+
 /** Describe the encoded pixels, using the encoder's metadata rather than the source's. */
 export function colourBox(colour: VideoColorSpaceInit | undefined): Uint8Array {
   if (!colour || colour.fullRange == null) return new Uint8Array(0)
+  const codes = colourCodes(colour)
   return boxOf('colr', u32(0x6e636c78),
-    u16(colour.primaries ? PRIMARIES[colour.primaries] ?? 2 : 2,
-      colour.transfer ? TRANSFER[colour.transfer] ?? 2 : 2,
-      colour.matrix ? MATRIX[colour.matrix] ?? 2 : 2),
-    u8(colour.fullRange ? 0x80 : 0))
+    u16(codes.primaries, codes.transfer, codes.matrix),
+    u8(codes.fullRange ? 0x80 : 0))
 }

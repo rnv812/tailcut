@@ -3,6 +3,7 @@ import { parseInit } from '../iso/init'
 import type { RangeReader } from '../iso/locate'
 import {
   AUDIO_WARMUP_PACKETS,
+  originOf,
   planClip,
   presentationSpan,
   type ClipSource,
@@ -347,7 +348,7 @@ function heldSpans(buffered: readonly Span[], cover: Span): Span[] {
 
 /** Presentation time of one source sample, in the clock used by HTMLMediaElement. */
 function sampleTime(track: SourceTrack, pts: number): number {
-  return (pts - track.editOffset) / track.timescale
+  return (pts - originOf(track)) / track.timescale
 }
 
 /**

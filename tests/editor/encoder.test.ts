@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { encodeToTrack, KEY_INTERVAL_SECONDS } from '../../src/editor/export/encoder'
 import { MAX_FRAMES_IN_FLIGHT, type Codecs, type FrameSource } from '../../src/editor/export/frames'
 import type { EncodingChoice } from '../../src/core/encode/codec'
-import { codedSampleEntry } from '../../src/core/encode/entry'
+import { codedSampleEntry, encodedVp9SampleEntry } from '../../src/core/encode/entry'
 import { planFrames, type FramePlan, type FrameToKeep } from '../../src/core/encode/plan'
 import {
   planClip,
@@ -214,6 +214,10 @@ function fakeCodecs(
     stray?: number
     /** Have the encoder report WebCodecs' generic asynchronous failure on this accepted frame. */
     failAfter?: number
+    /** What the encoder says about itself, by the configuration it was given; H.264's by default. */
+    decoderConfig?: (config: VideoEncoderConfig) => VideoDecoderConfig
+    /** Have copying this chunk (by place) out of the encoder throw, as an allocation can. */
+    copyFails?: number
   } = {},
 ): Fakes {
   const describeOn = options.describeOn === undefined ? 0 : options.describeOn
@@ -283,18 +287,33 @@ function fakeCodecs(
         fakes.emitted.push(item.timestamp)
         const metadata =
           given === describeOn
-            ? { decoderConfig: { codec: 'avc1.64001e', description: options.description ?? DESCRIPTION } }
+            ? {
+                decoderConfig: options.decoderConfig?.(config) ?? {
+                  codec: 'avc1.64001e',
+                  description: options.description ?? DESCRIPTION,
+                },
+              }
             : undefined
+        const copyFails = given === options.copyFails
         given += 1
-        on.chunk(
-          {
-            type: item.options?.keyFrame ? 'key' : 'delta',
-            timestamp: item.timestamp,
-            byteLength: bytes.byteLength,
-            copyTo: (into: Uint8Array) => into.set(bytes),
-          } as unknown as EncodedVideoChunk,
-          metadata as EncodedVideoChunkMetadata | undefined,
-        )
+        // As WebCodecs calls an output callback: whatever it throws is reported to nobody, so
+        // the only way a failure in it reaches the job is through the loop's own state.
+        try {
+          on.chunk(
+            {
+              type: item.options?.keyFrame ? 'key' : 'delta',
+              timestamp: item.timestamp,
+              byteLength: bytes.byteLength,
+              copyTo: (into: Uint8Array) => {
+                if (copyFails) throw new RangeError('Array buffer allocation failed')
+                into.set(bytes)
+              },
+            } as unknown as EncodedVideoChunk,
+            metadata as EncodedVideoChunkMetadata | undefined,
+          )
+        } catch {
+          /* swallowed, as the browser swallows it */
+        }
       }
 
       return {
@@ -411,9 +430,11 @@ describe('encodeToTrack: one sample for one frame', () => {
     // Progress is counted in frames **written** and never runs past the total the plan promised.
     // The first frame handed to the encoder is not a frame in the file — the encoder is holding
     // it — so the first thing the queue is told is nought.
-    expect(progress).toHaveLength(midGroup.kept)
+    // One report a frame handed over, and one more once the flush has given back what the
+    // encoder was still holding: without it the row stops short of its total for good.
+    expect(progress).toHaveLength(midGroup.kept + 1)
     expect(progress[0]).toBe(0)
-    expect(progress[progress.length - 1]).toBeLessThanOrEqual(midGroup.kept)
+    expect(progress[progress.length - 1]).toBe(midGroup.kept)
     expect(progress).toEqual([...progress].sort((a, b) => a - b))
   })
 })
@@ -620,7 +641,8 @@ describe('encodeToTrack: called off, and material that is not a metronome', () =
     })
     // The premise: the same clip with nobody calling anything off is a whole clip.
     expect(whole).not.toBeNull()
-    expect(done).toBe(everything.kept)
+    // A report for every frame handed over and the last one after the flush.
+    expect(done).toBe(everything.kept + 1)
 
     const called = fakeCodecs({ decoder: 'burst' })
     done = 0
@@ -711,5 +733,89 @@ describe('encodeToTrack: what waits for what', () => {
     expect(fakes.maxQueued).toBe(MAX_FRAMES_IN_FLIGHT + 1)
     expect(fakes.framesMade).toBe(everything.frames.length)
     expect(fakes.framesClosed).toBe(fakes.framesMade)
+  })
+})
+
+/** The VP9 rung as `ladderFor` states it for the 320 × 240 the plans above are. */
+const VP9: EncodingChoice = {
+  kind: 'vp9-sw',
+  config: {
+    ...configOf('vp09.00.20.08'),
+    hardwareAcceleration: 'prefer-software',
+    bitrateMode: 'quantizer',
+    latencyMode: 'quality',
+  },
+  control: 'quantizer',
+  quantizer: 34,
+}
+
+/** What Chrome's libvpx says about itself: a codec string and a colour, and no description. */
+const SMPTE = { primaries: 'smpte170m', transfer: 'smpte170m', matrix: 'smpte170m', fullRange: false } as const
+const vp9Describes = (config: VideoEncoderConfig): VideoDecoderConfig => ({
+  codec: config.codec,
+  codedWidth: config.width,
+  codedHeight: config.height,
+  colorSpace: SMPTE,
+})
+
+describe('encodeToTrack: VP9, for a browser with no H.264 encoder', () => {
+  it('writes a vp09 track from the codec string, with no description to copy', async () => {
+    const plan = planOf(4)
+    const fakes = fakeCodecs({ decoderConfig: vp9Describes })
+
+    const result = (await encodeToTrack(plan, VP9, sourceOf(), fakes.codecs, () => {}))!
+
+    expect(result.video.sampleEntry).toEqual(
+      encodedVp9SampleEntry('vp09.00.20.08', plan.geometry.width, plan.geometry.height, SMPTE),
+    )
+    expect(result.video.samples).toHaveLength(plan.kept)
+    // The quantizer goes to libvpx per frame, under its own name.
+    expect(fakes.fed.map((one) => one.options)).toEqual([
+      { keyFrame: true, vp9: { quantizer: 34 } },
+      { keyFrame: false, vp9: { quantizer: 34 } },
+      { keyFrame: false, vp9: { quantizer: 34 } },
+      { keyFrame: false, vp9: { quantizer: 34 } },
+    ])
+  })
+
+  it('still refuses a VP9 encoder that never said anything about its stream', async () => {
+    const fakes = fakeCodecs({ describeOn: null })
+    await expect(
+      encodeToTrack(planOf(4), VP9, sourceOf(), fakes.codecs, () => {}),
+    ).rejects.toThrow('The encoder produced no decoder configuration.')
+  })
+})
+
+describe('encodeToTrack: what WebCodecs would otherwise swallow', () => {
+  it('fails the job when taking a chunk out of the encoder throws, instead of losing the frame', async () => {
+    // A throw inside the output callback goes nowhere: WebCodecs calls it and drops what it
+    // throws. Without a catch the frame is missing from the file and the job is "done".
+    const fakes = fakeCodecs({ copyFails: 2 })
+
+    await expect(
+      encodeToTrack(planOf(12), SOFTWARE, sourceOf(), fakes.codecs, () => {}),
+    ).rejects.toThrow('Array buffer allocation failed')
+    expect(fakes.encoderClosed).toBe(1)
+    expect(fakes.framesClosed).toBe(fakes.framesMade)
+  })
+})
+
+describe('encodeToTrack: the size it is fed', () => {
+  it('configures the encoder with the size the frames are cut to, not the size the probe was asked', async () => {
+    // A probe asked about 400 × 240 — the size a track header declared — for material coded, and
+    // so cut, at 320 × 240. Configured with the probe's numbers the encoder would scale every
+    // frame, and the entry, which states the plan's size, would describe a stream it is not.
+    const plan = planOf(4)
+    const probed: EncodingChoice = {
+      ...AVC_HARDWARE,
+      config: { ...AVC_HARDWARE.config, width: 400 },
+    }
+    const fakes = fakeCodecs()
+
+    const result = (await encodeToTrack(plan, probed, sourceOf(), fakes.codecs, () => {}))!
+
+    expect(fakes.encoderConfigs).toHaveLength(1)
+    expect(fakes.encoderConfigs[0]).toMatchObject({ width: 320, height: 240, framerate: FRAMERATE })
+    expect(result.video.width).toBe(320)
   })
 })

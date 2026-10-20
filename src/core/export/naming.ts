@@ -24,6 +24,9 @@ export const MAX_NAME_BYTES = 200
  */
 const FORBIDDEN = /[\\/:*?"<>|\u0000-\u001f\u007f-\u009f]+/g
 
+/** The seventeen planes of Unicode, each of which ends on two noncharacters. */
+const PLANES = Array.from({ length: 17 }, (_, plane) => plane)
+
 /**
  * Characters that show nothing and break everything: removed outright rather than turned into a
  * space, because they stand inside a word as readily as between two.
@@ -32,12 +35,36 @@ const FORBIDDEN = /[\\/:*?"<>|\u0000-\u001f\u007f-\u009f]+/g
  * written by every page that mixes scripts, and by plenty that do not. Measured: a title carrying
  * U+200E LEFT-TO-RIGHT MARK, which is neither whitespace nor forbidden, survived every step of the
  * cleaning, Chrome refused the name, and the popup blamed the session for being gone. The
- * zero-width characters (space, non-joiner, joiner, no-break space) and the soft hyphen come from
- * the same place — a page's own typography — and are as invisible in a file manager as they are
- * in a title.
+ * zero-width characters and the soft hyphen come from the same place — a page's own typography.
+ *
+ * By category and not by list, because a list was measured to fall short: Chrome refuses the
+ * whole of "Other, format" (its base::i18n::IsFilenameLegal), and the characters the list did not
+ * name were refused all the same — the Arabic number signs U+0600-0605, the interlinear
+ * annotations U+FFF9-FFFB, the musical beams U+1D173-1D17A, and the tag characters U+E0001 and
+ * U+E0020-E007F. The tags are the real case: they spell the subdivision flags, and "Euro 2024
+ * <flag of England> vs Spain" lost its download to them. Taken out, the flag is left as the black
+ * flag it is built on. The same check refuses noncharacters — U+FDD0-FDEF and the last two code
+ * points of every plane — and a lone surrogate, which is no character at all and fails Chrome's
+ * conversion of the name before any check is made.
  */
-const INVISIBLE =
-  /[\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff]/g
+const INVISIBLE = new RegExp(
+  `[\\p{Cf}\\p{Cs}\\u{fdd0}-\\u{fdef}${PLANES.map((plane) => {
+    const end = (offset: number) => `\\u{${(plane * 0x10000 + offset).toString(16)}}`
+    return `${end(0xfffe)}-${end(0xffff)}`
+  }).join('')}]`,
+  'gu',
+)
+
+/**
+ * The device names of Windows: a file may not be called one, with or without an extension.
+ *
+ * Chrome checks them on every system and not only on Windows (net::IsSafePortablePathComponent,
+ * by way of IsReservedNameOnWindows), so "CON.mp4" is refused on Linux as well — measured — and
+ * so is "Aux.final.mp4": the name counts up to its first dot. In any case, since Windows matches
+ * them in any case. CLOCK$ is Chrome's own addition; CONIN$ and CONOUT$ and the superscript
+ * COM¹-LPT³ are Windows' own, which Chrome does not check and Windows would still refuse.
+ */
+const RESERVED = /^(con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³]|clock\$|conin\$|conout\$)(?=\.|$)/i
 
 /** How many bytes one code point takes in UTF-8: the unit a file system counts its limit in. */
 function utf8SizeOf(point: string): number {
@@ -97,14 +124,28 @@ export function sanitizeFileName(text: string, maxLength = MAX_NAME_LENGTH): str
     // at the edges go after the whitespace is collapsed and not before — otherwise "../../.bashrc"
     // keeps them behind the first space, and Chrome reads the result as a path upwards and
     // refuses the download whole.
-    .replace(/^[.\s]+/, '')
+    // A tilde goes with them: Chrome refuses one at either end of a name ("~ Downloads
+    // trick.mp4" was refused, "a~b.mp4" was saved) — at the front it reads as a home directory,
+    // and the end of the name is the extension, which is ours.
+    .replace(/^[.\s~]+/, '')
 
   // The cut comes last, so that the limits are spent on what survived the cleaning, and the tail
   // is tidied after the cut, so that a name cut on a space or a dot does not carry it into the
   // extension.
-  const base = clipToLimits(cleaned, maxLength).replace(/[.\s]+$/, '')
+  const base = tidy(cleaned, maxLength)
+
+  // A device name is checked on what is left, since the cleaning is what can make one: "con ."
+  // loses its tail and comes out as "con". Renamed by a mark right after the device name rather
+  // than by a prefix, so that the name still starts with what the title starts with, and cut
+  // again so that the mark is spent out of the limit and not on top of it.
+  if (RESERVED.test(base)) return tidy(base.replace(RESERVED, '$1_'), maxLength)
 
   return base || 'tailcut'
+}
+
+/** The name cut to the limits, without a dot or a space left on the tail for the extension. */
+function tidy(text: string, maxLength: number): string {
+  return clipToLimits(text, maxLength).replace(/[.\s]+$/, '')
 }
 
 /**

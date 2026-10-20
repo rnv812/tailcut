@@ -3,7 +3,7 @@ import type { EditContext } from '../edit/context'
 import { planClip, soundUnderPicture, type ClipSource, type ExportPlan } from '../export/plan'
 import type { JobKind } from '../export/queue'
 import { keptForRate, webpGeometry, type WebpOptions } from '../webp/timing'
-import type { Choice, EncodeGeometry, EncodingChoice } from './codec'
+import { choiceAt, type Choice, type EncodeGeometry, type EncodingChoice } from './codec'
 import { geometryOf } from './crop'
 import { planFrames, type FramePlan } from './plan'
 
@@ -17,7 +17,20 @@ import { planFrames, type FramePlan } from './plan'
  */
 export type ClipPath =
   | { kind: 'copy'; plan: ExportPlan }
-  | { kind: 'encode'; plan: FramePlan; choice: EncodingChoice }
+  | {
+      kind: 'encode'
+      plan: FramePlan
+      /** Configured for `plan.geometry` — the size the frames are cut to — whatever was probed. */
+      choice: EncodingChoice
+      /**
+       * The picture the browser was actually asked about, present only when it is not the one
+       * the frames are cut to: the tab probes the size the track header declares, and the plan
+       * cuts to the size the samples are coded in, and an anamorphic track has two. The encoder
+       * is then configured for a picture nobody asked about, which is the honest thing to try,
+       * and a failure says so (see `encodeIo`).
+       */
+      probedAt?: EncodeGeometry
+    }
   | { kind: 'webp'; plan: FramePlan; options?: WebpOptions }
   | { kind: 'blocked'; reason: BlockedReason; geometry: EncodeGeometry }
 
@@ -79,7 +92,17 @@ export function pathFor(
     return { kind: 'blocked', reason: 'no-encoder', geometry: plan.geometry }
   }
 
-  return { kind: 'encode', plan, choice }
+  // The encoder is configured for what it will be fed. `choiceAt` is the choice itself when the
+  // probe was asked about this very picture, which is every clip of every ordinary recording.
+  const configured = choiceAt(choice, plan.geometry)
+  if (configured === choice) return { kind: 'encode', plan, choice }
+
+  const probedAt = {
+    width: choice.config.width,
+    height: choice.config.height,
+    framerate: choice.config.framerate ?? plan.geometry.framerate,
+  }
+  return { kind: 'encode', plan, choice: configured, probedAt }
 }
 
 /** Queue lane for this path: up to three copies run together, while encodes run one at a time. */

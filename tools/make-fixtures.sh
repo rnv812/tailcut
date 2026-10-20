@@ -218,6 +218,39 @@ node -e '
   }
 ' "$work/muxed-edits.mp4" "$out/muxed-edits"
 
+# The same muxed buffer once more, with a moof of its own for every track.
+#
+# separate_moof, and the way Bento4 packs a muxed stream: the init still describes two traks, but
+# every fragment is written as a moof holding the picture's traf alone and another holding the
+# sound's. Cut at every moof, as MSE is fed, each media segment carries exactly one traf, and the
+# track_ID in its tfhd is the only thing that says which track it belongs to. A reader that takes
+# "the one traf of a segment" as the track it was asked about hands the sound the picture's
+# fragments and the picture the sound's, and nothing in either set above can show it.
+ffmpeg -y -i "$work/source-muxed.mp4" -c copy \
+       -f mp4 -movflags frag_keyframe+empty_moov+default_base_moof+separate_moof \
+       "$work/muxed-separate.mp4"
+
+rm -rf "$out/muxed-separate" && mkdir -p "$out/muxed-separate"
+node -e '
+  const fs = require("fs")
+  const data = fs.readFileSync(process.argv[1])
+  const boxes = []
+  for (let at = 0; at + 8 <= data.length; ) {
+    const size = data.readUInt32BE(at)
+    if (size < 8) break
+    boxes.push({ type: data.toString("latin1", at + 4, at + 8), at, size })
+    at += size
+  }
+  const starts = boxes.filter((b) => b.type === "moof").map((b) => b.at)
+  const last = boxes.filter((b) => b.type === "mdat").pop()
+  fs.writeFileSync(`${process.argv[2]}/init-stream0.m4s`, data.subarray(0, starts[0]))
+  for (const [i, start] of starts.entries()) {
+    const end = starts[i + 1] ?? last.at + last.size
+    const name = `chunk-stream0-${String(i + 1).padStart(5, "0")}.m4s`
+    fs.writeFileSync(`${process.argv[2]}/${name}`, data.subarray(start, end))
+  }
+' "$work/muxed-separate.mp4" "$out/muxed-separate"
+
 # A Common Encryption init segment: the header of a protected stream, and the one thing the
 # extension has to recognise before it copies anything of such a page.
 #
@@ -362,6 +395,21 @@ ffmpeg -y -f lavfi -i "color=c=#202040:s=256x144:r=10:d=6" \
        -pix_fmt yuv420p -c:a aac -b:a 16k -ar 22050 -ac 1 \
        -metadata:s:a:0 language=eng -metadata:s:a:1 language=rus \
        -shortest -f mp4 "$out/plain/two-sound.mp4"
+
+# A complete file whose sound begins half a second after its picture.
+#
+# What a muxer writes when one stream starts later than the other: the sound trak opens its edit
+# list with an empty edit — media_time −1, a stretch of the movie with nothing of the track under
+# it — and only then names a place in its material. ffmpeg 4.4 states 453 ms of it here and a
+# media_time of zero, so the priming plays inside the half second. A reader that keeps the
+# media_time and throws the empty edit away puts the sound 453 ms early in everything it writes,
+# and the file stays consistent enough that nothing complains.
+ffmpeg -y -f lavfi -i "color=c=#202040:s=256x144:r=10:d=6" \
+       -itsoffset 0.5 -f lavfi -i "sine=frequency=440:duration=5" \
+       -vf "drawbox=x='mod(t*60\,220)':y='60+40*sin(t)':w=30:h=30:color=orange:t=fill" \
+       -c:v libx264 -profile:v main -crf 30 -g 20 -keyint_min 20 -sc_threshold 0 \
+       -pix_fmt yuv420p -c:a aac -b:a 16k -ar 22050 -ac 1 \
+       -f mp4 "$out/plain/sound-late.mp4"
 
 # The same twenty seconds again, as a complete Matroska — the other container an ordinary file
 # arrives in, and the one our reader was written only for the segmented shape of.

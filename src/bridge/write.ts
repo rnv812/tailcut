@@ -1,5 +1,5 @@
 import { assembleMp4 } from '../core/export/assemble'
-import { compatibleMp4 } from '../core/export/compatible'
+import { compatibleMp4, type CompatibleMp4 } from '../core/export/compatible'
 import { planRanges, readsFor } from '../core/export/ranges'
 import { saveAllMp4 } from '../core/export/save'
 import { bytesFrom } from '../core/export/source'
@@ -23,10 +23,10 @@ import type { SaveSource } from './session-store'
  * bytes would be worse than a refusal: the user gets a file no player opens and no word about it.
  * For a plain source it is a read that was refused, and that can only be known by trying.
  */
-export async function writeSaveFile(source: SaveSource): Promise<Uint8Array | null> {
+export async function assembleSaveFile(source: SaveSource): Promise<Uint8Array | null> {
   if (source.kind === 'captured') {
     const file = saveAllMp4(source.tracks)
-    return file.byteLength > 0 ? compatibleMp4(file) : null
+    return file.byteLength > 0 ? file : null
   }
 
   const plan = source.plan
@@ -50,5 +50,17 @@ export async function writeSaveFile(source: SaveSource): Promise<Uint8Array | nu
     return null
   }
 
-  return compatibleMp4(assembleMp4(plan, bytesFrom(reads, buffers)))
+  return assembleMp4(plan, bytesFrom(reads, buffers))
+}
+
+/**
+ * The file Save all hands the browser: the one above, made importable where this browser can.
+ *
+ * Never null for a conversion that could not be done: the file then keeps the codecs it was
+ * recorded in and carries a note saying so (see `keptOriginal`), which the popup shows. Edit does
+ * not come through here — the editor reads the codecs of the recording and converts on export.
+ */
+export async function writeSaveFile(source: SaveSource): Promise<CompatibleMp4 | null> {
+  const file = await assembleSaveFile(source)
+  return file ? compatibleMp4(file) : null
 }

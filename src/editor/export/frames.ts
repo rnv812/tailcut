@@ -1,7 +1,7 @@
 import type { Crop } from '../../core/encode/crop'
 import type { FramePlan } from '../../core/encode/plan'
 import type { Located } from '../../shared/types'
-import { codecFailure } from './failure'
+import { CodecFailure, codecFailure } from './failure'
 
 /**
  * How many chunks the decoder is allowed to owe frames for at once.
@@ -48,6 +48,11 @@ export interface Codecs {
     },
   ): EncoderLike
   chunk(init: EncodedVideoChunkInit): EncodedVideoChunk
+  /**
+   * `VideoDecoder.isConfigSupported`, as a yes or a no. Optional: without it the stream asks for
+   * software and learns from the decoder itself whether there is one (see `decodedFrames`).
+   */
+  decoderSupported?(config: VideoDecoderConfig): Promise<boolean>
   /** Copies a frame into ordinary CPU-backed storage accepted by the software encoder. */
   normalize(frame: VideoFrame): Promise<VideoFrame>
   /**
@@ -89,12 +94,94 @@ export interface FrameSource {
  * Software decoding is asked for on purpose. Hardware decode of the very same clip measured 16.1
  * s against 9.1 for software, because a frame decoded on the GPU has to be read back over the bus
  * before an encoder can have it.
+ *
+ * **Except where there is no software decoder to ask.** Chrome decodes HEVC only through the
+ * platform, so `prefer-software` for it is a refusal, and a demand that was a speed preference
+ * would turn into "this clip cannot be re-encoded". Two ways out, both to `no-preference`, which
+ * lets the browser use whatever decoder it has: the browser is asked first where it can be
+ * (`Codecs.decoderSupported`), and a decoder that dies before it has produced a single frame is
+ * built once more without the demand and handed the clip from its first chunk again. Once a
+ * frame has come out there is no starting over — a second walk would hand the consumer the same
+ * frames twice — and the failure is the job's.
  */
 export async function* decodedFrames(
   plan: FramePlan,
   source: FrameSource,
   codecs: Codecs,
   normalize = false,
+): AsyncGenerator<VideoFrame> {
+  let acceleration = await preferenceFor(plan.decoder, codecs)
+
+  for (;;) {
+    const state = { produced: false }
+    try {
+      yield* walk(plan, source, codecs, normalize, acceleration, state)
+      return
+    } catch (error) {
+      const retry =
+        acceleration === 'prefer-software' &&
+        !state.produced &&
+        error instanceof CodecFailure &&
+        error.stage === 'decode'
+      if (!retry) throw error
+      acceleration = 'no-preference'
+    }
+  }
+}
+
+/**
+ * `prefer-software` where the browser has a software decoder for this material, `no-preference`
+ * where it says it has none. Where it cannot be asked, or the asking fails, software is tried and
+ * the runtime fallback in `decodedFrames` has the last word.
+ */
+async function preferenceFor(
+  config: VideoDecoderConfig,
+  codecs: Codecs,
+): Promise<HardwareAcceleration> {
+  if (!codecs.decoderSupported) return 'prefer-software'
+  try {
+    const software = await codecs.decoderSupported({
+      ...config,
+      hardwareAcceleration: 'prefer-software',
+    })
+    return software ? 'prefer-software' : 'no-preference'
+  } catch {
+    return 'prefer-software'
+  }
+}
+
+/**
+ * The crop that could not be cut, said with the rectangle in it.
+ *
+ * Its own message rather than a decoding failure: the decoder did its part, and a rectangle that
+ * does not fit the frame it is cut from — a frame decoded smaller than the plan expected — is a
+ * different thing to go and look for.
+ */
+function cropFailure(frame: VideoFrame, crop: Crop, cause: unknown): Error {
+  const record =
+    typeof cause === 'object' && cause !== null
+      ? (cause as { name?: unknown; message?: unknown })
+      : null
+  const name = typeof record?.name === 'string' && record.name ? record.name : 'Error'
+  const message =
+    typeof record?.message === 'string' && record.message ? record.message : String(cause)
+  const size =
+    typeof frame.codedWidth === 'number' && typeof frame.codedHeight === 'number'
+      ? ` (the decoded frame is ${frame.codedWidth}×${frame.codedHeight})`
+      : ''
+  return new Error(
+    `Cropping a decoded frame to ${crop.width}×${crop.height} at ${crop.x},${crop.y} failed (${name}): ${message}${size}`,
+  )
+}
+
+/** One decoder's walk through the clip, under one acceleration preference. */
+async function* walk(
+  plan: FramePlan,
+  source: FrameSource,
+  codecs: Codecs,
+  normalize: boolean,
+  acceleration: HardwareAcceleration,
+  state: { produced: boolean },
 ): AsyncGenerator<VideoFrame> {
   const ready: VideoFrame[] = []
   let failed: Error | null = null
@@ -104,9 +191,17 @@ export async function* decodedFrames(
   let decoder: DecoderLike
   try {
     decoder = codecs.decoder(
-      { ...plan.decoder, hardwareAcceleration: 'prefer-software' },
+      { ...plan.decoder, hardwareAcceleration: acceleration },
       {
         frame(frame) {
+          state.produced = true
+          // Nothing more goes into a walk that has failed; the frame is let go of here, because
+          // nobody will take it out of `ready` again.
+          if (failed) {
+            frame.close()
+            return
+          }
+
           // Before the entry point: decoded because what follows is predicted from it, never shown.
           // This is the whole of what replaces the edit list on this path.
           if (frame.timestamp < plan.headUs) {
@@ -125,8 +220,15 @@ export async function* decodedFrames(
           // that was asked for, which is the shape a wrong answer takes here. `plan.crop` is in the
           // source's own pixels and `plan.geometry` is its size, so what comes out needs no
           // resizing on the way into the encoder.
+          //
+          // The catch is not optional: this runs inside the decoder's output callback, and
+          // WebCodecs drops whatever such a callback throws. `new VideoFrame` throws a TypeError
+          // for a rectangle the decoded frame cannot hold, and uncaught that is a frame silently
+          // missing from the clip of a job that says it finished.
           try {
             ready.push(codecs.cut(frame, plan.crop))
+          } catch (error) {
+            failed ??= cropFailure(frame, plan.crop, error)
           } finally {
             frame.close()
           }
@@ -279,6 +381,16 @@ export function liveCodecs(): Codecs {
     },
 
     chunk: (init) => new EncodedVideoChunk(init),
+
+    // A throw is a configuration the browser considers malformed rather than unsupported; either
+    // way it is not one to decode with, and the walk will find out the same from the decoder.
+    decoderSupported: async (config) => {
+      try {
+        return (await VideoDecoder.isConfigSupported(config)).supported === true
+      } catch {
+        return false
+      }
+    },
 
     normalize: async (frame) => {
       const visible = frame.visibleRect

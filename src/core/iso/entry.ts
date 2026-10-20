@@ -13,6 +13,19 @@ import type { TrackKind } from '../../shared/types'
 const VIDEO_ENTRY_FIELDS = 86
 const AUDIO_ENTRY_FIELDS = 36
 
+/**
+ * What versions 1 and 2 of a QuickTime sound entry add behind those 36 bytes.
+ *
+ * QuickTime numbers its sound entries in the two bytes ISO BMFF calls reserved, at offset 16 of
+ * the entry. Version 1 adds four counts of 32 bits; version 2 replaces the rate and the channel
+ * count with placeholders and states the real ones in 36 bytes of its own — a struct size, the
+ * rate as a float64, the channel count as 32 bits, then words of layout (QTFF, "Sound Sample
+ * Description (Version 2)"). Read at the fixed offset either way, the walk for child boxes lands
+ * inside those fields, finds no esds, and an AAC track is taken for one nothing can decode.
+ */
+const AUDIO_V1_EXTRA = 16
+const AUDIO_V2_EXTRA = 36
+
 export interface SampleEntry {
   /** avc1 | avc3 | hev1 | hvc1 | vp09 | av01 | mp4a | Opus — the four letters of the entry box. */
   format: string
@@ -135,26 +148,56 @@ function entryOf(init: Uint8Array, track: TrackParts): SampleEntry | null {
   const entry = boxesIn(init, from, stsd.start + stsd.size)[0]
   if (!entry) return null
 
-  const fields = track.kind === 'video' ? VIDEO_ENTRY_FIELDS : AUDIO_ENTRY_FIELDS
-  if (entry.size < fields) return null
+  const video = track.kind === 'video'
+  if (entry.size < (video ? VIDEO_ENTRY_FIELDS : AUDIO_ENTRY_FIELDS)) return null
 
   const view = new DataView(init.buffer, init.byteOffset + entry.start, entry.size)
+  // The version of the stsd and not of the entry: an stsd of version 1 holds ISO's own
+  // AudioSampleEntryV1, which states entry_version 1 in the same two bytes and adds nothing.
+  const sound = video ? null : soundFieldsOf(view, init[stsd.start + stsd.headerSize] === 0)
+  const fields = sound ? sound.fields : VIDEO_ENTRY_FIELDS
+  if (entry.size < fields) return null
+
   const children = new Map<string, Uint8Array>()
   for (const child of boxesIn(init, entry.start + fields, entry.start + entry.size)) {
     if (!children.has(child.type)) children.set(child.type, boxBody(init, child))
   }
 
-  const video = track.kind === 'video'
   return {
     format: entry.type,
     trackId: track.trackId,
     codedWidth: video ? view.getUint16(32) : 0,
     codedHeight: video ? view.getUint16(34) : 0,
-    channels: video ? 0 : view.getUint16(24),
-    // A sampling rate is a 16.16 fixed-point number of hertz; nothing in the wild states a
-    // fraction of one, and the integer half is what a decoder is configured with.
-    sampleRate: video ? 0 : view.getUint32(32) >>> 16,
+    channels: sound ? sound.channels : 0,
+    sampleRate: sound ? sound.sampleRate : 0,
     children,
     bytes: init.subarray(entry.start, entry.start + entry.size),
   }
+}
+
+/** The length of the fixed fields of a sound entry, and what they say, by its version. */
+function soundFieldsOf(
+  view: DataView,
+  quickTime: boolean,
+): { fields: number; channels: number; sampleRate: number } {
+  const version = quickTime ? view.getUint16(16) : 0
+  // A sampling rate is a 16.16 fixed-point number of hertz; nothing in the wild states a
+  // fraction of one, and the integer half is what a decoder is configured with.
+  const ordinary = { channels: view.getUint16(24), sampleRate: view.getUint32(32) >>> 16 }
+
+  if (version === 1) return { fields: AUDIO_ENTRY_FIELDS + AUDIO_V1_EXTRA, ...ordinary }
+  if (version === 2) {
+    const fields = AUDIO_ENTRY_FIELDS + AUDIO_V2_EXTRA
+    // Too short to hold what it promises: the placeholders are all there is, and they say
+    // nothing a decoder could be configured with.
+    if (view.byteLength < fields) return { fields, channels: 0, sampleRate: 0 }
+    return {
+      fields,
+      channels: view.getUint32(48),
+      sampleRate: Math.round(view.getFloat64(40)),
+    }
+  }
+
+  // Version 0, and anything QuickTime never defined: the ISO BMFF layout, which is version 0's.
+  return { fields: AUDIO_ENTRY_FIELDS, ...ordinary }
 }

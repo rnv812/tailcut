@@ -1,5 +1,5 @@
 import { assembleMp4 } from '../../core/export/assemble'
-import { planPreview } from '../../core/export/plan'
+import { originOf, planPreview } from '../../core/export/plan'
 import { audioDecoderConfig } from '../../core/codec/audio'
 import { decoderConfigOf } from '../../core/encode/decoder'
 import { audioSampleEntry, videoSampleEntry } from '../../core/iso/entry'
@@ -129,8 +129,16 @@ function previewOf(
   }
 }
 
+/**
+ * One append of the monitor program: where its bytes are in the snapshot, not the bytes.
+ *
+ * The program is replayed once per media element (`openConsumer`), for as long as the tab is
+ * open, and it used to hold the segments themselves — every picture part and the sound, the
+ * whole recording kept in this tab's memory beside the copy each SourceBuffer holds anyway. An
+ * address costs nothing to keep; the consumer reads each segment as it appends it and lets it go.
+ */
 interface MonitorSegment {
-  bytes: Uint8Array
+  at: Located
   timestampOffset: number
   window?: { start: number; end: number }
 }
@@ -158,6 +166,8 @@ function mimeOf(initBytes: Uint8Array): string | null {
   return codecs.length ? `${kind}/mp4; codecs="${codecs.join(',')}"` : null
 }
 
+const sameRange = (a: Located, b: Located): boolean => a.at === b.at && a.length === b.length
+
 const append = (buffer: SourceBuffer, bytes: Uint8Array): Promise<void> =>
   new Promise((resolve, reject) => {
     const done = (): void => {
@@ -175,18 +185,63 @@ const append = (buffer: SourceBuffer, bytes: Uint8Array): Promise<void> =>
     buffer.addEventListener('updateend', done, { once: true })
     buffer.addEventListener('error', failed, { once: true })
     try {
-      buffer.appendBuffer(bytes.slice().buffer as ArrayBuffer)
+      // The view itself: `appendBuffer` copies what it is handed into the media pipeline, and a
+      // `slice()` here was a second, transient copy of every segment on the way in.
+      buffer.appendBuffer(bytes as Uint8Array<ArrayBuffer>)
     } catch (cause) {
       cleanup()
       reject(cause)
     }
   })
 
-async function appendStream(source: MediaSource, stream: MonitorStream): Promise<void> {
+/**
+ * Reads the segments of a stream in order, one ahead of the append that is waiting on them.
+ *
+ * The read of the next segment overlaps the append of this one, so the element is not fed more
+ * slowly than when the bytes were held; and one read is in hand at a time, so it is not fed out of
+ * more memory than two segments either. An address asked twice in a row — the sound appends one
+ * segment once per stretch of it the monitor keeps — is read once.
+ */
+function segmentReader(
+  segments: readonly Located[],
+  read: (at: Located) => Promise<Uint8Array>,
+): (index: number) => Promise<Uint8Array> {
+  /** The read started ahead of time: the segment after the one last handed out. */
+  let ahead: { index: number; bytes: Promise<Uint8Array> } | null = null
+
+  return (index) => {
+    const bytes = ahead?.index === index ? ahead.bytes : read(segments[index]!)
+    const next = index + 1
+    ahead =
+      next < segments.length
+        ? {
+            index: next,
+            bytes: sameRange(segments[next]!, segments[index]!) ? bytes : read(segments[next]!),
+          }
+        : null
+    // The read-ahead may never be waited for — the element was released, an append failed —
+    // and its refusal is then nobody's business.
+    ahead?.bytes.catch(() => undefined)
+    return bytes
+  }
+}
+
+async function appendStream(
+  source: MediaSource,
+  stream: MonitorStream,
+  read: (at: Located) => Promise<Uint8Array>,
+  released: () => boolean,
+): Promise<void> {
   const first = stream.parts[0]
   if (!first) return
   const buffer = source.addSourceBuffer(first.mime)
   let mime = first.mime
+
+  const bytesOf = segmentReader(
+    stream.parts.flatMap((part) => part.segments.map((segment) => segment.at)),
+    read,
+  )
+  let index = 0
 
   for (const part of stream.parts) {
     if (part.mime !== mime) {
@@ -196,6 +251,10 @@ async function appendStream(source: MediaSource, stream: MonitorStream): Promise
     }
     await append(buffer, part.initBytes)
     for (const segment of part.segments) {
+      // An element that went away mid-feed: the rest of the recording is not read for nothing.
+      if (released()) return
+      const bytes = await bytesOf(index++)
+      if (bytes.byteLength !== segment.at.length) throw new Error('the snapshot came back short')
       if (segment.window) {
         buffer.appendWindowEnd = segment.window.end
         buffer.appendWindowStart = segment.window.start
@@ -203,13 +262,17 @@ async function appendStream(source: MediaSource, stream: MonitorStream): Promise
       if (buffer.timestampOffset !== segment.timestampOffset) {
         buffer.timestampOffset = segment.timestampOffset
       }
-      await append(buffer, segment.bytes)
+      await append(buffer, bytes)
     }
   }
 }
 
 /** One independently attachable replay of the captured SourceBuffer program. */
-function mediaConsumer(streams: MonitorStream[], duration: number): PreviewConsumer {
+function mediaConsumer(
+  streams: MonitorStream[],
+  duration: number,
+  read: (at: Located) => Promise<Uint8Array>,
+): PreviewConsumer {
   const source = new MediaSource()
   const url = URL.createObjectURL(source)
   let released = false
@@ -217,7 +280,9 @@ function mediaConsumer(streams: MonitorStream[], duration: number): PreviewConsu
   source.addEventListener(
     'sourceopen',
     () => {
-      void Promise.all(streams.map((stream) => appendStream(source, stream)))
+      void Promise.all(
+        streams.map((stream) => appendStream(source, stream, read, () => released)),
+      )
         .then(() => {
           if (released || source.readyState !== 'open') return
           if (Number.isFinite(duration) && duration > 0) source.duration = duration
@@ -333,9 +398,9 @@ function monitorAudioSegments(
       const previous = last?.[last.length - 1]
       const previousRaw = previous ? raw.get(sampleKey(previous)) : undefined
       const previousCorrection = previous && previousRaw ? previous.pts - previousRaw.pts : correction
-      const time = (sample.pts - clock.audio.editOffset) / clock.audio.timescale
+      const time = (sample.pts - originOf(clock.audio)) / clock.audio.timescale
       const previousTime = previous
-        ? (previous.pts - clock.audio.editOffset) / clock.audio.timescale
+        ? (previous.pts - originOf(clock.audio)) / clock.audio.timescale
         : time
       if (
         !last ||
@@ -350,18 +415,18 @@ function monitorAudioSegments(
     for (const group of groups) {
       const first = group[0]!
       const firstRaw = raw.get(sampleKey(first))!
-      const start = (first.pts - clock.audio.editOffset) / clock.audio.timescale
+      const start = (first.pts - originOf(clock.audio)) / clock.audio.timescale
       const end = Math.max(
         ...group.map(
           (sample) =>
-            (sample.pts + sample.duration - clock.audio.editOffset) / clock.audio.timescale,
+            (sample.pts + sample.duration - originOf(clock.audio)) / clock.audio.timescale,
         ),
       )
       const shift = clock.shiftAt(start)
       const window = { start: Math.max(0, start + shift), end: end + shift }
       if (!(window.end > window.start)) continue
       output.push({
-        bytes: segment.bytes,
+        at: segment.at,
         timestampOffset:
           (segment.timestampOffset ?? 0) +
           (first.pts - firstRaw.pts) / clock.audio.timescale +
@@ -429,7 +494,7 @@ async function compositeMonitorPreview(
         const segment = segments.get(chunk.source.at)
         return segment
           ? [{
-              bytes: segment.bytes,
+              at: segment.at,
               timestampOffset:
                 (chunk.timestampOffset ?? 0) + monitorShift(program, chunk.start),
               window: {
@@ -451,28 +516,35 @@ async function compositeMonitorPreview(
     0,
   )
 
-  if (material.audio?.span) {
-    const sound = await load(reader, material.audio, 'audio')
-    const mime = mimeOf(sound.initBytes)
-    if (!mime || !MediaSource.isTypeSupported(mime)) return null
-    const segments = monitorAudioSegments(program, frames, sound)
-    if (!segments) return null
-    streams.push({
-      parts: [{
-        mime,
-        initBytes: sound.initBytes,
-        segments,
-      }],
-    })
-    bytes += sound.initBytes.byteLength
-    for (const segment of sound.segments) bytes += segment.bytes.byteLength
+  // Sound the MediaSource cannot take — E-AC-3, AAC with no DecoderSpecificInfo, Vorbis in MP4 —
+  // is left out of the monitor rather than taking the monitor down with it: the export copies that
+  // sound untouched whatever this element can play, and a silent picture of every ABR part is a
+  // better preview than the one-representation fallback below. The init is read first and alone,
+  // so a sound that will not be played is not read whole for nothing.
+  const sound = material.audio?.span ? material.audio : null
+  const soundInit = sound ? await reader.bytesOf(sound.track.init) : null
+  const soundMime = soundInit ? mimeOf(soundInit) : null
+  if (sound && soundMime && MediaSource.isTypeSupported(soundMime)) {
+    const loaded = await load(reader, sound, 'audio')
+    const segments = monitorAudioSegments(program, frames, loaded)
+    if (segments) {
+      streams.push({
+        parts: [{
+          mime: soundMime,
+          initBytes: loaded.initBytes,
+          segments,
+        }],
+      })
+      bytes += loaded.initBytes.byteLength
+      for (const segment of loaded.segments) bytes += segment.bytes.byteLength
+    }
   }
 
   const last = frames.at(frames.count() - 1)!
   const duration = last.out + last.duration
   const consumers = new Set<PreviewConsumer>()
   const openConsumer = (): PreviewConsumer => {
-    const opened = mediaConsumer(streams, duration)
+    const opened = mediaConsumer(streams, duration, (at) => reader.bytesOf(at))
     const release = opened.release
     const tracked: PreviewConsumer = {
       url: opened.url,
@@ -485,7 +557,20 @@ async function compositeMonitorPreview(
     return tracked
   }
   const primary = openConsumer()
+  // The crop space and the probe geometry are the coded size of the selected picture's sample
+  // entry, which is what the encoder is fed (src/core/encode/plan.ts) and what the Blob preview
+  // reports too. The track header is a display size and may be anything: zero from a packager
+  // that leaves it unset — a 0×0 frame the probe asked about, and a clip blocked as "no encoder
+  // for that picture" — or an anamorphic width the samples are not coded in.
+  const selectedInit = material.video
+    ? loadedByTrack.get(material.video.track.id)?.initBytes
+    : undefined
+  const coded = selectedInit ? videoSampleEntry(selectedInit) : null
   const declared = material.video?.track.info.tracks.find((track) => track.kind === 'video')
+  const frameSize =
+    coded && coded.codedWidth > 0 && coded.codedHeight > 0
+      ? { width: coded.codedWidth, height: coded.codedHeight }
+      : { width: declared?.width ?? 0, height: declared?.height ?? 0 }
   const selectedFrames = pictureFrameSources.find(
     (source) => source.trackId === material.video?.track.id,
   )?.frames ?? []
@@ -507,7 +592,7 @@ async function compositeMonitorPreview(
   return {
     url: primary.url,
     bytes,
-    frameSize: { width: declared?.width ?? 0, height: declared?.height ?? 0 },
+    frameSize,
     frames,
     editFrames: FrameTable.of(selectedFrames),
     monitor: { pictures: monitorPictures },
@@ -551,7 +636,7 @@ export async function buildPreview(
   const declared = picture.track.info.tracks.find((track) => track.kind === 'video')
   if (!declared || !(declared.timescale > 0)) return null
 
-  const loaded: Loaded[] = [await load(reader, picture, 'video')]
+  let loaded: Loaded[] | null = [await load(reader, picture, 'video')]
   // A muxed init carries the sound in these very segments under a track number of its own:
   // reading them a second time would double the peak for nothing.
   if (!material.audio && picture.kinds.includes('audio')) {
@@ -559,6 +644,25 @@ export async function buildPreview(
   }
   if (material.audio?.span) loaded.push(await load(reader, material.audio, 'audio'))
 
+  const assembled = assembleLoaded(loaded, declared)
+  // Nothing from here on needs a segment. Let go of them before the Blob below copies the file,
+  // so that the recording, the assembled file and the Blob's copy of it are not all held at once.
+  loaded = null
+  if (!assembled) return null
+
+  return previewOf(assembled.file, assembled.frames, assembled.frameSize)
+}
+
+/**
+ * The fragmented material, assembled into one file with its frame table.
+ *
+ * A function of its own, and synchronous, so that everything it builds out of the segments on the
+ * way — the address map, the per-track inputs — is gone the moment it returns.
+ */
+function assembleLoaded(
+  loaded: readonly Loaded[],
+  declared: { trackId: number; timescale: number },
+): { file: Uint8Array; frames: Frame[]; frameSize: { width: number; height: number } } | null {
   const source = clipSourceOf(
     loaded.map(
       (one): SourceTrackInput => ({
@@ -606,5 +710,5 @@ export async function buildPreview(
       )
     : []
 
-  return previewOf(file, frames, { width: shown?.width ?? 0, height: shown?.height ?? 0 })
+  return { file, frames, frameSize: { width: shown?.width ?? 0, height: shown?.height ?? 0 } }
 }

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { codedSampleEntry } from '../../src/core/encode/entry'
+import { codedSampleEntry, encodedVp9SampleEntry } from '../../src/core/encode/entry'
+import { decoderConfigOf } from '../../src/core/encode/decoder'
 import { videoSampleEntry } from '../../src/core/iso/entry'
 import { boxBody, boxesIn, topLevelBoxes } from '../../src/core/iso/reader'
 
@@ -156,5 +157,49 @@ describe('codedSampleEntry', () => {
     expect(() => codedSampleEntry('hvc1', new Uint8Array(0), 320, 240, BT709)).toThrow()
     // The premise: the same call with a record in hand goes through.
     expect(() => codedSampleEntry('avc1', avcC, 320, 240, BT709)).not.toThrow()
+  })
+})
+
+describe('encodedVp9SampleEntry', () => {
+  it('describes VP9 by a vpcC built from the codec string and the colour the encoder reported', () => {
+    // What Chrome's libvpx hands back for a canvas frame: no description at all, a codec string,
+    // and the colour of the pixels it was given.
+    const smpte = { primaries: 'smpte170m', transfer: 'smpte170m', matrix: 'smpte170m', fullRange: false } as const
+    const entry = encodedVp9SampleEntry('vp09.00.40.08', 1440, 1080, smpte)
+
+    expect(String.fromCharCode(...entry.subarray(4, 8))).toBe('vp09')
+    expect(viewOf(entry).getUint32(0)).toBe(entry.byteLength)
+    expect([viewOf(entry).getUint16(32), viewOf(entry).getUint16(34)]).toEqual([1440, 1080])
+
+    const children = childrenOf(entry)
+    expect(children.map((box) => box.type)).toEqual(['vpcC', 'colr'])
+    const vpcC = boxBody(entry, children[0]!)
+    // version 1, flags 0; profile 0, level 4.0; 8 bits, 4:2:0 colocated, limited; BT.601 (6) ×3;
+    // and no initialisation data.
+    expect([...vpcC]).toEqual([1, 0, 0, 0, 0, 40, (8 << 4) | (1 << 1), 6, 6, 6, 0, 0])
+
+    // And this program's own reader reads it back as the same stream, which is what the next
+    // export of the file — and the preview of it — will configure a decoder with.
+    expect(decoderConfigOf(entry)).toEqual({
+      codec: 'vp09.00.40.08',
+      codedWidth: 1440,
+      codedHeight: 1080,
+      colorSpace: smpte,
+    })
+  })
+
+  it('says unspecified, rather than guessing, for colour the encoder did not report', () => {
+    const entry = encodedVp9SampleEntry('vp09.00.10.08', 128, 72)
+    const children = childrenOf(entry)
+    expect(children.map((box) => box.type)).toEqual(['vpcC'])
+    expect([...boxBody(entry, children[0]!)]).toEqual([1, 0, 0, 0, 0, 10, 0x82, 2, 2, 2, 0, 0])
+
+    const full = encodedVp9SampleEntry('vp09.00.10.08', 128, 72, { ...BT709, fullRange: true })
+    expect(boxBody(full, childrenOf(full)[0]!)[6]).toBe(0x83)
+  })
+
+  it('refuses a codec string it cannot turn into a vpcC', () => {
+    expect(() => encodedVp9SampleEntry('vp09.07.40.08', 320, 240)).toThrow(/vp09\.07\.40\.08/)
+    expect(() => encodedVp9SampleEntry('avc1.64001e', 320, 240)).toThrow()
   })
 })

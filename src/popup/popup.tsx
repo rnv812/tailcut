@@ -112,6 +112,19 @@ const EDIT_FAILED: Record<NonNullable<EditResult['reason']>, string> = {
   // that failed, because the video really was watched and there is nothing lost from the page.
   unread: 'Could not read the video file on this page, so there is nothing to edit.',
   storage: 'Could not write the snapshot: the browser refused the storage.',
+  // The freeze itself broke. What broke follows the sentence (see `editComplaintFor`).
+  failed: 'Could not open the editor.',
+}
+
+/** The sentence for a refused edit, with what broke after it when the bridge said. */
+function editComplaintFor(failure: EditResult): string {
+  return withDetail(EDIT_FAILED[failure.reason ?? 'gone'] ?? EDIT_FAILED.failed, failure.detail)
+}
+
+/** A sentence and what was said about it, as one: "Could not do this: because of that." */
+function withDetail(said: string, detail: string | undefined): string {
+  if (!detail) return said
+  return `${said.replace(/\.$/u, '')}: ${detail}${/[.!?]$/u.test(detail) ? '' : '.'}`
 }
 
 /**
@@ -158,6 +171,10 @@ const SAVE_FAILED: Record<SaveFailure, string> = {
   gone: 'This recording is no longer on the page.',
   empty: 'There is nothing recorded to save yet.',
   refused: 'Chrome would not save the file.',
+  // Not Chrome: the file could not be made to hand it — the material could not be read, or the
+  // writer broke. "Chrome would not save the file. Error: …" over it sent the user to the
+  // browser's settings for a fault of this program's.
+  failed: 'Could not write the file.',
 }
 
 /** A refusal that named no reason: an older bridge, or a tab that closed without answering. */
@@ -165,8 +182,8 @@ const SAVE_FAILED_UNKNOWN = 'Could not save this session.'
 
 /** The complaint for one refusal, with whatever Chrome said about it after the sentence. */
 function complaintFor(failure: SaveResult): string {
-  const said = failure.reason ? SAVE_FAILED[failure.reason] : SAVE_FAILED_UNKNOWN
-  return failure.detail ? `${said} ${failure.detail}` : said
+  const said = (failure.reason && SAVE_FAILED[failure.reason]) || SAVE_FAILED_UNKNOWN
+  return withDetail(said, failure.detail)
 }
 
 /** How long the undo of a deletion stays on screen. The sweeper waits longer than this. */
@@ -269,19 +286,23 @@ function LiveThumbnailPreview(props: { session: SessionSummary; testId: string }
 function LiveSessionRow({ session }: { session: SessionSummary }) {
   const [busy, setBusy] = useState<'save' | 'edit' | null>(null)
   const [failure, setFailure] = useState<string | null>(null)
+  const [savedNote, setSavedNote] = useState<string | null>(null)
   const omitted = session.omits ? OMITTED[session.omits] : undefined
 
   const save = async (): Promise<void> => {
     setBusy('save')
     setFailure(null)
+    setSavedNote(null)
     const result = await saveAll(session.key)
     setBusy(null)
     if (!result.ok) setFailure(complaintFor(result))
+    else setSavedNote(result.note ?? null)
   }
 
   const edit = async (): Promise<void> => {
     setBusy('edit')
     setFailure(null)
+    setSavedNote(null)
     const result = await editSession(session.key)
     if (result.ok && result.snapshotId) {
       await openEditor(result.snapshotId)
@@ -289,7 +310,7 @@ function LiveSessionRow({ session }: { session: SessionSummary }) {
       return
     }
     setBusy(null)
-    setFailure(EDIT_FAILED[result.reason ?? 'gone'])
+    setFailure(editComplaintFor(result))
   }
 
   return (
@@ -328,6 +349,9 @@ function LiveSessionRow({ session }: { session: SessionSummary }) {
       </div>
       {omitted && <div class="session-note">{omitted}</div>}
       {failure && <div class="failed session-failure" role="alert">{failure}</div>}
+      {savedNote && (
+        <div class="session-note" data-testid="session-save-note" role="status">{savedNote}</div>
+      )}
     </div>
   )
 }
@@ -552,8 +576,11 @@ function Popup() {
   // The refusal of the last save, whole: the popup owes the user the reason and not only the
   // fact. null — nothing has been refused since the last time the complaint was cleared.
   const [failure, setFailure] = useState<SaveResult | null>(null)
+  // What the last save had to say about a file it did save: codecs Premiere cannot import, kept
+  // because this browser could not convert them. null — nothing to say.
+  const [savedNote, setSavedNote] = useState<string | null>(null)
   const [editing, setEditing] = useState(false)
-  const [editFailed, setEditFailed] = useState<NonNullable<EditResult['reason']> | null>(null)
+  const [editFailed, setEditFailed] = useState<EditResult | null>(null)
   /** What is on disk. Not a session of this tab and not asked of it: the index answers. */
   const [rows, setRows] = useState<HistoryRow[]>([])
   const [inUse, setInUse] = useState({ bytes: 0, full: false })
@@ -726,9 +753,11 @@ function Popup() {
   const save = async () => {
     setSaving(true)
     setFailure(null)
+    setSavedNote(null)
     const result = await saveAll(current.key)
     setSaving(false)
     setFailure(result.ok ? null : result)
+    setSavedNote(result.ok ? result.note ?? null : null)
   }
 
   const edit = async () => {
@@ -743,7 +772,7 @@ function Popup() {
       return
     }
     setEditing(false)
-    setEditFailed(result.reason ?? 'gone')
+    setEditFailed(result)
   }
 
   return (
@@ -812,12 +841,17 @@ function Popup() {
         </div>
         {editFailed && (
           <div class="failed" data-testid="edit-error" role="alert">
-            {EDIT_FAILED[editFailed]}
+            {editComplaintFor(editFailed)}
           </div>
         )}
         {failure && (
           <div class="failed" data-testid="error" role="alert">
             {complaintFor(failure)}
+          </div>
+        )}
+        {savedNote && (
+          <div class="omits" data-testid="save-note" role="status">
+            {savedNote}
           </div>
         )}
       </div>

@@ -108,7 +108,7 @@ function fakeIo(overrides: Partial<TestIo> = {}): TestIo {
 describe('export preparation', () => {
   it.each(['copy', 'encode'] as const)('saves the prepared %s bytes and reports their size', async (kind) => {
     const prepared = new Uint8Array([1, 2, 3, 4])
-    const prepare = vi.fn(async () => prepared)
+    const prepare = vi.fn(async () => ({ file: prepared }))
     const io = fakeIo({ prepare, encode: async () => new Uint8Array([8]) })
     const runner = createRunner(io)
     const path: ClipPath = kind === 'copy'
@@ -122,18 +122,42 @@ describe('export preparation', () => {
   })
 
   it('can cancel while compatibility conversion is running', async () => {
-    let release!: (file: Uint8Array) => void
-    const prepare = vi.fn(() => new Promise<Uint8Array>((resolve) => { release = resolve }))
+    let release!: (prepared: { file: Uint8Array }) => void
+    const prepare = vi.fn(() => new Promise<{ file: Uint8Array }>((resolve) => { release = resolve }))
     const io = fakeIo({ prepare })
     const runner = createRunner(io)
     runner.enqueue([request('c1', planFor(0, 1))])
     await turn()
     expect(prepare).toHaveBeenCalledOnce()
     runner.cancel(runner.queue().jobs[0]!.id)
-    release(new Uint8Array([1]))
+    release({ file: new Uint8Array([1]) })
     await runner.settled()
     expect(io.saved).toEqual([])
     expect(runner.queue().jobs[0]!.state).toBe('cancelled')
+  })
+
+  it.each(['copy', 'encode'] as const)('puts what preparation said about the %s file on its row', async (kind) => {
+    // A conversion this browser cannot do keeps the original codecs. The file is saved all the
+    // same, and the row is the one place left to say it will not open in Premiere.
+    const note = 'Saved with the original VP9/Opus — Premiere cannot import it: this browser has no H.264 encoder.'
+    const io = fakeIo({
+      prepare: async (file) => ({ file, note }),
+      encode: async () => new Uint8Array([8]),
+    })
+    const runner = createRunner(io)
+    runner.enqueue([pathRequest('c1', kind === 'copy' ? { kind, plan: planFor(0, 1) } : encodePath())])
+    await runner.settled()
+    expect(io.saved).toHaveLength(1)
+    expect(runner.queue().jobs[0]).toMatchObject({ state: 'done', note })
+  })
+
+  it('leaves no note on a row whose file came out as asked', async () => {
+    const io = fakeIo({ prepare: async (file) => ({ file }) })
+    const runner = createRunner(io)
+    runner.enqueue([request('c1', planFor(0, 1))])
+    await runner.settled()
+    expect(runner.queue().jobs[0]!.state).toBe('done')
+    expect(runner.queue().jobs[0]!.note).toBeUndefined()
   })
 
   it('reports conversion failure without saving an incompatible file', async () => {
@@ -848,5 +872,160 @@ describe('the export runner', () => {
 
     releaseSecond()
     await runner.settled()
+  })
+})
+
+describe('heavy codec work, one job at a time', () => {
+  it('runs a copy whose picture is to be converted in the lane of the encoder', async () => {
+    // A copy of VP9 into an mp4 is a whole decode and H.264 encode of the clip in `prepare`. In
+    // the copy lane three of them would run at once beside the encode lane's own encoder: four
+    // encoders, four decoders and the clip several times over in memory. A copy that converts
+    // is an encode in all but name, and it waits its turn like one.
+    const releases: Array<() => void> = []
+    const prepare = vi.fn((file: Uint8Array) =>
+      new Promise<{ file: Uint8Array }>((resolve) => releases.push(() => resolve({ file }))))
+    const io = fakeIo({
+      prepare,
+      converts: (asked) => asked.clipId !== 'plain',
+    })
+    const runner = createRunner(io)
+
+    runner.enqueue([
+      request('vp9-a', planFor(0, 1)),
+      request('vp9-b', planFor(1, 2)),
+      request('plain', planFor(2, 3)),
+    ])
+    await turn()
+
+    expect(runner.queue().jobs.map((job) => [job.kind, job.state])).toEqual([
+      ['encode', 'running'],
+      ['encode', 'queued'],
+      ['copy', 'running'],
+    ])
+
+    while (releases.length) {
+      releases.shift()!()
+      await turn()
+    }
+    await runner.settled()
+    expect(runner.queue().jobs.map((job) => job.state)).toEqual(['done', 'done', 'done'])
+  })
+
+  it('keeps a pure copy at three at a time', async () => {
+    const releases: Array<() => void> = []
+    const io = fakeIo({
+      prepare: (file) => new Promise((resolve) => releases.push(() => resolve({ file }))),
+      converts: () => false,
+    })
+    const runner = createRunner(io)
+
+    runner.enqueue([0, 1, 2, 3].map((at) => request(`c${at}`, planFor(at, at + 1))))
+    await turn()
+
+    expect(runner.queue().jobs.map((job) => job.state)).toEqual(['running', 'running', 'running', 'queued'])
+    while (releases.length) {
+      releases.shift()!()
+      await turn()
+    }
+    await runner.settled()
+  })
+
+  it('holds the encoder for a cancelled encode until its run has let go', async () => {
+    // Cancel rebuilds the row at once, and the row stops counting as running — while the run
+    // behind it is still closing its decoder and encoder. Starting the next encode there puts two
+    // codec pipelines on one machine, which is the very thing the lane of one exists to prevent.
+    let releaseFirst!: () => void
+    const firstParked = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    const started: string[] = []
+    const io = fakeIo({
+      encode: async (asked) => {
+        started.push(asked.clipId)
+        if (asked.clipId === 'first') {
+          await firstParked
+          return null
+        }
+        return new Uint8Array([1])
+      },
+    })
+    const runner = createRunner(io)
+
+    runner.enqueue([pathRequest('first', encodePath()), pathRequest('second', encodePath(3, 4))])
+    await turn()
+    expect(started).toEqual(['first'])
+
+    runner.cancel(runner.queue().jobs[0]!.id)
+    // Anything that sets the queue going again — here a copy asked for meanwhile, as easily the
+    // end of another job — looks for room while the cancelled run is still in flight.
+    runner.enqueue([request('copy', planFor(0, 1))])
+    await turn()
+    expect(started, 'the next encode started beside one still winding down').toEqual(['first'])
+    expect(runner.queue().jobs[1]!.state).toBe('queued')
+
+    releaseFirst()
+    await runner.settled()
+    expect(started).toEqual(['first', 'second'])
+    expect(runner.queue().jobs.map((job) => job.state)).toEqual(['cancelled', 'done', 'done'])
+  })
+
+  it('holds the encoder for a cancelled conversion until it has let go', async () => {
+    let releaseFirst!: () => void
+    const prepared: string[] = []
+    const io = fakeIo({
+      converts: (asked) => asked.clipId !== 'plain',
+      prepare: (file, fileName) => {
+        prepared.push(fileName)
+        if (fileName !== 'first.mp4') return Promise.resolve({ file })
+        return new Promise((resolve) => {
+          releaseFirst = () => resolve(null)
+        })
+      },
+    })
+    const runner = createRunner(io)
+
+    runner.enqueue([request('first', planFor(0, 1)), request('second', planFor(1, 2))])
+    await turn()
+    expect(prepared).toEqual(['first.mp4'])
+
+    runner.cancel(runner.queue().jobs[0]!.id)
+    runner.enqueue([request('plain', planFor(2, 3))])
+    await turn()
+    expect(prepared).toEqual(['first.mp4', 'plain.mp4'])
+
+    releaseFirst()
+    await runner.settled()
+    expect(prepared).toEqual(['first.mp4', 'plain.mp4', 'second.mp4'])
+  })
+
+  it('still starts a retry of a cancelled encode once its old run is over', async () => {
+    let releaseFirst!: () => void
+    let calls = 0
+    const io = fakeIo({
+      encode: async () => {
+        calls += 1
+        if (calls === 1) {
+          await new Promise<void>((resolve) => {
+            releaseFirst = resolve
+          })
+          return null
+        }
+        return new Uint8Array([1])
+      },
+    })
+    const runner = createRunner(io)
+
+    runner.enqueue([pathRequest('one', encodePath())])
+    await turn()
+    const id = runner.queue().jobs[0]!.id
+    runner.cancel(id)
+    runner.retry(id)
+    await turn()
+    expect(calls).toBe(1)
+
+    releaseFirst()
+    await runner.settled()
+    expect(calls).toBe(2)
+    expect(runner.queue().jobs[0]!.state).toBe('done')
   })
 })

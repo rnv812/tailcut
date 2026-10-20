@@ -1,16 +1,16 @@
-import { useEffect, useMemo, useState } from 'preact/hooks'
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { forcesEncoder, type Clip } from '../core/edit/clip'
 import { newProject } from '../core/edit/project'
 import { newSession, type SessionAction } from '../core/edit/session'
 import { canRedo, canUndo } from '../core/edit/history'
-import { chooseCodec, type Choice } from '../core/encode/codec'
+import { chooseCodec } from '../core/encode/codec'
 import { geometryOf } from '../core/encode/crop'
 import { estimateFor } from '../core/encode/estimate'
 import { EMPTY_PACE, notePace, type PaceBook } from '../core/encode/pace'
 import { pathFor, startsAtCopyBoundary } from '../core/encode/path'
 import { planFrames } from '../core/encode/plan'
-import { EMPTY_QUEUE, type Queue } from '../core/export/queue'
-import { createRunner } from '../core/export/run'
+import type { Queue } from '../core/export/queue'
+import { createRunner, type ExportIo, type ExportRunner } from '../core/export/run'
 import type { ClipSource } from '../core/export/plan'
 import { STILL, shuttleAdvance, shuttleLabel, type ShuttleState, shuttled } from '../core/edit/shuttle'
 import { selectPicture, type Material, type MaterialTrack } from '../core/snapshot/material'
@@ -31,6 +31,7 @@ import {
   requestsFor,
 } from './export/exporter'
 import { liveCodecs } from './export/frames'
+import { createProbeQueue, type ProbeQueue } from './export/probe-queue'
 import { cachedProbe, liveProbe } from './export/support'
 import { liveSurface, probeWebpBytes } from './export/webp'
 import { ClipBin, Clips } from './inspector/clips'
@@ -62,14 +63,14 @@ interface OpenWorkbenchProps extends WorkbenchProps {
   pictures: MaterialTrack[]
   selectedPicture: string
   onPicture: (trackId: string) => void
+  /** The editing session's one runner: it outlives every remount below (see `Workbench`). */
+  runner: ExportRunner
+  /** The editing session's one queue of codec questions, for the same reason. */
+  probes: ProbeQueue
+  /** The export index of the open picture, or null while it is being read. */
+  source: ClipSource | null
+  pace: PaceBook
 }
-
-interface ChoiceBook {
-  profile: string
-  answers: ReadonlyMap<string, Choice>
-}
-
-const NO_CHOICES: ReadonlyMap<string, Choice> = new Map()
 const INTERNAL_CODEC = 'auto' as const
 const INTERNAL_QUALITY = 'high' as const
 
@@ -149,12 +150,42 @@ function pictureName(track: MaterialTrack): string {
 }
 
 /**
- * Owns which one of the snapshot's picture representations is open.
+ * An io that is the latest one handed to `current` at every call, and the same object throughout.
+ *
+ * The runner keeps the io it was built with for its whole life, and that is what used to tie the
+ * life of the runner to the save settings: changing "ask where to save" built a new io, so a new
+ * runner, and the old one went on encoding where no row could show it or cancel it, then saved by
+ * the setting it had started under. Forwarding each member at the moment the runner touches it
+ * lets the settings change under one runner instead — a file is saved by the setting in force when
+ * it is saved — and forwarding by name rather than by a list keeps whatever members `ExportIo`
+ * grows without this having to know about them.
+ */
+function forwardingIo(current: () => ExportIo): ExportIo {
+  return new Proxy({} as ExportIo, {
+    get(_, name) {
+      const io = current()
+      const member = Reflect.get(io, name) as unknown
+      return typeof member === 'function' ? member.bind(io) : member
+    },
+    has: (_, name) => Reflect.has(current(), name),
+  })
+}
+
+/**
+ * Owns which one of the snapshot's picture representations is open, and what outlives it.
  *
  * A representation switch deliberately remounts the workbench below. Its frame grid, crop
  * geometry and export source are one indivisible context, and carrying an edit made against one
  * into another would make its times and pixels mean something else. The choice remains useful:
  * either side can be cut and exported, one editing session at a time.
+ *
+ * What is *not* remounted with it lives here: the export runner, the codec questions, the pace
+ * this machine has shown and the export index. A file being written belongs to the tab, not to
+ * the edit it was cut from — the queue is outside the history for exactly that reason — and a
+ * remount used to drop its row while the encode went on, uncancellable, holding a decoder and an
+ * encoder. The codec answers are about this machine and a picture size, which no remount changes.
+ * And the export index is the whole recording read and parsed: the `building` → `ready` remount
+ * used to read it a second time, the first time while `buildPreview` held the same bytes.
  */
 export function Workbench({ reader, material, preview, options, sourceTabId }: WorkbenchProps) {
   const initialPicture = material.video?.track.id ?? ''
@@ -212,6 +243,67 @@ export function Workbench({ reader, material, preview, options, sourceTabId }: W
   const previewPhase =
     shown === 'building' || shown === 'failed' || shown === null ? (shown ?? 'none') : 'ready'
 
+  /** How fast this machine has actually encoded. Empty until the first completed encode. */
+  const [pace, setPace] = useState<PaceBook>(EMPTY_PACE)
+
+  // The save settings are read by the io at the moment it saves; the runner never sees them change.
+  const io = useMemo(
+    () =>
+      // A surface factory, not a surface: an MP4 copy or encode never constructs a canvas.
+      encodeIo(reader, liveCodecs(), liveSurface, {
+        askWhere: options.askWhere,
+        onSaved: options.onSaved,
+        onPace: (kind, geometry, frames, ms) =>
+          setPace((book) => notePace(book, kind, geometry, frames, ms)),
+      }),
+    [reader, options.askWhere, options.onSaved],
+  )
+  const currentIo = useRef(io)
+  currentIo.current = io
+  const runner = useMemo(() => createRunner(forwardingIo(() => currentIo.current)), [reader])
+
+  // The tab is going away, or the recording under it is: nothing written from now on has anywhere
+  // to be shown, so nothing goes on being written.
+  useEffect(
+    () => () => {
+      for (const job of runner.queue().jobs) {
+        if (job.state === 'queued' || job.state === 'running') runner.cancel(job.id)
+      }
+    },
+    [runner],
+  )
+
+  // One cache of browser answers and one queue of questions for the life of the tab.
+  const codecProbe = useMemo(() => cachedProbe(liveProbe()), [])
+  const probes = useMemo(
+    () =>
+      createProbeQueue((geometry) =>
+        chooseCodec(geometry, codecProbe, { codec: INTERNAL_CODEC, quality: INTERNAL_QUALITY }),
+      ),
+    [codecProbe],
+  )
+  useEffect(() => () => probes.dispose(), [probes])
+
+  // The export index, once per picture and only after its preview has been built: assembling the
+  // preview reads the whole of the material too, and reading it here at the same moment put the
+  // recording into memory three times over. Nothing can be cut before the frame grid exists, so
+  // the wait costs nothing that could be seen.
+  const [indexed, setIndexed] = useState<{ material: Material; source: ClipSource | null } | null>(
+    null,
+  )
+  const indexing = shown !== 'building'
+  useEffect(() => {
+    if (!indexing) return
+    let alive = true
+    void openClipSource(reader, selectedMaterial).then((source) => {
+      if (alive) setIndexed({ material: selectedMaterial, source })
+    })
+    return () => {
+      alive = false
+    }
+  }, [reader, selectedMaterial, indexing])
+  const source = indexed?.material === selectedMaterial ? indexed.source : null
+
   return (
     <OpenWorkbench
       // A built preview changes the frame grid and therefore creates a new store below. Remount
@@ -226,6 +318,10 @@ export function Workbench({ reader, material, preview, options, sourceTabId }: W
       selectedPicture={selectedPicture}
       onPicture={setSelectedPicture}
       sourceTabId={sourceTabId}
+      runner={runner}
+      probes={probes}
+      source={source}
+      pace={pace}
     />
   )
 }
@@ -247,6 +343,10 @@ function OpenWorkbench({
   selectedPicture,
   onPicture,
   sourceTabId,
+  runner,
+  probes,
+  source,
+  pace,
 }: OpenWorkbenchProps) {
   const built = preview === 'building' || preview === 'failed' ? null : preview
   const derived = useMemo(
@@ -275,21 +375,14 @@ function OpenWorkbench({
 
   // The queue is outside the project and outside the history on purpose: a file handed to the
   // browser cannot be taken back, so Ctrl+Z has no business touching this.
-  const [queue, setQueue] = useState<Queue>(EMPTY_QUEUE)
-  const [source, setSource] = useState<ClipSource | null>(null)
-  const codec = INTERNAL_CODEC
-  const quality = INTERNAL_QUALITY
-  const choiceProfile = `${codec}:${quality}`
-  /** The ladder's answer per geometry. Filled by the probe effect below; read here. */
-  const [choiceBook, setChoiceBook] = useState<ChoiceBook>({
-    profile: choiceProfile,
-    answers: NO_CHOICES,
-  })
-  // An answer belongs to both its geometry and the settings that chose the ladder. Until the
-  // current profile has answered, exporting waits instead of reusing another codec or quality.
-  const choices = choiceBook.profile === choiceProfile ? choiceBook.answers : NO_CHOICES
-  /** How fast this machine has actually encoded. Empty until the first completed encode. */
-  const [pace, setPace] = useState<PaceBook>(EMPTY_PACE)
+  // The runner is the session's, so a remount picks up the rows it already has.
+  const [queue, setQueue] = useState<Queue>(() => runner.queue())
+  /**
+   * The ladder's answer per geometry, as the session's queue holds them. The ladder is chosen once
+   * per tab (`INTERNAL_CODEC`, `INTERNAL_QUALITY`); a ladder that could change would be a new
+   * queue, and so a map with none of the old answers in it.
+   */
+  const [choices, setChoices] = useState(() => probes.answers())
   /**
    * `probeKey → bytes` a WebP animation of that clip would weigh, measured on three real frames.
    *
@@ -298,31 +391,15 @@ function OpenWorkbench({
   const [probed, setProbed] = useState<ReadonlyMap<string, number>>(new Map())
 
   const rewriteHead = false
-  const runner = useMemo(
-    () =>
-      createRunner(
-        // A surface factory, not a surface: an MP4 copy or encode never constructs a canvas.
-        encodeIo(reader, liveCodecs(), liveSurface, {
-          askWhere: options.askWhere,
-          onSaved: options.onSaved,
-          onPace: (kind, geometry, frames, ms) =>
-            setPace((book) => notePace(book, kind, geometry, frames, ms)),
-        }),
-      ),
-    [reader, options.askWhere, options.onSaved],
-  )
 
-  useEffect(() => runner.subscribe(setQueue), [runner])
-
+  // Read again once listening: the runner is older than this mount, and a row it moved between
+  // the render above and this effect — a Cancel pressed on the frame the remount painted — would
+  // otherwise stay on the screen as it was.
   useEffect(() => {
-    let alive = true
-    void openClipSource(reader, material).then((opened) => {
-      if (alive) setSource(opened)
-    })
-    return () => {
-      alive = false
-    }
-  }, [reader, material])
+    const off = runner.subscribe(setQueue)
+    setQueue(runner.queue())
+    return off
+  }, [runner])
 
   const selected = doc.clips.find((clip) => clip.id === ui.selectedClipId)
   const exportClips = useMemo(() => doc.clips.map(automaticClip), [doc.clips])
@@ -365,32 +442,18 @@ function OpenWorkbench({
       ),
   )
 
-  // One cache for the life of the tab. A crop drag changes `wanted` every frame; putting this
-  // inside the effect below would ask the browser the same still-pending question every frame.
-  const codecProbe = useMemo(() => cachedProbe(liveProbe()), [])
-
+  // Every geometry is handed over every time the document changes, and the queue decides what is
+  // asked and when: only a set that has stopped changing, one ladder at a time, and never a
+  // rectangle nobody holds any more (src/editor/export/probe-queue.ts). Asked from here, one
+  // ladder per new key, a burst of edits put an OpenH264 encoder in flight for every rectangle
+  // it passed through.
   useEffect(() => {
-    let live = true
-
-    void Promise.all(
-      [...wanted].map(async ([key, geometry]) => {
-        if (choices.has(key)) return
-        const choice = await chooseCodec(geometry, codecProbe, { codec, quality })
-        if (live) {
-          setChoiceBook((known) => {
-            const answers = known.profile === choiceProfile ? known.answers : NO_CHOICES
-            return answers.has(key)
-              ? known
-              : { profile: choiceProfile, answers: new Map(answers).set(key, choice) }
-          })
-        }
-      }),
-    )
-
-    return () => {
-      live = false
-    }
-  }, [wanted, codecProbe, codec, quality, choiceProfile, choices])
+    const off = probes.subscribe(setChoices)
+    // The same catch-up as the queue's above: an answer may have landed before this mount listened.
+    setChoices(probes.answers())
+    return off
+  }, [probes])
+  useEffect(() => probes.want(wanted), [probes, wanted])
 
   const estimate = useMemo(() => {
     if (!selectedForExport || !source) return null

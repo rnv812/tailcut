@@ -75,6 +75,29 @@ describe('the export queue', () => {
     expect(startable(one).map((job) => job.id)).toEqual(['j4'])
   })
 
+  it('counts a cancelled encode whose run is still winding down as holding the encoder', () => {
+    const queue = play([
+      { type: 'enqueue', jobs: encodes },
+      { type: 'start', id: 'e1', now: 1 },
+      { type: 'cancel', id: 'e1' },
+    ])
+
+    expect(startable(queue).map((job) => job.id)).toEqual(['e2'])
+    expect(startable(queue, new Set(['e1']))).toEqual([])
+  })
+
+  it('does not start a retried job while its old run is still in flight', () => {
+    const queue = play([
+      { type: 'enqueue', jobs: three },
+      { type: 'start', id: 'j1', now: 1 },
+      { type: 'cancel', id: 'j1' },
+      { type: 'retry', id: 'j1' },
+    ])
+
+    // Its old run takes one of the three places, and the job itself waits for it to end.
+    expect(startable(queue, new Set(['j1'])).map((job) => job.id)).toEqual(['j2', 'j3'])
+  })
+
   it('fills the copy and encode lanes independently', () => {
     const queue = play([{ type: 'enqueue', jobs: [...three, ...encodes] }])
 

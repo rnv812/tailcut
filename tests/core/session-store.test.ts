@@ -531,7 +531,12 @@ describe('SessionStore: what ends up in a session', () => {
     store.append({ ...muxedPage, bytes: moof(1, 500, 3, 100) })
 
     expect(only(store.list()[0]!).map.runs()).toEqual([
-      { start: 0.5, end: 0.8, chunks: [{ start: 0.5, end: 0.8, bytes: expect.any(Uint8Array) }] },
+      {
+        start: 0.5,
+        end: 0.8,
+        // A fragment of a muxed buffer carries the track it is about: see the separate-moof test.
+        chunks: [{ start: 0.5, end: 0.8, bytes: expect.any(Uint8Array), trackId: 1 }],
+      },
     ])
   })
 
@@ -1165,7 +1170,7 @@ describe('SessionStore: choosing the track for a fragment', () => {
     store.append({ ...muxedPage, bytes: moof(2, 16_000, 2, 4_000) })
 
     expect(only(store.list()[0]!).map.runs()).toEqual([
-      { start: 2, end: 3, chunks: [{ start: 2, end: 3, bytes: expect.any(Uint8Array) }] },
+      { start: 2, end: 3, chunks: [{ start: 2, end: 3, bytes: expect.any(Uint8Array), trackId: 2 }] },
     ])
   })
 
@@ -2252,6 +2257,47 @@ describe('selectMaterial', () => {
     // The gap between the init of the second buffer and its first segment lasts moments, and a
     // clip made in one of them would be a silent film. Better nothing than that.
     expect(chosen(store)).toEqual([])
+  })
+
+  it('keeps both fragments of a muxed buffer that start on the same instant, one per track', () => {
+    // A muxed stream with a moof of its own per track (ffmpeg's separate_moof, Bento4): one init
+    // of two traks, then a segment of picture and a segment of sound, both starting at zero. One
+    // buffer, one map, and "the same start is the same piece" read the sound as a second copy of
+    // the picture — the first two seconds of picture were dropped and Save all wrote four.
+    // The same appends again are still a re-watch: each copy goes on the map once.
+    const load = (name: string) => new Uint8Array(readFileSync(`tests/fixtures/muxed-separate/${name}`))
+    const segments = [1, 2, 3, 4, 5, 6].map((n) => load(`chunk-stream0-0000${n}.m4s`))
+    const store = new SessionStore()
+    store.append({ ...videoBuffer, bytes: load('init-stream0.m4s') })
+    for (const bytes of segments) store.append({ ...videoBuffer, bytes })
+    for (const bytes of segments.slice(0, 2)) store.append({ ...videoBuffer, bytes: bytes.slice() })
+
+    const [material] = selectMaterial(store.list()[0]!)
+    expect(material!.segments).toHaveLength(6)
+    for (const segment of segments) {
+      expect(material!.segments.filter((kept) => sameBytes(kept, segment))).toHaveLength(1)
+    }
+  })
+
+  it('saves the picture alone once a kind that never got a fragment is plainly not coming', () => {
+    // A page that opens a SourceBuffer for sound and never feeds it: a muted preview, a player
+    // that settled on a muxed rendition, an ad slot. The rule above was meant for the moments
+    // between an init and its first segment; held to forever, it gave Save all an empty file for
+    // a minute of picture, and the editor — which ignores a track that holds nothing — opened the
+    // same session without a word. Past a grace measured in material, the empty kind is left out.
+    const store = new SessionStore()
+    const minuteVideo = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(
+      (n) => new Uint8Array(readFileSync(`tests/fixtures/minute/chunk-stream0-${String(n).padStart(5, '0')}.m4s`)),
+    )
+    store.append({ ...videoBuffer, bytes: aheadVideoInit })
+    store.append({ ...audioBuffer, bytes: aheadAudioInit })
+    for (const bytes of minuteVideo) store.append({ ...videoBuffer, bytes })
+
+    const material = selectMaterial(store.list()[0]!)
+    expect(material).toHaveLength(1)
+    expect(sameBytes(material[0]!.initBytes, aheadVideoInit)).toBe(true)
+    expect(material[0]!.segments).toHaveLength(10)
+    expect(summarize(store.list()[0]!).duration).toBeCloseTo(60, 0)
   })
 
   it('has nothing to give from a session made of init segments alone', () => {

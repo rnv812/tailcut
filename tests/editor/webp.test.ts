@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { FramePlan, FrameToKeep } from '../../src/core/encode/plan'
 import { chunksOf } from '../../src/core/webp/riff'
-import { frameDurations, keptForRate, WEBP_QUALITY } from '../../src/core/webp/timing'
+import { frameDurations, keptForRate, WEBP_MAX_BYTES, WEBP_QUALITY } from '../../src/core/webp/timing'
 import {
   encodeWebp,
   probeWebpBytes,
@@ -310,6 +310,49 @@ describe('encodeWebp', () => {
     ).rejects.toThrow('canvas failed')
     expect(surface.drawn).toHaveLength(2)
     expect(fakes.produced.every((frame) => frame.closed === 1)).toBe(true)
+  })
+})
+
+describe('encodeWebp under the size ceiling', () => {
+  // Every fake still is 600 bytes and lays 130 into the animation (see the probe test above):
+  // 300 frames at ten a second are 44 + 300 × 130 = 39 044 bytes of file.
+  const whole = 44 + 300 * 130
+
+  it('uses the ceiling of the program unless told otherwise', () => {
+    // A gigabyte: the stills and the file assembled from them are both in memory at the end, and
+    // twice that is as much as a tab can be asked for; the format itself stops at four.
+    expect(WEBP_MAX_BYTES).toBe(1024 ** 3)
+  })
+
+  it('refuses a hopeless animation after its first frames, with what to change', async () => {
+    const fakes = fakeCodecs()
+    const surface = fakeSurface()
+
+    await expect(
+      encodeWebp(planOf(300, 10), sourceOf(), fakes.codecs, surface, () => undefined, undefined, 10_000),
+    ).rejects.toThrow(/about 38 KB.*Lower the longest side or the frames per second/)
+    // Thirty frames to measure on, not three hundred to find out.
+    expect(surface.stillCalls).toBe(30)
+    expect(fakes.produced.every((frame) => frame.closed === 1)).toBe(true)
+  })
+
+  it('stops the moment the file passes the ceiling, when the start promised less', async () => {
+    const fakes = fakeCodecs()
+    const surface = fakeSurface()
+
+    await expect(
+      encodeWebp(planOf(300, 10), sourceOf(), fakes.codecs, surface, () => undefined, undefined, 30_000),
+    ).rejects.toThrow(/more than 29 KB.*Lower the longest side or the frames per second/)
+    // 44 + 231 × 130 = 30 074 is the first total past 30 000.
+    expect(surface.stillCalls).toBe(231)
+    expect(fakes.produced.every((frame) => frame.closed === 1)).toBe(true)
+  })
+
+  it('writes an animation that comes out exactly at the ceiling', async () => {
+    const bytes = await encodeWebp(
+      planOf(300, 10), sourceOf(), fakeCodecs().codecs, fakeSurface(), () => undefined, undefined, whole,
+    )
+    expect(bytes?.byteLength).toBe(whole)
   })
 })
 

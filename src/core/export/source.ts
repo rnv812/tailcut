@@ -1,8 +1,9 @@
 import { audioSampleEntry, sampleEntryBytes, sampleEntryOf, videoSampleEntry } from '../iso/entry'
 import { keyframeClassifier } from '../codec/keyframe'
 import { parseInit } from '../iso/init'
+import { childBoxes, topLevelBoxes } from '../iso/reader'
 import { samplesInMovie } from '../iso/movie'
-import { editOffset, locateSamples, sampleRunOf, trackDefaults } from '../iso/samples'
+import { editOffset, emptyEdit, locateSamples, sampleRunOf, trackDefaults } from '../iso/samples'
 import type { ClipSource, SourceTrack } from './plan'
 import type { Located, TrackKind } from '../../shared/types'
 
@@ -59,7 +60,12 @@ export function sourceTrackOf(input: SourceTrackInput): SourceTrack | null {
     trackId: entry.trackId,
     kind: input.kind,
     defaults: trackDefaults(input.initBytes),
-    loneTrack: true,
+    // Only where the init describes this one track and no other. A muxed init describes two, and
+    // a packager that gives every track a moof of its own (ffmpeg's separate_moof, Bento4) then
+    // hands each of them segments holding one traf — of the other track, every second time.
+    // Taken as the lone traf it is not, the sound read the fragments of the picture as packets
+    // and the picture the fragments of the sound as frames, and the file said nothing about it.
+    loneTrack: trakCount(input.initBytes) === 1,
     ...(input.kind === 'video' ? { syncOf: keyframeClassifier(sampleEntry) ?? undefined } : {}),
   })
 
@@ -75,6 +81,18 @@ export function sourceTrackOf(input: SourceTrackInput): SourceTrack | null {
     samples: run.samples,
     dropped: run.dropped,
   }
+}
+
+/**
+ * How many traks the movie box of an init describes, of any kind at all.
+ *
+ * Counted off the boxes and not off `parseInit`, which keeps the tracks it can name a kind and a
+ * codec for: a subtitle or a timed-metadata trak beside the picture is still a track a lone traf
+ * could be about.
+ */
+function trakCount(init: Uint8Array): number {
+  const moov = topLevelBoxes(init).find((box) => box.type === 'moov')
+  return moov ? childBoxes(init, moov).filter((box) => box.type === 'trak').length : 0
 }
 
 /**
@@ -114,6 +132,11 @@ export function movieTracksOf(moov: Uint8Array, total: number, at = 0): SourceTr
     const bytes = sampleEntryBytes(moov, indexed.trackId)
     if (!track || !entry || !bytes || !(track.timescale > 0)) continue
 
+    // A complete file is played as its edit lists say, and a track held empty at the head of
+    // one starts that much after the others. The fragmented path above leaves this out on
+    // purpose: an MSE player lays a fragment at its tfdt whatever the init's list says.
+    const held = emptyEdit(moov, indexed.trackId, track.timescale)
+
     tracks.push({
       kind: track.kind,
       timescale: track.timescale,
@@ -121,6 +144,7 @@ export function movieTracksOf(moov: Uint8Array, total: number, at = 0): SourceTr
       width: entry.codedWidth,
       height: entry.codedHeight,
       editOffset: editOffset(moov, indexed.trackId),
+      ...(held > 0 ? { emptyEdit: held } : {}),
       // The offsets of a movie box are already counted from the first byte of the file, so the
       // source they are placed in begins where that file does.
       samples: locateSamples(indexed.samples, { at, length: total }),

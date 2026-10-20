@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { describe, it, expect, vi } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { buildPreview } from '../../src/editor/source/preview'
 import { planSnapshot, type SnapshotSource } from '../../src/core/snapshot/build'
@@ -510,5 +510,196 @@ describe('buildPreview', () => {
     const material = materialOf(reader.index)
 
     expect(await buildPreview(reader, { ...material, video: null })).toBeNull()
+  })
+})
+
+/**
+ * A MediaSource that answers at once, and writes down what it was handed.
+ *
+ * `playable` stands for `MediaSource.isTypeSupported`: the composite monitor is the one preview
+ * that asks it, and what it does with a no is half of what is tested below.
+ */
+function fakeMediaSource(playable: (mime: string) => boolean = () => true) {
+  const mimes: string[] = []
+  const appended: Array<{ mime: string; bytes: number }> = []
+
+  class FakeSourceBuffer extends EventTarget {
+    timestampOffset = 0
+    appendWindowStart = 0
+    appendWindowEnd = Number.POSITIVE_INFINITY
+
+    constructor(private readonly mime: string) {
+      super()
+    }
+
+    appendBuffer(data: ArrayBufferView | ArrayBuffer): void {
+      appended.push({ mime: this.mime, bytes: data.byteLength })
+      queueMicrotask(() => this.dispatchEvent(new Event('updateend')))
+    }
+
+    changeType(): void {}
+  }
+
+  class FakeMediaSource extends EventTarget {
+    static isTypeSupported(mime: string): boolean {
+      return playable(mime)
+    }
+
+    readyState: ReadyState = 'open'
+    duration = Number.NaN
+    ended = false
+
+    constructor() {
+      super()
+      queueMicrotask(() => this.dispatchEvent(new Event('sourceopen')))
+    }
+
+    addSourceBuffer(mime: string): SourceBuffer {
+      mimes.push(mime)
+      return new FakeSourceBuffer(mime) as unknown as SourceBuffer
+    }
+
+    endOfStream(): void {
+      this.readyState = 'ended'
+    }
+  }
+
+  vi.stubGlobal('MediaSource', FakeMediaSource)
+  let nextUrl = 0
+  vi.spyOn(URL, 'createObjectURL').mockImplementation(() => `blob:tailcut/composite-${++nextUrl}`)
+  vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+
+  return { mimes, appended }
+}
+
+/** Two pictures on one SourceBuffer — an ABR switch — and a sound buffer beside them. */
+function abrSource(declared: { width: number; height: number } | null = null): SnapshotSource {
+  const info = parseInit(INIT)!
+  const pictureInfo = declared
+    ? { tracks: info.tracks.map((track) => ({ ...track, ...declared })) }
+    : info
+
+  return {
+    page,
+    tracks: [
+      {
+        id: 'low',
+        bufferId: 'low-buffer',
+        representation: 'video:avc1.4d401e:320x240:low',
+        kinds: ['video'],
+        info: pictureInfo,
+        initBytes: INIT,
+        chunks: [{ start: 0, end: 2, bytes: SEGMENTS[0]! }],
+      },
+      {
+        id: 'high',
+        bufferId: 'low-buffer',
+        representation: 'video:avc1.4d401e:320x240:high',
+        kinds: ['video'],
+        info: pictureInfo,
+        initBytes: INIT,
+        chunks: [{ start: 4, end: 6, bytes: SEGMENTS[2]! }],
+      },
+      {
+        id: 'sound',
+        bufferId: 'sound-buffer',
+        representation: 'audio:mp4a.40.2',
+        kinds: ['audio'],
+        info: parseInit(AUDIO_INIT)!,
+        initBytes: AUDIO_INIT,
+        chunks: AUDIO_SEGMENTS.map((bytes, at) => ({ start: at * 2, end: at * 2 + 2, bytes })),
+      },
+    ],
+  }
+}
+
+/** A reader that counts what it is asked for, over the snapshot of `source`. */
+async function countedSnapshot(source: SnapshotSource) {
+  const plan = planSnapshot(source, { id: 'x', capturedAt: 1_756_022_400_000, producer: 'tailcut test' })
+  const file = concatBytes(plan.parts)
+  const counter = { bytes: 0 }
+  const reader = (await SnapshotReader.open(async (at, length) => {
+    counter.bytes += length
+    return file.subarray(at, at + length)
+  }, file.byteLength))!
+  return { reader, counter }
+}
+
+const turnOver = () => new Promise((done) => setTimeout(done, 0))
+
+describe('the composite monitor of an ABR recording', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('measures its picture by the coded size when the track header says nothing', async () => {
+    // A packager is free to leave the width and height of `tkhd` at zero. The encoder is fed
+    // frames of the sample entry's coded size (src/core/encode/plan.ts), so a crop space of 0×0
+    // asked the codec probe about a picture of width 0 — `isConfigSupported` threw, the answer
+    // was no, and the clip was blocked as "no encoder for that picture" on a machine that has one.
+    fakeMediaSource()
+    const reader = await snapshotFrom(abrSource({ width: 0, height: 0 }))
+    const built = (await buildPreview(reader, materialOf(reader.index)))!
+
+    expect(built.monitor, 'the ABR recording did not get the composite monitor').toBeDefined()
+    expect(built.frameSize).toEqual({ width: 320, height: 240 })
+
+    built.release()
+  })
+
+  it('believes the coded size over a track header that disagrees with it', async () => {
+    fakeMediaSource()
+    const reader = await snapshotFrom(abrSource({ width: 640, height: 360 }))
+    const built = (await buildPreview(reader, materialOf(reader.index)))!
+
+    expect(built.frameSize).toEqual({ width: 320, height: 240 })
+
+    built.release()
+  })
+
+  it('plays the picture alone when the sound cannot go into a MediaSource', async () => {
+    // E-AC-3, AAC without its DecoderSpecificInfo, Vorbis in MP4: material the export copies
+    // perfectly and `isTypeSupported` refuses. The whole composite used to be refused with it.
+    const { mimes } = fakeMediaSource((mime) => mime.startsWith('video/'))
+    const reader = await snapshotFrom(abrSource())
+    const built = (await buildPreview(reader, materialOf(reader.index)))!
+    await turnOver()
+
+    expect(built.monitor, 'an unplayable sound took the composite monitor down').toBeDefined()
+    expect(built.frames.count()).toBe(2 * PER_SEGMENT)
+    expect(mimes).toEqual(['video/mp4; codecs="avc1.4d400d"'])
+
+    built.release()
+  })
+
+  it('keeps no segment in memory once built, and reads each again for the element it feeds', async () => {
+    // The monitor used to hold every segment of every picture and of the sound for the life of
+    // the tab — the whole recording, a second time over what the media element holds — because
+    // a second consumer (the hover thumbnail) replays the same program. Read from the snapshot
+    // as each consumer appends instead, one segment at a time.
+    const { appended } = fakeMediaSource()
+    const { reader, counter } = await countedSnapshot(abrSource())
+    const built = (await buildPreview(reader, materialOf(reader.index)))!
+    await turnOver()
+    await turnOver()
+
+    const media = [SEGMENTS[0]!, SEGMENTS[2]!, ...AUDIO_SEGMENTS].reduce(
+      (sum, one) => sum + one.byteLength,
+      0,
+    )
+    const fed = appended.reduce((sum, one) => sum + one.bytes, 0)
+    expect(fed).toBeGreaterThanOrEqual(media)
+
+    const before = counter.bytes
+    const thumbnail = built.openConsumer!()
+    for (let turn = 0; turn < 10; turn++) await turnOver()
+
+    // The second element was fed from storage, not from a copy the preview kept.
+    expect(counter.bytes - before).toBeGreaterThanOrEqual(media)
+    expect(appended.reduce((sum, one) => sum + one.bytes, 0)).toBe(fed * 2)
+
+    thumbnail.release()
+    built.release()
   })
 })

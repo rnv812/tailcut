@@ -92,6 +92,26 @@ describe('the export panel', () => {
     expect(at('estimate').textContent).not.toContain('about')
   })
 
+  it('says the file will be VP9, and where that file will not open, before it is written', () => {
+    const estimate: Estimate = {
+      kind: 'encode',
+      rung: 'vp9-sw',
+      geometry: { width: 1920, height: 1080, framerate: 30 },
+      frames: 300,
+      seconds: 10,
+      bytes: null,
+      sourceCodec: 'avc1',
+      inflates: false,
+      sourceBytes: 4_200_000,
+    }
+
+    render(<ExportQueue {...props({ estimate })} />, host)
+
+    expect(at('estimate').textContent).toBe(
+      'Selected clip: 4.0 MB in the recording. This browser has no H.264 encoder, so the clip is written as VP9 in MP4 — browsers and VLC play it, QuickTime and some editors do not. Constant quality promises a picture, not a size.',
+    )
+  })
+
   it('calls the software encoded weight a floor against the recording', () => {
     const estimate: Estimate = {
       kind: 'encode',
@@ -322,5 +342,33 @@ describe('the export panel', () => {
   it('says nothing at all when nothing has been exported', () => {
     render(<ExportQueue {...props()} />, host)
     expect(allAt('job')).toHaveLength(0)
+  })
+})
+
+describe('a row saved with a note', () => {
+  const note = 'Saved with the original VP9/Opus — Premiere cannot import it: this browser has no H.264 encoder.'
+
+  it('says on the finished row what the file is, beside its size', () => {
+    const queue = play([
+      ONE_JOB,
+      { type: 'start', id: 'j1', now: 0 },
+      { type: 'finish', id: 'j1', bytes: 2_000_000, now: 1, note },
+    ])
+    render(<ExportQueue {...props({ queue })} />, host)
+
+    expect(at('job-state').textContent).toBe('Saved')
+    expect(at('job-note').textContent).toBe(note)
+    expect(host.querySelector('[data-testid="job-error"]'), 'a saved file was called a failure').toBeNull()
+  })
+
+  it('says nothing more on a row whose file came out as asked', () => {
+    const queue = play([
+      ONE_JOB,
+      { type: 'start', id: 'j1', now: 0 },
+      { type: 'finish', id: 'j1', bytes: 2_000_000, now: 1 },
+    ])
+    render(<ExportQueue {...props({ queue })} />, host)
+
+    expect(host.querySelector('[data-testid="job-note"]')).toBeNull()
   })
 })

@@ -768,7 +768,7 @@ const dryRunLines = (args) => {
     `Use --media-1080 ${media}, or generate a 60-second 1080p H.264/AAC minute.`,
     `Serve the player and media through ranged HTTP with exact Range responses.`,
     `Refuse an occupied CDP port ${port}, then attach to Chrome.`,
-    'Probe 24 real codec-ladder configurations.',
+    'Probe 32 real codec-ladder configurations.',
     'Export forced HEVC at 1080p, then verify HEVC in hardware.',
     'Export the exact 128 x 64 crop through H.264 in software.',
     'Export and decode an animated WebP lasting 10 seconds.',
@@ -808,9 +808,9 @@ const liveOptions = (args, defaults) => {
 }
 
 const assertMatrix = (rows) => {
-  if (rows.length !== 24) throw new Error(`The codec matrix returned ${rows.length} rows, not 24.`)
+  if (rows.length !== 32) throw new Error(`The codec matrix returned ${rows.length} rows, not 32.`)
   const kinds = new Set(rows.map((row) => row.kind))
-  for (const required of ['hevc-hw', 'h264-hw', 'h264-sw']) {
+  for (const required of ['hevc-hw', 'h264-hw', 'h264-sw', 'vp9-sw']) {
     if (!kinds.has(required)) throw new Error(`The codec matrix omitted ${required}.`)
   }
 }

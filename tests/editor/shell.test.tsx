@@ -25,6 +25,8 @@ const exportHarness = vi.hoisted(() => ({
   encodeRequests: [] as Array<{ path: { kind: string; plan?: { geometry: { width: number; height: number; framerate: number }; kept: number }; choice?: { kind: string; quantizer?: number } } }>,
   openedTracks: [] as Array<string | null>,
   skipSave: false,
+  /** While set, every encode waits on it: a job that is still running when the screen changes. */
+  holdEncode: null as Promise<void> | null,
 }))
 
 vi.mock('../../src/editor/export/support', async () => {
@@ -95,6 +97,7 @@ vi.mock('../../src/editor/export/exporter', async () => {
           stale: () => boolean,
         ) => {
           exportHarness.encodeRequests.push(request)
+          if (exportHarness.holdEncode) await exportHarness.holdEncode
           if (stale() || request.path.kind !== 'encode' || !request.path.plan) return null
           report(request.path.plan.kept)
           options.onPace('mp4', request.path.plan.geometry, request.path.plan.kept, 1_200)
@@ -161,7 +164,9 @@ const CUT_SEGMENTS = [1, 2, 3].map(
   (n) => new Uint8Array(readFileSync(`tests/fixtures/h264/chunk-stream0-0000${n}.m4s`)),
 )
 
-async function cuttable(): Promise<Extract<EditorState, { status: 'ready' }>> {
+async function cuttable(
+  counter?: { bytes: number },
+): Promise<Extract<EditorState, { status: 'ready' }>> {
   const plan = planSnapshot(
     {
       page,
@@ -181,7 +186,10 @@ async function cuttable(): Promise<Extract<EditorState, { status: 'ready' }>> {
   )
   const file = concatBytes(plan.parts)
   const reader = (await SnapshotReader.open(
-    async (at, length) => file.subarray(at, at + length),
+    async (at, length) => {
+      if (counter) counter.bytes += length
+      return file.subarray(at, at + length)
+    },
     file.byteLength,
   ))!
 
@@ -281,9 +289,15 @@ const previewOf = (frameSize = { width: 1280, height: 720 }): Preview => ({
   release: () => {},
 })
 
-/** Turns the wheel until the screen says what is being waited for, or gives up saying so. */
+/**
+ * Turns the wheel until the screen says what is being waited for, or gives up saying so.
+ *
+ * Fifty turns and a second of wall clock, whichever is longer: a codec question waits for the
+ * crop to settle (`PROBE_SETTLE_MS`), and fifty turns of happy-dom's frames can be shorter.
+ */
 const until = async (ready: () => boolean, what: string): Promise<void> => {
-  for (let round = 0; round < 50; round++) {
+  const started = Date.now()
+  for (let round = 0; round < 50 || Date.now() - started < 1_000; round++) {
     if (ready()) return
     await settled()
   }
@@ -332,6 +346,7 @@ afterEach(() => {
   exportHarness.encodeRequests.length = 0
   exportHarness.openedTracks.length = 0
   exportHarness.skipSave = false
+  exportHarness.holdEncode = null
   vi.unstubAllGlobals()
 })
 
@@ -700,6 +715,10 @@ describe('the editor shell', () => {
     press('ArrowRight')
     press('s')
     await settled()
+    // The split leaves the second clip starting off a key frame, so its full picture needs the
+    // encoder too. Waited for, because a crop placed before the question settled would replace
+    // it, and a rectangle nobody holds any more is never asked about (probe-queue.ts).
+    await until(() => exportHarness.codecCalls.length > 0, 'the split clip was not probed')
 
     button('crop-ratio-1:1').click()
     await until(
@@ -726,6 +745,51 @@ describe('the editor shell', () => {
     await settled()
 
     expect(exportHarness.codecCalls).toHaveLength(1)
+  })
+
+  it('asks about a crop dragged again and again once, about where it stopped', async () => {
+    // A question that never answers, as a 1080p software encoder being built would look from
+    // here: anything asked during the burst would still be open at the end of it.
+    exportHarness.codecAnswer = 'pending'
+    await mount({ ...(await cuttable()), preview: previewOf({ width: 320, height: 240 }) })
+    press('i')
+    await settled()
+    button('crop-ratio-1:1').click()
+    await turn()
+
+    vi.spyOn(
+      document.querySelector<HTMLDivElement>('[data-testid="crop-host"]')!,
+      'getBoundingClientRect',
+    ).mockReturnValue({
+      width: 320,
+      height: 240,
+      x: 0,
+      y: 0,
+      top: 0,
+      right: 320,
+      bottom: 240,
+      left: 0,
+      toJSON: () => ({}),
+    })
+
+    // Ten drags of the corner, one frame apart, each leaving a different rectangle behind.
+    for (let drag = 0; drag < 10; drag++) {
+      const handle = document.querySelector<HTMLElement>('[data-testid="crop-handle-se"]')!
+      point(handle, 'pointerdown', 200, 200)
+      point(handle, 'pointermove', 196, 198)
+      point(handle, 'pointerup', 196, 198)
+      await turn()
+    }
+    const stoppedAt = text('crop-geometry')
+
+    await until(() => exportHarness.codecCalls.length > 0, 'the settled crop was never probed')
+    await new Promise((done) => setTimeout(done, 400))
+    await settled()
+
+    expect(
+      exportHarness.codecCalls.map(({ width, height }) => `${width} × ${height}`),
+    ).toEqual([stoppedAt])
+    expect(button('export-selected').disabled, 'export ran ahead of the probe').toBe(true)
   })
 
   it('weighs only the selected WebP again after its crop moves', async () => {
@@ -1250,6 +1314,116 @@ describe('the editor shell', () => {
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+
+  it('keeps a running export, and saves it the new way, when Ask where to save is switched', async () => {
+    // The settings page can be changed while a clip is being encoded. The runner used to be
+    // rebuilt for it: the row disappeared, the encode went on holding its decoder and encoder
+    // where nothing could cancel it, and it saved with the setting it was started under.
+    let release!: () => void
+    exportHarness.holdEncode = new Promise((done) => {
+      release = done
+    })
+    exportHarness.codecAnswer = true
+    const asked: Array<{ saveAs?: boolean }> = []
+    // With the dialog asked for, a save is done when Chrome says the download completed.
+    const listeners = new Set<(delta: { id: number; state?: { current: string } }) => void>()
+    vi.stubGlobal('chrome', {
+      downloads: {
+        download: (options: { saveAs?: boolean }, done: (id: number | undefined) => void) => {
+          asked.push(options)
+          done(7)
+          if (options.saveAs) {
+            for (const listener of listeners) listener({ id: 7, state: { current: 'complete' } })
+          }
+        },
+        onChanged: {
+          addListener: (listener: (delta: { id: number }) => void) => listeners.add(listener),
+          removeListener: (listener: (delta: { id: number }) => void) => listeners.delete(listener),
+        },
+        onErased: { addListener: () => undefined, removeListener: () => undefined },
+      },
+      runtime: { lastError: undefined },
+    })
+    const state = {
+      ...(await cuttable()),
+      preview: previewOf({ width: 320, height: 240 }),
+      options: { askWhere: false },
+    }
+    await mount(state)
+    press('i')
+    await settled()
+    button('crop-ratio-1:1').click()
+    await settled()
+    await until(() => !button('export-selected').disabled, 'the crop was never answered')
+    button('export-selected').click()
+    await until(() => text('job-state') === 'Writing', `the encode never started: ${text('export-panel')}`)
+
+    show({ ...state, options: { askWhere: true } })
+    await settled()
+    expect(document.querySelectorAll('[data-testid="job"]')).toHaveLength(1)
+    expect(text('job-state')).toBe('Writing')
+
+    release()
+    await until(() => text('job-state') === 'Saved', `the export was lost: ${text('job-state')}`)
+    expect(asked).toHaveLength(1)
+    expect(asked[0]!.saveAs, 'the file was saved by the setting it started under').toBe(true)
+  })
+
+  it('keeps an export cancellable after the other picture is opened', async () => {
+    let release!: () => void
+    exportHarness.holdEncode = new Promise((done) => {
+      release = done
+    })
+    exportHarness.codecAnswer = true
+    exportHarness.skipSave = true
+    await mount(await switchable())
+    press('i')
+    await settled()
+    button('crop-ratio-1:1').click()
+    await settled()
+    await until(() => !button('export-selected').disabled, 'the crop was never answered')
+    button('export-selected').click()
+    await until(() => text('job-state') === 'Writing', `the encode never started: ${text('export-panel')}`)
+
+    select('representation', 'v-short')
+    await until(() => text('frame-count') === '48', 'the second representation never opened')
+
+    // A new edit, not a new queue: the file being written is still on its way to the disk, and
+    // the one place it can be called off from is this row.
+    const job = document.querySelector<HTMLElement>('[data-testid="job"]')
+    expect(job, 'the running export vanished with the old picture').not.toBeNull()
+    document.querySelector<HTMLButtonElement>('[data-testid^="cancel-"]')!.click()
+    await until(() => text('job-state') === 'Cancelled', `the export could not be cancelled: ${text('job')}`)
+    release()
+    await settled()
+    expect(text('job-state')).toBe('Cancelled')
+  })
+
+  it('reads the recording for the export index once, after the preview has been built', async () => {
+    // The preview arrives after the screen: `building` first, the built preview afterwards, and
+    // the workbench is remounted between the two. Each mount used to read every segment for the
+    // export index, the first one while `buildPreview` was holding the same bytes and its own
+    // assembled copy of them — about three recordings in memory at the peak.
+    const counter = { bytes: 0 }
+    const state = await cuttable(counter)
+    const material = CUT_SEGMENTS.reduce((sum, one) => sum + one.byteLength, 0)
+
+    show({ ...state, preview: 'building' })
+    await settled()
+    await settled()
+    counter.bytes = 0
+    show({ ...state, preview: previewOf({ width: 320, height: 240 }) })
+    await until(
+      () => document.querySelector('[data-testid="export-note"]') === null,
+      'the recording was never indexed',
+    )
+    await settled()
+
+    expect(exportHarness.openedTracks).toHaveLength(1)
+    // The segments once, plus the init: nothing is read twice.
+    expect(counter.bytes).toBeGreaterThanOrEqual(material)
+    expect(counter.bytes).toBeLessThan(material * 1.1)
   })
 
   it('exports only the selection or the complete clip list from the two explicit actions', async () => {

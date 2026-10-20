@@ -43,6 +43,27 @@ export type Choice =
        */
       bitrate: number
     }
+  | {
+      /**
+       * VP9 in MP4, out of libvpx, for a browser with no H.264 encoder at all.
+       *
+       * Yandex Browser is built without OpenH264: its software H.264 encoder fails with "Failed
+       * to create OpenH264 encoder", and where no hardware encoder answers either, the rungs
+       * above this one are refusals, one after another. libvpx is in every Chromium build — it is what
+       * WebRTC runs on — so this rung is the one that is there when the others are not. It is
+       * last on purpose: a VP9 MP4 plays in every browser and in VLC, but QuickTime and the
+       * editors a clip is usually taken into do not all open it, and H.264 is the better file
+       * wherever there is a way to write it.
+       *
+       * The quantizer is on libvpx's own 0–63 scale (see `VP9_QUANTIZERS`): Chrome takes
+       * `bitrateMode: 'quantizer'` for VP9 and honours `{ vp9: { quantizer } }` per frame —
+       * measured in this project's Chromium 151 and in Yandex 26.8 alike.
+       */
+      kind: 'vp9-sw'
+      config: VideoEncoderConfig
+      control: 'quantizer'
+      quantizer: number
+    }
   | { kind: 'none'; tried: string[] }
 
 /**
@@ -119,6 +140,47 @@ export function hevcLevelIdc(g: EncodeGeometry): number {
 }
 
 /**
+ * VP9 levels, by luma samples of one picture, luma samples a second, and the longest side.
+ *
+ * The level definitions as libvpx states them (`vp9_level_defs`). The rate column is the one
+ * `levelFor` in src/core/vp9/codec.ts has to leave out — a WebM init carries no frame rate — but
+ * an encoder is told its rate, so here it counts: 1080p30 is 4.0 and 1080p60 is 4.1.
+ */
+const VP9_LEVELS: Array<{ level: number; samples: number; perSecond: number; side: number }> = [
+  { level: 10, samples: 36_864, perSecond: 829_440, side: 512 },
+  { level: 11, samples: 73_728, perSecond: 2_764_800, side: 768 },
+  { level: 20, samples: 122_880, perSecond: 4_608_000, side: 960 },
+  { level: 21, samples: 245_760, perSecond: 9_216_000, side: 1344 },
+  { level: 30, samples: 552_960, perSecond: 20_736_000, side: 2048 },
+  { level: 31, samples: 983_040, perSecond: 36_864_000, side: 2752 },
+  { level: 40, samples: 2_228_224, perSecond: 83_558_400, side: 4160 },
+  { level: 41, samples: 2_228_224, perSecond: 160_432_128, side: 4160 },
+  { level: 50, samples: 8_912_896, perSecond: 311_951_360, side: 8384 },
+  { level: 51, samples: 8_912_896, perSecond: 588_251_136, side: 8384 },
+  { level: 52, samples: 8_912_896, perSecond: 1_176_502_272, side: 8384 },
+  { level: 60, samples: 35_651_584, perSecond: 1_176_502_272, side: 16_832 },
+  { level: 61, samples: 35_651_584, perSecond: 2_353_004_544, side: 16_832 },
+  { level: 62, samples: 35_651_584, perSecond: 4_706_009_088, side: 16_832 },
+]
+
+/**
+ * The level of `vp09.00.LL.08` for this picture, as the two digits the string spells it in.
+ *
+ * Chrome does not refuse a VP9 encoder over its level, so nothing would fail if this were a
+ * constant. It is computed because the string becomes the vpcC of a file, and a file that
+ * understates its level is a file a hardware decoder with a table may refuse to open.
+ */
+export function vp9Level(g: EncodeGeometry): string {
+  const samples = g.width * g.height
+  const perSecond = samples * rate(g)
+  const side = Math.max(g.width, g.height)
+  const level = VP9_LEVELS.find(
+    (l) => samples <= l.samples && perSecond <= l.perSecond && side <= l.side,
+  )
+  return String((level ?? VP9_LEVELS[VP9_LEVELS.length - 1]!).level).padStart(2, '0')
+}
+
+/**
  * What a probe answer is about — the whole question, never less.
  *
  * Never a single global boolean: support flips with codec, width, height, framerate, whether
@@ -139,6 +201,18 @@ export function cacheKeyOf(config: VideoEncoderConfig): string {
  * by five are three visibly different files rather than three names for one.
  */
 export const QUANTIZERS: Record<ExportQuality, number> = { high: 22, medium: 27, low: 33 }
+
+/**
+ * Quantizer per quality level on the VP9 rung, on libvpx's 0–63 scale.
+ *
+ * A different scale from the table above, so a table of its own: Chrome hands the number to
+ * libvpx as its external quantizer, which libvpx maps onto an internal 0–255 index, and a VP9
+ * file halves in size every eight or so steps of it where H.264 halves every six — measured with
+ * ffmpeg's libvpx-vp9 at fixed quantizers from 20 to 48 on 720p material. Eight apart keeps the
+ * three levels about a halving apart, as the H.264 three are. The middle row sits at the constant
+ * quality Google's VP9 guidance gives for 720p to 1080p, which is where most clips are.
+ */
+export const VP9_QUANTIZERS: Record<ExportQuality, number> = { high: 26, medium: 34, low: 42 }
 
 /**
  * Bits per pixel per frame the software rung asks for, by quality.
@@ -188,6 +262,17 @@ const avcConfig = (g: EncodeGeometry, hardware: boolean, bitrate: number): Video
   avc: { format: 'avc' },
 })
 
+const vp9Config = (g: EncodeGeometry): VideoEncoderConfig => ({
+  // Profile 0, eight bits: what libvpx makes of the 4:2:0 frames a decoder hands over.
+  codec: `vp09.00.${vp9Level(g)}.08`,
+  width: g.width,
+  height: g.height,
+  framerate: g.framerate,
+  hardwareAcceleration: 'prefer-software',
+  bitrateMode: 'quantizer',
+  latencyMode: 'quality',
+})
+
 /**
  * Whether HEVC is tried before H.264.
  *
@@ -235,8 +320,22 @@ export function ladderFor(g: EncodeGeometry, options: LadderOptions): Rung[] {
     },
   }
 
-  if (options.codec === 'h264') return [h264hw, h264sw]
-  return hevcFirst(options) ? [hevc, h264hw, h264sw] : [h264hw, hevc, h264sw]
+  const vp9: Rung = {
+    config: vp9Config(g),
+    get choice(): Choice {
+      return {
+        kind: 'vp9-sw',
+        config: vp9Config(g),
+        control: 'quantizer',
+        quantizer: VP9_QUANTIZERS[options.quality],
+      }
+    },
+  }
+
+  // VP9 is last in every arrangement, the H.264-only one included: it is not a codec the setting
+  // chooses between, it is what stands between a browser with no H.264 encoder and no file.
+  if (options.codec === 'h264') return [h264hw, h264sw, vp9]
+  return hevcFirst(options) ? [hevc, h264hw, h264sw, vp9] : [h264hw, hevc, h264sw, vp9]
 }
 
 /**
@@ -260,28 +359,121 @@ export async function chooseCodec(
   return { kind: 'none', tried }
 }
 
+/** The picture a choice's configuration is about, read back off the configuration itself. */
+const geometryOfConfig = (config: VideoEncoderConfig): EncodeGeometry => ({
+  width: config.width,
+  height: config.height,
+  framerate: config.framerate ?? 0,
+})
+
+const QUALITY_LEVELS: ExportQuality[] = ['high', 'medium', 'low']
+
+/**
+ * The quality level a choice was made at, recovered from the choice itself; null for one that
+ * `ladderFor` did not make.
+ *
+ * Recoverable because every rung states it in a number that differs per level: the quantizer
+ * rungs by their quantizer — the three of each table are distinct on purpose — and the software
+ * H.264 rung by the bitrate `bitrateFor` asks at the picture its configuration names.
+ */
+export function qualityOf(choice: EncodingChoice): ExportQuality | null {
+  switch (choice.kind) {
+    case 'hevc-hw':
+    case 'h264-hw':
+      return QUALITY_LEVELS.find((one) => QUANTIZERS[one] === choice.quantizer) ?? null
+    case 'vp9-sw':
+      return QUALITY_LEVELS.find((one) => VP9_QUANTIZERS[one] === choice.quantizer) ?? null
+    case 'h264-sw': {
+      const g = geometryOfConfig(choice.config)
+      return QUALITY_LEVELS.find((one) => bitrateFor(g, one) === choice.bitrate) ?? null
+    }
+  }
+}
+
+/**
+ * The same choice for another picture — size, rate, level and bitrate re-derived, nothing else
+ * changed — or the choice itself when it is already about that picture.
+ *
+ * It exists because the probe and the plan count the picture in different numbers. The probe is
+ * asked about `geometryOf(clip.crop, ctx.frameSize, …)`, and `frameSize` is the size the track
+ * header declares; the plan cuts every frame to a rectangle normalised against the size the
+ * samples are coded in (src/core/encode/plan.ts). Where those differ — an anamorphic track, a
+ * header that rounds — an encoder configured from the probe's numbers is fed frames of another
+ * size, and `VideoEncoder` does not refuse that: it scales them, and the sample entry, which
+ * states the plan's size, then describes a stream that is not that size. The encoder has to be
+ * configured with the size of what it is fed.
+ *
+ * A choice the ladder did not make keeps its codec family and profile and gets the level of the
+ * new picture; its bitrate, where it has one, moves with the pixel rate.
+ */
+export function choiceAt(choice: EncodingChoice, g: EncodeGeometry): EncodingChoice {
+  const was = geometryOfConfig(choice.config)
+  if (was.width === g.width && was.height === g.height && was.framerate === g.framerate) {
+    return choice
+  }
+
+  const quality = qualityOf(choice)
+  if (quality) {
+    const codec = choice.kind === 'hevc-hw' ? 'hevc' : 'h264'
+    const rung = ladderFor(g, { codec, quality }).find((one) => one.choice.kind === choice.kind)
+    if (rung) return rung.choice as EncodingChoice
+  }
+
+  const codec = choice.config.codec
+  const config: VideoEncoderConfig = {
+    ...choice.config,
+    codec: codec.startsWith('avc')
+      ? `${codec.slice(0, -2)}${avcLevelHex(g)}`
+      : codec.startsWith('hev') || codec.startsWith('hvc')
+        ? codec.replace(/\.([LH])\d+/, `.$1${hevcLevelIdc(g)}`)
+        : codec.startsWith('vp09')
+          ? codec.replace(/^(vp09\.\d{2})\.\d{2}/, `$1.${vp9Level(g)}`)
+          : codec,
+    width: g.width,
+    height: g.height,
+    framerate: g.framerate,
+  }
+  if (choice.kind !== 'h264-sw') return { ...choice, config }
+
+  const scale = (g.width * g.height * rate(g)) / Math.max(1, was.width * was.height * rate(was))
+  const bitrate = Math.round(choice.bitrate * scale)
+  return { ...choice, config: { ...config, bitrate }, bitrate }
+}
+
 /**
  * The already-probed choice followed by codecs that can take over if a real encoder rejects it.
  *
  * `isConfigSupported` is advisory: a hardware encoder can answer true and still report
- * `EncodingError` when real frames arrive. The quality is recoverable from the quantizer because
- * the three settings deliberately use three distinct values. A software choice has nowhere
- * further to fall.
+ * `EncodingError` when real frames arrive, and a software one can answer true and then not be
+ * created at all — Yandex Browser says yes to `prefer-software` H.264 and fails with "Failed to
+ * create OpenH264 encoder", because it ships without OpenH264. So every rung below the probed
+ * one is a place to land, down to VP9, the one encoder every Chromium build carries. The quality
+ * is recovered from the choice itself (see `qualityOf`); a choice this file did not make has
+ * nothing to be translated into and stays alone.
+ *
+ * There is no `hardwareAcceleration: 'no-preference'` H.264 rung, deliberately: it is not a third
+ * encoder. Chrome resolves it to the platform's hardware encoder where there is one and to
+ * OpenH264 where there is not. Measured: on this project's Chromium it takes a constant bitrate
+ * and refuses a quantizer with "Unsupported bitrate mode", which is OpenH264's answer, and on
+ * Yandex it fails with the same "Failed to create OpenH264 encoder" the software rung does. Both
+ * of those are rungs here already, each named in the failure; a rung that can only repeat one of
+ * them would cost the one browser this list was extended for a whole extra failed attempt.
  */
 export function runtimeChoices(
   first: EncodingChoice,
   geometry: EncodeGeometry,
 ): EncodingChoice[] {
-  if (first.kind === 'h264-sw') return [first]
-
-  const quality = (Object.keys(QUANTIZERS) as ExportQuality[]).find(
-    (one) => QUANTIZERS[one] === first.quantizer,
-  )
+  const quality = qualityOf(first)
   if (!quality) return [first]
 
-  const h264 = ladderFor(geometry, { codec: 'h264', quality }).map(
+  const rungs = ladderFor(geometry, { codec: 'h264', quality }).map(
     (rung) => rung.choice as EncodingChoice,
   )
-  if (first.kind === 'hevc-hw') return [first, ...h264]
-  return [first, h264[1]!]
+  // Everything below the probed rung, in the ladder's own order. HEVC is only ever tried above
+  // both H.264 rungs, so all of them are below it.
+  const below =
+    first.kind === 'hevc-hw'
+      ? rungs
+      : rungs.slice(rungs.findIndex((rung) => rung.kind === first.kind) + 1)
+  return [first, ...below]
 }

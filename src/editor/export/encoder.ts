@@ -1,5 +1,5 @@
-import { codedSampleEntry } from '../../core/encode/entry'
-import type { EncodingChoice } from '../../core/encode/codec'
+import { codedSampleEntry, encodedVp9SampleEntry } from '../../core/encode/entry'
+import { choiceAt, type EncodingChoice } from '../../core/encode/codec'
 import type { FramePlan } from '../../core/encode/plan'
 import type { EncodedVideo } from '../../core/encode/assemble'
 import type { OutSample } from '../../core/iso/progressive'
@@ -29,6 +29,8 @@ export interface EncodeResult {
 function optionsFor(choice: EncodingChoice, keyFrame: boolean): VideoEncoderEncodeOptions {
   if (choice.kind === 'hevc-hw') return { keyFrame, hevc: { quantizer: choice.quantizer } }
   if (choice.kind === 'h264-hw') return { keyFrame, avc: { quantizer: choice.quantizer } }
+  // libvpx's own 0–63 scale, under the name the WebCodecs VP9 registration gives it.
+  if (choice.kind === 'vp9-sw') return { keyFrame, vp9: { quantizer: choice.quantizer } }
   // The software rung takes a bitrate and refuses `quantizer` mode outright, so there is nothing
   // per-frame to say to it. Promising constant quality here would be promising what openh264
   // does not implement.
@@ -49,17 +51,20 @@ function optionsFor(choice: EncodingChoice, keyFrame: boolean): VideoEncoderEnco
  * of eighteen hundred frames, and they would add up.
  *
  * The frames arrive already cut to `plan.crop` (see `decodedFrames`), so nothing here knows what
- * a crop is: `plan.geometry` is the size of what comes in and the size the encoder is configured
- * with, and those are the same number by construction.
+ * a crop is: `plan.geometry` is the size of what comes in, and it is made the size the encoder is
+ * configured with here, by `choiceAt`, rather than trusted to be. The choice was probed at the
+ * size the track header declares, which is not always the size the samples are coded in, and an
+ * encoder configured with the one and fed the other scales without a word.
  */
 export async function encodeToTrack(
   plan: FramePlan,
-  choice: EncodingChoice,
+  probed: EncodingChoice,
   source: FrameSource,
   codecs: Codecs,
   onFrames: (frames: number) => void,
   normalizeFrames = false,
 ): Promise<EncodeResult | null> {
+  const choice = choiceAt(probed, plan.geometry)
   const kept = plan.frames.filter((frame) => frame.keep)
   // Timestamp of a frame, in the microseconds the transport counts, to the ticks the file counts.
   // The map is the only bridge between the two scales, and it is keyed by the number the encoder
@@ -71,6 +76,8 @@ export async function encodeToTrack(
 
   const emitted: Array<{ bytes: Uint8Array; sync: boolean; timestamp: number }> = []
   let description: Uint8Array | null = null
+  /** The codec string of the first decoder configuration — all VP9 has to say about itself. */
+  let described: string | null = null
   let colorSpace: VideoColorSpaceInit | undefined
   let failed: Error | null = null
   const encodingFailure = (cause: unknown): Error =>
@@ -80,23 +87,36 @@ export async function encodeToTrack(
   try {
     encoder = codecs.encoder(choice.config, {
       chunk(chunk, metadata) {
-        const config = metadata?.decoderConfig
-        if (config?.description && !description) {
-          colorSpace = config.colorSpace
-          const raw = config.description
-          description =
-            raw instanceof Uint8Array ? new Uint8Array(raw) : new Uint8Array(raw as ArrayBuffer)
+        // Everything inside a try, because a throw out of an output callback goes nowhere:
+        // WebCodecs calls it and drops what it throws. An allocation that fails in `copyTo` would
+        // otherwise be a frame missing from the file of a job that says it finished.
+        try {
+          if (failed) return
+          const config = metadata?.decoderConfig
+          if (config && described === null) {
+            described = config.codec || choice.config.codec
+            colorSpace = config.colorSpace
+          }
+          if (config?.description && !description) {
+            // The colour of the configuration whose record goes into the entry, so the two agree.
+            colorSpace = config.colorSpace ?? colorSpace
+            const raw = config.description
+            description =
+              raw instanceof Uint8Array ? new Uint8Array(raw) : new Uint8Array(raw as ArrayBuffer)
+          }
+          const bytes = new Uint8Array(chunk.byteLength)
+          chunk.copyTo(bytes)
+          // A chunk whose timestamp is not one we handed in cannot be placed in the track. It has
+          // never been seen and would be a bug in the encoder, not in the clip — dropping it
+          // silently would lose a frame, so it is a failure with a name.
+          if (!ticksAt.has(chunk.timestamp)) {
+            failed = new Error('The encoder returned a frame that was never sent to it.')
+            return
+          }
+          emitted.push({ bytes, sync: chunk.type === 'key', timestamp: chunk.timestamp })
+        } catch (error) {
+          failed ??= error instanceof Error ? error : new Error(String(error))
         }
-        const bytes = new Uint8Array(chunk.byteLength)
-        chunk.copyTo(bytes)
-        // A chunk whose timestamp is not one we handed in cannot be placed in the track. It has
-        // never been seen and would be a bug in the encoder, not in the clip — dropping it silently
-        // would lose a frame, so it is a failure with a name.
-        if (!ticksAt.has(chunk.timestamp)) {
-          failed = new Error('The encoder returned a frame that was never sent to it.')
-          return
-        }
-        emitted.push({ bytes, sync: chunk.type === 'key', timestamp: chunk.timestamp })
       },
       error(error) {
         failed = encodingFailure(error)
@@ -107,6 +127,8 @@ export async function encodeToTrack(
   }
 
   let sent = 0
+  /** The count the queue was last told, so the flush adds a report only when it moved it. */
+  let reported = 0
   const keyInterval = KEY_INTERVAL_SECONDS * plan.timescale
   let ticksSinceKey = 0
 
@@ -140,7 +162,8 @@ export async function encodeToTrack(
       const duration = ticksAt.get(frame.timestamp) ?? 0
       ticksSinceKey = wantsKey ? duration : ticksSinceKey + duration
       sent += 1
-      onFrames(emitted.length)
+      reported = emitted.length
+      onFrames(reported)
 
       // The one place the whole chain waits. Everything upstream is bounded by this.
       if (encoder.queued > MAX_FRAMES_IN_FLIGHT) {
@@ -158,19 +181,14 @@ export async function encodeToTrack(
       throw failed ?? encodingFailure(error)
     }
     if (failed) throw failed
+    // The frames the encoder was still holding came back in the flush, after the last report the
+    // loop made; without this the row would stop short of its total and stay there.
+    if (emitted.length !== reported) onFrames(emitted.length)
     if (source.stale()) return null
-
-    if (!description) throw new Error('The encoder produced no decoder configuration.')
 
     return {
       video: {
-        sampleEntry: codedSampleEntry(
-          choice.kind === 'hevc-hw' ? 'hvc1' : 'avc1',
-          description,
-          plan.geometry.width,
-          plan.geometry.height,
-          colorSpace,
-        ),
+        sampleEntry: sampleEntryOf(choice, described, description, plan, colorSpace),
         width: plan.geometry.width,
         height: plan.geometry.height,
         timescale: plan.timescale,
@@ -185,6 +203,31 @@ export async function encodeToTrack(
       /* already gone */
     }
   }
+}
+
+/**
+ * The stsd entry for what the encoder wrote, out of what it said about it.
+ *
+ * H.264 and HEVC hand over their parameter sets as `description`, and the entry carries that
+ * record untouched. VP9 hands over none — Chrome's decoder configuration for it is a codec string
+ * and a colour space — so its vpcC is written from those (see `encodedVp9SampleEntry`). Either
+ * way an encoder that said nothing at all about its stream is refused: a track whose
+ * configuration never arrived is a file that looks written and plays as nothing.
+ */
+function sampleEntryOf(
+  choice: EncodingChoice,
+  described: string | null,
+  description: Uint8Array | null,
+  plan: FramePlan,
+  colorSpace: VideoColorSpaceInit | undefined,
+): Uint8Array {
+  const { width, height } = plan.geometry
+  if (choice.kind === 'vp9-sw') {
+    if (described === null) throw new Error('The encoder produced no decoder configuration.')
+    return encodedVp9SampleEntry(described, width, height, colorSpace)
+  }
+  if (!description) throw new Error('The encoder produced no decoder configuration.')
+  return codedSampleEntry(choice.kind === 'hevc-hw' ? 'hvc1' : 'avc1', description, width, height, colorSpace)
 }
 
 /**

@@ -15,6 +15,14 @@ export interface Job {
   frames?: number
   bytes: number
   error?: string
+  /**
+   * What a finished row has to say about its file besides its size.
+   *
+   * Today that is one thing: an mp4 that kept codecs Premiere cannot import because this browser
+   * could not convert them — Yandex Browser ships without an H.264 encoder at all. The file is
+   * saved regardless, since losing it would be worse, and this is where the user is told.
+   */
+  note?: string
   startedAt?: number
   finishedAt?: number
 }
@@ -29,6 +37,10 @@ export interface Job {
  * the memory, and the decoder-encoder pair holds frames on top of that. So copies go three at a
  * time and re-encodes go one at a time — and a copy never waits behind a re-encode, which is what
  * the UI means when it says a copy can start immediately.
+ *
+ * A copy that has to be converted to be imported — VP9 or AV1 in an mp4, re-encoded to H.264 on
+ * its way out — is a re-encode for these purposes, and goes in the second lane (see
+ * `ExportIo.converts`). Only a copy of bytes counts as a copy.
  */
 export const PARALLEL: Record<JobKind, number> = { copy: 3, encode: 1 }
 
@@ -46,7 +58,7 @@ export type QueueEvent =
   | { type: 'enqueue'; jobs: JobSeed[] }
   | { type: 'start'; id: string; now: number }
   | { type: 'progress'; id: string; done: number; total: number }
-  | { type: 'finish'; id: string; bytes: number; now: number }
+  | { type: 'finish'; id: string; bytes: number; now: number; note?: string }
   | { type: 'fail'; id: string; error: string; now: number }
   | { type: 'retry'; id: string }
   | { type: 'cancel'; id: string }
@@ -92,7 +104,14 @@ function changed(job: Job, event: JobEvent): Job {
 
     case 'finish':
       return job.state === 'running'
-        ? { ...job, state: 'done', progress: 1, bytes: event.bytes, finishedAt: event.now }
+        ? {
+            ...job,
+            state: 'done',
+            progress: 1,
+            bytes: event.bytes,
+            finishedAt: event.now,
+            ...(event.note ? { note: event.note } : {}),
+          }
         : job
 
     case 'fail':
@@ -141,14 +160,25 @@ export function reduceQueue(queue: Queue, event: QueueEvent): Queue {
   return { ...queue, jobs }
 }
 
-/** The jobs that may be set going right now, in the order they were asked for, lane by lane. */
-export function startable(queue: Queue): Job[] {
+/**
+ * The jobs that may be set going right now, in the order they were asked for, lane by lane.
+ *
+ * `winding` names the jobs whose row has moved on — cancelled, or waiting again after a retry —
+ * while a run of theirs is still in flight. Such a run still holds what its lane is a limit on:
+ * a cancelled encode closes its decoder and encoder, and a cancelled conversion its mediabunny
+ * pipeline, only when it gets to its next frame. Counted as running until it has let go, or the
+ * row the cancel freed would start a second codec pipeline beside the one still closing. A job
+ * in it is not started either: one job has one run at a time.
+ */
+export function startable(queue: Queue, winding: ReadonlySet<string> = new Set()): Job[] {
   const room: Record<JobKind, number> = { copy: queue.parallel.copy, encode: queue.parallel.encode }
-  for (const job of queue.jobs) if (job.state === 'running') room[job.kind] -= 1
+  for (const job of queue.jobs) {
+    if (job.state === 'running' || winding.has(job.id)) room[job.kind] -= 1
+  }
 
   const out: Job[] = []
   for (const job of queue.jobs) {
-    if (job.state !== 'queued') continue
+    if (job.state !== 'queued' || winding.has(job.id)) continue
     if (room[job.kind] <= 0) continue
     room[job.kind] -= 1
     out.push(job)

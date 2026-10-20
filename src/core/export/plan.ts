@@ -29,6 +29,13 @@ export interface SourceTrack {
   height: number
   /** The media_time of that init's first edit, in ticks of this track. */
   editOffset: number
+  /**
+   * Ticks of this track the presentation is held empty for before its material begins: the
+   * leading empty edits of a complete file (`emptyEdit` in iso/samples.ts). Absent where there
+   * are none, and on fragmented material always: an MSE player lays a fragment at its tfdt and
+   * not where an edit list in the init would put it, and the recording is of what it played.
+   */
+  emptyEdit?: number
   /** Every sample of the representation, in decode order, dts ascending. */
   samples: SourceSample[]
   /**
@@ -109,12 +116,27 @@ interface Span {
   end: number
 }
 
+/**
+ * The tick of a track's material that is shown at second zero of the session.
+ *
+ * Every instant this module states is `(pts − origin) / timescale`. The edit offset moves the
+ * origin into the material — the priming or the reordering delay it hides — and an empty edit
+ * moves it back out before the material by as long as the track is held silent. Without the
+ * second term a complete file whose sound starts half a second after its picture had that sound
+ * entered at the head of every clip and every save, 453 ms early on the fixture that measures it;
+ * with it, the sound enters where it lies and the entry point leaves a lead the edit list of the
+ * clip states as silence (`leadOf`). The result may be negative and is meant to be.
+ */
+export function originOf(track: SourceTrack): number {
+  return track.editOffset - (track.emptyEdit ?? 0)
+}
+
 /** Continuous presentation-time runs of one track, in seconds. */
 function runsOf(track: SourceTrack): Span[] {
   const spans = track.samples
     .map((sample) => ({
-      start: (sample.pts - track.editOffset) / track.timescale,
-      end: (sample.pts + sample.duration - track.editOffset) / track.timescale,
+      start: (sample.pts - originOf(track)) / track.timescale,
+      end: (sample.pts + sample.duration - originOf(track)) / track.timescale,
     }))
     .sort((a, b) => a.start - b.start)
   const runs: Span[] = []
@@ -166,7 +188,7 @@ function alignLateSound(video: SourceTrack, audio: SourceTrack): SourceTrack {
   return {
     ...audio,
     samples: audio.samples.map((sample) => {
-      const at = (sample.pts - audio.editOffset) / audio.timescale
+      const at = (sample.pts - originOf(audio)) / audio.timescale
       const shift = shifts.find((candidate) => at >= candidate.start && at < candidate.end)
       if (!shift) return sample
       const ticks = Math.round(shift.by * audio.timescale)
@@ -213,8 +235,8 @@ export function soundUnderPicture(source: ClipSource): ClipSource {
   if (crossed.length === 0) return source
 
   const samples = source.audio.samples.filter((sample) => {
-    const start = (sample.pts - source.audio!.editOffset) / source.audio!.timescale
-    const end = (sample.pts + sample.duration - source.audio!.editOffset) / source.audio!.timescale
+    const start = (sample.pts - originOf(source.audio!)) / source.audio!.timescale
+    const end = (sample.pts + sample.duration - originOf(source.audio!)) / source.audio!.timescale
     return !crossed.some((gap) => start >= gap.start && end <= gap.end)
   })
 
@@ -290,12 +312,12 @@ export function planClip(source: ClipSource, request: ClipRequest): ExportPlan {
  * lags by exactly the discarded head of the group in every player.
  */
 function firstDecodableIn(track: SourceTrack, requested: number): number {
-  const ticks = Math.round(requested * track.timescale) + track.editOffset
+  const ticks = Math.round(requested * track.timescale) + originOf(track)
   const enters = shownAt(track, ticks)
   const head = track.samples[firstFrame(track, enters)]
   if (!head?.sync || head.pts <= enters) return requested
 
-  return (head.pts - track.editOffset) / track.timescale
+  return (head.pts - originOf(track)) / track.timescale
 }
 
 /**
@@ -346,8 +368,8 @@ function decodableVideo(track: SourceTrack): DecodableTrack {
 function presentationHoles(track: SourceTrack, samples: readonly SourceSample[]): Hole[] {
   const spans = samples
     .map((sample) => ({
-      from: (sample.pts - track.editOffset) / track.timescale,
-      to: (sample.pts + sample.duration - track.editOffset) / track.timescale,
+      from: (sample.pts - originOf(track)) / track.timescale,
+      to: (sample.pts + sample.duration - originOf(track)) / track.timescale,
     }))
     .sort((a, b) => a.from - b.from)
   const merged: Hole[] = []
@@ -374,8 +396,8 @@ function soundAfterDecodablePicture(audio: SourceTrack, discarded: readonly Hole
   if (discarded.length === 0) return audio
 
   const samples = audio.samples.filter((sample) => {
-    const start = (sample.pts - audio.editOffset) / audio.timescale
-    const end = (sample.pts + sample.duration - audio.editOffset) / audio.timescale
+    const start = (sample.pts - originOf(audio)) / audio.timescale
+    const end = (sample.pts + sample.duration - originOf(audio)) / audio.timescale
     return !discarded.some((span) => end > span.from && start < span.to)
   })
 
@@ -400,8 +422,8 @@ export function presentationSpan(track: SourceTrack): { start: number; end: numb
 
   if (start === Infinity) return { start: 0, end: 0 }
   return {
-    start: (start - track.editOffset) / track.timescale,
-    end: (end - track.editOffset) / track.timescale,
+    start: (start - originOf(track)) / track.timescale,
+    end: (end - originOf(track)) / track.timescale,
   }
 }
 
@@ -432,8 +454,8 @@ function holesOf(track: SourceTrack): Hole[] {
     const ends = previous.dts + previous.duration
     if (next.dts > ends) {
       holes.push({
-        from: (ends - track.editOffset) / track.timescale,
-        to: (next.dts - track.editOffset) / track.timescale,
+        from: (ends - originOf(track)) / track.timescale,
+        to: (next.dts - originOf(track)) / track.timescale,
       })
     }
   }
@@ -448,8 +470,8 @@ function planTrack(track: SourceTrack, request: ClipRequest, seams: Seam[]): Pla
   // The request is stated on the presentation timeline; the samples are stated on the decode one.
   // Adding the edit offset moves from the first to the second, and it is the same addition for
   // both tracks — which is why the priming of the sound needs no term of its own anywhere below.
-  const inTicks = Math.round(request.in * scale) + track.editOffset
-  const outTicks = Math.round(request.out * scale) + track.editOffset
+  const inTicks = Math.round(request.in * scale) + originOf(track)
+  const outTicks = Math.round(request.out * scale) + originOf(track)
 
   const video = track.kind === 'video'
   const enters = video ? shownAt(track, inTicks) : inTicks
@@ -459,6 +481,13 @@ function planTrack(track: SourceTrack, request: ClipRequest, seams: Seam[]): Pla
   const chosen = track.samples.slice(first, last + 1)
   const head = chosen[0]
   if (!head) return null
+  // The rule of at least one sample is the picture's, which states the clip. Sound that ended
+  // before the in point or starts at or after the out point has nothing to say inside it, and
+  // the packets the rule would keep are warm-up behind an edit of no length — which some readers
+  // ignore and play — or one packet behind a silence that lengthens the movie to reach it.
+  if (!video && !chosen.some((sample) => sample.dts + sample.duration > inTicks && sample.dts < outTicks)) {
+    return null
+  }
 
   const samples: PlannedSample[] = chosen.map((sample, i) => {
     const next = chosen[i + 1]
@@ -473,8 +502,8 @@ function planTrack(track: SourceTrack, request: ClipRequest, seams: Seam[]): Pla
         // the file as an extra tick or two on the sample in front of the seam.
         const pull = pullAcross(
           seams,
-          (ends - track.editOffset) / scale,
-          (next.dts - track.editOffset) / scale,
+          (ends - originOf(track)) / scale,
+          (next.dts - originOf(track)) / scale,
         )
         duration += Math.max(0, hole - Math.round(pull * scale))
       }
@@ -495,9 +524,46 @@ function planTrack(track: SourceTrack, request: ClipRequest, seams: Seam[]): Pla
     width: track.width,
     height: track.height,
     samples,
-    skipTicks: Math.max(0, enters - head.dts),
-    ...(!video && head.dts > enters ? { delayTicks: head.dts - enters } : {}),
+    ...(!video && head.dts > enters
+      ? leadOf(track, enters, head.dts, seams)
+      : { skipTicks: Math.max(0, enters - head.dts) }),
   }
+}
+
+/**
+ * The silence in front of sound that enters after the clip does, on the timeline of the clip.
+ *
+ * Not the distance on the source clock. The two differ by every seam between the entry point and
+ * the first packet: a clip that opens just in front of a seek, where the sound stops earlier than
+ * the picture and resumes later, has the picture pulled across the hole and the sound beginning
+ * on the far side of it — and a lead counted in source ticks keeps the whole hole the picture has
+ * just closed. Measured, ten and a half seconds of silence in front of sound that belongs half a
+ * second into the clip, and the clip lengthened by as much. The pull taken off is the one the
+ * samples across a hole give up (`pullAcross`), so both ways of crossing a seam agree.
+ *
+ * The pull can be the larger of the two: sound whose hole is the wider one and yet resumes ahead
+ * of the picture lands in front of the head of the clip once the seam is closed. Then there is no
+ * silence to state, and what lies before the head is hidden instead, as any other run-up is.
+ */
+function leadOf(
+  track: SourceTrack,
+  enters: number,
+  head: number,
+  seams: Seam[],
+): { skipTicks: number; delayTicks?: number } {
+  const scale = track.timescale
+  const pull = pullAcross(
+    seams,
+    (enters - originOf(track)) / scale,
+    (head - originOf(track)) / scale,
+  )
+  const lead = head - enters - Math.round(pull * scale)
+  if (lead <= 0) return { skipTicks: -lead }
+  // What of the first packet lies before the track's own edit is encoder priming: hidden by a
+  // skip, and the delay grows by as much so that the content still lands where it belongs.
+  // Zero for any packet past the start of the material, where there is no priming left.
+  const priming = Math.max(0, track.editOffset - head)
+  return { skipTicks: priming, delayTicks: lead + priming }
 }
 
 /** The composition time of the frame on the screen at that instant. */

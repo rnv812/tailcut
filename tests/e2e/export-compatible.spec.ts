@@ -26,9 +26,10 @@ for (const [name, tracks, codecs] of [
         const url = chrome.runtime.getURL('shared/convert-mp4.js')
         const { convertMp4 } = await import(url)
         const started = performance.now()
-        const file = await convertMp4(new Uint8Array(bytes), needed, () => false)
-        return { bytes: Array.from(file as Uint8Array), ms: performance.now() - started }
+        const { file, note } = await convertMp4(new Uint8Array(bytes), needed, () => false)
+        return { bytes: Array.from(file as Uint8Array), note, ms: performance.now() - started }
       }, { bytes: Array.from(original), needed: conversionNeeded(original) })
+      expect(result.note, 'Chromium has an H.264 encoder: nothing should have been kept').toBeUndefined()
       const path = test.info().outputPath(`${name}.mp4`)
       writeFileSync(path, new Uint8Array(result.bytes))
       const probe = probeFile(path)
@@ -65,7 +66,8 @@ test('keeps audio aligned when converting Opus to AAC', async () => {
     const page = await openExtensionPage(context, extensionId, 'options/options.html')
     const result = await page.evaluate(async (bytes) => {
       const { convertMp4 } = await import(chrome.runtime.getURL('shared/convert-mp4.js'))
-      return Array.from(await convertMp4(new Uint8Array(bytes), { video: false, audio: true }, () => false))
+      const { file } = await convertMp4(new Uint8Array(bytes), { video: false, audio: true }, () => false)
+      return Array.from(file as Uint8Array)
     }, Array.from(bytes))
     writeFileSync(saved, new Uint8Array(result as number[]))
     const samples = (file: string) => {
@@ -90,3 +92,45 @@ test('keeps audio aligned when converting Opus to AAC', async () => {
     await context.close()
   }
 })
+
+/**
+ * Pictures of an odd size, which the web is full of: a 16:9 picture scaled to 481 lines, and a
+ * 4:3 picture stored 640 wide with a pixel aspect of 4:3 — 853 square pixels, the size mediabunny
+ * encodes it at. H.264 takes neither, and the conversion used to give up on both as "no encodable
+ * target codec". Made of ffmpeg's own VP9 and Opus, as YouTube serves them in an mp4.
+ */
+for (const [name, size, filter, expected] of [
+  ['853x481', '853x481', 'null', [852, 480]],
+  ['640x480-sar-4-3', '640x480', 'setsar=4/3', [852, 480]],
+] as const) {
+  test(`converts a VP9 picture of an odd size (${name}) to an even H.264 one`, async () => {
+    test.setTimeout(60_000)
+    const source = test.info().outputPath(`${name}-source.mp4`)
+    const saved = test.info().outputPath(`${name}-saved.mp4`)
+    execFileSync('ffmpeg', [
+      '-v', 'error', '-f', 'lavfi', '-i', `testsrc=size=${size}:rate=24:duration=2`,
+      '-f', 'lavfi', '-i', 'sine=f=440:d=2:sample_rate=48000',
+      '-vf', filter, '-pix_fmt', 'yuv420p', '-c:v', 'libvpx-vp9', '-deadline', 'realtime',
+      '-cpu-used', '8', '-c:a', 'libopus', '-strict', 'experimental', source,
+    ])
+    const bytes = new Uint8Array(readFileSync(source))
+    expect(conversionNeeded(bytes)).toEqual({ video: true, audio: true })
+    const { context, extensionId } = await launchWithExtension()
+    try {
+      const page = await openExtensionPage(context, extensionId, 'options/options.html')
+      const result = await page.evaluate(async (bytes) => {
+        const { convertMp4 } = await import(chrome.runtime.getURL('shared/convert-mp4.js'))
+        const { file, note } = await convertMp4(new Uint8Array(bytes), { video: true, audio: true }, () => false)
+        return { bytes: Array.from(file as Uint8Array), note }
+      }, Array.from(bytes))
+      expect(result.note, 'the odd size kept the recording out of Premiere').toBeUndefined()
+      writeFileSync(saved, new Uint8Array(result.bytes))
+      const probe = probeFile(saved)
+      expect(probe.streams.map((s) => s.codec_name)).toEqual(['h264', 'aac'])
+      expect([probe.streams[0]!.width, probe.streams[0]!.height]).toEqual(expected)
+      decodeFile(saved)
+    } finally {
+      await context.close()
+    }
+  })
+}

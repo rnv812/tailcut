@@ -23,6 +23,18 @@ export function continuesRun(lastEnd: number, start: number): boolean {
  */
 export const SAME_CHUNK_TOLERANCE_SECONDS = 0.001
 
+/**
+ * A chunk, and the ISO track of a muxed buffer it carries when that is one track and not all.
+ *
+ * A muxed init describes two traks, and a packager is free to give each of them a moof of its own
+ * (ffmpeg's separate_moof, Bento4): then the buffer is fed a fragment of picture and a fragment
+ * of sound that start on the same instant, and by start alone the second is a copy of the first.
+ * The number tells them apart. Absent everywhere else, and absent means "the one stream there is".
+ */
+export interface LanedChunk extends Chunk {
+  trackId?: number
+}
+
 export class PtsMap {
   /** Always sorted by start. */
   private chunks: Chunk[] = []
@@ -35,17 +47,22 @@ export class PtsMap {
    * Replacing an existing chunk with a longer version also counts as accepted because the map now
    * contains different material that must be written.
    */
-  insert(chunk: Chunk): boolean {
+  insert(chunk: LanedChunk): boolean {
     if (chunk.end <= chunk.start) return false
 
     const at = this.lowerBound(chunk.start)
 
     // The same interval may arrive again with a tiny start shift in either direction, so its
-    // duplicate is either at the insertion point or immediately before it.
-    for (const i of [at - 1, at]) {
-      const existing = this.chunks[i]
-      if (!existing) continue
-      if (Math.abs(existing.start - chunk.start) >= SAME_CHUNK_TOLERANCE_SECONDS) continue
+    // duplicate lies among the chunks starting within the tolerance on either side of the
+    // insertion point. Usually that is one chunk; in a muxed buffer whose tracks come in moofs of
+    // their own it is one per track, and only the one of the same track is a copy.
+    const near = (i: number) =>
+      Math.abs(this.chunks[i]!.start - chunk.start) < SAME_CHUNK_TOLERANCE_SECONDS
+    let from = at
+    while (from > 0 && near(from - 1)) from--
+    for (let i = from; i < this.chunks.length && near(i); i++) {
+      const existing: LanedChunk = this.chunks[i]!
+      if (existing.trackId !== chunk.trackId) continue
       // Keep the longer version.
       if (chunk.end > existing.end) {
         this.chunks[i] = chunk

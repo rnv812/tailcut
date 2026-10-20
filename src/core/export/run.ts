@@ -59,6 +59,18 @@ export interface ExportRequest {
 }
 
 /**
+ * A file ready for the browser, and what its row should say about it.
+ *
+ * `note` is set when the file is not quite what was asked for and is saved anyway: an mp4 whose
+ * VP9 or Opus this browser could not convert keeps them, and the row says Premiere cannot import
+ * it and why. Losing the clip would be worse than saving it in the codecs it was recorded in.
+ */
+export interface PreparedFile {
+  file: Uint8Array
+  note?: string
+}
+
+/**
  * Everything the runner wants of the world: bytes in, a file out — and frames, when it re-encodes.
  *
  * `encode` is **required**, not optional: an io without it would take a re-encoding request and
@@ -69,12 +81,26 @@ export interface ExportRequest {
 export interface ExportIo {
   read(at: Located): Promise<Uint8Array>
   save(file: Uint8Array, fileName: string): Promise<void>
-  /** Final format conversion, still cancellable and before Chrome owns the download. */
+  /**
+   * Final format conversion, still cancellable and before Chrome owns the download.
+   *
+   * Null when called off. A conversion the browser cannot do is not a rejection: it answers the
+   * file it was given, with a note for the row (see `PreparedFile`).
+   */
   prepare?(
     file: Uint8Array,
     fileName: string,
     stale: () => boolean,
-  ): Promise<Uint8Array | null>
+    request: ExportRequest,
+  ): Promise<PreparedFile | null>
+  /**
+   * Whether `prepare` will re-encode the picture of this request.
+   *
+   * Asked once, when the request is queued, and a yes puts a copy in the encode lane: a VP9 clip
+   * copied into an mp4 is decoded and encoded whole on its way out, which is exactly the load the
+   * lane of one exists for. Absent means no.
+   */
+  converts?(request: ExportRequest): boolean
   /**
    * The re-encoding path, whole: it reads its own material, sample by sample, and hands back the
    * file. The runner does not read for it, because reading every slice first and holding them all
@@ -211,9 +237,16 @@ export function createRunner(io: ExportIo, options: RunnerOptions = {}): ExportR
   }
 
   function pump(): void {
+    // Runs still in flight under a row that has moved on. They hold the codecs they were given
+    // until their next frame, and the lane counts them until then (see `startable`).
+    const winding = new Set<string>()
+    for (const id of inFlight) {
+      if (queue.jobs.find((job) => job.id === id)?.state !== 'running') winding.add(id)
+    }
+
     // startable answers with as many jobs as there is room for, so the loop cannot over-start:
     // every job it hands back is marked running by the first line of work, before any await.
-    for (const job of startable(queue)) {
+    for (const job of startable(queue, winding)) {
       // A retried job whose earlier run has not let go yet. Starting now would put two runs of
       // one clip in flight, each holding that clip's material; the stale one stops at its next
       // slice and pumps from its own `finally`, and this attempt begins there instead. So a job
@@ -236,6 +269,22 @@ export function createRunner(io: ExportIo, options: RunnerOptions = {}): ExportR
 
     inFlight.add(job.id)
     emit({ type: 'start', id: job.id, now: now() })
+
+    /** The last stretch of both paths: the conversion, the gate, and the hand-over. */
+    const prepareAndSave = async (written: Uint8Array): Promise<void> => {
+      const prepared = io.prepare ? await io.prepare(written, request.fileName, stale, request) : { file: written }
+      if (prepared === null || stale()) return
+
+      handedOver.add(job.id)
+      await io.save(prepared.file, request.fileName)
+      emit({
+        type: 'finish',
+        id: job.id,
+        bytes: prepared.file.byteLength,
+        now: now(),
+        ...(prepared.note ? { note: prepared.note } : {}),
+      })
+    }
 
     try {
       const path = request.path
@@ -261,12 +310,7 @@ export function createRunner(io: ExportIo, options: RunnerOptions = {}): ExportR
         // rebuilt by `cancel`. Nothing to report and nothing to save.
         if (file === null || stale()) return
 
-        if (io.prepare) file = await io.prepare(file, request.fileName, stale)
-        if (file === null || stale()) return
-
-        handedOver.add(job.id)
-        await io.save(file, request.fileName)
-        emit({ type: 'finish', id: job.id, bytes: file.byteLength, now: now() })
+        await prepareAndSave(file)
         return
       }
 
@@ -309,15 +353,10 @@ export function createRunner(io: ExportIo, options: RunnerOptions = {}): ExportR
       // told synchronously, so the last thing the loop reported is a place a call-off can land.
       if (stale()) return
 
-      let file: Uint8Array | null = assembleMp4(path.plan, bytesFrom(slices, buffers))
+      const file = assembleMp4(path.plan, bytesFrom(slices, buffers))
       if (!file.byteLength) throw new Error(EMPTY_CLIP)
 
-      if (io.prepare) file = await io.prepare(file, request.fileName, stale)
-      if (file === null || stale()) return
-
-      handedOver.add(job.id)
-      await io.save(file, request.fileName)
-      emit({ type: 'finish', id: job.id, bytes: file.byteLength, now: now() })
+      await prepareAndSave(file)
     } catch (error) {
       // Not a word out of a run nobody is waiting on. The only row left for it to land on is the
       // attempt that replaced it, which has not read a byte — and 'fail' takes a waiting job as
@@ -352,7 +391,9 @@ export function createRunner(io: ExportIo, options: RunnerOptions = {}): ExportR
         return {
           id,
           clipId: request.clipId,
-          kind: laneOf(request.path),
+          // A copy the io will convert on its way out is an encode by the load it puts on the
+          // machine, and it waits for the encoder like one (see `ExportIo.converts`).
+          kind: io.converts?.(request) ? 'encode' as const : laneOf(request.path),
           name: request.name,
           fileName: request.fileName,
           frames: framesOf(request.path),

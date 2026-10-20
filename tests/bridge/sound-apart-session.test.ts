@@ -119,7 +119,7 @@ async function paired(files?: Record<string, Uint8Array>) {
 /** Builds the file a save of this session would write, and reads it back through ffprobe. */
 async function saved(session: Session, name: string) {
   const plan = planSave(session)
-  const bytes = await writeSaveFile(plan.source)
+  const bytes = (await writeSaveFile(plan.source))?.file ?? null
   expect(bytes, 'the save produced no file').not.toBeNull()
 
   const file = writeTemp(name, bytes!)

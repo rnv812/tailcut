@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
   editOffset,
+  emptyEdit,
   locateSamples,
   sampleRunOf,
   samplesInSegment,
@@ -236,6 +237,53 @@ describe('editOffset', () => {
     expect(editOffset(written, 3)).toBe(0)
     expect(editOffset(h264Video, 9)).toBe(0)
     expect(editOffset(new Uint8Array(0), 1)).toBe(0)
+  })
+})
+
+/** The same one-track movie with an mvhd in front of it, counting the movie in `timescale`. */
+function movieWithEditList(version: 0 | 1, timescale: number, elst: Uint8Array): Uint8Array {
+  // mvhd: creation and modification four bytes apiece in version 0 and eight in version 1, then
+  // the timescale and a duration of the same width; the rest of the box is never read here.
+  const times = version === 1 ? [u64(0), u64(0), u32(timescale), u64(0)] : [u32(0, 0, timescale, 0)]
+  const mvhd = fullBoxOf('mvhd', version, 0, ...times, zeroes(80))
+  const tkhd = fullBoxOf('tkhd', 0, 3, u32(0, 0, 1, 0, 0), zeroes(60))
+  return boxOf('moov', mvhd, boxOf('trak', tkhd, boxOf('edts', elst)))
+}
+
+describe('emptyEdit', () => {
+  it('reads the empty edits at the head of a list, in ticks of the track', () => {
+    // 453 thousandths of the movie, held empty in front of the sound: ffmpeg's shape for a
+    // stream that starts after the others, and 9989 ticks of 22050 to the nearest tick.
+    const late = elstV0({ duration: 453, media: -1 }, { duration: 5_000, media: 0 })
+    expect(emptyEdit(movieWithEditList(0, 1_000, late), 1, 22_050)).toBe(9_989)
+    expect(emptyEdit(movieWithEditList(1, 1_000, late), 1, 22_050)).toBe(9_989)
+
+    // Two of them in a row hold the head for the two together; the media_time behind them is
+    // `editOffset`'s and changes nothing here.
+    const twice = elstV1(
+      { duration: 300, media: -1 },
+      { duration: 200, media: -1 },
+      { duration: 5_000, media: 1_024 },
+    )
+    expect(emptyEdit(movieWithEditList(0, 600, twice), 1, 48_000)).toBe(40_000)
+    expect(editOffset(movieWithEditList(0, 600, twice), 1)).toBe(1_024)
+  })
+
+  it('is zero where nothing is held at the head', () => {
+    const plain = elstV0({ duration: 5_000, media: 1_024 })
+    expect(emptyEdit(movieWithEditList(0, 1_000, plain), 1, 22_050)).toBe(0)
+    // An empty edit behind the first real one is a hole in the middle, not a head.
+    const middle = elstV0(
+      { duration: 1_000, media: 0 },
+      { duration: 500, media: -1 },
+      { duration: 1_000, media: 22_050 },
+    )
+    expect(emptyEdit(movieWithEditList(0, 1_000, middle), 1, 22_050)).toBe(0)
+    // No mvhd to count the movie in, an unknown track, junk: nothing to convert, nothing held.
+    const late = elstV0({ duration: 453, media: -1 }, { duration: 5_000, media: 0 })
+    expect(emptyEdit(initWithEditList(1, late), 1, 22_050)).toBe(0)
+    expect(emptyEdit(movieWithEditList(0, 1_000, late), 2, 22_050)).toBe(0)
+    expect(emptyEdit(new Uint8Array(0), 1, 22_050)).toBe(0)
   })
 })
 

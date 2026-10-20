@@ -43,7 +43,7 @@ import {
 import { writeSnapshot } from './snapshot-writer'
 import { liveThumbnailRuntime } from './thumbnail-runtime'
 import { thumbnailSourceOf } from './thumbnail-source'
-import { writeSaveFile } from './write'
+import { assembleSaveFile, writeSaveFile } from './write'
 
 const writeHistoryPiece = historyWorker()
 
@@ -366,23 +366,27 @@ async function save(key: string): Promise<SaveResult> {
 
   // A Blob only takes a view over a plain ArrayBuffer, while Uint8Array allows shared memory by
   // type. Both writers allocate the buffer themselves and neither is shared.
-  const file = (await writeSaveFile(plan.source)) as Uint8Array<ArrayBuffer> | null
+  const written = await writeSaveFile(plan.source)
 
   // The material is there and no file could be made of it. On the plain path it is on somebody's
   // server and the answer to a read of it may be a refusal; on the captured path it is here, and
   // the writer could make nothing of it — an init whose sample entry it does not know, segments
-  // it could not read. Said in the words of a refused download rather than of an empty session:
-  // the recording is there, and what failed was turning it into a file.
-  if (!file) {
+  // it could not read. Not the words of an empty session — the recording is there — and not those
+  // of a refused download either: Chrome was never asked. What failed was making the file.
+  if (!written) {
     return {
       ok: false,
-      reason: 'refused',
+      reason: 'failed',
       detail:
         plan.source.kind === 'plain'
           ? 'the file could not be read'
           : 'the recorded material could not be read',
     }
   }
+  const file = written.file as Uint8Array<ArrayBuffer>
+  // Set when the codecs could not be made importable and the file keeps its own: the popup says
+  // so beside the saved file rather than not saving it (see `keptOriginal`).
+  const note = written.note
 
   const url = URL.createObjectURL(new Blob([file], { type: 'video/mp4' }))
 
@@ -412,6 +416,7 @@ async function save(key: string): Promise<SaveResult> {
 
         const result: SaveResult = failed ? { ok: false, reason: 'refused' } : { ok: true }
         if (detail) result.detail = detail
+        if (!failed && note) result.note = note
         done(result)
       },
     ),
@@ -433,9 +438,12 @@ async function answer(request: ExtensionToTab, port: MessagePort | undefined): P
   try {
     reply = await replyTo(request)
   } catch (cause) {
-    // In the words of a refused save, which the popup already reads, and with what broke in it:
-    // "refused" with no detail sends the reader to the console of a frame they cannot open.
-    reply = { ok: false, reason: 'refused', detail: String(cause) }
+    // With what broke in it: a failure with no detail sends the reader to the console of a frame
+    // they cannot open. Not "refused" — that is Chrome turning a download down, and the popup
+    // says so in as many words — and a reason both a save and an edit declare, so that neither
+    // popup line is left with a word it has no sentence for: the edit used to get "refused",
+    // which EditResult does not name, and the popup put up an empty alert.
+    reply = { ok: false, reason: 'failed', detail: cause instanceof Error ? cause.message : String(cause) }
   }
   port?.postMessage(reply)
 }
@@ -633,7 +641,12 @@ async function freezeFile(session: Session, meta: SnapshotMeta): Promise<EditRes
   // there is nothing to cut. The same emptiness a capture of init segments alone answers with.
   if (cut.bytes === 0) return { ok: false, reason: 'empty' }
 
-  const file = await writeSaveFile(cut.source)
+  // The file as it is, and not as Save all would write it. The editor reads VP9 and Opus as
+  // readily as H.264, and re-encodes or converts every clip on its own way out; converting here
+  // as well would be a lossy encode of the whole recording before the editor even opened — and
+  // in a browser with no H.264 encoder, a reason to open nothing. A captured session is frozen
+  // in its own codecs too (freezeCaptured), so both kinds reach the editor alike.
+  const file = await assembleSaveFile(cut.source)
   // An address that has expired, a host that stopped answering, a read that came back short. The
   // recording is not lost — it was never here — so this is neither "gone" nor "empty".
   if (!file) return { ok: false, reason: 'unread' }

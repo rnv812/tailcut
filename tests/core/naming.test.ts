@@ -82,6 +82,59 @@ describe('sanitizeFileName', () => {
     expect(sanitizeFileName('   ')).toBe('tailcut')
     expect(sanitizeFileName('///')).toBe('tailcut')
   })
+
+  it('takes out every format character and noncharacter, not only the ones a list names', () => {
+    // Measured with chrome.downloads.download: each of these names was refused whole as "Invalid
+    // filename". The tag characters are the real case — they spell the subdivision flags, so
+    // "Euro 2024 <flag of England> vs Spain" is a title a sports page writes as a matter of course.
+    const england = '\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}'
+    expect(sanitizeFileName(`Euro 2024 ${england} vs Spain`)).toBe('Euro 2024 \u{1F3F4} vs Spain')
+    expect(sanitizeFileName('\u0600\u0601\u0605 Arabic')).toBe('Arabic')
+    expect(sanitizeFileName('x\ufff9\ufffa\ufffby')).toBe('xy')
+    expect(sanitizeFileName('x\u{1D173}\u{1D17A}y')).toBe('xy')
+    expect(sanitizeFileName('\u{E0001}tag')).toBe('tag')
+    // Noncharacters: the thirty-two in the Arabic block and the last two of every plane.
+    expect(sanitizeFileName('x\ufdd0\ufdefy')).toBe('xy')
+    expect(sanitizeFileName('x\ufffe\uffffy')).toBe('xy')
+    expect(sanitizeFileName('x\u{1FFFE}\u{10FFFF}y')).toBe('xy')
+    // A lone surrogate is no character at all, and a title can carry one from a page that cut
+    // its own string in half.
+    expect(sanitizeFileName('a\ud800b\udc00c')).toBe('abc')
+    // What is not a format character stays: a variation selector is a mark, and makes the emoji.
+    expect(sanitizeFileName('\u2764\ufe0f live')).toBe('\u2764\ufe0f live')
+  })
+
+  it('takes a tilde off the front, where Chrome refuses it, and leaves it everywhere else', () => {
+    // "~ Downloads trick.mp4" was refused; "a~b.mp4" was saved.
+    expect(sanitizeFileName('~/Downloads trick')).toBe('Downloads trick')
+    expect(sanitizeFileName('~ intro ~')).toBe('intro ~')
+    expect(sanitizeFileName('. . . ~ hidden')).toBe('hidden')
+    expect(sanitizeFileName('~~~')).toBe('tailcut')
+  })
+
+  it('renames a device name of Windows, in any case and before any dot', () => {
+    // Every one of these was refused by chrome.downloads.download, on Linux as well: Chrome
+    // checks the names Windows reserves on every system, so a file can be carried over to one.
+    expect(sanitizeFileName('CON')).toBe('CON_')
+    expect(sanitizeFileName('aux')).toBe('aux_')
+    expect(sanitizeFileName('Com1')).toBe('Com1_')
+    expect(sanitizeFileName('nul')).toBe('nul_')
+    expect(sanitizeFileName('LPT9')).toBe('LPT9_')
+    expect(sanitizeFileName('clock$')).toBe('clock$_')
+    expect(sanitizeFileName('CONIN$')).toBe('CONIN$_')
+    expect(sanitizeFileName('Aux.final')).toBe('Aux_.final')
+    // Reached after the cleaning: the tail goes and leaves the device name bare.
+    expect(sanitizeFileName('con .')).toBe('con_')
+    // Only the name before the first dot counts: a device name inside a title is a word.
+    expect(sanitizeFileName('con x')).toBe('con x')
+    expect(sanitizeFileName('LPT9 - live')).toBe('LPT9 - live')
+    expect(sanitizeFileName('console')).toBe('console')
+    expect(sanitizeFileName('COM0')).toBe('COM0')
+    // And the extra character is still inside the limit.
+    const long = sanitizeFileName(`prn.${'x'.repeat(300)}`)
+    expect(long).toHaveLength(100)
+    expect(long.startsWith('prn_.')).toBe(true)
+  })
 })
 
 describe('fileNameOf', () => {

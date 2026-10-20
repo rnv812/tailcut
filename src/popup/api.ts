@@ -10,6 +10,7 @@ import {
 import { hostOf } from '../shared/format'
 import { editorUrl, historyUrl } from '../shared/protocol'
 import type {
+  EditFailure,
   EditResult,
   Omission,
   SaveFailure,
@@ -31,10 +32,34 @@ import { readSettings, writeSettings } from '../shared/settings-store'
 
 // The answer is described by the protocol and not by the popup: let the two descriptions drift
 // apart and the popup would read fields the bridge does not send, showing undefined in silence.
-export type { EditResult, Omission, SaveFailure, SaveResult, SessionList, SessionSummary }
+export type { EditFailure, EditResult, Omission, SaveFailure, SaveResult, SessionList, SessionSummary }
 
 /** The reasons the bridge may give; a reply naming anything else is a refusal without a reason. */
-const FAILURES: SaveFailure[] = ['gone', 'empty', 'refused']
+const FAILURES: SaveFailure[] = ['gone', 'empty', 'refused', 'failed']
+
+/** The same for an edit. A word outside it is a freeze that failed for a reason not given. */
+const EDIT_FAILURES: EditFailure[] = ['gone', 'empty', 'unread', 'storage', 'failed']
+
+/** A saved file, with the one thing worth knowing about it when there is one. */
+function savedOf(reply: SaveResult): SaveResult {
+  return typeof reply.note === 'string' && reply.note ? { ok: true, note: reply.note } : { ok: true }
+}
+
+/**
+ * A refused edit the popup has a sentence for.
+ *
+ * The other half of the guard on saves. A bridge that answered an edit with "refused" — the
+ * word of a save, which is what its catch-all used to send — reached the popup as a reason with
+ * no sentence, and the popup drew an empty alert.
+ */
+function editRefusalOf(reply: EditResult | undefined): EditResult {
+  const given = reply?.reason
+  const reason: EditFailure = given === undefined ? 'gone' : EDIT_FAILURES.includes(given) ? given : 'failed'
+  const detail = reply?.detail
+  return reason === 'failed' && typeof detail === 'string' && detail
+    ? { ok: false, reason, detail }
+    : { ok: false, reason }
+}
 
 /**
  * A refusal in a shape the popup can act on, out of whatever the tab actually answered.
@@ -160,7 +185,7 @@ export async function saveAll(key: string): Promise<SaveResult> {
     const result = await saveInFrame(tabId, frameId, key)
     // Chrome answers undefined when the channel closed with nobody answering: the tab was closed
     // or taken off the page while the file was being built. Nothing was saved.
-    return result?.ok === true ? { ok: true } : refusalOf(result)
+    return result?.ok === true ? savedOf(result) : refusalOf(result)
   } catch {
     // A page with no content script, or a tab that is gone: an unhandled rejection would reach no
     // further than the console of the popup.
@@ -205,9 +230,7 @@ export async function editSession(key: string): Promise<EditResult> {
 
   try {
     const result = await editInFrame(tabId, frameId, key)
-    if (result?.ok !== true || typeof result.snapshotId !== 'string') {
-      return { ok: false, reason: result?.reason ?? 'gone' }
-    }
+    if (result?.ok !== true || typeof result.snapshotId !== 'string') return editRefusalOf(result)
     return result
   } catch {
     // A page with no content script, or a tab that has gone away under the open popup.

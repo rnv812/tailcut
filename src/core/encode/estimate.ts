@@ -114,7 +114,9 @@ export function estimateFor(input: EstimateInput): Estimate {
     frames: path.plan.kept,
     seconds: secondsFor(input.pace, 'mp4', path.plan.geometry, path.plan.kept),
     // A quantizer decides quality and lets the bytes fall where they will; there is no honest
-    // number here, and the panel says so instead of inventing one.
+    // number here, and the panel says so instead of inventing one. That is all three quantizer
+    // rungs — the two hardware ones and VP9, whose libvpx quantizer is no more a size than theirs.
+    // The panel says what VP9 changes about the file instead (src/editor/inspector/queue.tsx).
     bytes: choice.kind === 'h264-sw' ? Math.round((choice.bitrate * input.duration) / 8) : null,
     sourceCodec: path.plan.sourceFormat,
     inflates: ALREADY_EFFICIENT.has(path.plan.sourceFormat),

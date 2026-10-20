@@ -160,7 +160,7 @@ describe('Windows and working paths', () => {
 })
 
 describe('the real codec ladder matrix', () => {
-  it('asks the supplied ladder for three real rungs at eight geometries', () => {
+  it('asks the supplied ladder for four real rungs at eight geometries', () => {
     const calls: Array<{ width: number; height: number; framerate: number }> = []
     const traced = (
       geometry: { width: number; height: number; framerate: number },
@@ -182,7 +182,7 @@ describe('the real codec ladder matrix', () => {
       { width: 3840, height: 2160, framerate: 30 },
       { width: 3840, height: 2160, framerate: 60 },
     ])
-    expect(rows).toHaveLength(24)
+    expect(rows).toHaveLength(32)
     for (const geometry of calls) {
       const atGeometry = rows.filter(
         (row: { width: number; height: number; framerate: number }) =>
@@ -193,7 +193,7 @@ describe('the real codec ladder matrix', () => {
       expect(
         atGeometry.map((row: { kind: string }) => row.kind),
         `${geometry.width}x${geometry.height}@${geometry.framerate}`,
-      ).toEqual(['hevc-hw', 'h264-hw', 'h264-sw'])
+      ).toEqual(['hevc-hw', 'h264-hw', 'h264-sw', 'vp9-sw'])
     }
   })
 
@@ -244,7 +244,7 @@ describe('the real codec ladder matrix', () => {
 
     expect(bundle).toHaveBeenCalledTimes(1)
     expect(bundledLadder).toHaveBeenCalledTimes(8)
-    expect(rows).toHaveLength(24)
+    expect(rows).toHaveLength(32)
   })
 
   it('builds and executes the real ladder as a self-contained browser script', async () => {
@@ -1446,11 +1446,11 @@ describe('live Windows run', () => {
       'h264-4k': 'H.264 in hardware',
       ...options.choices,
     }
-    const matrix = Array.from({ length: 24 }, (_unused, index) => ({
-      width: [640, 1280, 1920, 3840][Math.floor(index / 6)],
-      height: [360, 720, 1080, 2160][Math.floor(index / 6)],
-      framerate: index % 2 === 0 ? 30 : 60,
-      kind: ['hevc-hw', 'h264-hw', 'h264-sw'][index % 3],
+    const matrix = Array.from({ length: 32 }, (_unused, index) => ({
+      width: [640, 1280, 1920, 3840][Math.floor(index / 8)],
+      height: [360, 720, 1080, 2160][Math.floor(index / 8)],
+      framerate: Math.floor(index / 4) % 2 === 0 ? 30 : 60,
+      kind: ['hevc-hw', 'h264-hw', 'h264-sw', 'vp9-sw'][index % 4],
     }))
     const server = {
       origin: 'http://127.0.0.1:43127',
@@ -1663,7 +1663,7 @@ describe('live Windows run', () => {
         { id: 'h264-4k', status: 'passed', selectedChoice: 'H.264 in hardware', level: 51, bFrames: 2 },
       ],
     })
-    expect((result.report.matrix as { rows: unknown[] }).rows).toHaveLength(24)
+    expect((result.report.matrix as { rows: unknown[] }).rows).toHaveLength(32)
     expect(harness.reports.find((report) => report.phase === 'export-hevc-1080-running')).toMatchObject({
       exports: [{ id: 'hevc-1080', status: 'running', selectedChoice: 'HEVC in hardware' }],
     })
@@ -1889,7 +1889,7 @@ describe('dry run', () => {
     expect(printed).toMatch(/copy.*dist/i)
     expect(printed).toMatch(/generate|media-1080|minute/i)
     expect(printed).toMatch(/ranged HTTP|Range/i)
-    expect(printed).toMatch(/24.*probe|probe.*24/i)
+    expect(printed).toMatch(/32.*probe|probe.*32/i)
     expect(printed).toMatch(/HEVC.*1080/i)
     expect(printed).toMatch(/128.*64/i)
     expect(printed).toMatch(/WebP.*10/i)

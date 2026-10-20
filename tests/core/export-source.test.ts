@@ -40,6 +40,17 @@ const MUXED = [1, 2, 3].map((n) => read(`muxed/chunk-stream0-0000${n}.m4s`))
 const MUXED_EDITS_INIT = read('muxed-edits/init-stream0.m4s')
 const MUXED_EDITS = [1, 2, 3].map((n) => read(`muxed-edits/chunk-stream0-0000${n}.m4s`))
 
+/**
+ * The same muxed material, with every fragment split into a moof of its own per track.
+ *
+ * `separate_moof` in ffmpeg, and the way Bento4 writes a muxed stream: one init of two traks, and
+ * then a moof holding the picture's traf alone, a moof holding the sound's alone, and so on. Cut
+ * into what MSE is fed, every media segment carries exactly one traf — and the two are told apart
+ * by the track_ID of that traf and by nothing else.
+ */
+const MUXED_SEPARATE_INIT = read('muxed-separate/init-stream0.m4s')
+const MUXED_SEPARATE = [1, 2, 3, 4, 5, 6].map((n) => read(`muxed-separate/chunk-stream0-0000${n}.m4s`))
+
 /** Segments laid out one after another in an address space of their own, as Save all lays them. */
 function placed(kind: 'video' | 'audio', initBytes: Uint8Array, segments: Uint8Array[]) {
   const map = new ByteMap()
@@ -328,6 +339,29 @@ describe('sourceTrackOf', () => {
     // Read exactly as the untouched segment is: the number in the traf changes nothing else.
     expect(track.samples).toEqual(untouched.samples)
     expect(track.samples).toHaveLength(48)
+  })
+
+  it('keeps each track of a muxed init to its own fragments when every moof holds one traf', () => {
+    // The allowance above stands on the init describing one track: then a lone traf, numbered
+    // whatever, can be about nothing else. A muxed init describes two, and a moof per track hands
+    // each of them a segment with one traf in it — the other track's, half the time. Taken as the
+    // lone traf it is not, the sound swallowed every fragment of the picture and the picture every
+    // fragment of the sound, and AAC packets went to the H.264 decoder as frames.
+    expect(
+      MUXED_SEPARATE.map((segment) => samplesInSegment(segment, new Map()).map((t) => t.trackId)),
+      'the fixture no longer puts one traf in every moof',
+    ).toEqual([[1], [2], [1], [2], [1], [2]])
+
+    const picture = sourceTrackOf(placed('video', MUXED_SEPARATE_INIT, MUXED_SEPARATE).input)!
+    const sound = sourceTrackOf(placed('audio', MUXED_SEPARATE_INIT, MUXED_SEPARATE).input)!
+
+    // The very numbers of the muxed set, which is the same recording packed two trafs to a moof.
+    const together = sourceTrackOf(placed('video', MUXED_INIT, MUXED).input)!
+    expect(picture.samples).toHaveLength(60)
+    expect(picture.samples.map((sample) => [sample.dts, sample.pts, sample.duration, sample.sync]))
+      .toEqual(together.samples.map((sample) => [sample.dts, sample.pts, sample.duration, sample.sync]))
+    expect(sound.samples).toHaveLength(131)
+    expect(sound.samples.reduce((total, sample) => total + sample.duration, 0)).toBe(136_710)
   })
 
   it('refuses a segment of two tracks that numbers neither of them the way the init does', () => {

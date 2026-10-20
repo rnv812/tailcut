@@ -542,6 +542,26 @@ describe('saveAll', () => {
     })
   })
 
+  it('carries the note of a file saved in its original codecs', async () => {
+    const chrome = installChrome()
+    chrome.setSaveReply({ ok: true, note: 'Saved with the original VP9/Opus' })
+    const { saveAll } = await importApi()
+
+    expect(await saveAll(summary.key)).toEqual({ ok: true, note: 'Saved with the original VP9/Opus' })
+  })
+
+  it('carries a file that could not be made, with what went wrong', async () => {
+    const chrome = installChrome()
+    chrome.setSaveReply({ ok: false, reason: 'failed', detail: 'the file could not be read' })
+    const { saveAll } = await importApi()
+
+    expect(await saveAll(summary.key)).toEqual({
+      ok: false,
+      reason: 'failed',
+      detail: 'the file could not be read',
+    })
+  })
+
   it('carries a reason that came without a detail as it is', async () => {
     const chrome = installChrome()
     chrome.setSaveReply({ ok: false, reason: 'gone' })
@@ -712,6 +732,24 @@ describe('editSession', () => {
     const { editSession } = await importApi()
 
     expect(await editSession(summary.key)).toEqual({ ok: false, reason: 'empty' })
+  })
+
+  it('carries what broke in a freeze that failed', async () => {
+    const chrome = installChrome()
+    chrome.setEditReply({ ok: false, reason: 'failed', detail: 'the writer broke' })
+    const { editSession } = await importApi()
+
+    expect(await editSession(summary.key)).toEqual({ ok: false, reason: 'failed', detail: 'the writer broke' })
+  })
+
+  it('invents no reason out of one nobody declared', async () => {
+    // A bridge that answered "refused" to an edit — a word of the save — left the popup looking
+    // up a sentence that was not there, and an empty alert went up.
+    const chrome = installChrome()
+    chrome.setEditReply({ ok: false, reason: 'refused' } as never)
+    const { editSession } = await importApi()
+
+    expect(await editSession(summary.key)).toEqual({ ok: false, reason: 'failed' })
   })
 
   it('counts an answer with no snapshot in it as a refusal', async () => {

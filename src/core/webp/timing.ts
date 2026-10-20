@@ -1,4 +1,5 @@
 import type { EncodeGeometry } from '../encode/codec'
+import { formatBytes } from '../../shared/format'
 
 /** Default maximum frame rate; slower sources retain their own rate. */
 export const WEBP_FPS = 15
@@ -21,6 +22,43 @@ export const WEBP_FPS_LIMIT = 60
 export function validWebpOptions(options: WebpOptions): boolean {
   return Number.isInteger(options.maxSide) && options.maxSide >= 1 && options.maxSide <= WEBP_SIDE_LIMIT &&
     Number.isFinite(options.fps) && options.fps >= 1 && options.fps <= WEBP_FPS_LIMIT
+}
+
+/**
+ * The largest animation this program will write, in bytes: a gigabyte.
+ *
+ * Nothing in the settings stops short of it on its own. "Original size" at sixty frames a second
+ * on a minute of 4K60 is 3 600 stills of 3840×2160 — several gigabytes — and the stills are held
+ * until the last one is in, because the file is assembled out of all of them at once. At the end
+ * both are in memory together, the stills and the file, so a gigabyte of animation is two of
+ * memory in one tab; past that the tab answers "Array buffer allocation failed" minutes into the
+ * work, or is killed outright. The format stops at four in any case (`packAnimation`). And an
+ * animation of a gigabyte is not one anything plays back smoothly — every frame of it is a whole
+ * still, decoded on its own.
+ */
+export const WEBP_MAX_BYTES = 1024 ** 3
+
+/**
+ * Why an animation of this weight will not be written, or null when it will be.
+ *
+ * One sentence for both places that can tell: before the work, on a weight projected from the
+ * first frames (`about`), and during it, on the weight already written (`atLeast`), which the
+ * file can only grow from. Either way the sentence ends on what to change, since the two
+ * settings that set the weight are the ones beside the clip.
+ */
+export function webpTooLarge(
+  bytes: number,
+  atLeast = false,
+  ceiling = WEBP_MAX_BYTES,
+): string | null {
+  if (bytes <= ceiling) return null
+  const weight = atLeast
+    ? `This animation came to more than ${formatBytes(bytes)} before its end`
+    : `This animation would weigh about ${formatBytes(bytes)}`
+  return (
+    `${weight}, more than the ${formatBytes(ceiling)} one WebP can be put together from ` +
+    'here. Lower the longest side or the frames per second, or shorten the clip.'
+  )
 }
 
 /**
